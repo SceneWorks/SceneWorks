@@ -1,6 +1,8 @@
-//! Real-weight CUDA validation of the Qwen3.8 27B dataset describer (SW-7120, feature SW-F365).
+//! Real-weight CUDA validation of the Qwen3.8 27B dataset describer (SW-7120, feature SW-F365),
+//! and its MLX twin `qwen38_describer_describes_a_synthetic_scene_on_mlx` (SW-7202) at the end of
+//! this file, which `qwen38-describer-mlx-validation.yml` runs on nax-macos-2.
 //!
-//! Runs ONLY from the dispatch-only `qwen38-describer-validation.yml` workflow, under the exact-UUID
+//! Runs ONLY from the dispatch-only `qwen38-describer-validation.yml` workflow (backend=cuda), under the exact-UUID
 //! CUDA guard (`scripts/ci/windows_cuda_execution.py`); it is never part of ordinary PR or push CI.
 //! It resolves a Candle tier (pre-quantised q4/q8 from the re-host, or full-precision bf16 from the
 //! upstream repository) through the production path (`qwen38_describer_weights_dir`), checks it is
@@ -19,6 +21,18 @@
 //! The scene is 512x384 by default; `SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE=1536` draws the same
 //! scene at 1536x1536, so the peak of a large image can be measured.
 //!
+//! SW-7204: the describer names the installed block draft (DFlash2 / DSpine) as a job does, then
+//! condenses the described fields with the product's condense step on the same loaded model. The
+//! evidence records one decode block per phase (proposer, draft, precision, verify, target passes,
+//! rows checked and accepted tokens per pass). Both phases send `speculative: auto`, checked
+//! linearly. The load names the draft only where `auto` prefers it (MLX q4/q8,
+//! SW-7200). `SCENEWORKS_QWEN38_BLOCK_DRAFT=on` requires linear checking in both phases; where
+//! `auto` prefers the draft it must run (block draft, the tier's draft precision, more than one
+//! accepted token per pass, no fallback), and elsewhere (CUDA, bf16) it must not run and the record
+//! must say why. `no_fit` caps the engine's load budget so the draft cannot fit beside the
+//! target and requires both phases to complete without it, the record saying why. The reply must
+//! be valid describer JSON either way (the strict parse below).
+//!
 //! ```text
 //! $env:HF_HUB_CACHE = "E:\huggingface\hub"
 //! $env:SCENEWORKS_QWEN38_DESCRIBER_TIER = "q4"
@@ -27,7 +41,9 @@
 //! ```
 
 use std::path::PathBuf;
+#[cfg(not(target_os = "macos"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_os = "macos"))]
 use std::sync::Arc;
 
 use gen_core::core_llm::CancelFlag;
@@ -38,22 +54,113 @@ use crate::batch_describe_jobs::{
     qwen38_describer_weights_dir, BatchDescriber, DescribeModel, DescribePrompt,
     VisionCaptionerDescriber,
 };
+use crate::qwen38_block_draft::SmokeDraftCheck;
+use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+
+/// The block draft the describe names, as a job resolves it, and (`no_fit`) the load-budget cap
+/// that keeps it from fitting, held for the describe.
+async fn smoke_block_draft(
+    check: SmokeDraftCheck,
+    settings: &Settings,
+    tier: &str,
+    weights_dir: &std::path::Path,
+) -> (
+    Option<crate::qwen38_block_draft::BlockDraftChoice>,
+    Option<crate::qwen38_block_draft::EnvOverride>,
+) {
+    let draft = check.installed_draft(
+        &settings.data_dir,
+        QWEN38_27B_DESCRIBER_MODEL_ID,
+        Some(tier),
+    );
+    let cap = match (check, &draft) {
+        (SmokeDraftCheck::NoFit, Some(draft)) => {
+            Some(crate::qwen38_block_draft::force_draft_no_fit(weights_dir, draft).await)
+        }
+        _ => None,
+    };
+    (draft, cap)
+}
+
+/// Condense the described `fields` with the product's condense step (the `Fit to` rewrite a job
+/// runs on the model the describe left resident: same load, same request), then check the
+/// describer's decode blocks (the image describe and the text-only condense) against `check`.
+/// Panics with the record when a check fails.
+///
+/// The condense runs on the describer directly rather than through a one-image
+/// `run_dataset_batch_describe_job`: that job needs a stub job API, a staged dataset and an
+/// installed `Fit to` target tokenizer, none of which this smoke's runners carry. The describe and
+/// condense loads and requests are the job's own (`VisionCaptionerDescriber`).
+async fn checked_decode_record(
+    check: SmokeDraftCheck,
+    describer: &VisionCaptionerDescriber,
+    fields: &[String; DESCRIBE_FIELDS.len()],
+) -> Value {
+    use crate::batch_describe_jobs::condense::{condense_system, condense_user};
+    use sceneworks_core::dataset_batch_describe::{condense_char_bound, condense_word_target};
+    let words = condense_word_target(1024, condense_char_bound(), 0);
+    let condensed = describer
+        .condense(
+            condense_system(words),
+            condense_user(fields),
+            CancelFlag::new(),
+        )
+        .await
+        .expect("the describer stays loaded for the condense")
+        .expect("the describer condenses");
+    assert!(
+        !condensed.text.trim().is_empty(),
+        "the condensed prompt is empty"
+    );
+    eprintln!(
+        "condensed ({} tokens):\n{}",
+        condensed.generated_tokens, condensed.text
+    );
+    let decode = describer
+        .decode_record()
+        .expect("the Qwen3.8 27B describer records its decode");
+    eprintln!("DECODE block_draft_check={} {decode}", check.label());
+    for phase in ["describe", "condense"] {
+        check
+            .check(&decode[phase], describer.block_draft.as_ref())
+            .unwrap_or_else(|error| {
+                panic!("block-draft check {} ({phase}): {error}", check.label())
+            });
+    }
+    decode
+}
 
 const TIER_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_TIER";
 const IMAGE_SIDE_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE";
 const CATALOG_ID: &str = "vision_describe_qwen3_8_27b";
 
-/// The catalog's pinned snapshot of `tier` on the Candle lane: the re-host's `<tier>/` folder for
-/// q4 and q8, the upstream repository's root for full precision (`bf16`).
-fn pinned_candle_snapshot(tier: &str) -> crate::batch_describe_jobs::Qwen38PinnedSnapshot {
-    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO;
+/// The catalog's pinned snapshot of `tier` on this host's lane: the folder the re-host row names for
+/// q4 and q8 (MLX re-host on macOS, Candle re-host elsewhere), the upstream repository's root for
+/// full precision (`bf16`).
+fn pinned_snapshot(tier: &str) -> crate::batch_describe_jobs::Qwen38PinnedSnapshot {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let rehost = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
     let entry = crate::test_env::shipped_catalog_entry(CATALOG_ID);
-    crate::batch_describe_jobs::qwen38_pinned_snapshot(
-        &entry,
-        tier,
-        QWEN38_27B_DESCRIBER_CANDLE_REPO,
-    )
-    .unwrap_or_else(|| panic!("the catalog has no pinned Candle {tier} row for {CATALOG_ID}"))
+    crate::batch_describe_jobs::qwen38_pinned_snapshot(&entry, tier, rehost)
+        .unwrap_or_else(|| panic!("the catalog has no pinned {rehost} {tier} row for {CATALOG_ID}"))
+}
+
+/// `$SCENEWORKS_QWEN38_DESCRIBER_TIER`, checked to be one of the catalog's tiers.
+fn requested_tier() -> String {
+    let tier =
+        std::env::var(TIER_ENV).unwrap_or_else(|_| panic!("set ${TIER_ENV} to q4, q8 or bf16"));
+    let tier = tier.trim().to_owned();
+    assert!(
+        matches!(tier.as_str(), "q4" | "q8" | "bf16"),
+        "${TIER_ENV} must be q4, q8 or bf16, got {tier:?}"
+    );
+    tier
 }
 
 /// The scene size `$SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE` selects: unset, blank or `default` is
@@ -99,16 +206,11 @@ fn synthetic_scene(width: u32, height: u32) -> image::DynamicImage {
     image::DynamicImage::ImageRgb8(scene)
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight describer GPU validation; needs a pinned Candle tier of the Qwen3.8 27B describer under HF_HUB_CACHE and a CUDA device"]
 async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
-    let tier =
-        std::env::var(TIER_ENV).unwrap_or_else(|_| panic!("set ${TIER_ENV} to q4, q8 or bf16"));
-    let tier = tier.trim().to_owned();
-    assert!(
-        matches!(tier.as_str(), "q4" | "q8" | "bf16"),
-        "${TIER_ENV} must be q4, q8 or bf16, got {tier:?}"
-    );
+    let tier = requested_tier();
     let hf_hub_cache = PathBuf::from(
         std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
     );
@@ -124,7 +226,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
     let settings = Settings::for_test(temp.path().join("data"));
     let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
         .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
-    let pinned = pinned_candle_snapshot(&tier);
+    let pinned = pinned_snapshot(&tier);
     let pinned_suffix = &pinned.relative_dir;
     assert!(
         weights_dir.ends_with(pinned_suffix),
@@ -132,6 +234,8 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         weights_dir.display(),
         pinned_suffix.display()
     );
+    let draft_check = SmokeDraftCheck::from_env();
+    let (draft, _no_fit_cap) = smoke_block_draft(draft_check, &settings, &tier, &weights_dir).await;
 
     // The worker reads the job's card by its nvidia-smi (PCI-bus-ordered) index; under
     // `CUDA_VISIBLE_DEVICES` that is the visible device's index.
@@ -160,11 +264,12 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
 
     let (scene_width, scene_height) = scene_size();
     let scene = synthetic_scene(scene_width, scene_height);
-    let describer = VisionCaptionerDescriber {
-        model: DescribeModel::Qwen38,
-        weights_dir: weights_dir.clone(),
-        job_id: "sw-7120-qwen38-describer-smoke".to_owned(),
-    };
+    let describer = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
+        weights_dir.clone(),
+        "sw-7120-qwen38-describer-smoke".to_owned(),
+    )
+    .with_block_draft(draft);
     let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
     let started = std::time::Instant::now();
     let reply = describer.describe(scene, &prompt, CancelFlag::new()).await;
@@ -201,6 +306,7 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");
+    let decode = checked_decode_record(draft_check, &describer, &parsed.fields).await;
 
     let test_fqn = std::thread::current()
         .name()
@@ -223,6 +329,11 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
             "weights_dir": weights_dir,
             "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },
             "fields": fields,
+            "block_draft": {
+                "check": draft_check.label(),
+                "decode": decode,
+                "auto": crate::qwen38_block_draft::auto_evidence(describer.block_draft.as_ref()),
+            },
             "wall_seconds": wall_seconds,
             "wall_time_scope": "one describe call on a cold process: model load plus one image",
             "gpu_memory": {
@@ -250,7 +361,9 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
 
 /// Directory of real images the throughput benchmark describes (the first
 /// `$SCENEWORKS_QWEN38_BENCH_IMAGES_COUNT`, default 4, in name order). Never checked in.
+#[cfg(not(target_os = "macos"))]
 const BENCH_IMAGES_ENV: &str = "SCENEWORKS_QWEN38_BENCH_IMAGES";
+#[cfg(not(target_os = "macos"))]
 const BENCH_COUNT_ENV: &str = "SCENEWORKS_QWEN38_BENCH_IMAGES_COUNT";
 
 /// Throughput benchmark of the describe path on one tier: real images described one after another
@@ -264,6 +377,7 @@ const BENCH_COUNT_ENV: &str = "SCENEWORKS_QWEN38_BENCH_IMAGES_COUNT";
 /// $env:SCENEWORKS_QWEN38_BENCH_IMAGES = "<a directory of images>"
 /// cargo test -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_throughput -- --ignored --nocapture --test-threads=1
 /// ```
+#[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight describer GPU benchmark; needs a pinned Candle tier under HF_HUB_CACHE, a CUDA device and a directory of images"]
 async fn qwen38_describer_throughput_on_cuda() {
@@ -301,11 +415,18 @@ async fn qwen38_describer_throughput_on_cuda() {
     let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
         .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
     let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
-    let describer = VisionCaptionerDescriber {
-        model: DescribeModel::Qwen38,
+    // As a job does: the installed block draft rides the load (SW-7204).
+    let draft = crate::qwen38_block_draft::installed_block_draft(
+        &settings.data_dir,
+        QWEN38_27B_DESCRIBER_MODEL_ID,
+        Some(&tier),
+    );
+    let describer = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
         weights_dir,
-        job_id: "qwen38-describer-bench".to_owned(),
-    };
+        "qwen38-describer-bench".to_owned(),
+    )
+    .with_block_draft(draft);
 
     // Warm-up: the load and first-call graph capture are paid here, not by a measured image.
     let started = std::time::Instant::now();
@@ -349,6 +470,7 @@ async fn qwen38_describer_throughput_on_cuda() {
 /// constraint (on-device sampling), with the describer's temperature and no constraint, and with
 /// the describer's temperature under the JSON constraint. Comparing the three
 /// `describe_generation_stats` lines separates the model step from sampling and constraint cost.
+#[cfg(not(target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight decode-path benchmark; needs a pinned Candle tier under HF_HUB_CACHE and a CUDA device"]
 async fn qwen38_decode_paths_on_cuda() {
@@ -375,7 +497,8 @@ async fn qwen38_decode_paths_on_cuda() {
         ("t0.4_json_mtp", 0.4, Some(Constraint::Json), mtp),
     ];
     for (label, temperature, constraint, speculative) in cases {
-        let (spec, requirements) = crate::batch_describe_jobs::vision_describer_load(&weights_dir);
+        let (spec, requirements) =
+            crate::batch_describe_jobs::vision_describer_load(&weights_dir, None);
         let started = std::time::Instant::now();
         let output = crate::refine_model_cache::with_cached_refiner(
             spec,
@@ -430,4 +553,125 @@ async fn qwen38_decode_paths_on_cuda() {
             report.map(|r| r.fallbacks.clone()),
         );
     }
+}
+
+/// The MLX twin of the CUDA smoke (SW-7202): the same production describer, tier resolution, pinned
+/// snapshot check, synthetic scene and strict parse, on macOS. It does not sample memory itself:
+/// `qwen38-describer-mlx-validation.yml` runs it on nax-macos-2 under the external phys_footprint
+/// guard (`scripts/ci/iris-mlx-real-weights/tree_guard.py`), whose `root_lifetime_max` is the
+/// kernel's exact high-water mark of this process (`ri_lifetime_max_phys_footprint`, Metal buffers
+/// included): the peak the MLX floor is set from.
+///
+/// ```text
+/// HF_HUB_CACHE=<hub> SCENEWORKS_QWEN38_DESCRIBER_TIER=q4 SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE=1536 \
+///   cargo test -p sceneworks-worker --release --lib qwen38_describer_gpu_smoke -- --ignored --nocapture --test-threads=1
+/// ```
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "real-weight describer MLX validation; needs a pinned MLX tier of the Qwen3.8 27B describer under HF_HUB_CACHE"]
+async fn qwen38_describer_describes_a_synthetic_scene_on_mlx() {
+    let tier = requested_tier();
+    let hf_hub_cache = PathBuf::from(
+        std::env::var("HF_HUB_CACHE").expect("set $HF_HUB_CACHE to the real-weights hub"),
+    );
+    assert!(
+        hf_hub_cache.is_dir(),
+        "HF_HUB_CACHE is not a directory: {}",
+        hf_hub_cache.display()
+    );
+    let temp = tempfile::tempdir().expect("smoke tempdir creates");
+    let settings = Settings::for_test(temp.path().join("data"));
+    let weights_dir = qwen38_describer_weights_dir(&settings, &tier)
+        .unwrap_or_else(|error| panic!("the {tier} tier resolves from HF_HUB_CACHE: {error}"));
+    let pinned = pinned_snapshot(&tier);
+    assert!(
+        weights_dir.ends_with(&pinned.relative_dir),
+        "the {tier} tier resolved to {} instead of the pinned snapshot {}",
+        weights_dir.display(),
+        pinned.relative_dir.display()
+    );
+    let draft_check = SmokeDraftCheck::from_env();
+    let (draft, _no_fit_cap) = smoke_block_draft(draft_check, &settings, &tier, &weights_dir).await;
+
+    let (scene_width, scene_height) = scene_size();
+    let describer = VisionCaptionerDescriber::new(
+        DescribeModel::Qwen38,
+        weights_dir.clone(),
+        "sw-7202-qwen38-describer-mlx-smoke".to_owned(),
+    )
+    .with_block_draft(draft);
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    let started = std::time::Instant::now();
+    let reply = describer
+        .describe(
+            synthetic_scene(scene_width, scene_height),
+            &prompt,
+            CancelFlag::new(),
+        )
+        .await;
+    let wall_seconds = started.elapsed().as_secs_f64();
+    eprintln!(
+        "RESULT model=qwen38_27b backend=mlx tier={tier} image={scene_width}x{scene_height} \
+         wall_s={wall_seconds:.1}"
+    );
+    let raw = reply
+        .expect("the describer model loads")
+        .expect("the describer generates");
+    eprintln!("raw reply:\n{raw}");
+    assert!(!raw.contains("<think>"), "thinking must be off: {raw}");
+    let parsed = describer
+        .parse(&raw)
+        .expect("the reply is the complete description JSON");
+    assert!(
+        parsed.notice.is_none(),
+        "a complete reply carries no cut-off notice: {:?}",
+        parsed.notice
+    );
+    let empty: Vec<&str> = DESCRIBE_FIELDS
+        .iter()
+        .zip(&parsed.fields)
+        .filter(|(name, text)| !matches!(**name, "camera" | "pose") && text.is_empty())
+        .map(|(name, _)| *name)
+        .collect();
+    assert!(empty.is_empty(), "described fields are empty: {empty:?}");
+    let decode = checked_decode_record(draft_check, &describer, &parsed.fields).await;
+    let test_fqn = std::thread::current()
+        .name()
+        .expect("the libtest case has an actual FQN")
+        .to_owned();
+    if let Some(output_dir) = std::env::var_os("MODEL_PROOF_OUTPUT_DIR") {
+        let output_dir = PathBuf::from(output_dir);
+        assert!(output_dir.is_absolute() && output_dir.is_dir());
+        let fields: serde_json::Map<String, Value> = DESCRIBE_FIELDS
+            .iter()
+            .zip(&parsed.fields)
+            .map(|(name, text)| ((*name).to_owned(), json!(text)))
+            .collect();
+        let result = json!({
+            "schema_version": 1,
+            "test_fqn": test_fqn,
+            "backend": "mlx",
+            "repo": pinned.repo,
+            "revision": pinned.revision,
+            "tier": tier,
+            "weights_dir": weights_dir,
+            "image": { "kind": "synthetic-scene", "width": scene_width, "height": scene_height },
+            "fields": fields,
+            "block_draft": {
+                "check": draft_check.label(),
+                "decode": decode,
+                "auto": crate::qwen38_block_draft::auto_evidence(describer.block_draft.as_ref()),
+            },
+            "wall_seconds": wall_seconds,
+            "wall_time_scope": "one describe call on a cold process: model load plus one image",
+            "memory": "measured outside the process by tree_guard.py (root_lifetime_max)"
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_dir.join("describer-result.json"))
+            .expect("create the owned describer result, never replace an existing file");
+        serde_json::to_writer_pretty(&mut file, &result).expect("persist the describer result");
+    }
+    eprintln!("MODEL_INFERENCE_BODY_COMPLETED {test_fqn}");
 }

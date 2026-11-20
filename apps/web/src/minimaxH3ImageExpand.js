@@ -1,11 +1,26 @@
 // MiniMax-H3-Image prompt expansion (SW-7102): the wording of the Expand prompt control and the
 // size it offers for the expander's proposed aspect ratio.
 //
+// SW-7208: and which model the expander runs (see `h3ExpanderChoices` below).
+//
 // The expander proposes a RATIO, never a size. The size offered here is one of MiniMax-H3-Image's
 // own presets (`limits.resolutions`) whose ratio matches, preferring the preset closest in area to
 // the size the user already has; with no matching preset, the ratio at the current area on a 16 px
 // grid inside the model's `minDimension`/`maxDimension`. Accepting it is the user's separate
 // choice — nothing here changes the request on its own.
+
+import { useCallback, useMemo, useState } from "react";
+import { MINIMAX_H3_IMAGE_PE_MODEL_ID } from "./constants.js";
+import { H3_EXPANDER_DESCRIBER_MODEL_ID, readH3ExpanderModel, writeH3ExpanderModel } from "./h3ExpanderModelStore.js";
+
+export {
+  H3_EXPANDER_DESCRIBER_MODEL_ID,
+  H3_EXPANDER_MODEL_IDS,
+  normalizeH3ExpanderModel,
+  readH3ExpanderModel,
+  seedH3ExpanderModelFromServer,
+  writeH3ExpanderModel,
+} from "./h3ExpanderModelStore.js";
 
 const RATIO_TOLERANCE = 0.01;
 // Most prompts a batch run expands in one go; past this the run is refused until the variables
@@ -89,3 +104,93 @@ export const H3_IMAGE_EXPAND_COPY = Object.freeze({
     failed: (item, reason) => `Prompt ${item} was not expanded: ${reason}`,
   }),
 });
+
+// SW-7208: the expander runs one of two models, both on MiniMax's prompt files and reply contract:
+// MiniMax-H3-Image-PE (the default) or the abliterated Qwen3.8-27B the dataset describer uses
+// (any installed tier). The saved choice lives in h3ExpanderModelStore.js. Mirrors
+// `sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_PROMPTS_PURPOSE`.
+//
+// The expander entry's conditional component holding MiniMax's prompt files alone: the abliterated
+// choice needs them, but not MiniMax-H3-Image-PE's weights.
+export const H3_EXPAND_PROMPTS_PURPOSE = "describer_prompt_expansion";
+
+const EXPANDER_LABELS = Object.freeze({
+  [MINIMAX_H3_IMAGE_PE_MODEL_ID]: "MiniMax-H3-Image-PE",
+  [H3_EXPANDER_DESCRIBER_MODEL_ID]: "Abliterated Qwen3.8-27B (the describer’s model)",
+});
+
+// Each expander model with what it needs on this install. MiniMax-H3-Image-PE needs an installed
+// tier (which brings its prompt files). The abliterated choice needs an installed describer tier
+// plus MiniMax's prompt files, which an installed expander tier or the prompt-files download
+// supplies. `missing` is "weights", "prompts" or null.
+export function h3ExpanderChoices(models = []) {
+  const find = (id) => models.find((entry) => entry?.id === id) ?? null;
+  const installed = (entry) => Boolean(entry) && entry.installState !== "missing";
+  const pe = find(MINIMAX_H3_IMAGE_PE_MODEL_ID);
+  const describer = find(H3_EXPANDER_DESCRIBER_MODEL_ID);
+  const promptsInstalled =
+    pe?.conditionalPurposes?.[H3_EXPAND_PROMPTS_PURPOSE]?.installState === "installed";
+  return [
+    { id: MINIMAX_H3_IMAGE_PE_MODEL_ID, entry: pe, missing: installed(pe) ? null : "weights" },
+    {
+      id: H3_EXPANDER_DESCRIBER_MODEL_ID,
+      entry: describer,
+      missing: !installed(describer) ? "weights" : promptsInstalled ? null : "prompts",
+    },
+  ]
+    .filter((choice) => choice.entry)
+    .map((choice) => ({ ...choice, label: EXPANDER_LABELS[choice.id], available: choice.missing === null }));
+}
+
+// The expander for this install and the saved choice: `selected` is the saved model while it can
+// run, else the first model that can. `offered` is whether the Expand tool shows at all: a model
+// can run, or the describer is installed and only lacks the prompt files (the panel offers them).
+export function resolveH3Expander(models, preferred) {
+  const choices = h3ExpanderChoices(models);
+  const runnable = choices.filter((choice) => choice.available);
+  const selected =
+    runnable.find((choice) => choice.id === preferred) ??
+    choices.find((choice) => choice.id === preferred && choice.missing === "prompts") ??
+    runnable[0] ??
+    choices.find((choice) => choice.missing === "prompts") ??
+    null;
+  return { choices, selected, offered: Boolean(selected) };
+}
+
+// The saved expander model as React state, written through on change.
+export function useH3ExpanderModel() {
+  const [model, setModel] = useState(readH3ExpanderModel);
+  const choose = useCallback((value) => setModel(writeH3ExpanderModel(value)), []);
+  return [model, choose];
+}
+
+// The Expand prompt tool's state for a studio, shared by both Image Studio views: whether the tool
+// shows (`available`), the catalog entry of the model that will run (`model`), the expand call
+// bound to that model (`prompt`, undefined while it cannot run, which disables the button), and
+// the model picker's props.
+export function useH3Expander({ models, applies, expandPrompt, downloadConditionalComponents }) {
+  const [preferred, choose] = useH3ExpanderModel();
+  const { choices, selected, offered } = useMemo(
+    () => (applies ? resolveH3Expander(models, preferred) : { choices: [], selected: null, offered: false }),
+    [applies, models, preferred],
+  );
+  const selectedId = selected?.id ?? null;
+  const prompt = useCallback(
+    (args) => expandPrompt({ ...args, expanderModelId: selectedId }),
+    [expandPrompt, selectedId],
+  );
+  const runnable = Boolean(selected?.available) && typeof expandPrompt === "function";
+  const downloadPrompts = useMemo(
+    () =>
+      typeof downloadConditionalComponents === "function"
+        ? () => downloadConditionalComponents(MINIMAX_H3_IMAGE_PE_MODEL_ID, H3_EXPAND_PROMPTS_PURPOSE)
+        : undefined,
+    [downloadConditionalComponents],
+  );
+  return {
+    available: offered && typeof expandPrompt === "function",
+    model: selected?.entry ?? null,
+    prompt: runnable ? prompt : undefined,
+    picker: { choices, value: selectedId, onChange: choose, onDownloadPrompts: downloadPrompts },
+  };
+}

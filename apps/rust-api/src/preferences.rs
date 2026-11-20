@@ -134,6 +134,28 @@ pub(crate) struct UiPreferences {
     /// `false` back — this only goes from absent to `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workflow_embed_notice_seen: Option<bool>,
+    /// The model the MiniMax-H3-Image prompt expander runs (SW-7208): `minimax_h3_image_pe` or
+    /// `vision_describe_qwen3_8_27b` (the abliterated Qwen3.8-27B the describer uses). Absent until
+    /// first picked, which means MiniMax-H3-Image-PE. App-wide rather than per workspace: it picks
+    /// installed weights, not an authoring choice. The prompt-refine route reads it when an
+    /// expansion request names no model, so every client runs the saved choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    h3_image_expander_model: Option<String>,
+}
+
+/// The saved MiniMax-H3-Image expander model (SW-7208), when one is stored and still valid.
+pub(crate) async fn saved_h3_image_expander_model(state: &AppState) -> Option<&'static str> {
+    let path = preferences_path(state);
+    let prefs = tokio::task::spawn_blocking(move || load_preferences(&path))
+        .await
+        .ok()?;
+    normalize_h3_image_expander_model(prefs.h3_image_expander_model.as_deref())
+}
+
+/// The valid expander model for `input`, or `None` when it names none of them.
+fn normalize_h3_image_expander_model(input: Option<&str>) -> Option<&'static str> {
+    let value = input.map(str::trim).filter(|value| !value.is_empty())?;
+    sceneworks_core::contracts::minimax_h3_image_expander_model(Some(value)).ok()
 }
 
 /// Retained workspaces in a studio-settings map. The map grows by one entry per workspace the
@@ -369,6 +391,12 @@ pub(crate) async fn set_ui_preferences(
         if payload.workflow_embed_notice_seen == Some(true) {
             prefs.workflow_embed_notice_seen = Some(true);
         }
+        // An unknown model leaves the stored choice untouched, like an unknown theme.
+        if let Some(model) =
+            normalize_h3_image_expander_model(payload.h3_image_expander_model.as_deref())
+        {
+            prefs.h3_image_expander_model = Some(model.to_owned());
+        }
         if let Some(active_view) = normalize_preference_id(payload.active_view.as_deref(), 48) {
             prefs.active_view = Some(active_view);
         }
@@ -400,10 +428,26 @@ pub(crate) async fn set_ui_preferences(
 mod tests {
     use super::{
         migrate_quality_to_auto, normalize_accent, normalize_generation_quality,
-        normalize_studio_settings, normalize_theme, UiPreferences, MAX_STUDIO_ENTRY_BYTES,
-        MAX_STUDIO_WORKSPACES,
+        normalize_h3_image_expander_model, normalize_studio_settings, normalize_theme,
+        UiPreferences, MAX_STUDIO_ENTRY_BYTES, MAX_STUDIO_WORKSPACES,
     };
     use std::collections::BTreeMap;
+
+    /// SW-7208: only the two expander models are stored; anything else leaves the choice alone.
+    #[test]
+    fn the_h3_image_expander_model_is_one_of_the_two_expanders() {
+        assert_eq!(
+            normalize_h3_image_expander_model(Some("vision_describe_qwen3_8_27b")),
+            Some("vision_describe_qwen3_8_27b")
+        );
+        assert_eq!(
+            normalize_h3_image_expander_model(Some(" minimax_h3_image_pe ")),
+            Some("minimax_h3_image_pe")
+        );
+        for value in [None, Some(""), Some("vision_caption_qwen3vl_8b")] {
+            assert_eq!(normalize_h3_image_expander_model(value), None, "{value:?}");
+        }
+    }
 
     fn snapshot(prompt: &str) -> serde_json::Value {
         serde_json::json!({ "image": { "prompt": prompt, "model": "z_image" } })

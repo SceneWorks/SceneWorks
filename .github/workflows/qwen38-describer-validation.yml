@@ -5,9 +5,78 @@ name: Qwen3.8 27B describer CUDA validation
 # qwen38-describer-provision.yml) and uploads the seven described fields, wall time and peak GPU
 # memory. Fails if any field other than pose or camera is empty, or if the reply was cut off. `image_side: 1536` draws the same scene at 1536x1536 to
 # measure the peak of a large image; `default` keeps the 512x384 scene.
+#
+# `backend: mlx` runs qwen38-describer-mlx-validation.yml (nax-macos or nax-macos-2, per `mac_runner`)
+# as a reusable workflow instead of the CUDA job. It is routed through this file because GitHub only
+# dispatches workflows present on the default branch, and this one is.
+#
+# `job: expander` runs the MiniMax-H3-Image prompt expander smoke instead (SW-7202): one production
+# prompt_refine expand job on the selected q4 or q8 tier (CUDA: candle-q4-full/ or candle-q8-full/,
+# provisioned by qwen38-describer-provision.yml `tiers: expander-q4|expander-q8`; MLX: q4-full/ or
+# q8-full/, fetched by the MLX run script). It fails unless the expansion is complete and
+# well-formed and the job loaded the selected tier's folder. `image_side` does not apply to it.
+#
+# `fresh_hub: true` (expander only) runs it against a new run-scoped hub that holds only the
+# selected tier and the prompt files (CUDA: fetched here by qwen38_describer_provision.py into
+# E:\huggingface\sw-fresh-hub-<run>-<attempt>, removed afterwards; MLX: run.sh), so the evidence
+# records tier_isolated=true: the job needed no other tier.
+#
+# `expander_model` (expander only, SW-7208) picks the model the expansion runs: `minimax` (the
+# default, MiniMax-H3-Image-PE, unchanged from above) or `abliterated` (the abliterated Qwen3.8-27B
+# describer's own q4-full/ or q8-full/ folder, with the same MiniMax prompt files; a fresh hub then
+# holds that describer tier and the prompt files, provisioned as `expander-abliterated-<tier>`).
+# The evidence must name the model that ran.
+#
+# `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter. Every
+# request sends `speculative: auto`, checked linearly; both jobs load an installed draft (DFlash2 /
+# DSpine) only where core-llm's measured decision prefers it (MLX q4/q8, SW-7200) and otherwise
+# record why auto keeps MTP. `record` (the default) records the decode blocks (proposer, draft,
+# precision, verify, target passes, rows checked and accepted tokens per pass; the describer's
+# describe and condense separately) and asserts nothing about them; `on` requires linear checking
+# and, where auto prefers the draft, the draft to run at the tier's draft precision with more than
+# one accepted token per target pass and no fallback (elsewhere the draft must not run and the
+# record must say why); `no_fit` caps the engine's load budget
+# so the draft cannot fit beside the target and requires the job to complete without it, its
+# record naming why. Only `on` / `no_fit` fetch the drafts (a fresh hub here, the MLX hub in
+# run.sh); the CUDA shared hub takes them from qwen38-describer-provision.yml `tiers: drafts`.
 on:
   workflow_dispatch:
     inputs:
+      job:
+        description: describer (Qwen3.8 27B describer smoke) or expander (MiniMax-H3-Image prompt expander smoke, q4/q8 only)
+        required: true
+        type: choice
+        options: [describer, expander]
+        default: describer
+      fresh_hub:
+        description: expander only - run against a fresh run-scoped hub holding only the selected tier (proves tier isolation; downloads the tier)
+        required: false
+        type: boolean
+        default: false
+      expander_model:
+        description: expander only - minimax (MiniMax-H3-Image-PE) or abliterated (the describer's Qwen3.8-27B with MiniMax's prompt files)
+        required: false
+        type: choice
+        options: [minimax, abliterated]
+        default: minimax
+      block_draft:
+        description: record (record the decode block only), on (where auto prefers the block draft, MLX q4/q8, require it to run; elsewhere require MTP and the recorded reason), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
+        required: false
+        type: choice
+        options: [record, "on", no_fit]
+        default: record
+      backend:
+        description: cuda (Windows real-weights runner) or mlx (Mac runner named by mac_runner)
+        required: true
+        type: choice
+        options: [cuda, mlx]
+        default: cuda
+      mac_runner:
+        description: Mac for backend=mlx (ignored for cuda). nax-macos-2 is the default; nax-macos is Michael's dev Mac, only on a loan he approved
+        required: true
+        type: choice
+        options: [nax-macos, nax-macos-2]
+        default: nax-macos-2
       tier:
         description: Candle tier to describe with (q4/q8 pre-quantised, bf16 full precision)
         required: true
@@ -25,7 +94,31 @@ permissions:
   contents: read
 
 jobs:
+  # Refused here, before any runner builds or takes a GPU, instead of failing inside the smoke: the
+  # prompt expander's bf16 tier is unpublished (pendingArtifact), and a fresh hub is an expander-only
+  # option (the describer keeps its provisioned cache), and so is the expander's model choice.
+  refuse-invalid-request:
+    if: ${{ (inputs.job == 'expander' && inputs.tier == 'bf16') || (inputs.job == 'describer' && (inputs.fresh_hub || inputs.expander_model == 'abliterated')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::error::job=expander needs tier q4 or q8 (its bf16 tier is unpublished), and fresh_hub and expander_model=abliterated apply only to job=expander"
+          exit 1
+
+  qwen38-describer-mlx:
+    if: ${{ inputs.backend == 'mlx' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && (inputs.fresh_hub || inputs.expander_model == 'abliterated')) }}
+    uses: ./.github/workflows/qwen38-describer-mlx-validation.yml
+    with:
+      job: ${{ inputs.job }}
+      fresh_hub: ${{ inputs.fresh_hub }}
+      expander_model: ${{ inputs.expander_model }}
+      block_draft: ${{ inputs.block_draft || 'record' }}
+      tier: ${{ inputs.tier }}
+      image_side: ${{ inputs.image_side }}
+      mac_runner: ${{ inputs.mac_runner }}
+
   qwen38-describer-smoke:
+    if: ${{ inputs.backend == 'cuda' && !(inputs.job == 'expander' && inputs.tier == 'bf16') && !(inputs.job == 'describer' && (inputs.fresh_hub || inputs.expander_model == 'abliterated')) }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -47,10 +140,21 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
       SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
       SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE: ${{ inputs.image_side }}
+      # job=expander: the prompt expander smoke's tier, the evidence validator's job, and the smoke's
+      # exact test path (the describer's otherwise).
+      SCENEWORKS_H3_EXPANDER_TIER: ${{ inputs.tier }}
+      # SW-7208: the expander's model (minimax unless dispatched otherwise), for the smoke and the validator.
+      SCENEWORKS_H3_EXPANDER_MODEL: ${{ inputs.expander_model || 'minimax' }}
+      SCENEWORKS_QWEN38_VALIDATION_JOB: ${{ inputs.job }}
+      # SW-7204: what the smoke and the validator check about the block drafter.
+      SCENEWORKS_QWEN38_BLOCK_DRAFT: ${{ inputs.block_draft || 'record' }}
+      SCENEWORKS_QWEN38_SMOKE_TEST: ${{ inputs.job == 'expander' && 'h3_prompt_expander_gpu_smoke::h3_prompt_expander_expands_a_prompt_on_cuda' || 'qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda' }}
       # Free memory the run needs on the card before it starts: at least candle-llm's own load
       # requirement for the tier (21,248 / 33,657 / 66,300 MiB for q4 / q8 / bf16) and its measured
       # peak above baseline (21,995 / 34,409 / 57,319 MiB), plus room for this process's CUDA
       # context. The catalog's Candle floors are 22 / 34 / 65 GiB, set from the same two numbers.
+      # The expander's tiers are the same 27B model at the same bit widths (folders within 0.3 GB
+      # of the describer's), so the run takes the same free-memory need.
       SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB: ${{ inputs.tier == 'bf16' && '70000' || inputs.tier == 'q8' && '40000' || '28000' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -84,10 +188,38 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test --locked -p sceneworks-worker --features backend-candle --release --lib --no-run
+      # fresh_hub (expander only): a new hub for this run, holding only the selected tier's Candle
+      # folder and the upstream prompt files, fetched by the same checked provisioning script.
+      - name: Provision a fresh run-scoped hub with only the selected expander tier
+        if: ${{ inputs.fresh_hub }}
+        shell: powershell
+        env:
+          HF_HUB_CACHE: ${{ format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) }}
+          HF_HUB_OFFLINE: "0"
+          SCENEWORKS_QWEN38_DESCRIBER_PROVISION: ${{ inputs.expander_model == 'abliterated' && format('expander-abliterated-{0}', inputs.tier) || format('expander-{0}', inputs.tier) }}
+          # SW-7204: a drafter-checking run (on, no_fit) also fetches the block drafts into the fresh hub.
+          SCENEWORKS_QWEN38_BLOCK_DRAFT: ${{ inputs.block_draft || 'record' }}
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          if (Test-Path $env:HF_HUB_CACHE) { throw "the run-scoped hub $env:HF_HUB_CACHE already exists" }
+          New-Item -ItemType Directory -Path $env:HF_HUB_CACHE | Out-Null
+          $venv = Join-Path $env:RUNNER_TEMP "qwen38-fresh-hub-venv-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local provisioning venv' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
+          & $python -I -B scripts/ci/qwen38_describer_provision.py
+          if ($LASTEXITCODE -ne 0) { throw "fresh-hub provisioning failed with exit code $LASTEXITCODE" }
       - name: Run the describer smoke under the CUDA guard
         shell: cmd
         env:
           MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+          # The job's own hub, or (fresh_hub) this run's.
+          HF_HUB_CACHE: ${{ inputs.fresh_hub && format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) || 'E:\huggingface\hub' }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -98,7 +230,7 @@ jobs:
           rem per-GPU lock and the owned child, and with the lock held admits on the card's FREE memory
           rem (the tier's need) and a stable window. The smoke still samples the card and reports the
           rem peak above its own baseline.
-          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 --probe-visible 1 --require-physical-index 1 --min-free-mib %SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB% -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1
+          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 --probe-visible 1 --require-physical-index 1 --min-free-mib %SCENEWORKS_QWEN38_DESCRIBER_NEED_FREE_MIB% -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib %SCENEWORKS_QWEN38_SMOKE_TEST% -- --exact --ignored --nocapture --test-threads=1
           if errorlevel 1 exit /b 1
       # Runs even when the smoke failed, so the receipt and the reason are uploaded. An exact-filter
       # mismatch (zero tests run, exit 0) also fails here: only the completed smoke body writes the result.
@@ -111,6 +243,14 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: qwen38-describer-proof-${{ inputs.tier }}-${{ inputs.image_side }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-proof-{0}', inputs.tier) || format('h3-expander-proof-{0}', inputs.tier)) || format('qwen38-describer-proof-{0}-{1}', inputs.tier, inputs.image_side) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
           if-no-files-found: error
+      # Only this run's own hub, by its exact run-scoped path.
+      - name: Remove the fresh run-scoped hub
+        if: ${{ always() && inputs.fresh_hub }}
+        shell: powershell
+        env:
+          FRESH_HUB: ${{ format('E:\huggingface\sw-fresh-hub-{0}-{1}', github.run_id, github.run_attempt) }}
+        run: |
+          if (Test-Path $env:FRESH_HUB) { Remove-Item -LiteralPath $env:FRESH_HUB -Recurse -Force }

@@ -1,4 +1,4 @@
-//! MiniMax-H3-Image prompt expansion (SW-7102, feature SW-F363).
+//! MiniMax-H3-Image prompt expansion (SW-7102, feature SW-F363; model choice SW-7208).
 //!
 //! `MiniMaxAI/MiniMax-H3-Image-PE` expands a short prompt — or an edit instruction that names its
 //! ordered references as `<Picture N>` — into the long caption MiniMax-H3-Image was trained on, and
@@ -7,6 +7,15 @@
 //! [`sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK`]. The request assembly and the reply contract are the engine's
 //! (`core_llm::minimax_h3_image_pe`); this module only finds the weights and the prompt files on
 //! disk and shapes the job result.
+//!
+//! # Two models, one contract
+//!
+//! The user picks the model (SW-7208): MiniMax-H3-Image-PE (the default), or the abliterated
+//! Qwen3.8-27B the dataset describer uses (`vision_describe_qwen3_8_27b`, any installed tier). Both
+//! run the same engine request and reply contract from the same MiniMax prompt files; only the
+//! weights directory differs. The job's `expanderModelId` names the model and its
+//! `modelManifestEntry` is that model's entry; for the describer the API adds MiniMax's `prompt`
+//! files to it as a co-requisite. The result names the model that ran.
 //!
 //! # The prompts are read, never copied
 //!
@@ -43,8 +52,27 @@ pub(crate) use sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID as PE_MO
 const PROMPT_COMPONENT: &str = "prompt";
 /// The prompt manifest inside a snapshot.
 const PROMPT_MANIFEST: &str = "prompt/manifest.json";
-/// Tiers in preference order, shared with the API's tier selection.
-use sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_TIERS as TIERS;
+/// The abliterated describer, the expander's other model (SW-7208).
+pub(crate) use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID as DESCRIBER_MODEL_ID;
+
+/// The user-facing name of expander model `model_id`, for errors.
+fn model_label(model_id: &str) -> String {
+    if model_id == DESCRIBER_MODEL_ID {
+        format!("the abliterated Qwen3.8-27B describer ({DESCRIBER_MODEL_ID})")
+    } else {
+        format!("the MiniMax-H3-Image Prompt Expander ({PE_MODEL_ID})")
+    }
+}
+
+/// The checkpoint repository an expansion with `model_id` names on its result when no local
+/// snapshot overrides it.
+pub(crate) fn default_repo(model_id: &str) -> &'static str {
+    if model_id == DESCRIBER_MODEL_ID {
+        sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_REPO
+    } else {
+        pe::REPO
+    }
+}
 
 /// Whether the expander applies to `model` (MiniMax-H3-Image only).
 pub(crate) fn is_expand_target_model(model: &str) -> bool {
@@ -78,6 +106,8 @@ impl Workflow {
 /// Where one expansion reads its weights and its prompts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExpanderDirs {
+    /// The expander model that runs: [`PE_MODEL_ID`] or [`DESCRIBER_MODEL_ID`].
+    pub(crate) model_id: &'static str,
     /// The tier directory the TextLlm loads.
     pub(crate) weights: PathBuf,
     /// The upstream snapshot holding `prompt/`.
@@ -136,7 +166,7 @@ fn tier_dir(data_dir: &Path, entry: &JsonObject, tier: &str) -> Option<PathBuf> 
 }
 
 /// The upstream snapshot the `prompt` co-requisite pins, when its manifest is on disk.
-fn prompt_root(data_dir: &Path, entry: &JsonObject) -> WorkerResult<PathBuf> {
+fn prompt_root(data_dir: &Path, entry: &JsonObject, model_id: &str) -> WorkerResult<PathBuf> {
     let row = entry
         .get("downloads")
         .and_then(Value::as_array)
@@ -148,29 +178,37 @@ fn prompt_root(data_dir: &Path, entry: &JsonObject) -> WorkerResult<PathBuf> {
         })
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
-                "{PE_MODEL_ID}: the catalog entry declares no `{PROMPT_COMPONENT}` co-requisite — \
+                "{model_id}: the expansion entry declares no `{PROMPT_COMPONENT}` co-requisite — \
                  the model manifest entry is misconfigured"
             ))
         })?;
     let (repo, revision) = row_identity(row).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "{PE_MODEL_ID}: the `{PROMPT_COMPONENT}` co-requisite declares no repo/revision"
+            "{model_id}: the `{PROMPT_COMPONENT}` co-requisite declares no repo/revision"
         ))
     })?;
+    let install = if model_id == DESCRIBER_MODEL_ID {
+        "download MiniMax's prompt files from the Expand prompt panel (the prompt files alone, \
+         no expander weights), or install the MiniMax-H3-Image Prompt Expander"
+    } else {
+        "install the MiniMax-H3-Image Prompt Expander from the Model Manager"
+    };
     crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, repo, revision)
         .filter(|root| root.join(PROMPT_MANIFEST).is_file())
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
-                "{PE_MODEL_ID}: its prompt files ({repo} @ {revision}, `prompt/`) are not \
-                 installed — install the MiniMax-H3-Image Prompt Expander from the Model Manager"
+                "{model_id}: MiniMax's prompt files ({repo} @ {revision}, `prompt/`) are not \
+                 installed — {install}"
             ))
         })
 }
 
-/// Resolve the expander's weights and prompt directories from its catalog entry.
+/// Resolve the expander's weights and prompt directories from the entry of the model it runs
+/// (MiniMax-H3-Image-PE, or the abliterated describer with MiniMax's `prompt` co-requisite added).
 ///
 /// `explicit_tier` (the payload's `peTier`) is honoured or refused by name, never substituted;
-/// with none, the first installed tier this host can run, in [`TIERS`] order. `override_dir` is an
+/// with none, the first installed tier this host can run, in the model's expander tier order
+/// ([`sceneworks_core::contracts::minimax_h3_image_expander_tiers`]). `override_dir` is an
 /// explicit local snapshot (the real-weight smoke's `payload.model`): its own `prompt/` is used
 /// when it has one, else the catalog's.
 pub(crate) fn resolve_dirs(
@@ -196,12 +234,16 @@ fn resolve_dirs_for_os(
     override_dir: Option<PathBuf>,
     os: &str,
 ) -> WorkerResult<ExpanderDirs> {
-    if entry.get("id").and_then(Value::as_str) != Some(PE_MODEL_ID) {
+    let Ok(model_id) = sceneworks_core::contracts::minimax_h3_image_expander_model(Some(
+        entry.get("id").and_then(Value::as_str).unwrap_or_default(),
+    )) else {
         return Err(WorkerError::InvalidPayload(format!(
-            "prompt expansion needs the `{PE_MODEL_ID}` catalog entry on the job payload \
-             (`modelManifestEntry`)"
+            "prompt expansion needs the `{PE_MODEL_ID}` or `{DESCRIBER_MODEL_ID}` catalog entry on \
+             the job payload (`modelManifestEntry`)"
         )));
-    }
+    };
+    let tiers = sceneworks_core::contracts::minimax_h3_image_expander_tiers(model_id);
+    let label = model_label(model_id);
     // The API forwards the complete cross-platform entry, and each converted tier has one row per
     // layout (`q8/` for MLX on macOS, `candle-q8/` for Candle on Windows/Linux) under the same
     // variant name. Narrow it to this host's rows first, so the tier lookup below cannot pick
@@ -217,9 +259,10 @@ fn resolve_dirs_for_os(
         let prompt_root = if weights.join(PROMPT_MANIFEST).is_file() {
             weights.clone()
         } else {
-            prompt_root(data_dir, entry)?
+            prompt_root(data_dir, entry, model_id)?
         };
         return Ok(ExpanderDirs {
+            model_id,
             weights,
             prompt_root,
             tier: None,
@@ -227,45 +270,48 @@ fn resolve_dirs_for_os(
     }
     let (tier, weights) = match explicit_tier {
         Some(requested) => {
-            let tier = TIERS
-                .into_iter()
+            let tier = tiers
+                .iter()
+                .copied()
                 .find(|tier| tier.eq_ignore_ascii_case(requested.trim()))
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload(format!(
-                        "{PE_MODEL_ID} has no `{requested}` tier; its tiers are {}",
-                        TIERS.join(", ")
+                        "{model_id} has no `{requested}` tier; its tiers are {}",
+                        tiers.join(", ")
                     ))
                 })?;
             if !tier_runs_here(tier) {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "{PE_MODEL_ID} tier {tier} needs a Blackwell NVIDIA GPU (compute capability \
+                    "{model_id} tier {tier} needs a Blackwell NVIDIA GPU (compute capability \
                      12.0 or newer); pick another tier"
                 )));
             }
             let dir = tier_dir(data_dir, entry, tier).ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
-                    "{PE_MODEL_ID} tier {tier} is not installed or not published yet; install it \
+                    "{model_id} tier {tier} is not installed or not published yet; install it \
                      in the Model Manager or pick an installed tier (an explicit tier selection is \
                      never substituted with another)"
                 ))
             })?;
             (tier, dir)
         }
-        None => TIERS
-            .into_iter()
+        None => tiers
+            .iter()
+            .copied()
             .filter(|tier| tier_runs_here(tier))
             .find_map(|tier| tier_dir(data_dir, entry, tier).map(|dir| (tier, dir)))
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
-                    "the MiniMax-H3-Image Prompt Expander ({PE_MODEL_ID}) is not installed in a \
-                     tier this host can run — MiniMax-H3-Image generates normally without it; open \
-                     the Models screen to download it"
+                    "{label} is not installed in a tier this host can run — MiniMax-H3-Image \
+                     generates normally without prompt expansion; open the Models screen to \
+                     download it"
                 ))
             })?,
     };
     Ok(ExpanderDirs {
+        model_id,
         weights,
-        prompt_root: prompt_root(data_dir, entry)?,
+        prompt_root: prompt_root(data_dir, entry, model_id)?,
         tier: Some(tier),
     })
 }
@@ -375,11 +421,13 @@ pub(crate) fn truncated_reply_error(max_new_tokens: u32) -> String {
 }
 
 /// The suggestion block the job result carries beside `refinedPrompt`:
-/// `{ whRatio, workflow, rewriterModelId, tier? }`. The UI maps `whRatio` to a size of the image
-/// model's own envelope and offers it; nothing here changes the request's size.
+/// `{ whRatio, workflow, rewriterModelId, tier? }`, `rewriterModelId` being the expander model that
+/// ran. The UI maps `whRatio` to a size of the image model's own envelope and offers it; nothing
+/// here changes the request's size.
 pub(crate) fn suggestion_result_block(
     expansion: &pe::Expansion,
     workflow: Workflow,
+    model_id: &str,
     tier: Option<&str>,
 ) -> Map<String, Value> {
     let mut block = Map::new();
@@ -388,7 +436,7 @@ pub(crate) fn suggestion_result_block(
         Value::from(expansion.aspect_ratio.clone()),
     );
     block.insert("workflow".to_owned(), Value::from(workflow.name()));
-    block.insert("rewriterModelId".to_owned(), Value::from(PE_MODEL_ID));
+    block.insert("rewriterModelId".to_owned(), Value::from(model_id));
     if let Some(tier) = tier {
         block.insert("tier".to_owned(), Value::from(tier));
     }
@@ -548,9 +596,16 @@ mod tests {
         assert!(!is_pending_artifact_download(&nvfp4));
         for tier in ["bf16", "q8", "q4"] {
             let row = model_download_for_variant(&value, tier).expect("converted row");
-            // Every converted tier is published and pinned to a hub revision.
+            // Every converted tier is published and pinned to a hub revision. bf16 is the dense
+            // `bf16/` snapshot; the macOS q8/q4 rows are the fully quantized `q8-full/` / `q4-full/`
+            // packs (SW-7202) pinned to their publication revision.
             assert!(!is_pending_artifact_download(&row), "{tier}");
-            assert_eq!(row_tier_subdir(&row).as_deref(), Some(tier));
+            let expected = if tier == "bf16" {
+                tier.to_owned()
+            } else {
+                format!("{tier}-full")
+            };
+            assert_eq!(row_tier_subdir(&row).as_deref(), Some(expected.as_str()));
         }
         // The engine's pinned revision is the catalog's, for the weights and the prompts alike.
         assert_eq!(pe::REPO, PE_REPO);
@@ -592,14 +647,14 @@ mod tests {
             }
         }
         let tier_snapshot = snapshot(data.path(), "SceneWorks/minimax-h3-image-pe", published);
-        std::fs::create_dir_all(tier_snapshot.join("q8")).unwrap();
-        std::fs::write(tier_snapshot.join("q8").join("config.json"), "{}").unwrap();
+        std::fs::create_dir_all(tier_snapshot.join("q8-full")).unwrap();
+        std::fs::write(tier_snapshot.join("q8-full").join("config.json"), "{}").unwrap();
         let upstream = snapshot(data.path(), PE_REPO, PE_REVISION);
         synthetic_prompt_tree(&upstream);
 
         let dirs =
             resolve_dirs_for_os(&settings(data.path()), &entry, None, None, "macos").unwrap();
-        assert_eq!(dirs.weights, tier_snapshot.join("q8"));
+        assert_eq!(dirs.weights, tier_snapshot.join("q8-full"));
         assert_eq!(dirs.prompt_root, upstream);
         assert_eq!(dirs.tier, Some("q8"));
         // The converted tier never carries `prompt/` of its own.
@@ -612,9 +667,9 @@ mod tests {
     #[test]
     fn each_host_os_resolves_its_own_layout_of_a_converted_tier() {
         for (os, q8_dir) in [
-            ("macos", "q8"),
-            ("windows", "candle-q8"),
-            ("linux", "candle-q8"),
+            ("macos", "q8-full"),
+            ("windows", "candle-q8-full"),
+            ("linux", "candle-q8-full"),
         ] {
             let (data, _cache) = isolated();
             let mut entry = Value::Object(catalog_entry());
@@ -628,7 +683,7 @@ mod tests {
             assert!(!is_pending_artifact_download(&row), "{os}");
             let tier_snapshot = snapshot(data.path(), repo, revision);
             // Both layouts exist on disk; only the host's own may be chosen.
-            for directory in ["q8", "candle-q8"] {
+            for directory in ["q8-full", "candle-q8-full"] {
                 std::fs::create_dir_all(tier_snapshot.join(directory)).unwrap();
                 std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
             }
@@ -647,9 +702,9 @@ mod tests {
     #[test]
     fn an_unnarrowed_entry_resolves_the_executing_hosts_layout() {
         for (os, q4_dir) in [
-            ("macos", "q4"),
-            ("windows", "candle-q4"),
-            ("linux", "candle-q4"),
+            ("macos", "q4-full"),
+            ("windows", "candle-q4-full"),
+            ("linux", "candle-q4-full"),
         ] {
             let (data, _cache) = isolated();
             let entry = catalog_entry();
@@ -661,7 +716,7 @@ mod tests {
             let (repo, revision) = row_identity(&row).unwrap();
             let tier_snapshot = snapshot(data.path(), repo, revision);
             // A shared cache holding both layouts: only the host's own may be chosen.
-            for directory in ["q4", "candle-q4"] {
+            for directory in ["q4-full", "candle-q4-full"] {
                 std::fs::create_dir_all(tier_snapshot.join(directory)).unwrap();
                 std::fs::write(tier_snapshot.join(directory).join("config.json"), "{}").unwrap();
             }
@@ -805,6 +860,91 @@ mod tests {
         );
     }
 
+    /// The describer's shipped entry as the API forwards it for an expansion (SW-7208): every
+    /// platform's tiers plus the expander's `prompt` co-requisite row.
+    fn describer_expansion_entry() -> JsonObject {
+        let mut entry = crate::test_env::shipped_catalog_entry(DESCRIBER_MODEL_ID);
+        let prompt = catalog_entry()["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["coRequisite"] == true && row["componentId"] == PROMPT_COMPONENT)
+            .cloned()
+            .expect("the expander's prompt co-requisite");
+        entry
+            .get_mut("downloads")
+            .and_then(Value::as_array_mut)
+            .unwrap()
+            .push(prompt);
+        entry
+    }
+
+    /// SW-7208 (AC2/AC3): the abliterated describer runs the expansion from its OWN tier folder on
+    /// each host's layout, with MiniMax's prompt files read from the expander's pinned upstream
+    /// snapshot — no MiniMax-H3-Image-PE weights anywhere. Its tiers are its own (no NVFP4), and
+    /// without the prompt files it says how to get them alone. Weights-free.
+    #[test]
+    fn the_abliterated_describer_expands_from_its_own_tier_with_minimax_prompt_files() {
+        for (os, q4_dir) in [
+            ("macos", "q4-full"),
+            ("windows", "q4-full"),
+            ("linux", "q4-full"),
+        ] {
+            let (data, _cache) = isolated();
+            let entry = describer_expansion_entry();
+            let mut host = Value::Object(entry.clone());
+            sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+                &mut host, os,
+            );
+            let row = model_download_for_variant(&host, "q4").expect("describer q4 row");
+            let (repo, revision) = row_identity(&row).unwrap();
+            let tier_snapshot = snapshot(data.path(), repo, revision);
+            std::fs::create_dir_all(tier_snapshot.join(q4_dir)).unwrap();
+            std::fs::write(tier_snapshot.join(q4_dir).join("config.json"), "{}").unwrap();
+
+            // The tier alone: the prompt files are missing, and the error names them alone.
+            let error = resolve_dirs_for_os(&settings(data.path()), &entry, None, None, os)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("prompt files"), "{os}: {error}");
+            assert!(error.contains("no expander weights"), "{os}: {error}");
+
+            let upstream = snapshot(data.path(), PE_REPO, PE_REVISION);
+            synthetic_prompt_tree(&upstream);
+            for explicit in [Some("q4"), None] {
+                let dirs = resolve_dirs_for_os(&settings(data.path()), &entry, explicit, None, os)
+                    .unwrap();
+                assert_eq!(dirs.model_id, DESCRIBER_MODEL_ID, "{os}");
+                assert_eq!(
+                    dirs.weights,
+                    tier_snapshot.join(q4_dir),
+                    "{os} {explicit:?}"
+                );
+                assert_eq!(dirs.prompt_root, upstream, "{os}");
+                assert_eq!(dirs.tier, Some("q4"), "{os}");
+            }
+            assert_eq!(
+                repo,
+                if os == "macos" {
+                    sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MLX_REPO
+                } else {
+                    sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO
+                },
+                "{os}: the describer's own re-host, never the expander's"
+            );
+            // An expander-only tier is not the describer's: refused by name.
+            let error =
+                resolve_dirs_for_os(&settings(data.path()), &entry, Some("nvfp4"), None, os)
+                    .unwrap_err();
+            assert!(error.to_string().contains("no `nvfp4` tier"), "{error}");
+        }
+        assert_eq!(
+            default_repo(DESCRIBER_MODEL_ID),
+            sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_REPO
+        );
+        assert_eq!(default_repo(PE_MODEL_ID), PE_REPO);
+    }
+
     #[test]
     fn a_tier_without_its_prompt_files_is_refused_with_the_install_step() {
         let (data, _cache) = isolated();
@@ -828,6 +968,37 @@ mod tests {
         entry.insert("id".to_owned(), json!("qwen_image_2_1_pe_t2i"));
         let error = resolve_dirs(&settings(data.path()), &entry, None, None).unwrap_err();
         assert!(error.to_string().contains("modelManifestEntry"), "{error}");
+    }
+
+    /// SW-7204: the expansion request the job runs is the engine's, sending `auto` checked
+    /// linearly (never an explicit block draft, never tree checking), its recipe untouched.
+    #[test]
+    fn the_expansion_request_the_job_runs_sends_auto_checked_linearly() {
+        use gen_core::core_llm::{CancelFlag, KvCompressionPolicy, Speculative, SpeculativeVerify};
+        let dir = tempfile::tempdir().unwrap();
+        let digest = synthetic_prompt_tree(dir.path());
+        let files = pe::PromptFiles::load_with_manifest_digest(dir.path(), &digest).unwrap();
+        let engine = build_request(
+            &files,
+            "a harbour at dusk",
+            &[],
+            &pe::AspectSelection::Adaptive,
+        )
+        .unwrap();
+        let request = crate::prompt_refine_jobs::prepare_expansion_request(
+            engine.clone(),
+            CancelFlag::new(),
+            KvCompressionPolicy::default(),
+        );
+        assert_eq!(
+            request.constraint, engine.constraint,
+            "the reply schema is kept"
+        );
+        assert_eq!(request.speculative, Some(Speculative::Auto));
+        assert_eq!(request.speculative_verify, SpeculativeVerify::Linear);
+        assert_eq!(request.messages.len(), engine.messages.len());
+        assert_eq!(request.max_new_tokens, engine.max_new_tokens);
+        assert_eq!(request.sampling.temperature, engine.sampling.temperature);
     }
 
     #[test]
@@ -944,7 +1115,12 @@ mod tests {
             expansion.expanded_caption,
             "A wide harbour at dusk, boats on a stone quay."
         );
-        let block = suggestion_result_block(&expansion, Workflow::TextToImage, Some("nvfp4"));
+        let block = suggestion_result_block(
+            &expansion,
+            Workflow::TextToImage,
+            PE_MODEL_ID,
+            Some("nvfp4"),
+        );
         assert_eq!(block.get("whRatio"), Some(&json!("16:9")));
         assert_eq!(block.get("workflow"), Some(&json!("t2i")));
         assert_eq!(block.get("rewriterModelId"), Some(&json!(PE_MODEL_ID)));

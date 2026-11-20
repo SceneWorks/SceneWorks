@@ -3839,9 +3839,56 @@ def _license_acknowledgment_repo_index(models):
     for model in models:
         if model.get("requiresLicenseAcknowledgment") is not True:
             continue
-        for repo in _declared_download_repos(model):
+        # A row that declares its own `license` is a component under different terms (SW-7203), so
+        # the entry's acknowledgment does not govern its repo.
+        governed = {**model, "downloads": [d for d in model.get("downloads", []) if not str(d.get("license") or "").strip()]}
+        for repo in _declared_download_repos(governed):
             index.setdefault(repo, model["id"])
     return index
+
+
+# SW-7203: a download row that declares its own `license` on a `requiresLicenseAcknowledgment` entry is
+# EXEMPT from that entry's repo-keyed acknowledgment (the Apache-2.0 block drafts shipped with the gated
+# MiniMax prompt expander). `license` used to be display-only, so a new display-only license on a gated
+# row would otherwise silently drop that repo from the gate. Extend the allow-list only when the shipped
+# manifest needs another permissive SPDX id.
+PERMISSIVE_OWN_LICENSE_ALLOW_LIST = frozenset({"Apache-2.0", "MIT", "BSD-3-Clause"})
+
+
+def _own_license_exempt_rows_of_gated_entries():
+    """`(entry id, repo key, license)` for every download row carrying its own `license` on a gated entry."""
+    rows = []
+    for model_id, model in _license_acknowledgment_models().items():
+        for download in model.get("downloads", []):
+            license_id = str(download.get("license") or "").strip()
+            key = _huggingface_repo_key(download.get("repo"))
+            if license_id and key:
+                rows.append((model_id, key, license_id))
+    return rows
+
+
+def test_gated_entry_rows_with_their_own_license_are_permissive_and_not_shared_with_gated_rows():
+    models = _load_builtin_models_manifest()["models"]
+    # The repos the gate really covers: unlicensed download rows of every gated entry (what the Rust index
+    # reads) plus every conditional component, which keeps its own `license` and stays gated.
+    gated = set(_license_acknowledgment_repo_index(models))
+    for model in _license_acknowledgment_models().values():
+        for component in model.get("conditionalComponents", []):
+            key = _huggingface_repo_key(component.get("repo"))
+            if key:
+                gated.add(key)
+    exempt = _own_license_exempt_rows_of_gated_entries()
+    assert exempt, "no gated entry carries a row with its own license; the exemption (and this audit) is vacuous"
+    for model_id, repo, license_id in exempt:
+        assert license_id in PERMISSIVE_OWN_LICENSE_ALLOW_LIST, (
+            f"{model_id}: row {repo} declares license {license_id!r}, which exempts it from the entry's "
+            f"license acknowledgment but is not in {sorted(PERMISSIVE_OWN_LICENSE_ALLOW_LIST)}. A display-only "
+            "license on a gated row silently drops the repo from the gate."
+        )
+        assert repo not in gated, (
+            f"{model_id}: repo {repo} is exempted by its own license here but is also named by an un-licensed "
+            "row or conditional component of a gated entry, so the exemption would not hold consistently"
+        )
 
 
 def _license_acknowledgment_models():
@@ -4336,10 +4383,17 @@ def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
         ]
         by_platforms = {tuple(row["platforms"]): row for row in rows}
         assert len(rows) == len(by_platforms) == 2, tier
-        for platforms, directory in ((("macos",), tier), (("windows", "linux"), f"candle-{tier}")):
+        # SW-7202: the fully quantized tiers (`prepare_snapshot` q8-full / q4-full), each backend's
+        # folders at its own publication commit. The exact commits come from the qwen38-full-tiers.yml
+        # publication reports; this test asserts only a full commit SHA, and the single gate
+        # `test_no_placeholder_pins_in_the_shipped_manifest` refuses placeholder values.
+        for platforms, directory in (
+            (("macos",), f"{tier}-full"),
+            (("windows", "linux"), f"candle-{tier}-full"),
+        ):
             row = by_platforms[platforms]
             assert row.get("pendingArtifact") is None, (tier, platforms)
-            assert row["revision"] == "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b", (tier, platforms)
+            assert _FULL_SHA_RE.fullmatch(row["revision"]), (tier, platforms)
             assert row["files"] == [f"{directory}/*"], (tier, platforms)
     prompt_rows = [
         download
@@ -5385,3 +5439,62 @@ def test_flux3_both_checkpoints_declare_the_owned_reference_editing_surface():
         assert model["limits"]["requiresDimensionsMultipleOf"] == 16
         assert model["ui"]["hideReferenceStrength"] is True
         assert model["ui"]["promptEnhance"] is True
+
+
+# ---------------------------------------------------------------------------------------------
+# SW-7202 — NO PLACEHOLDER PINS gate. While the fully quantized tiers await publication, the
+# manifest carries placeholder revisions (`7202` + zeros + a digit) and `PENDING-SW-7202` markers.
+# Both are valid-looking to every other check, so this test fails until each one is replaced by the
+# real publication commit: nothing merges to main with a placeholder pin.
+# ---------------------------------------------------------------------------------------------
+
+_PLACEHOLDER_REVISION_RE = re.compile(r"^72020+[0-9a-f]?$")
+_PENDING_MARKER = "PENDING-SW-7202"
+_PENDING_MARKER_SCAN_PATHS = (
+    ROOT / "config" / "manifests",
+    ROOT / "scripts" / "ci" / "qwen38_describer_provision.py",
+)
+
+
+def _placeholder_revisions(node, path="$"):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            child = f"{path}.{key}"
+            if key == "revision" and isinstance(value, str) and _PLACEHOLDER_REVISION_RE.fullmatch(value):
+                yield child, value
+            yield from _placeholder_revisions(value, child)
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _placeholder_revisions(value, f"{path}[{index}]")
+
+
+def _pending_marker_hits():
+    files = []
+    for root in _PENDING_MARKER_SCAN_PATHS:
+        files.extend(sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else [root])
+    for file in files:
+        for line_number, line in enumerate(file.read_text(errors="ignore").splitlines(), 1):
+            if _PENDING_MARKER in line:
+                yield f"{file.relative_to(ROOT)}:{line_number}"
+
+
+def test_placeholder_revision_pattern_matches_only_placeholders():
+    assert _PLACEHOLDER_REVISION_RE.fullmatch("7202000000000000000000000000000000000003")
+    assert not _PLACEHOLDER_REVISION_RE.fullmatch(_PE_REVISION)
+    assert not _PLACEHOLDER_REVISION_RE.fullmatch("7202abc000000000000000000000000000000003")
+
+
+def test_no_placeholder_pins_in_the_shipped_manifest():
+    """NO PLACEHOLDER PINS gate (SW-7202): fails while any manifest revision is a `7202000…000N`
+    placeholder or any `PENDING-SW-7202` marker remains in config/manifests or the describer
+    provisioning script. Replace them with the publication commits; never relax this test."""
+    revisions = [
+        f"{model['id']}{path}={value}"
+        for model in _load_builtin_models_manifest()["models"]
+        for path, value in _placeholder_revisions(model)
+    ]
+    markers = list(_pending_marker_hits())
+    assert not revisions and not markers, (
+        "placeholder pins must be replaced by real publication commits before merging to main:\n"
+        + "\n".join(["placeholder revisions:", *revisions, f"{_PENDING_MARKER} markers:", *markers])
+    )

@@ -13,6 +13,7 @@ import { assetUrl } from "../../components/assetMedia.jsx";
 import { onPromptKeyDown, ModeTabs } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../../minimaxH3ImageExpand.js";
+import { H3ExpanderModelPicker } from "../../components/H3ExpanderModelPicker.jsx";
 
 export function ImagePromptComposer({
   mode,
@@ -117,6 +118,7 @@ export function ImagePromptComposer({
   h3ExpandAvailable,
   h3ExpandModel,
   h3ExpandPrompt,
+  h3ExpandPicker,
   h3BatchExpandOn = false,
   batchJobCount = 0,
   h3BatchExpandTooMany = "",
@@ -646,6 +648,7 @@ export function ImagePromptComposer({
                     {/* Batch mode: expansion is part of Run batch (useImageBatchRun), so there
                         is nothing to start or apply here — only what it will do, and the size
                         opt-in the single-prompt control offers per prompt. */}
+                    {h3ExpandPicker ? <H3ExpanderModelPicker {...h3ExpandPicker} /> : null}
                     <div className="refine-control batch-expand-control">
                       <p className="refine-hint">{H3_IMAGE_EXPAND_COPY.batch.hint}</p>
                       <label className="batch-expand-sizes">
@@ -666,6 +669,7 @@ export function ImagePromptComposer({
                   </div>
                 ) : h3ExpandActive ? (
                   <div className="prompt-tool-panel">
+                    {h3ExpandPicker ? <H3ExpanderModelPicker {...h3ExpandPicker} /> : null}
                     <QwenRewritePromptControl
                       copy={H3_IMAGE_EXPAND_COPY}
                       modelId={model}

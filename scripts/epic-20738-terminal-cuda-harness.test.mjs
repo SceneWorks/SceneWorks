@@ -255,8 +255,9 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest. SW-F373 adds only the three SenseNova-Loop-9B listings, and the retired Qwen3.6-27B film planner listing is removed (161 keys).
   // SW-F369 adds ostris' MiniMax-H3-Image training adapter listing (162 keys).
+  // SW-7203 adds the two Qwen3.8-27B block-draft listings and SW-7202 re-pins three tier listings (164 keys).
   assert.equal(current.downloadEvidenceSha256,
-    "d0801d496453222410dafaf85d31ef66da1ca662f5a9e180e9496db1bec88d51");
+    "f118dec4dd40af01df8e6a1d7659b14b64e8c04acd3a3c2ccde8fff0a1af906a");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

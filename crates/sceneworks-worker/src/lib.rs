@@ -673,6 +673,10 @@ mod qwen_prompt_rewrite;
 // (`core_llm::minimax_h3_image_pe`); `prompt_refine_jobs` drives it on the same TextLlm lane.
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod minimax_h3_image_prompt_expand;
+// SW-7204 — the Qwen3.8-27B block drafter (DFlash2 / DSpine) on the describer and the H3 prompt
+// expander: which installed draft a load names, the request's proposer, and the job's decode record.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+mod qwen38_block_draft;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
@@ -732,11 +736,17 @@ mod flux2_dev_gpu_smoke;
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
 
-// Real-weight CUDA validation of the Qwen3.8 27B describer (SW-7120). Test-only + candle-only and
-// ignored, like the other worker GPU smokes; only the dispatch-only
-// `qwen38-describer-validation.yml` workflow runs it.
-#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+// Real-weight validation of the Qwen3.8 27B describer: CUDA (SW-7120, candle builds) and MLX
+// (SW-7202, macOS). Test-only and ignored, like the other worker GPU smokes; only the dispatch-only
+// `qwen38-describer-validation.yml` (CUDA) and `qwen38-describer-mlx-validation.yml` (nax-macos-2)
+// workflows run them.
+#[cfg(all(test, native_lane))]
 mod qwen38_describer_gpu_smoke;
+// Real-weight validation of the MiniMax-H3-Image prompt expander's q4/q8 tiers (SW-7202): one
+// production `prompt_refine` expand job on CUDA (candle builds) or MLX (macOS). Test-only and
+// ignored; only `qwen38-describer-validation.yml` with `job=expander` runs it.
+#[cfg(all(test, native_lane))]
+mod h3_prompt_expander_gpu_smoke;
 // Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
 // descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
 // NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the
