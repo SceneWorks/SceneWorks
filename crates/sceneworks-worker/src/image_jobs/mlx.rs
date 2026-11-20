@@ -179,12 +179,6 @@ pub(super) fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
     }
 }
 
-/// The FLUX.1 pre-load planner the generic MLX lane hands its owner command.
-#[cfg(target_os = "macos")]
-type PreparedFluxRenders = Box<
-    dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<super::render::PreparedRender>> + Send,
->;
-
 /// Complete immutable input to both pre-load tier selection and the eventual cached generation.
 #[cfg(target_os = "macos")]
 struct PreparedMlxImageTier {
@@ -813,14 +807,20 @@ pub(super) async fn generate_stream_using(
                 model.descriptor.capabilities.pag.as_ref(),
                 lane_controls.pag.as_ref(),
             )
-            .saturating_add(crate::execution_planner::low_res_start_workspace_bytes(
-                engine_id,
-                width,
-                height,
-                native_batch_images,
-                steps,
-                lane_controls.low_res_start.as_ref(),
-            )?),
+            .saturating_add(
+                crate::execution_planner::low_res_start_workspace_bytes_with_source(
+                    engine_id,
+                    flux_source_image
+                        .as_ref()
+                        .or(identity_init.as_ref())
+                        .map(|(img, _)| (img.width, img.height)),
+                    width,
+                    height,
+                    native_batch_images,
+                    steps,
+                    lane_controls.low_res_start.as_ref(),
+                )?,
+            ),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -1021,9 +1021,12 @@ pub(super) async fn generate_stream_using(
     // IP-Adapter, several references, a mask) before any weights load. A Hires.fix request compiles
     // both passes as one multi-pass plan: the refinement pass binds the first pass's stretched
     // output by size and strength.
-    let flux1_planned = matches!(engine_id, "flux1_schnell" | "flux1_dev");
-    let prepare_render_plans: PreparedFluxRenders = if flux1_planned {
-        if hires_fix.is_some() && spec.ip_adapter.is_none() {
+    let eng2_planned = super::render::is_eng2_preload_planned_engine(engine_id);
+    let prepare_render_plans: super::stream::PreparedRenderPlans = if eng2_planned {
+        if matches!(engine_id, "flux1_schnell" | "flux1_dev")
+            && hires_fix.is_some()
+            && spec.ip_adapter.is_none()
+        {
             // The refinement pass conditions on the first pass's image, and base FLUX.1 accepts a
             // reference only through the XLabs IP-Adapter.
             return Err(WorkerError::InvalidPayload(
@@ -1102,15 +1105,13 @@ pub(super) async fn generate_stream_using(
                         planning_cancel,
                     )?;
                     let Some(hires) = hires_fix else {
-                        return Ok(super::render::PreparedRender {
-                            pass: super::render::compile_render_plan(
-                                crate::inference_runtime::media(),
-                                engine_id,
-                                &planning_spec,
-                                &candidate,
-                            )?,
-                            hires: None,
-                        });
+                        return super::render::compile_prepared_render(
+                            crate::inference_runtime::media(),
+                            engine_id,
+                            &planning_spec,
+                            &candidate,
+                            None,
+                        );
                     };
                     // The refinement pass through the builder `generate_one_with_hires_on_surface`
                     // runs, minus the reference the plan binds from the first pass.
@@ -1136,18 +1137,13 @@ pub(super) async fn generate_stream_using(
                         },
                         planning_cancel,
                     )?;
-                    let (pass, hires) = super::render::compile_hires_render_plans(
+                    super::render::compile_prepared_render(
                         crate::inference_runtime::media(),
                         engine_id,
                         &planning_spec,
                         &candidate,
-                        &refine,
-                        &hires,
-                    )?;
-                    Ok(super::render::PreparedRender {
-                        pass: Some(pass),
-                        hires: Some(hires),
-                    })
+                        Some((&refine, &hires)),
+                    )
                 })
                 .collect::<WorkerResult<Vec<_>>>()
         })

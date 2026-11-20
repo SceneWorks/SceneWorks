@@ -1185,6 +1185,7 @@ fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::Memo
         predicted_peak_bytes: 18 * 1024 * 1024 * 1024,
         cache_state: gen_core::MemoryCacheState::Warm,
         evidence_revision: "fixture-evidence".to_owned(),
+        low_res_start: None,
     }
 }
 

@@ -1010,16 +1010,22 @@ async fn generate_candle_registry_stream_using(
         model.descriptor.capabilities.pag.as_ref(),
         lane_controls.pag.as_ref(),
     )
-    .saturating_add(crate::execution_planner::low_res_start_workspace_bytes(
-        engine_id,
-        width,
-        height,
-        native_batch
-            .as_ref()
-            .map_or(1, lane_controls::NativePromptBatch::images),
-        steps,
-        lane_controls.low_res_start.as_ref(),
-    )?);
+    .saturating_add(
+        crate::execution_planner::low_res_start_workspace_bytes_with_source(
+            engine_id,
+            flux_source_image
+                .as_ref()
+                .or(img2img_reference.as_ref())
+                .map(|(img, _)| (img.width, img.height)),
+            width,
+            height,
+            native_batch
+                .as_ref()
+                .map_or(1, lane_controls::NativePromptBatch::images),
+            steps,
+            lane_controls.low_res_start.as_ref(),
+        )?,
+    );
     // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
     // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
     // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces
@@ -2291,6 +2297,7 @@ async fn generate_candle_registry_stream_using(
                     gen_core::MemoryCacheState::Cold
                 },
                 evidence_revision: krea_evidence_revision(),
+                low_res_start: None,
             })
         })
     });
@@ -2365,18 +2372,14 @@ async fn generate_candle_registry_stream_using(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    // Compile the pure base request plan in the same owner command as the cached load and run.
+    // Compile the pre-load request plan in the same owner command as the cached load and run.
     // Count retains the exact existing `(seed, prompt)` relation and one plan per image.
-    let base_flux = request.mode == "text_to_image"
-        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
-        && edit_reference.is_none()
-        && img2img_reference.is_none()
-        && edit_refs.is_empty()
-        && edit_mask.is_none()
-        && flux3_references.is_none()
-        && spec.ip_adapter.is_none();
-    let prepare_render_plans: PreparedRenderPlans = if base_flux {
-        if hires_fix.is_some() {
+    let eng2_planned = super::render::is_eng2_preload_planned_engine(engine_id);
+    let prepare_render_plans: PreparedRenderPlans = if eng2_planned {
+        if matches!(engine_id, "flux1_schnell" | "flux1_dev")
+            && hires_fix.is_some()
+            && spec.ip_adapter.is_none()
+        {
             return Err(WorkerError::InvalidPayload(
                 "FLUX.1 base rendering does not support Hires.fix refinement".to_owned(),
             ));
@@ -2389,15 +2392,36 @@ async fn generate_candle_registry_stream_using(
         let planning_guidance_method = guidance_method.clone();
         let planning_enhance = enhance.clone();
         let planning_batch = native_batch.clone();
+        let planning_reference = edit_reference
+            .as_ref()
+            .or(img2img_reference.as_ref())
+            .cloned();
+        let planning_edit_refs = edit_refs.clone();
+        let planning_edit_ref_alpha = edit_ref_alpha.clone();
+        let planning_edit_mask = edit_mask.clone();
+        let planning_flux3_references = flux3_references.clone();
+        let planning_flux3_layout = flux3_layout.clone();
         let planning_flux_source_image = flux_source_image.clone();
         let planning_lane_controls = lane_controls.clone();
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
-                output_channels: rgba_output_channels,
+                multi_reference_alpha: &planning_edit_ref_alpha,
+                flux3_references: planning_flux3_references.as_ref(),
+                flux3_layout: planning_flux3_layout.as_ref(),
+                output_channels: if hires_fix.is_some() {
+                    gen_core::OutputChannels::Rgb
+                } else {
+                    rgba_output_channels
+                },
                 controls: planning_lane_controls.clone(),
                 source_image: planning_flux_source_image.as_ref(),
                 prompt_batch: planning_batch.as_ref(),
                 ..Default::default()
+            };
+            let first_pass_enhance = if hires_fix.is_some() {
+                PromptEnhance::default()
+            } else {
+                planning_enhance.clone()
             };
             let planning_work = if planning_batch.is_some() {
                 vec![(planning_work[0].0, "")]
@@ -2418,9 +2442,9 @@ async fn generate_candle_registry_stream_using(
                         steps,
                         guidance,
                         planning_negative.clone(),
-                        None,
-                        &[],
-                        None,
+                        planning_reference.as_ref(),
+                        &planning_edit_refs,
+                        planning_edit_mask.as_ref(),
                         true_cfg,
                         planning_sampler.as_deref(),
                         planning_scheduler.as_deref(),
@@ -2429,17 +2453,49 @@ async fn generate_candle_registry_stream_using(
                         use_pid,
                         text_style_gain,
                         None,
-                        &planning_enhance,
+                        &first_pass_enhance,
                         gen_core::PromptEnhancementSink::default(),
                         gen_core::PreviewSink::default(),
                         &planning_surface,
                         planning_cancel,
                     )?;
-                    super::render::compile_render_plan(
+                    let Some(hires) = hires_fix else {
+                        return super::render::compile_prepared_render(
+                            crate::inference_runtime::media(),
+                            engine_id,
+                            &planning_spec,
+                            &candidate,
+                            None,
+                        );
+                    };
+                    let refine = super::render::build_hires_refinement_request(
+                        item_prompt,
+                        seed,
+                        &hires,
+                        planning_negative.clone(),
+                        None,
+                        planning_sampler.as_deref(),
+                        planning_scheduler.as_deref(),
+                        scheduler_shift,
+                        planning_guidance_method.as_deref(),
+                        text_style_gain,
+                        None,
+                        &planning_enhance,
+                        gen_core::PromptEnhancementSink::default(),
+                        gen_core::PreviewSink::default(),
+                        &LaneRgbaSurface {
+                            output_channels: rgba_output_channels,
+                            controls: planning_lane_controls.clone(),
+                            ..Default::default()
+                        },
+                        planning_cancel,
+                    )?;
+                    super::render::compile_prepared_render(
                         crate::inference_runtime::media(),
                         engine_id,
                         &planning_spec,
                         &candidate,
+                        Some((&refine, &hires)),
                     )
                 })
                 .collect::<WorkerResult<Vec<_>>>()
@@ -2727,7 +2783,9 @@ async fn generate_candle_registry_stream_using(
                                 low_res_start_report: Some(&low_res_start_report),
                                 source_image: None,
                                 prompt_batch: Some(batch),
-                                render_plan: render_plans.first().and_then(Option::as_ref),
+                                render_plan: render_plans
+                                    .first()
+                                    .and_then(|plans| plans.pass.as_ref()),
                                 hires_render_plan: None,
                             },
                             &cancel,
@@ -2824,8 +2882,12 @@ async fn generate_candle_registry_stream_using(
                                 low_res_start_report: Some(&low_res_start_report),
                                 source_image: flux_source_image.as_ref(),
                                 prompt_batch: None,
-                                render_plan: render_plans.get(index).and_then(Option::as_ref),
-                                hires_render_plan: None,
+                                render_plan: render_plans
+                                    .get(index)
+                                    .and_then(|plans| plans.pass.as_ref()),
+                                hires_render_plan: render_plans
+                                    .get(index)
+                                    .and_then(|plans| plans.hires.as_ref()),
                             },
                             &cancel,
                             on_progress,

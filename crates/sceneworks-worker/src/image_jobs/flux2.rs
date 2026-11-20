@@ -511,6 +511,7 @@ pub(super) fn flux2_dev_edit_memory_context(
         predicted_peak_bytes: 0,
         cache_state: gen_core::MemoryCacheState::Cold,
         evidence_revision: "provider-owned-flux2-dev-edit-fit".to_owned(),
+        low_res_start: None,
     }))
 }
 

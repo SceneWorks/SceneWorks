@@ -267,6 +267,7 @@ fn resident_context() -> gen_core::MemoryRunContext {
         predicted_peak_bytes: 20,
         cache_state: gen_core::MemoryCacheState::Cold,
         evidence_revision: "resident-sentinel".to_owned(),
+        low_res_start: None,
     }
 }
 

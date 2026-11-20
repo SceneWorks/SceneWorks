@@ -1200,27 +1200,122 @@ pub(crate) const FLUX1_VAE_SPATIAL_SCALE: u32 = 8;
 pub(crate) const FLUX1_PATCH_SIZE: u32 = 2;
 pub(crate) const FLUX1_HEAD_DIM: u32 = 128;
 
-/// Maximum T5 sequence length for a first-cohort FLUX.1 route (`256` for `flux1_schnell`, `512` for
-/// `flux1_dev`). Returns `None` for non-first-cohort routes.
-#[cfg_attr(not(native_lane), allow(dead_code))]
-pub(crate) fn flux1_t5_max_tokens(route_id: &str) -> Option<u32> {
+/// Architecture and latent-space parameters for an `ENG-2` route that admits `low_res_start`
+/// (`SW-6942`, `SW-6945`, `SW-6946`, `SW-6947`, `SW-6948`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Eng2LowResArchitectureParams {
+    pub(crate) latent_channels: u32,
+    pub(crate) vae_spatial_scale: u32,
+    pub(crate) patch_size: u32,
+    pub(crate) requires_multiple: u32,
+    pub(crate) min_dim: u32,
+    pub(crate) max_text_tokens: u32,
+    pub(crate) head_dim: u32,
+}
+
+/// Resolve the `ENG-2` latent-space and attention-context parameters for `route_id` when the route
+/// admits `low_res_start` (`SW-6942`, `SW-6948`).
+///
+/// Returns `None` for non-`ENG-2` routes and for `ENG-2` conditioned-only / `ENG-5` sibling routes
+/// (`flux1_dev_control`, `pulid_flux`, `qwen_image_edit`, `qwen_image_control`, `z_image_control`,
+/// `z_image_turbo_control`, `sana_sprint_1600m`, `boogu_image_turbo`, `boogu_image_edit`).
+pub(crate) fn eng2_low_res_architecture_params(
+    route_id: &str,
+) -> Option<Eng2LowResArchitectureParams> {
     match route_id {
-        "flux1_schnell" | "flux_schnell" => Some(256),
-        "flux1_dev" | "flux_dev" => Some(512),
+        "flux1_schnell" | "flux_schnell" => Some(Eng2LowResArchitectureParams {
+            latent_channels: FLUX1_LATENT_CHANNELS,
+            vae_spatial_scale: FLUX1_VAE_SPATIAL_SCALE,
+            patch_size: FLUX1_PATCH_SIZE,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 256,
+            head_dim: FLUX1_HEAD_DIM,
+        }),
+        "flux1_dev" | "flux_dev" => Some(Eng2LowResArchitectureParams {
+            latent_channels: FLUX1_LATENT_CHANNELS,
+            vae_spatial_scale: FLUX1_VAE_SPATIAL_SCALE,
+            patch_size: FLUX1_PATCH_SIZE,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 512,
+            head_dim: FLUX1_HEAD_DIM,
+        }),
+        "flux2_dev" | "flux2_klein_4b" | "flux2_klein_9b" | "lens" | "lens_turbo" => {
+            Some(Eng2LowResArchitectureParams {
+                latent_channels: 32,
+                vae_spatial_scale: 8,
+                patch_size: 2,
+                requires_multiple: 16,
+                min_dim: 256,
+                max_text_tokens: 512,
+                head_dim: 128,
+            })
+        }
+        "chroma1_hd"
+        | "chroma1_base"
+        | "chroma1_flash"
+        | "anima"
+        | "anima_base"
+        | "anima_aesthetic"
+        | "anima_turbo"
+        | "boogu_image"
+        | "qwen_image"
+        | "qwen_image_2_1"
+        | "qwen_image_2_1_turbo"
+        | "z_image"
+        | "z_image_turbo" => Some(Eng2LowResArchitectureParams {
+            latent_channels: 16,
+            vae_spatial_scale: 8,
+            patch_size: 2,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 512,
+            head_dim: 128,
+        }),
+        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => {
+            Some(Eng2LowResArchitectureParams {
+                latent_channels: 16,
+                vae_spatial_scale: 8,
+                patch_size: 2,
+                requires_multiple: 16,
+                min_dim: 256,
+                max_text_tokens: 333,
+                head_dim: 64,
+            })
+        }
+        "sana_1600m" => Some(Eng2LowResArchitectureParams {
+            latent_channels: 32,
+            vae_spatial_scale: 32,
+            patch_size: 1,
+            requires_multiple: 32,
+            min_dim: 256,
+            max_text_tokens: 300,
+            head_dim: 70,
+        }),
+        "kolors" | "sdxl" | "realvisxl" => Some(Eng2LowResArchitectureParams {
+            latent_channels: 4,
+            vae_spatial_scale: 8,
+            patch_size: 2,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 77,
+            head_dim: 64,
+        }),
         _ => None,
     }
 }
 
-/// Qualify the conservative byte bound for a first-cohort FLUX.1 (`flux1_schnell`, `flux1_dev`)
-/// `low_res_start` transition (`§6.12`, `B4`, `SW-6942`).
+/// Qualify the conservative byte bound for an `ENG-2` (`flux1_*`, `flux2_*`, `chroma1_*`, `lens*`,
+/// `anima*`, `sd3_5_*`, `sana_1600m`, `boogu_image`, `qwen_image`, `qwen_image_2_1*`, `z_image*`,
+/// curated `kolors`, curated `sdxl`) `low_res_start` transition (`§6.12`, `B4`, `SW-6942`, `SW-6948`).
 ///
 /// Covers:
 /// 1. Small-grid forward (`0..K` at `(low_w, low_h)`) proven bounded by `ordinary_t2i_peak_bytes`.
 /// 2. Read-only endpoint evaluation workspace at `sigma_K` proven bounded by `ordinary_t2i_peak_bytes`.
 /// 3. Solver snapshot / boundary handoff buffers (`2 * reduced_latent_fp32_bytes`).
 /// 4. Retained phase-1 conditioning/positional context (`img_ids` + RoPE cos/sin embeddings).
-/// 5. Six-buffer fp32 transition workspace ceiling (`2 * reduced_f32 + 4 * full_f32 = 4,718,592 B`
-///    at `512x512 -> 1024x1024`).
+/// 5. Six-buffer fp32 transition workspace ceiling (`2 * reduced_f32 + 4 * full_f32`).
 #[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn qualify_first_cohort_low_res_transition_bound(
     route_id: &str,
@@ -1229,9 +1324,9 @@ pub(crate) fn qualify_first_cohort_low_res_transition_bound(
     plan: &gen_core::ResolvedLowResStartPlan,
     batch: u32,
 ) -> crate::WorkerResult<gen_core::LowResTransitionCoverageTrace> {
-    let t5_max_tokens = flux1_t5_max_tokens(route_id).ok_or_else(|| {
+    let params = eng2_low_res_architecture_params(route_id).ok_or_else(|| {
         crate::WorkerError::InvalidPayload(format!(
-            "{route_id}: low_res_start transition pricing is only qualified for the first cohort (flux1_schnell, flux1_dev)"
+            "{route_id}: low_res_start transition pricing is only qualified for ENG-2 routes"
         ))
     })?;
     gen_core::qualify_flux1_low_res_transition_bound(
@@ -1239,17 +1334,17 @@ pub(crate) fn qualify_first_cohort_low_res_transition_bound(
         evidence_basis,
         plan,
         batch.max(1),
-        FLUX1_LATENT_CHANNELS,
-        FLUX1_VAE_SPATIAL_SCALE,
-        FLUX1_PATCH_SIZE,
-        t5_max_tokens,
-        FLUX1_HEAD_DIM,
+        params.latent_channels,
+        params.vae_spatial_scale,
+        params.patch_size,
+        params.max_text_tokens,
+        params.head_dim,
     )
     .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))
 }
 
 /// Evaluate worker admission for an optional `low_res_start` plan against `budget` and `posture`
-/// (`ADM-3`, `B4`, `§6.12`, `SW-6942`).
+/// (`ADM-3`, `B4`, `§6.12`, `SW-6942`, `SW-6948`).
 ///
 /// - When `low_res_plan` is `None`, ordinary T2I admission is completely unchanged.
 /// - When `posture` is `LowResTransitionPricingPosture::UnqualifiedRealEvidence`, opted-in
@@ -1270,6 +1365,10 @@ pub(crate) fn evaluate_worker_low_res_transition_admission(
     posture: &gen_core::LowResTransitionPricingPosture,
 ) -> Result<gen_core::LowResTransitionAdmissionReceipt, gen_core::LowResTransitionAdmissionRefusal>
 {
+    let (latent_channels, vae_spatial_scale) = eng2_low_res_architecture_params(route_id)
+        .map_or((FLUX1_LATENT_CHANNELS, FLUX1_VAE_SPATIAL_SCALE), |p| {
+            (p.latent_channels, p.vae_spatial_scale)
+        });
     gen_core::evaluate_low_res_transition_admission(
         route_id,
         ordinary_t2i_peak_bytes,
@@ -1277,20 +1376,48 @@ pub(crate) fn evaluate_worker_low_res_transition_admission(
         budget,
         low_res_plan,
         batch.max(1),
-        FLUX1_LATENT_CHANNELS,
-        FLUX1_VAE_SPATIAL_SCALE,
+        latent_channels,
+        vae_spatial_scale,
         posture,
     )
 }
 
 /// Compute the conservative incremental transition workspace bytes above the ordinary full-grid
-/// peak for an active `low_res_start` request on a first-cohort FLUX.1 route (`SW-6942`).
+/// peak for an active `low_res_start` request on an `ENG-2` route (`SW-6942`, `SW-6948`).
 ///
 /// Returns `Ok(0)` when `low_res_start` is `None`, so disabled / non-participating requests
 /// preserve their exact existing admission bytes.
-#[cfg_attr(not(native_lane), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn low_res_start_workspace_bytes(
     route_id: &str,
+    width: u32,
+    height: u32,
+    batch: u32,
+    executed_steps: u32,
+    low_res_start: Option<&gen_core::LowResStartSpec>,
+) -> crate::WorkerResult<u64> {
+    low_res_start_workspace_bytes_with_source(
+        route_id,
+        None,
+        width,
+        height,
+        batch,
+        executed_steps,
+        low_res_start,
+    )
+}
+
+/// Compute the conservative incremental transition + M3 initial codec workspace bytes above the
+/// ordinary full-grid peak for an active `low_res_start` request on an `ENG-2` route (`SW-6942`,
+/// `SW-6946`, `SW-6948`, `§6.13`).
+///
+/// When `source_dimensions` is `Some((source_width, source_height))` (plain single-source img2img),
+/// charges the M3 initial codec buffers (`raw_source_rgb8_bytes + fitted_phase0_input_f32_bytes +
+/// retained_clean_init_latent_bytes`) in addition to the qualified transition bound.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn low_res_start_workspace_bytes_with_source(
+    route_id: &str,
+    source_dimensions: Option<(u32, u32)>,
     width: u32,
     height: u32,
     batch: u32,
@@ -1300,16 +1427,21 @@ pub(crate) fn low_res_start_workspace_bytes(
     let Some(spec) = low_res_start else {
         return Ok(0);
     };
+    let params = eng2_low_res_architecture_params(route_id).ok_or_else(|| {
+        crate::WorkerError::InvalidPayload(format!(
+            "{route_id}: low_res_start transition pricing is only qualified for ENG-2 routes"
+        ))
+    })?;
     let resolved = spec
         .resolve_geometry(
             route_id,
             width,
             height,
             executed_steps.max(2) as usize,
-            FLUX1_VAE_SPATIAL_SCALE,
-            FLUX1_PATCH_SIZE,
-            16,
-            256,
+            params.vae_spatial_scale,
+            params.patch_size,
+            params.requires_multiple,
+            params.min_dim,
         )
         .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?;
     let trace = qualify_first_cohort_low_res_transition_bound(
@@ -1319,9 +1451,571 @@ pub(crate) fn low_res_start_workspace_bytes(
         &resolved,
         batch.max(1),
     )?;
-    trace
+    let transition_delta = trace
         .total_incremental_bytes_above_ordinary()
-        .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))
+        .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?;
+    let Some((src_w, src_h)) = source_dimensions else {
+        return Ok(transition_delta);
+    };
+    let raw_source_rgb8_bytes = u64::from(src_w)
+        .saturating_mul(u64::from(src_h))
+        .saturating_mul(3);
+    let fitted_phase0_input_f32_bytes = u64::from(resolved.low_width)
+        .saturating_mul(u64::from(resolved.low_height))
+        .saturating_mul(3 * 4);
+    let retained_clean_init_latent_bytes = trace.six_buffer_ceiling.reduced_latent_fp32_bytes;
+    let init_codec_bytes = raw_source_rgb8_bytes
+        .saturating_add(fitted_phase0_input_f32_bytes)
+        .saturating_add(retained_clean_init_latent_bytes);
+    Ok(transition_delta.saturating_add(init_codec_bytes))
+}
+
+/// Complete pass-scoped [`gen_core::RequestLiveSetPlan`] pricing result for an `ENG-2` two-pass
+/// Hires.fix request (`ADM-3`, `§6.6`, `§6.13`, `§6.14`, `SW-6948`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Eng2HiresFixLiveSetPricing {
+    pub(crate) route_id: String,
+    pub(crate) domain: gen_core::MemoryBudgetDomain,
+    pub(crate) pass0_width: u32,
+    pub(crate) pass0_height: u32,
+    pub(crate) pass1_width: u32,
+    pub(crate) pass1_height: u32,
+    pub(crate) pass0_reference_count: u32,
+    pub(crate) pass1_reference_count: u32,
+    pub(crate) pass0_low_res_active: bool,
+    pub(crate) pass1_low_res_active: bool,
+    pub(crate) pass0_enhance_active: bool,
+    pub(crate) pass1_enhance_active: bool,
+    pub(crate) pass0_use_pid: bool,
+    pub(crate) pass1_use_pid: bool,
+    pub(crate) pass0_peak_bytes: u64,
+    pub(crate) transition_peak_bytes: u64,
+    pub(crate) pass1_peak_bytes: u64,
+    pub(crate) request_live_set_plan: gen_core::RequestLiveSetPlan,
+    pub(crate) priced_domain_peak: gen_core::PricedDomainPeak,
+}
+
+/// Build and price the pass-scoped [`gen_core::RequestLiveSetPlan`] for an `ENG-2` two-pass
+/// Hires.fix request (`ADM-3`, `§6.6`, `§6.13`, `§6.14`, `SW-6948`).
+///
+/// Models:
+/// - **Pass 0 (`pass_index: 0`)**: base geometry `(base_width, base_height)`, unenhanced prompt
+///   (`pass0_enhance_active = false`), original conditioning (`pass0_reference_canvases`), optional
+///   `low_res_start` (phase 0 at `(low_width, low_height)` -> `LatentSpatialTransition` 6-buffer
+///   ceiling -> phase 1 at `(base_width, base_height)`), and intermediate RGB VAE decode at
+///   `(base_width, base_height)`.
+/// - **Pass 0 -> Pass 1 transition (`TransitionMechanismKind::PixelRoundTrip`)**: intermediate RGB
+///   decode output (`base_width * base_height * 3`) + host/device pixel stretch to
+///   `(hires_width * hires_height * 3)`.
+/// - **Pass 1 (`pass_index: 1`)**: target geometry `(hires_width, hires_height)`, single replacement
+///   reference (`reference_count = 1`, `reference_canvases = vec![(hires_width, hires_height)]`),
+///   final-pass prompt enhancement (`pass1_enhance_active = enhance_active`), `low_res_start = None`,
+///   and final decode (`use_pid = false` on refinement decode).
+/// - Takes the domain max across Pass 0, the `PixelRoundTrip` transition, and Pass 1.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
+    route_id: &str,
+    domain: gen_core::MemoryBudgetDomain,
+    base_width: u32,
+    base_height: u32,
+    base_steps: u32,
+    hires_width: u32,
+    hires_height: u32,
+    _hires_steps: u32,
+    batch: u32,
+    pass0_reference_canvases: &[(u32, u32)],
+    low_res_start: Option<&gen_core::LowResStartSpec>,
+    enhance_active: bool,
+    pass0_use_pid: bool,
+    resident_conditioning_weights_bytes: u64,
+    resident_transformer_weights_bytes: u64,
+    resident_vae_weights_bytes: u64,
+    per_reference_encode_workspace_bytes: u64,
+    enhance_workspace_bytes: u64,
+    base_forward_workspace_bytes: u64,
+    hires_forward_workspace_bytes: u64,
+    base_decode_workspace_bytes: u64,
+    hires_decode_workspace_bytes: u64,
+) -> crate::WorkerResult<Eng2HiresFixLiveSetPricing> {
+    use gen_core::{
+        MemoryPhase, PhaseOperationLiveSet, PricedAllocation, RequestLiveSetPlan,
+        StreamPhaseGeometry, TransitionMechanismKind, TransitionOperationLiveSet,
+    };
+
+    let batch = batch.max(1);
+    let params =
+        eng2_low_res_architecture_params(route_id).unwrap_or(Eng2LowResArchitectureParams {
+            latent_channels: FLUX1_LATENT_CHANNELS,
+            vae_spatial_scale: FLUX1_VAE_SPATIAL_SCALE,
+            patch_size: FLUX1_PATCH_SIZE,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 512,
+            head_dim: FLUX1_HEAD_DIM,
+        });
+
+    let resolved_low_res = match low_res_start {
+        Some(spec) => Some(
+            spec.resolve_geometry(
+                route_id,
+                base_width,
+                base_height,
+                base_steps.max(2) as usize,
+                params.vae_spatial_scale,
+                params.patch_size,
+                params.requires_multiple,
+                params.min_dim,
+            )
+            .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?,
+        ),
+        None => None,
+    };
+
+    let pass0_reference_count = u32::try_from(pass0_reference_canvases.len()).unwrap_or(u32::MAX);
+    let pass0_ref_rgb_bytes: u64 = pass0_reference_canvases
+        .iter()
+        .map(|&(w, h)| u64::from(w).saturating_mul(u64::from(h)).saturating_mul(3))
+        .fold(0_u64, u64::saturating_add);
+    let pass0_ref_encode_workspace = u64::from(pass0_reference_count)
+        .saturating_mul(per_reference_encode_workspace_bytes)
+        .saturating_add(pass0_ref_rgb_bytes);
+
+    let mut pass0_full_geom = StreamPhaseGeometry::image("image", base_width, base_height, batch);
+    pass0_full_geom.reference_count = pass0_reference_count;
+    pass0_full_geom.reference_canvases = pass0_reference_canvases.to_vec();
+
+    let base_rgb_bytes = u64::from(base_width)
+        .saturating_mul(u64::from(base_height))
+        .saturating_mul(3)
+        .saturating_mul(u64::from(batch));
+    let hires_rgb_bytes = u64::from(hires_width)
+        .saturating_mul(u64::from(hires_height))
+        .saturating_mul(3)
+        .saturating_mul(u64::from(batch));
+
+    let base_latent_fp32_bytes = u64::from(batch)
+        .saturating_mul(u64::from(params.latent_channels))
+        .saturating_mul(u64::from(base_width / params.vae_spatial_scale))
+        .saturating_mul(u64::from(base_height / params.vae_spatial_scale))
+        .saturating_mul(4);
+    let hires_latent_fp32_bytes = u64::from(batch)
+        .saturating_mul(u64::from(params.latent_channels))
+        .saturating_mul(u64::from(hires_width / params.vae_spatial_scale))
+        .saturating_mul(u64::from(hires_height / params.vae_spatial_scale))
+        .saturating_mul(4);
+
+    let mut operations = Vec::new();
+    let mut transitions = Vec::new();
+
+    // Pass 0 conditioning (base prompt unenhanced!).
+    let mut pass0_cond_activations = vec![PricedAllocation::new(
+        "pass0_prompt_encode_workspace",
+        domain,
+        1_048_576,
+    )];
+    if pass0_ref_encode_workspace > 0 {
+        pass0_cond_activations.push(PricedAllocation::new(
+            "pass0_reference_encode_workspace",
+            domain,
+            pass0_ref_encode_workspace,
+        ));
+    }
+    if let Some(low_res) = &resolved_low_res {
+        if let Some(&(src_w, src_h)) = pass0_reference_canvases.first() {
+            let fitted_phase0_f32 = u64::from(low_res.low_width)
+                .saturating_mul(u64::from(low_res.low_height))
+                .saturating_mul(3 * 4);
+            let raw_src_rgb8 = u64::from(src_w)
+                .saturating_mul(u64::from(src_h))
+                .saturating_mul(3);
+            pass0_cond_activations.push(PricedAllocation::new(
+                "pass0_m3_initial_codec_workspace",
+                domain,
+                raw_src_rgb8.saturating_add(fitted_phase0_f32),
+            ));
+        }
+    }
+    operations.push(PhaseOperationLiveSet {
+        operation_id: "pass0_conditioning".into(),
+        phase: MemoryPhase::Conditioning,
+        pass_index: 0,
+        phase_index: 0,
+        stream_geometries: vec![pass0_full_geom.clone()],
+        resident_weights: vec![PricedAllocation::new(
+            "pass0_conditioning_weights",
+            domain,
+            resident_conditioning_weights_bytes,
+        )],
+        resident_overlays: Vec::new(),
+        concurrent_stream_activations: pass0_cond_activations,
+        joint_workspaces: Vec::new(),
+        retained_state: vec![PricedAllocation::new(
+            "pass0_prompt_embeddings",
+            domain,
+            65_536,
+        )],
+        evidence_peak: None,
+    });
+
+    // Pass 0 denoise (single-phase or two-phase with low_res_start on pass 0 only).
+    if let Some(low_res) = &resolved_low_res {
+        let trace = qualify_first_cohort_low_res_transition_bound(
+            route_id,
+            0,
+            gen_core::EvidencePeakBasis::WHOLE_REQUEST_HIGH_WATER_COPIED_TO_PHASES,
+            low_res,
+            batch,
+        )?;
+        let mut pass0_low_geom =
+            StreamPhaseGeometry::image("image", low_res.low_width, low_res.low_height, batch);
+        pass0_low_geom.reference_count = pass0_reference_count;
+        pass0_low_geom.reference_canvases = pass0_reference_canvases.to_vec();
+
+        let low_area = u64::from(low_res.low_width).saturating_mul(u64::from(low_res.low_height));
+        let full_area =
+            u64::from(low_res.full_width).saturating_mul(u64::from(low_res.full_height));
+        let phase0_forward_workspace = base_forward_workspace_bytes
+            .saturating_mul(low_area)
+            .checked_div(full_area.max(1))
+            .unwrap_or(base_forward_workspace_bytes)
+            .max(1);
+
+        operations.push(PhaseOperationLiveSet {
+            operation_id: "pass0_denoise_phase0".into(),
+            phase: MemoryPhase::Denoise,
+            pass_index: 0,
+            phase_index: 0,
+            stream_geometries: vec![pass0_low_geom],
+            resident_weights: vec![PricedAllocation::new(
+                "transformer",
+                domain,
+                resident_transformer_weights_bytes,
+            )],
+            resident_overlays: Vec::new(),
+            concurrent_stream_activations: vec![PricedAllocation::new(
+                "pass0_phase0_forward_workspace",
+                domain,
+                phase0_forward_workspace,
+            )],
+            joint_workspaces: Vec::new(),
+            retained_state: vec![
+                PricedAllocation::new("pass0_prompt_embeddings", domain, 65_536),
+                PricedAllocation::new(
+                    "pass0_phase0_latent",
+                    domain,
+                    trace.six_buffer_ceiling.reduced_latent_fp32_bytes,
+                ),
+            ],
+            evidence_peak: None,
+        });
+
+        operations.push(PhaseOperationLiveSet {
+            operation_id: "pass0_denoise_phase1".into(),
+            phase: MemoryPhase::Denoise,
+            pass_index: 0,
+            phase_index: 1,
+            stream_geometries: vec![pass0_full_geom.clone()],
+            resident_weights: vec![PricedAllocation::new(
+                "transformer",
+                domain,
+                resident_transformer_weights_bytes,
+            )],
+            resident_overlays: Vec::new(),
+            concurrent_stream_activations: vec![PricedAllocation::new(
+                "pass0_phase1_forward_workspace",
+                domain,
+                base_forward_workspace_bytes,
+            )],
+            joint_workspaces: Vec::new(),
+            retained_state: vec![
+                PricedAllocation::new("pass0_prompt_embeddings", domain, 65_536),
+                PricedAllocation::new(
+                    "pass0_retained_phase1_context",
+                    domain,
+                    trace.retained_phase1_context_bytes,
+                ),
+                PricedAllocation::new("pass0_phase1_latent", domain, base_latent_fp32_bytes),
+            ],
+            evidence_peak: None,
+        });
+
+        transitions.push(TransitionOperationLiveSet {
+            transition_id: "pass0_node_k_low_res_transition".into(),
+            from_operation_id: "pass0_denoise_phase0".into(),
+            to_operation_id: "pass0_denoise_phase1".into(),
+            mechanism: TransitionMechanismKind::LatentSpatialTransition,
+            resident_weights: vec![PricedAllocation::new(
+                "transformer",
+                domain,
+                resident_transformer_weights_bytes,
+            )],
+            resident_overlays: Vec::new(),
+            transition_workspaces: vec![PricedAllocation::new(
+                "pass0_six_buffer_fp32_transition_workspace",
+                domain,
+                trace.six_buffer_ceiling.total_six_buffer_ceiling_bytes,
+            )],
+            live_handoff_buffers: vec![
+                PricedAllocation::new("pass0_prompt_embeddings", domain, 65_536),
+                PricedAllocation::new(
+                    "pass0_solver_snapshot_handoff",
+                    domain,
+                    trace.solver_snapshot_handoff_bytes,
+                ),
+                PricedAllocation::new(
+                    "pass0_retained_phase1_context",
+                    domain,
+                    trace.retained_phase1_context_bytes,
+                ),
+            ],
+        });
+    } else {
+        operations.push(PhaseOperationLiveSet {
+            operation_id: "pass0_denoise".into(),
+            phase: MemoryPhase::Denoise,
+            pass_index: 0,
+            phase_index: 0,
+            stream_geometries: vec![pass0_full_geom.clone()],
+            resident_weights: vec![PricedAllocation::new(
+                "transformer",
+                domain,
+                resident_transformer_weights_bytes,
+            )],
+            resident_overlays: Vec::new(),
+            concurrent_stream_activations: vec![PricedAllocation::new(
+                "pass0_forward_workspace",
+                domain,
+                base_forward_workspace_bytes,
+            )],
+            joint_workspaces: Vec::new(),
+            retained_state: vec![
+                PricedAllocation::new("pass0_prompt_embeddings", domain, 65_536),
+                PricedAllocation::new("pass0_latent", domain, base_latent_fp32_bytes),
+            ],
+            evidence_peak: None,
+        });
+    }
+
+    // Pass 0 intermediate RGB decode.
+    operations.push(PhaseOperationLiveSet {
+        operation_id: "pass0_decode_rgb".into(),
+        phase: MemoryPhase::Decode,
+        pass_index: 0,
+        phase_index: 0,
+        stream_geometries: vec![pass0_full_geom],
+        resident_weights: vec![PricedAllocation::new(
+            "vae_decoder",
+            domain,
+            resident_vae_weights_bytes,
+        )],
+        resident_overlays: Vec::new(),
+        concurrent_stream_activations: vec![PricedAllocation::new(
+            "pass0_decode_workspace",
+            domain,
+            base_decode_workspace_bytes,
+        )],
+        joint_workspaces: Vec::new(),
+        retained_state: vec![PricedAllocation::new(
+            "pass0_decoded_rgb_output",
+            domain,
+            base_rgb_bytes,
+        )],
+        evidence_peak: None,
+    });
+
+    // Pass 1 geometry: single replacement reference stretched to `(hires_width, hires_height)`.
+    let mut pass1_geom = StreamPhaseGeometry::image("image", hires_width, hires_height, batch);
+    pass1_geom.reference_count = 1;
+    pass1_geom.reference_canvases = vec![(hires_width, hires_height)];
+
+    // Pass 0 -> Pass 1 transition: LearnedComponentTransition (intermediate RGB decode + pixel stretch to hires).
+    transitions.push(TransitionOperationLiveSet {
+        transition_id: "pass0_to_pass1_pixel_round_trip".into(),
+        from_operation_id: "pass0_decode_rgb".into(),
+        to_operation_id: "pass1_conditioning_and_ref_encode".into(),
+        mechanism: TransitionMechanismKind::LearnedComponentTransition {
+            learned_component_workspace_bytes: base_decode_workspace_bytes.max(1),
+        },
+        resident_weights: vec![PricedAllocation::new(
+            "vae_codec",
+            domain,
+            resident_vae_weights_bytes,
+        )],
+        resident_overlays: Vec::new(),
+        transition_workspaces: vec![
+            PricedAllocation::new(
+                "pass0_intermediate_vae_decode_workspace",
+                domain,
+                base_decode_workspace_bytes.max(1),
+            ),
+            PricedAllocation::new(
+                "pixel_resize_stretch_workspace",
+                domain,
+                base_rgb_bytes.saturating_add(hires_rgb_bytes),
+            ),
+        ],
+        live_handoff_buffers: vec![PricedAllocation::new(
+            "stretched_hires_reference_rgb8",
+            domain,
+            hires_rgb_bytes,
+        )],
+    });
+
+    // Pass 1 conditioning & replacement reference encode (final-pass prompt enhancement runs here only).
+    let mut pass1_cond_activations = vec![
+        PricedAllocation::new("pass1_prompt_encode_workspace", domain, 1_048_576),
+        PricedAllocation::new(
+            "pass1_replacement_reference_encode_workspace",
+            domain,
+            per_reference_encode_workspace_bytes.saturating_add(hires_rgb_bytes),
+        ),
+    ];
+    if enhance_active && enhance_workspace_bytes > 0 {
+        pass1_cond_activations.push(PricedAllocation::new(
+            "pass1_prompt_enhancement_workspace",
+            domain,
+            enhance_workspace_bytes,
+        ));
+    }
+    operations.push(PhaseOperationLiveSet {
+        operation_id: "pass1_conditioning_and_ref_encode".into(),
+        phase: MemoryPhase::Conditioning,
+        pass_index: 1,
+        phase_index: 0,
+        stream_geometries: vec![pass1_geom.clone()],
+        resident_weights: vec![PricedAllocation::new(
+            "pass1_conditioning_weights",
+            domain,
+            resident_conditioning_weights_bytes,
+        )],
+        resident_overlays: Vec::new(),
+        concurrent_stream_activations: pass1_cond_activations,
+        joint_workspaces: Vec::new(),
+        retained_state: vec![
+            PricedAllocation::new("pass1_prompt_embeddings", domain, 65_536),
+            PricedAllocation::new(
+                "pass1_encoded_reference_latent",
+                domain,
+                hires_latent_fp32_bytes,
+            ),
+        ],
+        evidence_peak: None,
+    });
+
+    // Pass 1 denoise at `(hires_width, hires_height)` with `low_res_start = None` and `reference_count = 1`.
+    operations.push(PhaseOperationLiveSet {
+        operation_id: "pass1_denoise".into(),
+        phase: MemoryPhase::Denoise,
+        pass_index: 1,
+        phase_index: 0,
+        stream_geometries: vec![pass1_geom.clone()],
+        resident_weights: vec![PricedAllocation::new(
+            "transformer",
+            domain,
+            resident_transformer_weights_bytes,
+        )],
+        resident_overlays: Vec::new(),
+        concurrent_stream_activations: vec![PricedAllocation::new(
+            "pass1_forward_workspace",
+            domain,
+            hires_forward_workspace_bytes,
+        )],
+        joint_workspaces: Vec::new(),
+        retained_state: vec![
+            PricedAllocation::new("pass1_prompt_embeddings", domain, 65_536),
+            PricedAllocation::new("pass1_latent", domain, hires_latent_fp32_bytes),
+        ],
+        evidence_peak: None,
+    });
+
+    // Pass 1 final decode at `(hires_width, hires_height)` (refinement always decodes with `use_pid = false`).
+    operations.push(PhaseOperationLiveSet {
+        operation_id: "pass1_decode".into(),
+        phase: MemoryPhase::Decode,
+        pass_index: 1,
+        phase_index: 0,
+        stream_geometries: vec![pass1_geom],
+        resident_weights: vec![PricedAllocation::new(
+            "vae_decoder",
+            domain,
+            resident_vae_weights_bytes,
+        )],
+        resident_overlays: Vec::new(),
+        concurrent_stream_activations: vec![PricedAllocation::new(
+            "pass1_decode_workspace",
+            domain,
+            hires_decode_workspace_bytes,
+        )],
+        joint_workspaces: Vec::new(),
+        retained_state: vec![PricedAllocation::new(
+            "pass1_decoded_rgb_output",
+            domain,
+            hires_rgb_bytes,
+        )],
+        evidence_peak: None,
+    });
+
+    let request_live_set_plan = RequestLiveSetPlan {
+        operations,
+        transitions,
+    };
+    let priced_domain_peak = request_live_set_plan
+        .price_domain(domain)
+        .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?;
+
+    let mut pass0_peak_bytes = 0_u64;
+    let mut pass1_peak_bytes = 0_u64;
+    for op in &request_live_set_plan.operations {
+        let peak = op
+            .operation_peak_bytes(domain)
+            .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?;
+        if op.pass_index == 0 {
+            pass0_peak_bytes = pass0_peak_bytes.max(peak);
+        } else {
+            pass1_peak_bytes = pass1_peak_bytes.max(peak);
+        }
+    }
+    if let Some(low_res_tr) = request_live_set_plan
+        .transitions
+        .iter()
+        .find(|tr| tr.transition_id == "pass0_node_k_low_res_transition")
+    {
+        let tr_peak = low_res_tr
+            .transition_peak_bytes(domain)
+            .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?;
+        pass0_peak_bytes = pass0_peak_bytes.max(tr_peak);
+    }
+    let transition_peak_bytes = request_live_set_plan
+        .transitions
+        .iter()
+        .find(|tr| tr.transition_id == "pass0_to_pass1_pixel_round_trip")
+        .map(|tr| tr.transition_peak_bytes(domain))
+        .transpose()
+        .map_err(|error| crate::WorkerError::InvalidPayload(format!("{route_id}: {error}")))?
+        .unwrap_or(0);
+
+    Ok(Eng2HiresFixLiveSetPricing {
+        route_id: route_id.to_owned(),
+        domain,
+        pass0_width: base_width,
+        pass0_height: base_height,
+        pass1_width: hires_width,
+        pass1_height: hires_height,
+        pass0_reference_count,
+        pass1_reference_count: 1,
+        pass0_low_res_active: resolved_low_res.is_some(),
+        pass1_low_res_active: false,
+        pass0_enhance_active: false,
+        pass1_enhance_active: enhance_active,
+        pass0_use_pid,
+        pass1_use_pid: false,
+        pass0_peak_bytes,
+        transition_peak_bytes,
+        pass1_peak_bytes,
+        request_live_set_plan,
+        priced_domain_peak,
+    })
 }
 
 #[cfg(test)]
@@ -2870,5 +3564,186 @@ mod corpus_replay_tests {
                 (MemoryPhase::Decode, 0, 0, 1024, 1024),
             ]
         );
+    }
+
+    #[test]
+    fn sw_6948_eng2_hires_fix_and_low_res_start_pass_scoped_live_set_admission_pricing() {
+        use gen_core::{LowResStartSpec, MemoryBudgetDomain};
+
+        let spec = LowResStartSpec::new(3, Some(0.5));
+
+        // 1. Every ENG-2 route that admits low_res_start resolves a positive workspace bound
+        // using its actual latent-space parameters (channels, spatial compression, packed vs unpacked).
+        for route in [
+            "flux1_schnell",
+            "flux1_dev",
+            "flux2_dev",
+            "flux2_klein_4b",
+            "flux2_klein_9b",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
+            "lens",
+            "lens_turbo",
+            "anima",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "boogu_image",
+            "qwen_image",
+            "qwen_image_2_1",
+            "qwen_image_2_1_turbo",
+            "z_image",
+            "z_image_turbo",
+            "kolors",
+            "sdxl",
+        ] {
+            let delta = low_res_start_workspace_bytes(route, 1024, 1024, 1, 8, Some(&spec))
+                .unwrap_or_else(|e| panic!("{route}: must price low_res_start: {e}"));
+            assert!(delta > 0, "{route}: delta must be positive");
+            let with_m3_source = low_res_start_workspace_bytes_with_source(
+                route,
+                Some((1200, 700)),
+                1024,
+                768,
+                1,
+                6,
+                Some(&spec),
+            )
+            .unwrap_or_else(|e| panic!("{route}: M3 img2img low_res_start must price: {e}"));
+            let t2i_non_square =
+                low_res_start_workspace_bytes(route, 1024, 768, 1, 6, Some(&spec)).unwrap();
+            assert!(
+                with_m3_source > t2i_non_square,
+                "{route}: M3 plain img2img initial codec workspace must increase priced bytes above T2I"
+            );
+        }
+
+        // Verify architecture-specific latent space scaling:
+        // FLUX.2 / Lens (32-ch at /8) has 2x the 6-buffer ceiling of FLUX.1 / SD3.5 (16-ch at /8),
+        // while Kolors / SDXL (4-ch at /8) has 1/4 the 6-buffer ceiling of 16-ch at /8,
+        // and SANA (32-ch at /32 DC-AE) has 1/8 the 6-buffer ceiling of 16-ch at /8.
+        let flux2_delta =
+            low_res_start_workspace_bytes("flux2_dev", 1024, 1024, 1, 8, Some(&spec)).unwrap();
+        let flux1_delta =
+            low_res_start_workspace_bytes("flux1_dev", 1024, 1024, 1, 8, Some(&spec)).unwrap();
+        let sd35_delta =
+            low_res_start_workspace_bytes("sd3_5_medium", 1024, 1024, 1, 8, Some(&spec)).unwrap();
+        let sdxl_delta =
+            low_res_start_workspace_bytes("sdxl", 1024, 1024, 1, 8, Some(&spec)).unwrap();
+        let sana_delta =
+            low_res_start_workspace_bytes("sana_1600m", 1024, 1024, 1, 8, Some(&spec)).unwrap();
+        assert!(flux2_delta > flux1_delta);
+        assert!(flux1_delta > sd35_delta);
+        assert!(sd35_delta > sdxl_delta);
+        assert!(sdxl_delta > sana_delta);
+
+        // Excluded ENG-5 routes (sana_sprint_1600m, boogu_image_turbo) must refuse low_res_start transition pricing.
+        for excluded in ["sana_sprint_1600m", "boogu_image_turbo"] {
+            assert!(
+                low_res_start_workspace_bytes(excluded, 1024, 1024, 1, 8, Some(&spec)).is_err(),
+                "{excluded} must refuse low_res_start transition pricing"
+            );
+        }
+
+        // 2. Two-pass Hires.fix RequestLiveSetPlan pricing across pass 0, PixelRoundTrip transition,
+        // and pass 1 (with low_res_start on pass 0 only, prompt enhancement on pass 1 only, and
+        // single replacement reference on pass 1).
+        for domain in [
+            MemoryBudgetDomain::UnifiedMemory,
+            MemoryBudgetDomain::DeviceVram,
+        ] {
+            let hires_dominated = price_eng2_hires_fix_request_live_set_plan(
+                "flux2_dev",
+                domain,
+                512,
+                512,
+                6,
+                1536,
+                1536,
+                8,
+                1,
+                &[(512, 512)],
+                Some(&spec),
+                true,
+                false,
+                512 * 1024 * 1024,
+                4096 * 1024 * 1024,
+                256 * 1024 * 1024,
+                32 * 1024 * 1024,
+                128 * 1024 * 1024,
+                256 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                64 * 1024 * 1024,
+                256 * 1024 * 1024,
+            )
+            .expect("two-pass Hires.fix RequestLiveSetPlan pricing succeeds");
+
+            assert!(hires_dominated.pass0_low_res_active);
+            assert!(!hires_dominated.pass1_low_res_active);
+            assert!(!hires_dominated.pass0_enhance_active);
+            assert!(hires_dominated.pass1_enhance_active);
+            assert_eq!(hires_dominated.pass0_reference_count, 1);
+            assert_eq!(hires_dominated.pass1_reference_count, 1);
+            assert!(!hires_dominated.pass1_use_pid);
+            assert!(hires_dominated.transition_peak_bytes > 0);
+            assert!(hires_dominated.pass1_peak_bytes > hires_dominated.pass0_peak_bytes);
+            assert_eq!(
+                hires_dominated.priced_domain_peak.request_peak_bytes,
+                hires_dominated
+                    .pass0_peak_bytes
+                    .max(hires_dominated.transition_peak_bytes)
+                    .max(hires_dominated.pass1_peak_bytes)
+            );
+            assert_eq!(
+                hires_dominated.priced_domain_peak.dominant_stage_id,
+                "pass1_denoise"
+            );
+
+            // When Pass 0 carries heavy multi-reference conditioning (e.g. 4 large references on
+            // qwen_image_2_1) that Pass 1 replaces with the single stretched pass-0 output, Pass 0
+            // can dominate Pass 1 and the domain max captures Pass 0's peak!
+            let pass0_dominated = price_eng2_hires_fix_request_live_set_plan(
+                "qwen_image_2_1",
+                domain,
+                1024,
+                1024,
+                8,
+                1280,
+                1280,
+                6,
+                1,
+                &[(1536, 1536), (1536, 1536), (1536, 1536), (1536, 1536)],
+                None,
+                false,
+                false,
+                2048 * 1024 * 1024,
+                2048 * 1024 * 1024,
+                256 * 1024 * 1024,
+                512 * 1024 * 1024,
+                0,
+                256 * 1024 * 1024,
+                320 * 1024 * 1024,
+                64 * 1024 * 1024,
+                96 * 1024 * 1024,
+            )
+            .expect("multi-ref pass-0 Hires.fix pricing succeeds");
+
+            assert_eq!(pass0_dominated.pass0_reference_count, 4);
+            assert_eq!(pass0_dominated.pass1_reference_count, 1);
+            assert!(pass0_dominated.pass0_peak_bytes > pass0_dominated.pass1_peak_bytes);
+            assert_eq!(
+                pass0_dominated.priced_domain_peak.request_peak_bytes,
+                pass0_dominated.pass0_peak_bytes
+            );
+            assert_eq!(
+                pass0_dominated.priced_domain_peak.dominant_stage_id,
+                "pass0_conditioning"
+            );
+        }
     }
 }
