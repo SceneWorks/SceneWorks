@@ -7380,8 +7380,6 @@ async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
                     // The challenge names exactly the source the job needs.
                     assert_eq!(challenge["sourceId"], json!(claim.source_id));
                     assert_eq!(challenge["files"], json!(claim.files));
-                    let claims = if proves { json!([claim]) } else { json!([]) };
-                    heartbeat(claims.clone()).await;
                     let answer = if proves {
                         portable_file_ledger_sha256(&claim.files).expect("ledger")
                     } else {
@@ -7395,8 +7393,13 @@ async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
                     )
                     .await;
                     assert_eq!(status, StatusCode::OK);
-                    // The ordinary heartbeat that follows an answer.
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    // A heartbeat whose claims were snapshotted BEFORE the proof finished, arriving
+                    // only after the answer: it must not be taken as the proof's publication.
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    heartbeat(json!([])).await;
+                    // The next heartbeat carries what the proof published.
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    let claims = if proves { json!([claim]) } else { json!([]) };
                     heartbeat(claims).await;
                     return;
                 }

@@ -41,6 +41,14 @@ const STATIC_SOURCE_IDS: &[&str] = &[
     "iris_generation_text_encoder",
 ];
 
+/// Operator-configured overrides that replace a pinned default (the API's
+/// `SelectedSourceLocation::OperatorOverrideOrManifest`). Admission picks the override only when a
+/// worker advertises it, and otherwise binds the default successfully, so an unadvertised override
+/// is never challenged on use: the job would silently run on the default instead. These are
+/// therefore verified by the inventory itself, even though it reads no other model bytes. With no
+/// override configured their capture finds nothing and reads nothing.
+const OPERATOR_OVERRIDE_SOURCE_IDS: &[&str] = &["ltx_training_gemma_override"];
+
 static INVENTORY_STARTED: AtomicBool = AtomicBool::new(false);
 static OVERLAY_REFRESH_STARTED: AtomicBool = AtomicBool::new(false);
 static PENDING_INVENTORY: OnceLock<Mutex<InventoryProgress>> = OnceLock::new();
@@ -729,7 +737,14 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
     registered_unreceipted_builtin_lora_source_claims(settings, &mut publish);
     let empty = JsonObject::new();
     for source_id in STATIC_SOURCE_IDS {
-        match capture_selected_source(source_id, settings, &empty) {
+        let captured = if OPERATOR_OVERRIDE_SOURCE_IDS.contains(source_id) {
+            with_hash_permission(HashPermission::Any, || {
+                capture_selected_source(source_id, settings, &empty)
+            })
+        } else {
+            capture_selected_source(source_id, settings, &empty)
+        };
+        match captured {
             Ok(Some((claim, _))) => publish(claim),
             Ok(None) => {}
             Err(error) => {
@@ -2966,6 +2981,50 @@ mod tests {
                     PortableSourceProvenance::OperatorOverride
                 );
                 assert_eq!(advertised.files.len(), 3);
+            },
+        );
+    }
+
+    /// The cache-only inventory still advertises a configured operator override on a cold
+    /// verdict store. Admission otherwise binds the pinned default without challenging anyone, and
+    /// LTX training would silently run on the default encoder instead of `$LTX_GEMMA_DIR`.
+    #[cfg(native_lane)]
+    #[test]
+    fn cold_store_inventory_still_advertises_a_configured_gemma_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let gemma = temp.path().join("gemma");
+        std::fs::create_dir(&gemma).unwrap();
+        std::fs::write(
+            gemma.join("config.json"),
+            br#"{"model_type":"gemma3_text"}"#,
+        )
+        .unwrap();
+        std::fs::write(gemma.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+        weights.extend_from_slice(header);
+        weights.push(7);
+        std::fs::write(gemma.join("model.safetensors"), weights).unwrap();
+        // A fresh data dir: the verdict store has never seen these files.
+        let settings = Settings::for_test(temp.path().join("data"));
+        let hub = temp.path().join("hub");
+        std::fs::create_dir(&hub).unwrap();
+        crate::test_env::temp_env_vars(
+            &[
+                ("LTX_GEMMA_DIR", gemma.to_str().unwrap()),
+                ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ],
+            || {
+                let mut advertised = Vec::new();
+                with_hash_permission(HashPermission::RecordedOnly, || {
+                    collect_source_claims(&settings, |claim| advertised.push(claim));
+                });
+                let claim = advertised
+                    .into_iter()
+                    .find(|claim| claim.source_id == "ltx_training_gemma_override")
+                    .expect("a configured override must be advertised even on a cold store");
+                assert_eq!(claim.provenance, PortableSourceProvenance::OperatorOverride);
+                assert_eq!(claim.files.len(), 3);
             },
         );
     }

@@ -339,9 +339,10 @@ async fn wait_for_utility_source_proof(
 /// source. The worker mirrors this string.
 pub(crate) const FULL_INVENTORY_CHALLENGE_SOURCE: &str = "sceneworks:full-source-inventory";
 
-/// After every asked worker has answered its challenge, how long admission keeps retrying so the
-/// claims a proof published reach the API on that worker's next heartbeat.
-const SOURCE_PROOF_ANSWER_GRACE: Duration = Duration::from_secs(20);
+/// After every asked worker has answered its challenge, the longest admission keeps retrying for
+/// the two heartbeats that carry its published claims (workers heartbeat every 5–15 s). A worker
+/// that stops heartbeating must not hold the request until the full challenge timeout.
+const SOURCE_PROOF_ANSWER_GRACE: Duration = Duration::from_secs(45);
 
 /// Sources one admission attempt could not prove from any live worker's advertisement, and the
 /// authenticated workers eligible to verify them now.
@@ -490,18 +491,36 @@ fn issue_source_proof_challenges(
     (ids, pending.workers)
 }
 
-/// Whether every worker in `workers` has heartbeated since `since`, so whatever it published
-/// before answering has reached this API process.
-async fn workers_heartbeated_since(
+/// How many keyed heartbeats each of `workers` has delivered so far.
+async fn worker_heartbeat_counts(
     state: &AppState,
     workers: &BTreeSet<String>,
-    since: Instant,
-) -> bool {
+) -> BTreeMap<String, u64> {
     let authenticated = state.authenticated_worker_claims.lock().await;
-    workers.iter().all(|worker| {
+    workers
+        .iter()
+        .map(|worker| {
+            let count = authenticated
+                .get(worker)
+                .map_or(0, |record| record.heartbeats);
+            (worker.clone(), count)
+        })
+        .collect()
+}
+
+/// Whether every worker has delivered two heartbeats since `baseline` was taken, so whatever it
+/// published before answering has reached this API process.
+///
+/// One is not enough: a heartbeat can snapshot its claims before the proof finishes and still
+/// arrive after the answer. A worker heartbeats sequentially, so the second heartbeat received
+/// after the baseline was built after the first one returned — after the answer arrived, and so
+/// after the claims the proof published before answering.
+async fn workers_published_since(state: &AppState, baseline: &BTreeMap<String, u64>) -> bool {
+    let authenticated = state.authenticated_worker_claims.lock().await;
+    baseline.iter().all(|(worker, count)| {
         authenticated
             .get(worker)
-            .is_some_and(|record| record.seen_at > since)
+            .is_some_and(|record| record.heartbeats >= count + 2)
     })
 }
 
@@ -1182,6 +1201,8 @@ pub(crate) async fn capture_portable_model_binding(
     let (challenges, workers) = issue_source_proof_challenges(state, &requests);
     let deadline = Instant::now() + SOURCE_CHALLENGE_TIMEOUT;
     let mut answered_at: Option<Instant> = None;
+    // Each asked worker's heartbeat count when the last answer arrived.
+    let mut heartbeats_at_answer = None;
     let mut settled = false;
     let outcome = loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1206,9 +1227,10 @@ pub(crate) async fn capture_portable_model_binding(
         }
         if answered_at.is_none() && source_proof_challenges_answered(state, &challenges) {
             answered_at = Some(Instant::now());
+            heartbeats_at_answer = Some(worker_heartbeat_counts(state, &workers).await);
         }
-        if let Some(at) = answered_at {
-            settled = workers_heartbeated_since(state, &workers, at).await;
+        if let Some(baseline) = &heartbeats_at_answer {
+            settled = workers_published_since(state, baseline).await;
         }
     };
     retire_source_proof_challenges(state, &challenges);
