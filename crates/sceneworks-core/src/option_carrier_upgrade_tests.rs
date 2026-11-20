@@ -133,3 +133,89 @@ fn upgrade_preserves_malformed_request_fields_for_shared_shape_validation() {
         crate::request_validation::validate_shape("promptRefine", upgraded.as_object().unwrap());
     assert!(refusal.is_err());
 }
+
+#[test]
+fn missing_or_unknown_low_res_recipe_version_returns_typed_refusal_code() {
+    let mut missing_version = share(json!({"lowResStart":{"version":1,"k":4,"scale":0.5}}));
+    missing_version["advanced"]["lowResStart"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    let err = parse_workflow_share(&missing_version).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::workflow_share::WorkflowShareError::Malformed { field, detail }
+                if field == "advanced.lowResStart.version" && detail.contains("MissingRecipeVersion")
+        ),
+        "expected MissingRecipeVersion refusal, got {err:?}"
+    );
+
+    let mut unknown_version = share(json!({"lowResStart":{"version":1,"k":4,"scale":0.5}}));
+    unknown_version["advanced"]["lowResStart"]["version"] = json!(2);
+    let err = parse_workflow_share(&unknown_version).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::workflow_share::WorkflowShareError::Malformed { field, detail }
+                if field == "advanced.lowResStart.version" && detail.contains("UnsupportedSchemaVersion")
+        ),
+        "expected UnsupportedSchemaVersion refusal, got {err:?}"
+    );
+}
+
+#[test]
+fn portable_import_revalidates_route_support_and_records_omitted_low_res_start() {
+    use crate::workflow_share::{
+        revalidate_portable_import, OMITTED_LOW_RES_START, WORKFLOW_SHARE_LEGACY_VERSION,
+        WORKFLOW_SHARE_SCHEMA_VERSION,
+    };
+
+    let active_value = share(json!({"steps":9,"lowResStart":{"version":1,"k":4,"scale":0.5}}));
+    let parsed = parse_workflow_share(&active_value).unwrap();
+    assert_eq!(parsed.schema_version, WORKFLOW_SHARE_SCHEMA_VERSION);
+
+    // Supported route preserves active lowResStart and outer v2.
+    let supported_entry = json!({
+        "id": "z_image_turbo",
+        "defaults": { "steps": 9 },
+        "resolution": { "multipleOf": 16, "minDimension": 64 },
+        "features": { "low_res_start": true }
+    });
+    let preserved = revalidate_portable_import(&parsed, supported_entry.as_object().unwrap());
+    assert_eq!(preserved.schema_version, WORKFLOW_SHARE_SCHEMA_VERSION);
+    assert_eq!(
+        preserved.advanced.get("lowResStart"),
+        Some(&json!({"version":1,"k":4,"scale":0.5}))
+    );
+    assert!(preserved.omitted.is_empty());
+
+    // Unsupported route strips lowResStart, records "advanced.lowResStart" in omitted, and downgrades to v1.
+    let unsupported_entry = json!({
+        "id": "flux_dev",
+        "defaults": { "steps": 28 },
+        "features": {}
+    });
+    let stripped = revalidate_portable_import(&parsed, unsupported_entry.as_object().unwrap());
+    assert_eq!(stripped.schema_version, WORKFLOW_SHARE_LEGACY_VERSION);
+    assert!(!stripped.advanced.contains_key("lowResStart"));
+    assert_eq!(stripped.omitted, vec![OMITTED_LOW_RES_START.to_owned()]);
+    assert!(old_reader::parse_workflow_share(&serde_json::to_value(&stripped).unwrap()).is_ok());
+
+    // Route where executed steps <= k strips lowResStart and records omission.
+    let too_few_steps_entry = json!({
+        "id": "z_image_turbo",
+        "defaults": { "steps": 4 },
+        "features": { "low_res_start": true }
+    });
+    let mut four_step_share = parsed.clone();
+    four_step_share.advanced.insert("steps".into(), json!(4));
+    let step_stripped =
+        revalidate_portable_import(&four_step_share, too_few_steps_entry.as_object().unwrap());
+    assert_eq!(step_stripped.schema_version, WORKFLOW_SHARE_LEGACY_VERSION);
+    assert!(!step_stripped.advanced.contains_key("lowResStart"));
+    assert_eq!(
+        step_stripped.omitted,
+        vec![OMITTED_LOW_RES_START.to_owned()]
+    );
+}

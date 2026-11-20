@@ -125,12 +125,17 @@ import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
 import {
   h3ImageSamplerDefaults,
   h3ImageSamplerFromRecipe,
+  lowResStartDefaults,
+  lowResStartFromRecipe,
   pagDefaults,
   pagFromRecipe,
   resolveCfgInterval,
   resolveH3ImageSampler,
+  resolveLowResStart,
+  resolveLowResStartExecutedSteps,
   resolvePag,
   supportsH3ImageSampler,
+  supportsLowResStart,
   supportsPag,
 } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
@@ -588,6 +593,8 @@ export function ImageStudio() {
   const [h3ImageSampler, setH3ImageSampler] = useState(() => ({ ...h3ImageSamplerDefaults(), ...saved.h3ImageSampler }));
   // SW-7181: Perturbed-Attention Guidance (PAG) controls, capability-gated per selectedModel.pag.
   const [pag, setPag] = useState(() => ({ ...pagDefaults(), ...saved.pag }));
+  // SW-6942: Two-phase low-resolution start controls, capability-gated per selectedModel.features?.low_res_start.
+  const [lowResStart, setLowResStart] = useState(() => ({ ...lowResStartDefaults(), ...saved.lowResStart }));
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -1658,6 +1665,7 @@ export function ImageStudio() {
     setCaptionOverflow("default");
     setH3ImageSampler(h3ImageSamplerDefaults());
     setPag(pagDefaults());
+    setLowResStart(lowResStartDefaults());
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
@@ -1983,6 +1991,7 @@ export function ImageStudio() {
   setCaptionOverflow,
   setH3ImageSampler,
   setPag,
+  setLowResStart,
   setBatchMode,
   setBatchPromptsText,
   setGuidanceMethod,
@@ -2152,6 +2161,28 @@ export function ImageStudio() {
     dimensionIntent: activeDimensionIntent,
   });
   const { width, height, constraints: dimensionConstraints } = dimensionEval;
+  const showLowResStart = supportsLowResStart(selectedModel, {
+    mode,
+    multiPhaseActive,
+    controlActive: Boolean(controlPreprocessSourceId || controlPassthroughId),
+    hasPoses: posePayload.length > 0,
+  });
+  const lowResStartImg2imgActive =
+    mode === "text_to_image" && Boolean(supportsImg2img && img2imgReferenceAssetId);
+  const lowResStartExecutedSteps = resolveLowResStartExecutedSteps({
+    model: selectedModel,
+    stepsOverride: stepsFixed ? "" : stepsOverride,
+    img2imgActive: lowResStartImg2imgActive,
+    img2imgStrength,
+  });
+  const lowResStartResolved = resolveLowResStart({
+    supported: showLowResStart,
+    options: lowResStart,
+    executedSteps: lowResStartExecutedSteps,
+    width,
+    height,
+  });
+  const { block: outgoingLowResStart, error: lowResStartError } = lowResStartResolved;
   // A bare native stride is advice for the editable controls, not an API request
   // limit. The portable owner enforces the grid only with a full declared envelope.
   const declaredMinimum = Number(selectedModel?.limits?.minDimension);
@@ -2213,14 +2244,20 @@ export function ImageStudio() {
     if (!base?.defaults) return base;
     const hasTopPag = Object.hasOwn(base.defaults, "pag");
     const hasNestedMossPag = Boolean(base.defaults.mossImage && Object.hasOwn(base.defaults.mossImage, "pag"));
-    if (!hasTopPag && !hasNestedMossPag) return base;
+    const hasLowResStart = Object.hasOwn(base.defaults, "lowResStart");
+    if (!hasTopPag && !hasNestedMossPag && !hasLowResStart) return base;
     const { pag: nestedMossPag, ...restMossImage } = base.defaults.mossImage ?? {};
     return {
       ...base,
       defaults: {
         ...base.defaults,
         ...(hasNestedMossPag ? { mossImage: restMossImage } : {}),
-        pag: pagFromRecipe(hasTopPag ? base.defaults.pag : nestedMossPag),
+        ...(hasTopPag || hasNestedMossPag
+          ? { pag: pagFromRecipe(hasTopPag ? base.defaults.pag : nestedMossPag) }
+          : {}),
+        ...(hasLowResStart
+          ? { lowResStart: lowResStartFromRecipe(base.defaults.lowResStart) }
+          : {}),
       },
     };
   }, [moss, selectedPreset]);
@@ -2271,6 +2308,7 @@ export function ImageStudio() {
       // The preset machinery applies through a functional update (to snapshot the prior value).
       ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
       ["pag", setPag],
+      ["lowResStart", setLowResStart],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2338,6 +2376,7 @@ export function ImageStudio() {
         h3ImageSampler: outgoingH3ImageSampler ?? { sampler: "lcm", sNoise: Number(h3ImageSampler.sNoise), sNoiseEnd: Number(h3ImageSampler.sNoiseEnd), noiseClipStd: Number(h3ImageSampler.noiseClipStd) },
       } : {}),
       ...(outgoingPag ? { pag: outgoingPag } : {}),
+      ...(outgoingLowResStart ? { lowResStart: outgoingLowResStart } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId
@@ -2428,6 +2467,7 @@ export function ImageStudio() {
     captionOverflow,
     h3ImageSampler,
     pag,
+    lowResStart,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2478,6 +2518,7 @@ export function ImageStudio() {
     if (cfgIntervalError) return cfgIntervalError;
     if (h3ImageSamplerError) return h3ImageSamplerError;
     if (pagError) return pagError;
+    if (lowResStartError) return lowResStartError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
     if (!validity.ready) return validity.surfaced[0]?.message || "Complete the required fields before generating.";
@@ -2695,6 +2736,7 @@ export function ImageStudio() {
       captionOverflow: outgoingCaptionOverflow,
       h3ImageSampler: outgoingH3ImageSampler,
       pag: outgoingPag,
+      lowResStart: outgoingLowResStart,
       stepsOverride: stepsFixed ? "" : stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
@@ -3721,6 +3763,10 @@ export function ImageStudio() {
             pag={pag}
             setPag={setPag}
             pagError={pagError}
+            showLowResStart={showLowResStart}
+            lowResStart={lowResStart}
+            setLowResStart={setLowResStart}
+            lowResStartResolved={lowResStartResolved}
             supportsTextStyle={supportsTextStyle}
             textStyleGainConfig={textStyleGainConfig}
             setTextStyleGain={setTextStyleGain}

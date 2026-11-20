@@ -253,3 +253,229 @@ export function pagFromRecipe(recorded) {
     adaptiveScale,
   };
 }
+
+// SW-6942: Two-phase Low-Resolution Start trajectory controls, capability-driven from
+// `model?.features?.low_res_start === true` and `model?.feature_details?.low_res_start`.
+// Available only for T2I or ordinary single-source img2img (`text_to_image` mode, not edit,
+// character/reference, strict-control, or multi-phase).
+export const LOW_RES_START_DEFAULT_SCALE = 0.5;
+export const LOW_RES_START_MIN_SCALE = 0.25;
+export const LOW_RES_START_MAX_SCALE = 0.9;
+export const LOW_RES_START_QUANTUM = 16;
+export const LOW_RES_START_MIN_DIM = 256;
+
+export function supportsLowResStart(
+  model,
+  { mode = "text_to_image", multiPhaseActive = false, controlActive = false, hasPoses = false } = {},
+) {
+  return Boolean(
+    model?.features?.low_res_start === true &&
+      mode === "text_to_image" &&
+      !multiPhaseActive &&
+      !controlActive &&
+      !hasPoses,
+  );
+}
+
+export function lowResStartDefaults() {
+  return {
+    version: 1,
+    enabled: false,
+    k: "",
+    scale: LOW_RES_START_DEFAULT_SCALE,
+  };
+}
+
+// Executed step count `M` after ordinary single-source img2img strength truncation (`§6.13`).
+export function resolveLowResStartExecutedSteps({
+  model,
+  stepsOverride,
+  img2imgActive = false,
+  img2imgStrength = 0.5,
+} = {}) {
+  const defaultSteps =
+    Number.isInteger(Number(model?.defaults?.steps)) && Number(model?.defaults?.steps) > 0
+      ? Number(model.defaults.steps)
+      : model?.id === "flux_schnell"
+        ? 4
+        : 25;
+  const rawSteps =
+    stepsOverride !== "" && stepsOverride != null && Number.isFinite(Number(stepsOverride))
+      ? Math.max(1, Math.trunc(Number(stepsOverride)))
+      : defaultSteps;
+  if (!img2imgActive) {
+    return rawSteps;
+  }
+  const strength = Number.isFinite(Number(img2imgStrength)) ? Number(img2imgStrength) : 0.5;
+  const initTimeStep = strength > 0 ? Math.max(1, Math.floor(rawSteps * strength)) : 0;
+  return Math.max(0, rawSteps - initTimeStep);
+}
+
+export function defaultLowResStartK(executedSteps) {
+  const m = Number.isFinite(Number(executedSteps)) ? Math.trunc(Number(executedSteps)) : 0;
+  if (m < 2) return 1;
+  return Math.min(m - 1, Math.max(1, Math.floor(m / 2)));
+}
+
+export function resolveLowResStartDimensions({
+  width = 1024,
+  height = 1024,
+  scale = LOW_RES_START_DEFAULT_SCALE,
+  quantum = LOW_RES_START_QUANTUM,
+  minDim = LOW_RES_START_MIN_DIM,
+} = {}) {
+  const fullWidth = Number.isFinite(Number(width)) && Number(width) > 0 ? Math.trunc(Number(width)) : 1024;
+  const fullHeight = Number.isFinite(Number(height)) && Number(height) > 0 ? Math.trunc(Number(height)) : 1024;
+  const numericScale = Number(scale);
+  if (!Number.isFinite(numericScale) || numericScale <= 0) {
+    return {
+      lowWidth: 0,
+      lowHeight: 0,
+      fullWidth,
+      fullHeight,
+      valid: false,
+      error: `Low-res scale must be between ${LOW_RES_START_MIN_SCALE} and ${LOW_RES_START_MAX_SCALE}.`,
+    };
+  }
+  const q = Number.isInteger(quantum) && quantum > 0 ? quantum : LOW_RES_START_QUANTUM;
+  const lowWidth = Math.floor((fullWidth * numericScale) / q) * q;
+  const lowHeight = Math.floor((fullHeight * numericScale) / q) * q;
+  if (!withinF32Bounds(numericScale, LOW_RES_START_MIN_SCALE, LOW_RES_START_MAX_SCALE)) {
+    return {
+      lowWidth,
+      lowHeight,
+      fullWidth,
+      fullHeight,
+      valid: false,
+      error: `Low-res scale must be between ${LOW_RES_START_MIN_SCALE} and ${LOW_RES_START_MAX_SCALE}.`,
+    };
+  }
+  if (lowWidth < minDim || lowHeight < minDim) {
+    return {
+      lowWidth,
+      lowHeight,
+      fullWidth,
+      fullHeight,
+      valid: false,
+      error: `Low-res dimensions (${lowWidth}×${lowHeight}) must be at least ${minDim}×${minDim}.`,
+    };
+  }
+  if (lowWidth >= fullWidth || lowHeight >= fullHeight) {
+    return {
+      lowWidth,
+      lowHeight,
+      fullWidth,
+      fullHeight,
+      valid: false,
+      error: `Low-res dimensions (${lowWidth}×${lowHeight}) must be strictly smaller than ${fullWidth}×${fullHeight}.`,
+    };
+  }
+  return {
+    lowWidth,
+    lowHeight,
+    fullWidth,
+    fullHeight,
+    valid: true,
+    error: null,
+  };
+}
+
+export function resolveLowResStart({
+  supported = false,
+  options,
+  executedSteps = 25,
+  width = 1024,
+  height = 1024,
+} = {}) {
+  const m = Number.isFinite(Number(executedSteps)) ? Math.max(0, Math.trunc(Number(executedSteps))) : 0;
+  const defaultK = defaultLowResStartK(m);
+  const rawK = options?.k;
+  const effectiveK =
+    rawK === "" || rawK == null ? defaultK : Number(rawK);
+  const rawScale = options?.scale;
+  const effectiveScale =
+    rawScale === "" || rawScale == null ? LOW_RES_START_DEFAULT_SCALE : Number(rawScale);
+  const dims = resolveLowResStartDimensions({
+    width,
+    height,
+    scale: effectiveScale,
+  });
+
+  if (!supported || !options?.enabled) {
+    return {
+      block: null,
+      error: null,
+      effectiveK,
+      executedSteps: m,
+      effectiveScale: Number.isFinite(effectiveScale) ? effectiveScale : LOW_RES_START_DEFAULT_SCALE,
+      dimensions: dims,
+    };
+  }
+
+  if (m < 2) {
+    return {
+      block: null,
+      error: `Low-res start requires at least 2 executed steps (current M = ${m}).`,
+      effectiveK,
+      executedSteps: m,
+      effectiveScale,
+      dimensions: dims,
+    };
+  }
+
+  if (!Number.isInteger(effectiveK) || effectiveK < 1 || effectiveK >= m) {
+    return {
+      block: null,
+      error: `Low-res steps K (${rawK === "" || rawK == null ? effectiveK : rawK}) must be an integer with 1 ≤ K < ${m}.`,
+      effectiveK,
+      executedSteps: m,
+      effectiveScale,
+      dimensions: dims,
+    };
+  }
+
+  if (!dims.valid) {
+    return {
+      block: null,
+      error: dims.error,
+      effectiveK,
+      executedSteps: m,
+      effectiveScale,
+      dimensions: dims,
+    };
+  }
+
+  return {
+    block: {
+      version: 1,
+      k: effectiveK,
+      scale: f32Decimal(effectiveScale),
+    },
+    error: null,
+    effectiveK,
+    executedSteps: m,
+    effectiveScale: f32Decimal(effectiveScale),
+    dimensions: dims,
+  };
+}
+
+export function lowResStartFromRecipe(recorded) {
+  const defaults = lowResStartDefaults();
+  if (!recorded || typeof recorded !== "object") return defaults;
+  const k = recorded.k;
+  if (k == null || k === "") return defaults;
+  const numericK = Number(k);
+  if (!Number.isFinite(numericK) || numericK < 1) return defaults;
+  const rawScale = recorded.scale;
+  const numericScale = Number(rawScale);
+  const scale =
+    rawScale != null && rawScale !== "" && Number.isFinite(numericScale)
+      ? f32Decimal(numericScale)
+      : LOW_RES_START_DEFAULT_SCALE;
+  return {
+    version: 1,
+    enabled: true,
+    k: Math.trunc(numericK),
+    scale,
+  };
+}

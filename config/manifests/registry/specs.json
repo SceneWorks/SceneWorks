@@ -15003,6 +15003,294 @@
         "minMemoryGb": 42
       }
     },
+    "featureDetails": {
+      "low_res_start": {
+        "applicable": true,
+        "available": true,
+        "class": "recipe",
+        "classification": "recipe",
+        "conditioned_routes": {
+          "flux1_dev_control": {
+            "applicable": false,
+            "available": false,
+            "class": "recipe",
+            "classification": "recipe",
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [
+              "conflicts_with_pass0_control_conditioning"
+            ],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "default_executed_steps": 25,
+                "max": 24,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": null,
+            "reasons": [
+              {
+                "code": "conflicts_with_pass0_control_conditioning",
+                "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+              }
+            ],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": false,
+            "version": 1
+          },
+          "flux1_dev_ip_adapter": {
+            "applicable": false,
+            "available": false,
+            "class": "recipe",
+            "classification": "recipe",
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [
+              "missing_packed_image_trajectory",
+              "missing_spatial_unpack_repack",
+              "missing_clean_estimate_renoise_transition",
+              "conflicts_with_pass0_reference_conditioning"
+            ],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": null,
+            "reasons": [
+              {
+                "code": "missing_packed_image_trajectory",
+                "message": "route 'flux1_dev_ip_adapter' does not compile a pass-0 packed image trajectory"
+              },
+              {
+                "code": "missing_spatial_unpack_repack",
+                "message": "route 'flux1_dev_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
+              },
+              {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'flux1_dev_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
+                "code": "conflicts_with_pass0_reference_conditioning",
+                "message": "route 'flux1_dev_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+              }
+            ],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": false,
+            "version": 1
+          },
+          "flux1_dev_pulid": {
+            "applicable": false,
+            "available": false,
+            "class": "recipe",
+            "classification": "recipe",
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [
+              "conflicts_with_pass0_reference_conditioning"
+            ],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "default_executed_steps": 25,
+                "max": 24,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": null,
+            "reasons": [
+              {
+                "code": "conflicts_with_pass0_reference_conditioning",
+                "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+              }
+            ],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": false,
+            "version": 1
+          }
+        },
+        "conflicts": [
+          "phases",
+          "pass0_reference_conditioning",
+          "pass0_control_conditioning",
+          "pass0_edit_conditioning",
+          "krea_multiphase"
+        ],
+        "hook_points": [
+          "schedule_transform",
+          "phase_transition"
+        ],
+        "id": "low_res_start",
+        "inapplicability_reasons": [],
+        "memory_effect": {
+          "extra_resident_weight_bytes": 0,
+          "introduces_denoise_phase_boundary": true,
+          "introduces_pass_boundary": false,
+          "retains_single_pass_schedule": true,
+          "transition_residency": "in_device_latent_unpack_resize_repack"
+        },
+        "parameter_schema": {
+          "k": {
+            "default_executed_steps": 25,
+            "max": 24,
+            "max_exclusive": "executed_steps",
+            "min": 1,
+            "range": "1..executed_steps",
+            "required": true,
+            "type": "step_index"
+          },
+          "scale": {
+            "default": 0.5,
+            "inclusive": true,
+            "max": 0.9,
+            "min": 0.25,
+            "required": false,
+            "type": "float_range"
+          },
+          "version": 1
+        },
+        "parameters": {
+          "k": {
+            "default_executed_steps": 25,
+            "max": 24,
+            "max_exclusive": "executed_steps",
+            "min": 1,
+            "range": "1..executed_steps",
+            "required": true,
+            "type": "step_index"
+          },
+          "scale": {
+            "default": 0.5,
+            "inclusive": true,
+            "max": 0.9,
+            "min": 0.25,
+            "required": false,
+            "type": "float_range"
+          },
+          "version": 1
+        },
+        "reasons": [],
+        "requires": [
+          "render_plan",
+          "packed_image_trajectory",
+          "spatial_unpack_repack",
+          "clean_estimate_renoise_transition",
+          "noise_start_pass0"
+        ],
+        "supported": true,
+        "version": 1
+      }
+    },
+    "features": {
+      "low_res_start": true
+    },
     "pag": {
       "blockDomain": "flux_blocks",
       "defaultLayers": [
@@ -15186,6 +15474,278 @@
         "backend": "candle",
         "conditioning": [],
         "family": "flux",
+        "features": {
+          "low_res_start": {
+            "applicable": true,
+            "available": true,
+            "class": "recipe",
+            "classification": "recipe",
+            "conditioned_routes": {
+              "flux1_dev_control": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "conflicts_with_pass0_control_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "default_executed_steps": 25,
+                    "max": 24,
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "conflicts_with_pass0_control_conditioning",
+                    "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              },
+              "flux1_dev_ip_adapter": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "conflicts_with_pass0_reference_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "default_executed_steps": 25,
+                    "max": 24,
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "conflicts_with_pass0_reference_conditioning",
+                    "message": "route 'flux1_dev_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              },
+              "flux1_dev_pulid": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "conflicts_with_pass0_reference_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "default_executed_steps": 25,
+                    "max": 24,
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "conflicts_with_pass0_reference_conditioning",
+                    "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              }
+            },
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "default_executed_steps": 25,
+                "max": 24,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": {
+              "k": {
+                "default_executed_steps": 25,
+                "max": 24,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "reasons": [],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": true,
+            "version": 1
+          }
+        },
         "id": "flux1_dev",
         "modality": "image",
         "pag": {
@@ -15234,6 +15794,291 @@
           "reference"
         ],
         "family": "flux",
+        "features": {
+          "low_res_start": {
+            "applicable": true,
+            "available": true,
+            "class": "recipe",
+            "classification": "recipe",
+            "conditioned_routes": {
+              "flux1_dev_control": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "conflicts_with_pass0_control_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "default_executed_steps": 25,
+                    "max": 24,
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "conflicts_with_pass0_control_conditioning",
+                    "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              },
+              "flux1_dev_ip_adapter": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "missing_packed_image_trajectory",
+                  "missing_spatial_unpack_repack",
+                  "missing_clean_estimate_renoise_transition",
+                  "conflicts_with_pass0_reference_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "missing_packed_image_trajectory",
+                    "message": "route 'flux1_dev_ip_adapter' does not compile a pass-0 packed image trajectory"
+                  },
+                  {
+                    "code": "missing_spatial_unpack_repack",
+                    "message": "route 'flux1_dev_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
+                  },
+                  {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'flux1_dev_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
+                  {
+                    "code": "conflicts_with_pass0_reference_conditioning",
+                    "message": "route 'flux1_dev_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              },
+              "flux1_dev_pulid": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "conflicts_with_pass0_reference_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "default_executed_steps": 25,
+                    "max": 24,
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "conflicts_with_pass0_reference_conditioning",
+                    "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              }
+            },
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "default_executed_steps": 25,
+                "max": 24,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": {
+              "k": {
+                "default_executed_steps": 25,
+                "max": 24,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "reasons": [],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": true,
+            "version": 1
+          }
+        },
         "id": "flux1_dev",
         "modality": "image",
         "pag": {
@@ -16121,6 +16966,166 @@
         "minMemoryGb": 42
       }
     },
+    "featureDetails": {
+      "low_res_start": {
+        "applicable": true,
+        "available": true,
+        "class": "recipe",
+        "classification": "recipe",
+        "conditioned_routes": {
+          "flux1_schnell_ip_adapter": {
+            "applicable": false,
+            "available": false,
+            "class": "recipe",
+            "classification": "recipe",
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [
+              "missing_packed_image_trajectory",
+              "missing_spatial_unpack_repack",
+              "missing_clean_estimate_renoise_transition",
+              "conflicts_with_pass0_reference_conditioning"
+            ],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": null,
+            "reasons": [
+              {
+                "code": "missing_packed_image_trajectory",
+                "message": "route 'flux1_schnell_ip_adapter' does not compile a pass-0 packed image trajectory"
+              },
+              {
+                "code": "missing_spatial_unpack_repack",
+                "message": "route 'flux1_schnell_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
+              },
+              {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'flux1_schnell_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
+                "code": "conflicts_with_pass0_reference_conditioning",
+                "message": "route 'flux1_schnell_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+              }
+            ],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": false,
+            "version": 1
+          }
+        },
+        "conflicts": [
+          "phases",
+          "pass0_reference_conditioning",
+          "pass0_control_conditioning",
+          "pass0_edit_conditioning",
+          "krea_multiphase"
+        ],
+        "hook_points": [
+          "schedule_transform",
+          "phase_transition"
+        ],
+        "id": "low_res_start",
+        "inapplicability_reasons": [],
+        "memory_effect": {
+          "extra_resident_weight_bytes": 0,
+          "introduces_denoise_phase_boundary": true,
+          "introduces_pass_boundary": false,
+          "retains_single_pass_schedule": true,
+          "transition_residency": "in_device_latent_unpack_resize_repack"
+        },
+        "parameter_schema": {
+          "k": {
+            "default_executed_steps": 4,
+            "max": 3,
+            "max_exclusive": "executed_steps",
+            "min": 1,
+            "range": "1..executed_steps",
+            "required": true,
+            "type": "step_index"
+          },
+          "scale": {
+            "default": 0.5,
+            "inclusive": true,
+            "max": 0.9,
+            "min": 0.25,
+            "required": false,
+            "type": "float_range"
+          },
+          "version": 1
+        },
+        "parameters": {
+          "k": {
+            "default_executed_steps": 4,
+            "max": 3,
+            "max_exclusive": "executed_steps",
+            "min": 1,
+            "range": "1..executed_steps",
+            "required": true,
+            "type": "step_index"
+          },
+          "scale": {
+            "default": 0.5,
+            "inclusive": true,
+            "max": 0.9,
+            "min": 0.25,
+            "required": false,
+            "type": "float_range"
+          },
+          "version": 1
+        },
+        "reasons": [],
+        "requires": [
+          "render_plan",
+          "packed_image_trajectory",
+          "spatial_unpack_repack",
+          "clean_estimate_renoise_transition",
+          "noise_start_pass0"
+        ],
+        "supported": true,
+        "version": 1
+      }
+    },
+    "features": {
+      "low_res_start": true
+    },
     "pag": {
       "blockDomain": "flux_blocks",
       "defaultLayers": [
@@ -16281,6 +17286,150 @@
         "backend": "candle",
         "conditioning": [],
         "family": "flux",
+        "features": {
+          "low_res_start": {
+            "applicable": true,
+            "available": true,
+            "class": "recipe",
+            "classification": "recipe",
+            "conditioned_routes": {
+              "flux1_schnell_ip_adapter": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "conflicts_with_pass0_reference_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "default_executed_steps": 4,
+                    "max": 3,
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "conflicts_with_pass0_reference_conditioning",
+                    "message": "route 'flux1_schnell_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              }
+            },
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "default_executed_steps": 4,
+                "max": 3,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": {
+              "k": {
+                "default_executed_steps": 4,
+                "max": 3,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "reasons": [],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": true,
+            "version": 1
+          }
+        },
         "id": "flux1_schnell",
         "modality": "image",
         "pag": {
@@ -16329,6 +17478,163 @@
           "reference"
         ],
         "family": "flux",
+        "features": {
+          "low_res_start": {
+            "applicable": true,
+            "available": true,
+            "class": "recipe",
+            "classification": "recipe",
+            "conditioned_routes": {
+              "flux1_schnell_ip_adapter": {
+                "applicable": false,
+                "available": false,
+                "class": "recipe",
+                "classification": "recipe",
+                "conflicts": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning",
+                  "krea_multiphase"
+                ],
+                "hook_points": [
+                  "schedule_transform",
+                  "phase_transition"
+                ],
+                "id": "low_res_start",
+                "inapplicability_reasons": [
+                  "missing_packed_image_trajectory",
+                  "missing_spatial_unpack_repack",
+                  "missing_clean_estimate_renoise_transition",
+                  "conflicts_with_pass0_reference_conditioning"
+                ],
+                "memory_effect": {
+                  "extra_resident_weight_bytes": 0,
+                  "introduces_denoise_phase_boundary": true,
+                  "introduces_pass_boundary": false,
+                  "retains_single_pass_schedule": true,
+                  "transition_residency": "in_device_latent_unpack_resize_repack"
+                },
+                "parameter_schema": {
+                  "k": {
+                    "max_exclusive": "executed_steps",
+                    "min": 1,
+                    "range": "1..executed_steps",
+                    "required": true,
+                    "type": "step_index"
+                  },
+                  "scale": {
+                    "default": 0.5,
+                    "inclusive": true,
+                    "max": 0.9,
+                    "min": 0.25,
+                    "required": false,
+                    "type": "float_range"
+                  },
+                  "version": 1
+                },
+                "parameters": null,
+                "reasons": [
+                  {
+                    "code": "missing_packed_image_trajectory",
+                    "message": "route 'flux1_schnell_ip_adapter' does not compile a pass-0 packed image trajectory"
+                  },
+                  {
+                    "code": "missing_spatial_unpack_repack",
+                    "message": "route 'flux1_schnell_ip_adapter' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
+                  },
+                  {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'flux1_schnell_ip_adapter' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
+                  {
+                    "code": "conflicts_with_pass0_reference_conditioning",
+                    "message": "route 'flux1_schnell_ip_adapter' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
+                  }
+                ],
+                "requires": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "supported": false,
+                "version": 1
+              }
+            },
+            "conflicts": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning",
+              "krea_multiphase"
+            ],
+            "hook_points": [
+              "schedule_transform",
+              "phase_transition"
+            ],
+            "id": "low_res_start",
+            "inapplicability_reasons": [],
+            "memory_effect": {
+              "extra_resident_weight_bytes": 0,
+              "introduces_denoise_phase_boundary": true,
+              "introduces_pass_boundary": false,
+              "retains_single_pass_schedule": true,
+              "transition_residency": "in_device_latent_unpack_resize_repack"
+            },
+            "parameter_schema": {
+              "k": {
+                "default_executed_steps": 4,
+                "max": 3,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "parameters": {
+              "k": {
+                "default_executed_steps": 4,
+                "max": 3,
+                "max_exclusive": "executed_steps",
+                "min": 1,
+                "range": "1..executed_steps",
+                "required": true,
+                "type": "step_index"
+              },
+              "scale": {
+                "default": 0.5,
+                "inclusive": true,
+                "max": 0.9,
+                "min": 0.25,
+                "required": false,
+                "type": "float_range"
+              },
+              "version": 1
+            },
+            "reasons": [],
+            "requires": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "supported": true,
+            "version": 1
+          }
+        },
         "id": "flux1_schnell",
         "modality": "image",
         "pag": {

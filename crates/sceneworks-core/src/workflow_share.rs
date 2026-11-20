@@ -333,6 +333,8 @@ pub struct WorkflowShare {
 // The omission marker
 // ---------------------------------------------------------------------------
 
+/// `advanced.lowResStart`, dropped when invalid or unsupported on the target route.
+pub const OMITTED_LOW_RES_START: &str = "advanced.lowResStart";
 /// `loras`, dropped or thinned.
 pub const OMITTED_LORAS: &str = "loras";
 /// `inputs`, dropped or thinned.
@@ -343,6 +345,8 @@ pub const OMITTED_POSES: &str = "advanced.poses";
 pub const OMITTED_PHASES: &str = "advanced.phases";
 /// A phase's own `loras` schedule, dropped.
 pub const OMITTED_PHASE_LORAS: &str = "advanced.phases[].loras";
+
+pub use sceneworks_options::image_sampling_controls::sanitize_share_low_res_start;
 
 /// Every name [`WorkflowShare::omitted`] may hold, and nothing else.
 ///
@@ -373,7 +377,7 @@ pub const OMITTED_PHASE_LORAS: &str = "advanced.phases[].loras";
 /// declared nothing else — where an entry count over [`MAX_SHARE_LORAS`] is, because the recipe
 /// named LoRAs and the envelope records none of them.
 pub const OMITTED_FIELDS: &[&str] = &[
-    "advanced.lowResStart",
+    OMITTED_LOW_RES_START,
     OMITTED_LORAS,
     OMITTED_INPUTS,
     OMITTED_POSES,
@@ -711,7 +715,7 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
-    allow_from("lowResStart", AdvancedShape::LowResStart, AdvancedKeySource::Server, "Versioned low-res recipe params; requires outer share v2. Execution availability is checked separately."),
+    allow("lowResStart", AdvancedShape::LowResStart, "Versioned low-res recipe params; requires outer share v2. Execution availability is checked separately."),
     allow("flux3_layout", AdvancedShape::Flux3Layout, "Authored FLUX.3 soft-guidance boxes; public row fields only, never worker provenance."),
     allow("flux3_reference_ids", AdvancedShape::StringList, "Ordered attachment-instance identities for FLUX.3 layout replay; not asset paths."),
     allow("mossImageEdit", AdvancedShape::MossImageEditOptions, "Authored native edit reference edge and cache policy, emitted and restored by Studio."),
@@ -2219,8 +2223,15 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
     if low_res_active(advanced.get("lowResStart"))
         && !sanitized_advanced.contains_key("lowResStart")
     {
-        lost.push("advanced.lowResStart".to_owned());
+        lost.push(OMITTED_LOW_RES_START.to_owned());
     }
+    let schema_version = if low_res_active(sanitized_advanced.get("lowResStart")) {
+        WORKFLOW_SHARE_SCHEMA_VERSION
+    } else if low_res_active(advanced.get("lowResStart")) {
+        WORKFLOW_SHARE_LEGACY_VERSION
+    } else {
+        schema_version
+    };
 
     WorkflowShare {
         kind,
@@ -2466,9 +2477,7 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             continue;
         }
         let sanitized = match rule.shape {
-            AdvancedShape::LowResStart => {
-                validate_low_res_start(value).ok().map(|()| value.clone())
-            }
+            AdvancedShape::LowResStart => sanitize_share_low_res_start(value),
             AdvancedShape::Scalar => sanitize_scalar(key, value),
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
             AdvancedShape::Appearance => sanitize_appearance(value),
@@ -2938,6 +2947,12 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
             }
         }
     }
+    let value =
+        crate::options::upgrade::upgrade(value, crate::options::upgrade::Carrier::ShareEnvelope)
+            .map_err(|error| WorkflowShareError::Malformed {
+                field: error.field.clone(),
+                detail: format!("{}: {}", error.code, error.message),
+            })?;
     if let Some(recipe) = object.get("advanced").and_then(|a| a.get("lowResStart")) {
         validate_low_res_start(recipe).map_err(|detail| WorkflowShareError::Malformed {
             field: "advanced.lowResStart".to_owned(),
@@ -2950,12 +2965,6 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
             });
         }
     }
-    let value =
-        crate::options::upgrade::upgrade(value, crate::options::upgrade::Carrier::ShareEnvelope)
-            .map_err(|error| WorkflowShareError::Malformed {
-                field: error.field.clone(),
-                detail: error.to_string(),
-            })?;
     let share: WorkflowShare =
         serde_json::from_value(value).map_err(|error| WorkflowShareError::Malformed {
             field: field_from_serde_error(&error),
@@ -2971,6 +2980,78 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
     // `WORKFLOW_SHARE_MAX_BYTES` — this is the bound the per-field caps could not compose into.
     within_recording_ceiling(&reduced)?;
     Ok(reduced)
+}
+
+/// Revalidate a portable [`WorkflowShare`] against the receiving install's `model_entry`
+/// (`OPT-6`, `ADM-3`, `FEAT-1`, `M2`, `E6`).
+///
+/// When `advanced.lowResStart` is active on a share imported onto a model/backend route that does
+/// not support `features.low_res_start` or whose local step/scale/dimension bounds reject the
+/// recipe, the active recipe is stripped from `advanced`, `"advanced.lowResStart"` is recorded in
+/// `omitted`, and the outer share `schema_version` is downgraded to `1` (`WORKFLOW_SHARE_LEGACY_VERSION`).
+#[must_use]
+pub fn revalidate_portable_import(
+    share: &WorkflowShare,
+    model_entry: &JsonObject,
+) -> WorkflowShare {
+    let WorkflowShare {
+        mut schema_version,
+        width,
+        height,
+        advanced: mut share_options,
+        mut omitted,
+        ..
+    } = share.clone();
+
+    if low_res_active(share_options.get("lowResStart")) {
+        let valid_cfg = sceneworks_options::image_sampling_controls::requested_low_res_start(
+            &share_options,
+            model_entry,
+        )
+        .ok()
+        .flatten();
+        let dimensions_valid = match (valid_cfg, width, height) {
+            (Some(cfg), Some(w), Some(h)) => {
+                let quantum = model_entry
+                    .get("resolution")
+                    .and_then(|res| res.get("multipleOf"))
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(sceneworks_options::low_res_start::LOW_RES_START_QUANTUM);
+                let min_dim = model_entry
+                    .get("resolution")
+                    .and_then(|res| res.get("minDimension"))
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| *v > 0)
+                    .unwrap_or(sceneworks_options::low_res_start::LOW_RES_START_MIN_DIM);
+                sceneworks_options::low_res_start::quantize_low_res_dimensions(
+                    w, h, cfg.scale, quantum, min_dim,
+                )
+                .is_ok()
+            }
+            (Some(_), _, _) => true,
+            (None, _, _) => false,
+        };
+        if !dimensions_valid {
+            share_options.remove("lowResStart");
+            omitted.push(OMITTED_LOW_RES_START.to_owned());
+            omitted = reduce_omitted(omitted);
+            schema_version = WORKFLOW_SHARE_LEGACY_VERSION;
+        } else {
+            schema_version = WORKFLOW_SHARE_SCHEMA_VERSION;
+        }
+    } else if share_options.remove("lowResStart").is_some() {
+        schema_version = WORKFLOW_SHARE_LEGACY_VERSION;
+    }
+
+    WorkflowShare {
+        schema_version,
+        advanced: share_options,
+        omitted,
+        ..share.clone()
+    }
 }
 
 /// Best-effort field name out of a serde error, so the message names something the user can
@@ -4819,5 +4900,64 @@ mod tests {
         let sanitized = build_workflow_share(&asset_fixture(), &hostile);
         assert!(!sanitized.advanced.contains_key("pag"));
         assert!(!sanitized.advanced.contains_key("pagExecutionReport"));
+    }
+
+    #[test]
+    fn attached_low_res_start_without_pag_report_survives_png_workflow_chunk_round_trip() {
+        let mut share = build_workflow_share(&asset_fixture(), &payload_fixture());
+        assert_eq!(share.schema_version, WORKFLOW_SHARE_LEGACY_VERSION);
+        assert!(!share.advanced.contains_key("pagExecutionReport"));
+        assert!(!share.advanced.contains_key("lowResStart"));
+
+        let raw_settings = json!({
+            "steps": 9,
+            "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+        });
+        let sanitized_low_res = raw_settings
+            .get("lowResStart")
+            .and_then(sanitize_share_low_res_start)
+            .expect("valid lowResStart sanitizes");
+        share
+            .advanced
+            .insert("lowResStart".to_owned(), sanitized_low_res);
+        share.schema_version = WORKFLOW_SHARE_SCHEMA_VERSION;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("low_res_round_trip.png");
+        let img = image::RgbImage::from_pixel(16, 16, image::Rgb([12, 34, 56]));
+        crate::workflow_png::write_workflow_chunk(&img, &png_path, Some(&share))
+            .expect("writes workflow chunk");
+        let parsed = crate::workflow_png::read_workflow_chunk_file(&png_path)
+            .expect("reads workflow chunk")
+            .expect("workflow chunk present");
+        assert_eq!(parsed.schema_version, WORKFLOW_SHARE_SCHEMA_VERSION);
+        assert_eq!(
+            parsed.advanced.get("lowResStart"),
+            Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
+        );
+
+        // Portable import rejects a 512x512 recipe with scale=0.25 (128x128 < canonical min_dim 256)
+        // when the model entry has no resolution override:
+        let mut share_512 = parsed.clone();
+        share_512.width = Some(512);
+        share_512.height = Some(512);
+        share_512.advanced.insert(
+            "lowResStart".to_owned(),
+            json!({ "version": 1, "k": 3, "scale": 0.25 }),
+        );
+        let flux_entry = json!({
+            "id": "flux_dev",
+            "defaults": { "steps": 28 },
+            "features": { "low_res_start": true }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let revalidated = revalidate_portable_import(&share_512, &flux_entry);
+        assert_eq!(revalidated.schema_version, WORKFLOW_SHARE_LEGACY_VERSION);
+        assert!(!revalidated.advanced.contains_key("lowResStart"));
+        assert!(revalidated
+            .omitted
+            .contains(&OMITTED_LOW_RES_START.to_owned()));
     }
 }
