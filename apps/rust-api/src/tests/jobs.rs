@@ -5646,13 +5646,16 @@ async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
         let (status, edit) = request(app.clone(), "POST", "/api/v1/image/jobs", valid_edit).await;
         assert_eq!(status, StatusCode::CREATED, "{edit}");
 
+        // Surfaced image modes Candle does not route reach the enhancement route gate; the legacy
+        // `reference` / `image_to_image` aliases are refused even earlier, by the resolved-options
+        // mode schema (SW-7035/SW-7038), so neither replay can drop its reference into a base render.
         let job_id = initial["id"].as_str().expect("created job id");
         for operation in ["retry", "duplicate"] {
-            for mode in [
-                "character_image",
-                "style_variations",
-                "reference",
-                "image_to_image",
+            for (mode, refusal) in [
+                ("character_image", "Candle supports only"),
+                ("style_variations", "Candle supports only"),
+                ("reference", "mode has an invalid value"),
+                ("image_to_image", "mode has an invalid value"),
             ] {
                 let (status, error) = request(
                     app.clone(),
@@ -5671,9 +5674,12 @@ async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
                     StatusCode::BAD_REQUEST,
                     "{operation} mode={mode}: {error}"
                 );
-                assert!(error["detail"]
-                    .as_str()
-                    .is_some_and(|value| value.contains("Candle supports only")));
+                assert!(
+                    error["detail"]
+                        .as_str()
+                        .is_some_and(|value| value.contains(refusal)),
+                    "{operation} mode={mode}: {error}"
+                );
             }
         }
     }

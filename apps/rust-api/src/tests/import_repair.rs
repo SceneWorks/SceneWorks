@@ -427,6 +427,9 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);
     let model = fixture::stage_managed_minimax_h3_import(&settings.data_dir, "repair_selection");
+    // The repair's closure is computed by the API from the registered base row, not the
+    // fixture's document-only closure, so it needs that row's components in every lane.
+    fixture::stage_registered_closure_components(&settings.data_dir);
     let original = Value::Object(model.entry.clone());
     manifests(&settings, json!([original]));
     let original_bytes = std::fs::read(

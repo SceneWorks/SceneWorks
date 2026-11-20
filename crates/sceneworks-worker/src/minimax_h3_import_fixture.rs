@@ -584,15 +584,33 @@ pub fn stage_component_snapshots(data_dir: &Path) {
     // predicate requires its weights beside the three constructor documents. A native lane drives
     // this fixture's own document-only closure ([`component_downloads`]) through a real loader, and
     // there an undeclared file beside the documents is an uncommitted acquisition, so it stays out.
-    if cfg!(not(native_lane)) && registered_fl2va_row_is_a_directory() {
-        write_safetensors(
-            &scratch_base.join("FL2VA/audio_vae/model.safetensors"),
-            &[("weight", "F16")],
-            0x2d,
-        );
+    if cfg!(not(native_lane)) {
+        write_registered_fl2va_weights(&scratch_base);
     }
     copy_missing(&scratch_base, &base);
     copy_missing(&scratch_tiers, &tiers);
+}
+
+/// Stage the FL2VA audio-VAE weights an API-computed H3 import closure requires on this host, in
+/// every lane. [`stage_component_snapshots`] leaves them out of native lanes, whose own document-only
+/// closure is driven through a real loader; a test that submits an import or repair through the API
+/// instead binds the REGISTERED row, which off macOS names the whole `FL2VA/audio_vae/` directory,
+/// and must call this after staging so the shared completeness predicate sees its weights. A no-op
+/// where the registered row names only the constructor documents, or the weights are present.
+pub fn stage_registered_closure_components(data_dir: &Path) {
+    let snapshot = shared_component_snapshot(data_dir);
+    assert!(
+        snapshot.starts_with(data_dir.parent().unwrap()),
+        "fixture component staging must never address a real/shared HF cache"
+    );
+    write_registered_fl2va_weights(&snapshot);
+}
+
+fn write_registered_fl2va_weights(base: &Path) {
+    let weights = base.join("FL2VA/audio_vae/model.safetensors");
+    if registered_fl2va_row_is_a_directory() && !weights.exists() {
+        write_safetensors(&weights, &[("weight", "F16")], 0x2d);
+    }
 }
 
 /// Whether the registered `minimax_h3` FL2VA audio-VAE row, as this host's catalog serves it, names
