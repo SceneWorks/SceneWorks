@@ -106,6 +106,40 @@ export function validateLowResStartShare(share) {
   return { ok: true, schemaVersion };
 }
 
+const BUILTIN_LOW_RES_START_MODELS = {
+  flux_schnell: {
+    id: "flux_schnell",
+    features: { low_res_start: true },
+    defaults: { steps: 4 },
+    resolution: { multipleOf: 16, minDimension: 256 },
+  },
+  flux_dev: {
+    id: "flux_dev",
+    features: { low_res_start: true },
+    defaults: { steps: 28 },
+    resolution: { multipleOf: 16, minDimension: 256 },
+  },
+};
+
+function resolveLowResStartTargetModel(
+  share,
+  report = null,
+  { substituteModelId = null, models = [] } = {},
+) {
+  const modelId = workflowModelId(report) ?? (substituteModelId || share?.model || null);
+  if (!modelId) return null;
+  const fromCatalog = Array.isArray(models)
+    ? models.find((entry) => entry?.id === modelId)
+    : null;
+  return (
+    fromCatalog ??
+    BUILTIN_LOW_RES_START_MODELS[modelId] ?? {
+      id: modelId,
+      features: { low_res_start: false },
+    }
+  );
+}
+
 export function revalidatePortableWorkflowShare(share, modelEntry = null) {
   if (!share || typeof share !== "object") return share;
   const lowRes = share.advanced?.lowResStart;
@@ -117,18 +151,21 @@ export function revalidatePortableWorkflowShare(share, modelEntry = null) {
     }
     return nextShare;
   }
+  const effectiveModelEntry = modelEntry ?? resolveLowResStartTargetModel(share);
   const check = validateLowResStartShare({
     ...share,
     schemaVersion: share.schemaVersion ?? WORKFLOW_SHARE_SCHEMA_VERSION,
   });
-  const supportsRoute = modelEntry?.features?.low_res_start === true;
-  const steps = Number(share.advanced?.steps ?? modelEntry?.defaults?.steps ?? 0);
+  const workflowOk = !share.sceneworksWorkflow || share.sceneworksWorkflow === "image";
+  const modeOk = !share.mode || share.mode === "text_to_image";
+  const supportsRoute = effectiveModelEntry?.features?.low_res_start === true;
+  const steps = Number(share.advanced?.steps ?? effectiveModelEntry?.defaults?.steps ?? 0);
   const stepsOk = !(Number.isFinite(steps) && steps > 0) || lowRes.k < steps;
   const hasPhases = Array.isArray(share.advanced?.phases) && share.advanced.phases.length > 0;
   let dimsOk = true;
   if (Number.isFinite(share.width) && Number.isFinite(share.height)) {
-    const quantum = Number(modelEntry?.resolution?.multipleOf ?? 16) || 16;
-    const minDim = Number(modelEntry?.resolution?.minDimension ?? 256) || 256;
+    const quantum = Number(effectiveModelEntry?.resolution?.multipleOf ?? 16) || 16;
+    const minDim = Number(effectiveModelEntry?.resolution?.minDimension ?? 256) || 256;
     const scale32 = Math.fround(lowRes.scale);
     const lowW = Math.floor((share.width * scale32) / quantum) * quantum;
     const lowH = Math.floor((share.height * scale32) / quantum) * quantum;
@@ -140,7 +177,7 @@ export function revalidatePortableWorkflowShare(share, modelEntry = null) {
       lowW < share.width &&
       lowH < share.height;
   }
-  if (!check.ok || !supportsRoute || !stepsOk || hasPhases || !dimsOk) {
+  if (!check.ok || !workflowOk || !modeOk || !supportsRoute || !stepsOk || hasPhases || !dimsOk) {
     const nextShare = structuredClone(share);
     nextShare.schemaVersion = WORKFLOW_SHARE_LEGACY_VERSION;
     if (nextShare.advanced && typeof nextShare.advanced === "object") {
@@ -380,7 +417,7 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // as not restored, and left out of the recipe. The safe default is "the user is told", never "it
 // quietly disappears".
 export const ADVANCED_PREFILL = {
-  lowResStart: { label: "Low-resolution start", detail: "This recipe requires low-resolution start support on the selected model and backend. This build cannot restore it.", prefill: PREFILL_NONE },
+  lowResStart: { label: "Low-resolution start", prefill: PREFILL_CONTROL },
   mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
   mossImageEdit: { label: "MOSS edit controls", prefill: PREFILL_CONTROL },
   mossImageAdvanced: { label: "Native edit tensors and output", prefill: PREFILL_CONTROL },
@@ -585,7 +622,17 @@ export const ADVANCED_PREFILL = {
   },
 };
 
-function prefillDisposition(key, share) {
+function canRestoreLowResStart(share, report = null, options = {}) {
+  if (!isLowResStartActive(share?.advanced?.lowResStart)) return false;
+  const targetModel = resolveLowResStartTargetModel(share, report, options);
+  const revalidated = revalidatePortableWorkflowShare(share, targetModel);
+  return isLowResStartActive(revalidated?.advanced?.lowResStart);
+}
+
+function prefillDisposition(key, share, report = null, options = {}) {
+  if (key === "lowResStart") {
+    return canRestoreLowResStart(share, report, options) ? PREFILL_CONTROL : PREFILL_NONE;
+  }
   if ((key === "flux3_layout" || key === "flux3_reference_ids") &&
       (share.sceneworksWorkflow !== "image" || !/^flux3(?:_|$)/.test(share.model ?? ""))) return PREFILL_NONE;
   return key === "veda" && share.sceneworksWorkflow !== "video"
@@ -653,6 +700,11 @@ export function recipeFromWorkflowShare(
   if (!share) {
     return null;
   }
+  const lowResOptions = { substituteModelId, models };
+  const targetLowResModel = resolveLowResStartTargetModel(share, report, lowResOptions);
+  const validatedShare = isLowResStartActive(share.advanced?.lowResStart)
+    ? revalidatePortableWorkflowShare(share, targetLowResModel)
+    : share;
   // The studio-facing copy of the envelope's settings: exactly the keys `ADVANCED_PREFILL` says
   // the replay effect reads, and nothing else. Filtered rather than copied wholesale so the recipe
   // cannot carry a key the studio ignores while the panel presents it as restored — the two now
@@ -660,8 +712,12 @@ export function recipeFromWorkflowShare(
   // (Built fresh, never aliased: the panel still renders the envelope and must not see the
   // studio-facing edits below.)
   const rawSettings = {};
-  for (const [key, value] of Object.entries(share.advanced ?? {})) {
-    if (value !== null && value !== undefined && prefillDisposition(key, share) !== PREFILL_NONE) {
+  for (const [key, value] of Object.entries(validatedShare.advanced ?? {})) {
+    if (
+      value !== null &&
+      value !== undefined &&
+      prefillDisposition(key, validatedShare, report, lowResOptions) !== PREFILL_NONE
+    ) {
       if (NUMERIC_ADVANCED_PREFILL_KEYS.has(key)) {
         const number = sharedRecipeNumber(value);
         if (number === null) {
@@ -868,7 +924,7 @@ export function workflowModeLabel(share) {
 // `report` is what makes `styleId` honest. It is a `control` key, but the recipe carries it ONLY
 // when the style resolved here (see `recipeFromWorkflowShare`) — so with the style absent from this
 // catalog the row has to say so rather than inherit the table's optimism.
-export function workflowSettingRows(share, report = null) {
+export function workflowSettingRows(share, report = null, options = {}) {
   const settings = share?.advanced;
   if (!settings || typeof settings !== "object") {
     return [];
@@ -876,7 +932,7 @@ export function workflowSettingRows(share, report = null) {
   const styleResolvedHere = styleIdResolved(report);
   const appearanceAsText = appearanceNeedsComposedStyle(share, report);
   return Object.keys(settings)
-    .filter((key) => prefillDisposition(key, share) !== PREFILL_PROMPT)
+    .filter((key) => prefillDisposition(key, share, report, options) !== PREFILL_PROMPT)
     .map((key) => ({ key, value: settings[key] }))
     .filter(
       (row) =>
@@ -888,18 +944,24 @@ export function workflowSettingRows(share, report = null) {
     .map((row) => {
       const styleUnavailable = row.key === "styleId" && !styleResolvedHere;
       const appearanceUnavailable = appearanceAsText && APPEARANCE_REPLAY_KEYS.has(row.key);
+      const restored =
+        prefillDisposition(row.key, share, report, options) === PREFILL_CONTROL &&
+        !styleUnavailable &&
+        !appearanceUnavailable;
       return {
         key: row.key,
         label: ADVANCED_PREFILL[row.key]?.label ?? row.key,
         value: settingValueLabel(row.key, row.value),
-        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable && !appearanceUnavailable,
+        restored,
         detail: appearanceUnavailable
           ? "The style is unavailable here. Style and appearance text are kept in the composed prompts; appearance picker values are not restored."
           : styleUnavailable
             ? "This install does not have that style, so the prompt is used exactly as it was already composed."
             : row.key === "veda" && share.sceneworksWorkflow !== "video"
               ? "Video Studio only."
-              : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
+              : row.key === "lowResStart" && !restored
+                ? "This recipe requires low-resolution start support on the selected model and backend. This build cannot restore it."
+                : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
       };
     });
 }
@@ -919,8 +981,8 @@ export function workflowSettingRows(share, report = null) {
 // The panel's verdict counts this list, which is what stops successful transport being punished:
 // a pose selection DROPPED over the writer's cap lands in `omitted` and forces `runnable: false`,
 // so before this existed the only silent case was the one where the poses arrived intact.
-export function workflowNotRestored(share, report = null) {
-  const rows = workflowSettingRows(share, report)
+export function workflowNotRestored(share, report = null, options = {}) {
+  const rows = workflowSettingRows(share, report, options)
     .filter((row) => !row.restored)
     .map((row) => ({
       kind: "setting",

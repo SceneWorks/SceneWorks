@@ -1214,4 +1214,69 @@ describe("Low Res Start share versioning and portable import revalidation (SW-69
     expect(strippedSmallGrid.advanced.lowResStart).toBeUndefined();
     expect(strippedSmallGrid.omitted).toContain(OMITTED_LOW_RES_START);
   });
+
+  it("restores a supported v2 low-res start workflow through recipeFromWorkflowShare into Studio state", () => {
+    const fluxV2Share = share({
+      schemaVersion: 2,
+      model: "flux_dev",
+      mode: "text_to_image",
+      width: 1024,
+      height: 1024,
+      advanced: {
+        steps: 28,
+        guidanceScale: 3.5,
+        sampler: "euler",
+        resolution: "1024x1024",
+        lowResStart: { version: 1, k: 8, scale: 0.5 },
+      },
+    });
+    const fluxReport = report({
+      model: {
+        slug: "flux_dev",
+        state: "resolved",
+        catalogId: "flux_dev",
+        name: "FLUX.1 Dev",
+        detail: "FLUX.1 Dev is installed on this machine.",
+      },
+    });
+    const fluxModels = [
+      {
+        id: "flux_dev",
+        defaults: { steps: 28 },
+        resolution: { multipleOf: 16, minDimension: 256 },
+        features: { low_res_start: true },
+      },
+    ];
+
+    const rows = workflowSettingRows(fluxV2Share, fluxReport, { models: fluxModels });
+    const lowResRow = rows.find((row) => row.key === "lowResStart");
+    expect(lowResRow).toMatchObject({
+      key: "lowResStart",
+      restored: true,
+    });
+    expect(workflowNotRestored(fluxV2Share, fluxReport, { models: fluxModels })).toEqual([]);
+
+    const recipe = recipeFromWorkflowShare(fluxV2Share, fluxReport, { models: fluxModels });
+    expect(recipe.rawAdapterSettings.lowResStart).toEqual({
+      version: 1,
+      k: 8,
+      scale: 0.5,
+    });
+
+    const patch = recipeToStudioPatch(
+      { view: "Image", recipe },
+      {
+        model: "flux_dev",
+        advancedDefaultsModel: "flux_dev",
+        mossEditActive: false,
+        recipeMode: (r) => r.mode,
+      },
+    );
+    expect(patch.values.lowResStart).toEqual({
+      version: 1,
+      enabled: true,
+      k: 8,
+      scale: 0.5,
+    });
+  });
 });

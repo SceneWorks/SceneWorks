@@ -733,6 +733,28 @@ pub fn require_provider_route_binding(
     Ok(())
 }
 
+/// Normalize a low-res start scale factor through the engine's `f32` representation using its
+/// shortest round-trip decimal representation so recorded receipts and accepted payloads stay
+/// consistent across `f32 <-> f64` conversions.
+pub fn normalize_low_res_start_scale(scale: f64) -> f64 {
+    let as_f32 = scale as f32;
+    as_f32
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or_else(|_| f64::from(as_f32))
+}
+
+/// Compare a recorded receipt scale against a requested payload scale at the engine's `f32`
+/// execution precision.
+pub fn low_res_start_scales_match(recorded: f64, requested: f64) -> bool {
+    if !recorded.is_finite() || !requested.is_finite() {
+        return false;
+    }
+    let rec_f32 = recorded as f32;
+    let req_f32 = requested as f32;
+    rec_f32.to_bits() == req_f32.to_bits() || (rec_f32 - req_f32).abs() <= f32::EPSILON
+}
+
 /// Verify that a trusted receipt's `low_res_start` provenance and quality-affecting rung match the
 /// accepted payload (`OPT-6`, `ADM-3`, `FEAT-1`, `M2`, `E6`).
 pub fn require_low_res_start_replay_binding(
@@ -795,7 +817,7 @@ pub fn require_low_res_start_replay_binding(
         || Some(recorded.k) != requested.k
         || requested
             .scale
-            .is_none_or(|s| (recorded.scale - s).abs() > 1e-9)
+            .is_none_or(|s| !low_res_start_scales_match(recorded.scale, s))
     {
         return Err(ReplayUnavailable::new(
             "low_res_recipe_changed",

@@ -80,7 +80,9 @@ pub(crate) fn record_low_res_start_execution_report(
         version: report.version,
         k: u32::try_from(report.k).unwrap_or(u32::MAX),
         executed_steps: u32::try_from(report.executed_steps).unwrap_or(u32::MAX),
-        scale: (report.scale as f64 * 1e6).round() / 1e6,
+        scale: sceneworks_core::execution_receipt::normalize_low_res_start_scale(f64::from(
+            report.scale,
+        )),
         low_w: report.low_width,
         low_h: report.low_height,
         full_w: report.full_width,

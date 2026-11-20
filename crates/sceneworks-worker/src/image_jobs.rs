@@ -1164,7 +1164,9 @@ pub(crate) fn extract_low_res_start_receipt_value(
         .get("executed_steps")?
         .as_u64()
         .and_then(|v| u32::try_from(v).ok())?;
-    let scale = (obj.get("scale")?.as_f64()? * 1e6).round() / 1e6;
+    let scale = sceneworks_core::execution_receipt::normalize_low_res_start_scale(
+        obj.get("scale")?.as_f64()?,
+    );
     let low_w = obj
         .get("low_width")?
         .as_u64()
@@ -1419,7 +1421,7 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
     );
     #[cfg(native_lane)]
     {
-        let resolved_plan = gen_core::LowResStartSpec::new(8, Some(0.5))
+        let resolved_plan = gen_core::LowResStartSpec::new(8, Some(0.3333333_f32))
             .with_estimate_source(gen_core::EstimateSource::EndpointEvaluation)
             .resolve_geometry("flux1_dev", 1024, 1024, 28, 8, 2, 16, 256)
             .unwrap();
@@ -1436,7 +1438,7 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
                 2,
                 1,
                 16,
-                64,
+                42,
             )
             .unwrap();
         lane_controls::record_low_res_start_execution_report(&mut lane_facts, Some(&report));
@@ -1450,9 +1452,9 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
                 "version": 1,
                 "k": 8,
                 "executed_steps": 28,
-                "scale": 0.5,
-                "low_width": 512,
-                "low_height": 512,
+                "scale": 0.3333333_f32,
+                "low_width": 336,
+                "low_height": 336,
                 "full_width": 1024,
                 "full_height": 1024,
                 "estimator": "endpoint_evaluation_v1",
@@ -1467,16 +1469,56 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
             .unwrap();
     let recorded_low_res = low_res_receipt
         .low_res_start
+        .clone()
         .expect("lane-produced low_res_start report must populate receipt.low_res_start");
     assert_eq!(recorded_low_res.version, 1);
     assert_eq!(recorded_low_res.k, 8);
     assert_eq!(recorded_low_res.executed_steps, 28);
-    assert_eq!(recorded_low_res.scale, 0.5);
-    assert_eq!(recorded_low_res.low_w, 512);
-    assert_eq!(recorded_low_res.low_h, 512);
+    assert!(
+        sceneworks_core::execution_receipt::low_res_start_scales_match(
+            recorded_low_res.scale,
+            0.3333333
+        )
+    );
+    assert_eq!(recorded_low_res.low_w, 336);
+    assert_eq!(recorded_low_res.low_h, 336);
     assert_eq!(recorded_low_res.full_w, 1024);
     assert_eq!(recorded_low_res.full_h, 1024);
     assert_eq!(recorded_low_res.estimator, "endpoint_evaluation_v1");
+
+    // Verify completed-receipt-to-replay binding succeeds for a scale with >6 decimal places:
+    let trusted_receipt = sceneworks_core::execution_receipt::TrustedExecutionReceipt {
+        version: low_res_receipt.version,
+        job_id: "job-1".to_owned(),
+        job_type: "image_generate".to_owned(),
+        worker_id: "worker-1".to_owned(),
+        attempt_id: "attempt-1".to_owned(),
+        accepted_backend: "mlx".to_owned(),
+        accepted_device: "metal".to_owned(),
+        accepted_source_route: None,
+        inference_revision: "fd91147c4069d8ad8fedace3847e01415efaedc8".to_owned(),
+        accepted_binding_sha256: "binding-sha".to_owned(),
+        accepted_result_sha256: "result-sha".to_owned(),
+        execution: low_res_receipt.execution.clone(),
+        outputs: low_res_receipt.outputs.clone(),
+        stages: low_res_receipt.stages.clone(),
+        low_res_start: low_res_receipt.low_res_start.clone(),
+    };
+    let replay_payload = serde_json::json!({
+        "model": "flux_dev",
+        "mode": "text_to_image",
+        "width": 1024,
+        "height": 1024,
+        "advanced": {
+            "steps": 28,
+            "lowResStart": { "version": 1, "k": 8, "scale": 0.3333333 }
+        }
+    });
+    sceneworks_core::execution_receipt::require_low_res_start_replay_binding(
+        &trusted_receipt,
+        replay_payload.as_object().unwrap(),
+    )
+    .expect("completed receipt with >6 decimal scale must pass replay binding");
 }
 
 #[cfg(all(test, native_lane))]

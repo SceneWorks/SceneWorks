@@ -78,7 +78,8 @@ export function checkExactReplayHostSupport(payload, context = {}) {
     if (
       recorded.k !== lowResStart.k ||
       typeof lowResStart.scale !== "number" ||
-      Math.abs(recorded.scale - lowResStart.scale) > 1e-9
+      typeof recorded.scale !== "number" ||
+      Math.fround(recorded.scale) !== Math.fround(lowResStart.scale)
     ) {
       return {
         ok: false,
