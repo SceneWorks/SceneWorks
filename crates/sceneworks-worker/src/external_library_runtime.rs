@@ -857,9 +857,11 @@ struct PortableAttemptSnapshot {
 }
 
 /// Written into every route-bundle directory this layout creates. A bundle without it was built by
-/// the earlier layout that also copied pinned Hugging Face members; nothing reads those any more,
-/// so retention reclaims them first, whatever the size and count targets.
-const PORTABLE_BUNDLE_LAYOUT_MARKER: &str = ".layout-v4";
+/// an earlier layout: one that copied pinned Hugging Face members, or v4, which held a second copy
+/// of an imported checkpoint for its plan layer. Nothing reads those any more, so retention
+/// reclaims them first, whatever the size and count targets. The route digest
+/// (`portable_cache_route_digest`) carries the same version, so each route rebuilds once.
+const PORTABLE_BUNDLE_LAYOUT_MARKER: &str = ".layout-v5";
 
 struct PreparedPortableSnapshot {
     snapshot: PortableAttemptSnapshot,
@@ -1593,6 +1595,13 @@ fn prepare_portable_snapshot(
         create_private_directory(&staging)?;
     }
     let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
+    let source_cache = verified_source_cache(settings);
+    // Canonical source file -> where this bundle holds its copy (relative to the bundle root), so
+    // a checkpoint-plan layer whose bytes the bundle already copies from the same file is served
+    // from that one copy rather than duplicated (an imported checkpoint's primary member IS its
+    // single plan layer). Computed identically whether this attempt materializes or reads.
+    let mut copied_sources: std::collections::BTreeMap<PathBuf, PathBuf> =
+        std::collections::BTreeMap::new();
     let mut rewrites = Vec::new();
     // (slot, member, selected path, selected auxiliary) for in-place Revision members.
     let mut in_place = Vec::new();
@@ -1725,36 +1734,66 @@ fn prepare_portable_snapshot(
                         .ok_or_else(|| invalid_binding("checkpoint plan layer has no target file"))
                 })
                 .transpose()?;
+            // A plan layer whose exact source file this bundle already holds under the same file
+            // name is served from that copy: same bytes, same name, one verification record.
+            let reused_copy = plan_target_name.as_ref().and_then(|name| {
+                let source = std::fs::canonicalize(&selected).ok()?;
+                copied_sources
+                    .get(&source)
+                    .filter(|copy| copy.file_name() == Some(name.as_os_str()))
+                    .cloned()
+            });
+            if let Some(copy) = reused_copy {
+                rewrites.push((
+                    model.slot.clone(),
+                    member.clone(),
+                    PathBuf::from(copy.file_name().expect("a recorded copy names a file")),
+                    is_selected_aux,
+                    copy.parent().unwrap_or(Path::new("")).to_path_buf(),
+                    plan_layer.map(|layer| (layer.checkpoint_id, layer.layer_id)),
+                ));
+                continue;
+            }
             if needs_copy {
                 create_private_tree(&target_root)?;
-                for file in &member.files {
-                    let source = if let Some(snapshot) = &revision_snapshot {
-                        snapshot.join(&file.relative_path)
-                    } else if selected_is_file {
-                        selected.clone()
-                    } else {
-                        selected.join(&file.relative_path)
-                    };
-                    sceneworks_core::model_artifacts::confine_artifact_path(
-                        &source,
-                        &allowed_roots,
-                    )
-                    .map_err(|_| invalid_binding("frozen source is outside an authorized root"))?;
-                    let target = target_root
-                        .join(plan_target_name.as_deref().unwrap_or(&file.relative_path));
-                    create_private_tree(target.parent().expect("portable file has a parent"))?;
-                    if revision_snapshot.is_some() && target.exists() {
-                        continue;
+            }
+            for file in &member.files {
+                let source = if let Some(snapshot) = &revision_snapshot {
+                    snapshot.join(&file.relative_path)
+                } else if selected_is_file {
+                    selected.clone()
+                } else {
+                    selected.join(&file.relative_path)
+                };
+                let target =
+                    target_root.join(plan_target_name.as_deref().unwrap_or(&file.relative_path));
+                if revision_snapshot.is_none() {
+                    if let (Ok(real), Ok(relative)) = (
+                        std::fs::canonicalize(&source),
+                        target.strip_prefix(&staging),
+                    ) {
+                        copied_sources
+                            .entry(real)
+                            .or_insert_with(|| relative.to_path_buf());
                     }
-                    let mut input = File::open(&source).map_err(WorkerError::Io)?;
-                    let mut output = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&target)
-                        .map_err(WorkerError::Io)?;
-                    io::copy(&mut input, &mut output).map_err(WorkerError::Io)?;
-                    output.sync_all().map_err(WorkerError::Io)?;
                 }
+                if !needs_copy {
+                    continue;
+                }
+                sceneworks_core::model_artifacts::confine_artifact_path(&source, &allowed_roots)
+                    .map_err(|_| invalid_binding("frozen source is outside an authorized root"))?;
+                create_private_tree(target.parent().expect("portable file has a parent"))?;
+                if revision_snapshot.is_some() && target.exists() {
+                    continue;
+                }
+                let mut input = File::open(&source).map_err(WorkerError::Io)?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map_err(WorkerError::Io)?;
+                io::copy(&mut input, &mut output).map_err(WorkerError::Io)?;
+                output.sync_all().map_err(WorkerError::Io)?;
             }
             rewrites.push((
                 model.slot.clone(),
@@ -1794,6 +1833,7 @@ fn prepare_portable_snapshot(
             private_tree_bytes(&staging)?;
             for (_, member, selected_relative, _, relative_root, plan_layer) in &rewrites {
                 verify_private_snapshot_member(
+                    &source_cache,
                     &staging,
                     member,
                     selected_relative,
@@ -1834,6 +1874,7 @@ fn prepare_portable_snapshot(
         {
             if !needs_copy {
                 verify_private_snapshot_member(
+                    &source_cache,
                     &published,
                     member,
                     selected_relative,
@@ -2051,7 +2092,15 @@ fn publish_verified_snapshot(
     std::fs::rename(staging, published).map_err(WorkerError::Io)
 }
 
+/// Prove one member's files in a private bundle hold exactly its admitted bytes.
+///
+/// Verification goes through the host's [`VerifiedSourceCache`], the same hash-once store the
+/// original sources use: a bundle file is published once and then frozen read-only, so while its
+/// stamp (size, times, file identity) is unchanged its recorded verdict is reused and nothing is
+/// read. Re-hashing every file of the reused bundle on every job instead re-read a 12 GB imported
+/// checkpoint before each render. Any stamp change, or a mismatch, still reads and refuses.
 fn verify_private_snapshot_member(
+    cache: &VerifiedSourceCache,
     snapshot_root: &Path,
     member: &PortableArtifactMember,
     selected_relative: &Path,
@@ -2059,31 +2108,23 @@ fn verify_private_snapshot_member(
     is_plan_layer: bool,
     allowed_roots: &[PathBuf],
 ) -> WorkerResult<()> {
+    let failed = || invalid_binding("private snapshot verification failed");
     let target_root = snapshot_root.join(relative_root);
-    let mapped = LocalArtifactMember {
-        role: member.role.clone(),
-        component_id: member.component_id.clone(),
-        source: member.source.clone(),
-        tier: member.tier.clone(),
-        files: member
-            .files
-            .iter()
-            .map(|file| LocalArtifactFile {
-                relative_path: file.relative_path.clone(),
-                path: if is_plan_layer {
-                    target_root.join(selected_relative)
-                } else {
-                    target_root.join(&file.relative_path)
-                },
-            })
-            .collect(),
-    };
-    let captured = PortableArtifactMember::capture(&mapped, allowed_roots)
-        .map_err(|_| invalid_binding("private snapshot verification failed"))?;
-    if captured != *member {
-        return Err(invalid_binding(
-            "private snapshot differs from admitted bytes",
-        ));
+    for file in &member.files {
+        let path = if is_plan_layer {
+            target_root.join(selected_relative)
+        } else {
+            target_root.join(&file.relative_path)
+        };
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| failed())?;
+        if !metadata.is_file() || metadata.len() != file.size_bytes {
+            return Err(failed());
+        }
+        let real = sceneworks_core::model_artifacts::confine_artifact_path(&path, allowed_roots)
+            .map_err(|_| failed())?;
+        cache
+            .verify(&real, &file.sha256, &|| Ok(()))
+            .map_err(|_| failed())?;
     }
     Ok(())
 }
@@ -2125,7 +2166,7 @@ fn portable_cache_route_digest(route: &PortableRouteBinding) -> WorkerResult<Str
     let encoded = serde_json::to_vec(route)
         .map_err(|error| invalid_binding(format!("cannot encode frozen route: {error}")))?;
     let mut digest = Sha256::new();
-    digest.update(b"portable-route-cache-v4\0");
+    digest.update(b"portable-route-cache-v5\0");
     digest.update(encoded);
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -2315,9 +2356,13 @@ fn freeze_private_snapshot(path: &Path) -> WorkerResult<()> {
                 .map_err(WorkerError::Io)?;
         }
     } else if metadata.is_file() {
+        // Re-freezing an already read-only file is skipped, so every job that re-freezes the
+        // published bundle leaves its files' change time — and so their verification records — intact.
         let mut permissions = metadata.permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(path, permissions).map_err(WorkerError::Io)?;
+        if !permissions.readonly() {
+            permissions.set_readonly(true);
+            std::fs::set_permissions(path, permissions).map_err(WorkerError::Io)?;
+        }
     } else {
         return Err(invalid_binding("private snapshot contains a non-file"));
     }
@@ -5721,8 +5766,10 @@ mod tests {
         std::fs::create_dir(&staging).unwrap();
         let copied = staging.join("model.safetensors");
         std::fs::write(&copied, b"substituted").unwrap();
+        let cache = VerifiedSourceCache::new(temp.path().join("verdicts"));
         let verify = |root: &Path| {
             verify_private_snapshot_member(
+                &cache,
                 root,
                 &frozen,
                 Path::new(""),
@@ -6314,6 +6361,162 @@ mod tests {
         assert!(FileLock::try_open_exclusive(&entry.join(".lease")).is_err());
         drop(first);
         assert!(FileLock::try_open_exclusive(&entry.join(".lease")).is_ok());
+    }
+
+    /// An imported checkpoint whose primary file is also its one checkpoint-plan layer (every
+    /// managed Krea import) is held ONCE in its route bundle, and a reused bundle is verified
+    /// through the host's verdict store, so later jobs read none of its bytes.
+    ///
+    /// Before: the bundle held two copies of the checkpoint (`member0/` and `checkpoint-plan/`),
+    /// and every job after the first re-hashed both in full with no cache: about 24 GB read before
+    /// each KreaMania V8 render.
+    #[test]
+    fn an_imported_checkpoint_bundle_holds_one_copy_and_reuses_its_verdict() {
+        use sceneworks_core::checkpoint_import::{
+            CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+        };
+        use sceneworks_core::model_artifacts::portable_binding::{
+            portable_closure_sha256, PortableCheckpointPlan,
+        };
+        use sceneworks_core::verified_source_cache::read_counts;
+
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let install = data.join("models/imports/imported_krea");
+        std::fs::create_dir_all(&install).unwrap();
+        let bytes = b"imported checkpoint weights".to_vec();
+        std::fs::write(install.join("imported.safetensors"), &bytes).unwrap();
+        let mut settings = settings(data.clone());
+        settings.config_dir = temp.path().join("config");
+        std::fs::create_dir_all(settings.config_dir.join("manifests")).unwrap();
+        let entry = json!({"id":"imported_krea", "downloads":[], "paths":{"model":install},
+            "importPlan":{"checkpointId":"managed/imported_krea"}});
+        std::fs::write(
+            settings.config_dir.join("manifests/user.models.jsonc"),
+            json!({"schemaVersion":1, "models":[entry.clone()]}).to_string(),
+        )
+        .unwrap();
+
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let layer_id = "artifact:imported.safetensors";
+        let plan = ImportPlanV1::new(
+            "checkpoint-plan-test",
+            "krea_2",
+            vec![ImportLayerV1 {
+                layer_id: layer_id.into(),
+                role: "transformer".into(),
+                target_path: "imported.safetensors".into(),
+                container: CheckpointContainerV1::Safetensors,
+                source: SourceLocatorV1::linked("root-test", "imported.safetensors", &sha).unwrap(),
+            }],
+        )
+        .unwrap();
+        let file = |relative: &str| PortableArtifactFile {
+            relative_path: relative.into(),
+            size_bytes: bytes.len() as u64,
+            sha256: format!("sha256:{sha}"),
+        };
+        let member = |role, component_id: Option<String>, files: Vec<PortableArtifactFile>| {
+            PortableArtifactMember {
+                role,
+                component_id,
+                source: PortableSourceIdentity::Digest {
+                    sha256: portable_closure_sha256(&files).unwrap(),
+                },
+                tier: None,
+                files,
+            }
+        };
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "imported_krea",
+            "cpu",
+            "local",
+            None,
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            vec![
+                member(
+                    ArtifactMemberRole::Primary,
+                    None,
+                    vec![file("imported.safetensors")],
+                ),
+                member(
+                    ArtifactMemberRole::RequiredComponent,
+                    Some(format!("modelManifestEntry/importPlan/layers/{layer_id}")),
+                    vec![file("artifact")],
+                ),
+            ],
+        )
+        .unwrap()
+        .with_checkpoint_plan(PortableCheckpointPlan::from_import_plan(&plan, None).unwrap())
+        .unwrap();
+        let binding = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
+        let payload = json!({"modelManifestEntry": entry})
+            .as_object()
+            .unwrap()
+            .clone();
+        let attempt = || {
+            RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+            .unwrap()
+        };
+
+        let first = attempt();
+        let served = PathBuf::from(
+            first.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                .as_str()
+                .unwrap(),
+        );
+        let bundle = served
+            .ancestors()
+            .find(|path| path.file_name() == Some("bundle".as_ref()))
+            .expect("the primary is served from the route bundle")
+            .to_path_buf();
+        let mut copies = Vec::new();
+        let mut stack = vec![bundle.clone()];
+        while let Some(path) = stack.pop() {
+            for entry in std::fs::read_dir(&path).unwrap().flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    copies.push(entry.path());
+                }
+            }
+        }
+        assert_eq!(
+            copies.len(),
+            1,
+            "the plan layer must be served from the primary's copy, not a second one: {copies:?}"
+        );
+        let copy = std::fs::canonicalize(&copies[0]).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+        drop(first);
+
+        // Later attempts reuse the published bundle. Space them past the stamp's racy window
+        // (`SOURCE_STAMP_GRANULARITY_NANOS`, 20 ms), as real jobs are, so the verdict settles.
+        for _ in 0..2 {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(attempt());
+        }
+        let store = VerifiedSourceCache::for_data_dir(&data);
+        assert!(
+            store.recorded(&copy).is_some(),
+            "the bundle copy must carry a verdict in the host's verdict store"
+        );
+        let reads = read_counts::of(&copy);
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            drop(attempt());
+        }
+        assert_eq!(
+            read_counts::of(&copy),
+            reads,
+            "a reused, unchanged bundle must not be read again"
+        );
     }
 
     #[test]
