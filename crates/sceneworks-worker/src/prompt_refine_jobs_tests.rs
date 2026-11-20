@@ -2965,9 +2965,9 @@ async fn an_expansion_runs_only_the_named_expander_model_under_its_own_entry() {
 }
 
 /// The pinned snapshot of catalog download `row` (its repo at its revision) in `data`'s hub cache.
-/// Marked `cfg(test)`, as `batch_describe_jobs_tests`' snapshot helpers are, so the model-artifact
-/// inventory reads it as a test fixture rather than a production model root.
-#[cfg(test)]
+/// Gated `cfg(all(test, native_lane))` like its only caller; the `test` predicate keeps the
+/// model-artifact inventory reading it as a test fixture rather than a production model root.
+#[cfg(all(test, native_lane))]
 fn pinned_row_snapshot(data: &Path, row: &Value) -> std::path::PathBuf {
     crate::huggingface_hub_cache_dir(data)
         .join(format!(

@@ -11,7 +11,16 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { MINIMAX_H3_IMAGE_PE_MODEL_ID } from "./constants.js";
-import { putUiPreferences } from "./uiPreferences.js";
+import { H3_EXPANDER_DESCRIBER_MODEL_ID, readH3ExpanderModel, writeH3ExpanderModel } from "./h3ExpanderModelStore.js";
+
+export {
+  H3_EXPANDER_DESCRIBER_MODEL_ID,
+  H3_EXPANDER_MODEL_IDS,
+  normalizeH3ExpanderModel,
+  readH3ExpanderModel,
+  seedH3ExpanderModelFromServer,
+  writeH3ExpanderModel,
+} from "./h3ExpanderModelStore.js";
 
 const RATIO_TOLERANCE = 0.01;
 // Most prompts a batch run expands in one go; past this the run is refused until the variables
@@ -98,10 +107,9 @@ export const H3_IMAGE_EXPAND_COPY = Object.freeze({
 
 // SW-7208: the expander runs one of two models, both on MiniMax's prompt files and reply contract:
 // MiniMax-H3-Image-PE (the default) or the abliterated Qwen3.8-27B the dataset describer uses
-// (any installed tier). Mirrors `sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS`
-// and `MINIMAX_H3_IMAGE_EXPAND_PROMPTS_PURPOSE`.
-export const H3_EXPANDER_DESCRIBER_MODEL_ID = "vision_describe_qwen3_8_27b";
-export const H3_EXPANDER_MODEL_IDS = Object.freeze([MINIMAX_H3_IMAGE_PE_MODEL_ID, H3_EXPANDER_DESCRIBER_MODEL_ID]);
+// (any installed tier). The saved choice lives in h3ExpanderModelStore.js. Mirrors
+// `sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_PROMPTS_PURPOSE`.
+//
 // The expander entry's conditional component holding MiniMax's prompt files alone: the abliterated
 // choice needs them, but not MiniMax-H3-Image-PE's weights.
 export const H3_EXPAND_PROMPTS_PURPOSE = "describer_prompt_expansion";
@@ -110,43 +118,6 @@ const EXPANDER_LABELS = Object.freeze({
   [MINIMAX_H3_IMAGE_PE_MODEL_ID]: "MiniMax-H3-Image-PE",
   [H3_EXPANDER_DESCRIBER_MODEL_ID]: "Abliterated Qwen3.8-27B (the describer’s model)",
 });
-
-const STORAGE_KEY = "sceneworks-h3-image-expander-model";
-
-export function normalizeH3ExpanderModel(value) {
-  return H3_EXPANDER_MODEL_IDS.includes(value) ? value : MINIMAX_H3_IMAGE_PE_MODEL_ID;
-}
-
-// The saved expander model: the localStorage cache of the durable server preference.
-export function readH3ExpanderModel() {
-  try {
-    return normalizeH3ExpanderModel(window.localStorage.getItem(STORAGE_KEY));
-  } catch {
-    return MINIMAX_H3_IMAGE_PE_MODEL_ID;
-  }
-}
-
-function cacheH3ExpanderModel(value) {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, value);
-  } catch {
-    // localStorage unavailable: the server copy still holds the choice.
-  }
-}
-
-// Seed the cache from the durable server copy on launch (App.jsx, after GET /api/v1/ui-preferences).
-export function seedH3ExpanderModelFromServer(value) {
-  if (H3_EXPANDER_MODEL_IDS.includes(value)) cacheH3ExpanderModel(value);
-}
-
-// Save the user's pick: the instant-paint cache and the durable server preference, which the API
-// also reads for an expansion request that names no model.
-export function writeH3ExpanderModel(value) {
-  const model = normalizeH3ExpanderModel(value);
-  cacheH3ExpanderModel(model);
-  putUiPreferences({ h3ImageExpanderModel: model }).catch(() => {});
-  return model;
-}
 
 // Each expander model with what it needs on this install. MiniMax-H3-Image-PE needs an installed
 // tier (which brings its prompt files). The abliterated choice needs an installed describer tier

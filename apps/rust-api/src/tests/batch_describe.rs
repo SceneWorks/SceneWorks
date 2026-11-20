@@ -748,6 +748,62 @@ async fn a_partial_qwen38_tier_reads_not_installed_and_is_refused() {
     );
 }
 
+/// Installing one tier leaves the others never downloaded, not torn: with only q4 cached (the
+/// bf16 row's pinned snapshot never fetched), the model reads installed with nothing to repair, so
+/// Model Manager offers no Fix that would fetch an unselected tier. A genuinely partial q4 (its
+/// weights gone) is still a repairable cache.
+#[tokio::test]
+async fn an_uninstalled_sibling_qwen38_tier_is_not_a_repairable_cache() {
+    for partial in [false, true] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        serve_builtin_models(&temp_dir, &[QWEN38_27B_DESCRIBER_MODEL_ID]);
+        let (app, _, _, _, _, state) = dataset_fixture(&temp_dir).await;
+        let _hub = private_hub(&state);
+        seed_qwen38_tier(&state.settings.data_dir, "q4");
+        if partial {
+            let row = qwen38_tier_row(std::env::consts::OS, "q4");
+            let cache = huggingface_repo_cache_path(
+                &state.settings.data_dir,
+                row["repo"].as_str().unwrap(),
+            )
+            .unwrap();
+            let weights = if cfg!(target_os = "macos") {
+                "model.safetensors"
+            } else {
+                "model-fixture.safetensors"
+            };
+            std::fs::remove_file(
+                cache
+                    .join("snapshots")
+                    .join(row["revision"].as_str().unwrap())
+                    .join(format!(
+                        "{}{weights}",
+                        qwen38_tier_folder(std::env::consts::OS, "q4")
+                    )),
+            )
+            .expect("drop the q4 weights");
+        }
+
+        let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let entry = catalog
+            .as_array()
+            .expect("catalog rows")
+            .iter()
+            .find(|entry| entry["id"] == QWEN38_27B_DESCRIBER_MODEL_ID)
+            .cloned()
+            .expect("the 27B is listed");
+        if partial {
+            assert_ne!(entry["installState"], "installed", "{entry}");
+            assert_eq!(entry["repairAvailable"], true, "{entry}");
+        } else {
+            assert_eq!(entry["installState"], "installed", "{entry}");
+            assert_eq!(entry["repairAvailable"], false, "{entry}");
+            assert_eq!(entry["missingRequiredFiles"], json!([]), "{entry}");
+        }
+    }
+}
+
 /// A tier is installed only at the revision its row pins. An older revision of the re-host that
 /// `refs/main` names and that holds MORE files (every file of the tier's folder plus a plain
 /// twelve-file `q4/` folder of a superseded pin) does not install the tier: the request is refused

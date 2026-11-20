@@ -16,6 +16,16 @@ impl HuggingFaceCacheHealth {
         }
     }
 
+    /// Nothing of this set is on disk: never downloaded, so not installed and nothing torn to
+    /// repair. Distinct from [`Self::missing`], which is a partial (repairable) download.
+    pub(super) fn absent(missing_files: Vec<String>) -> Self {
+        Self {
+            installed: false,
+            incomplete: false,
+            missing_files,
+        }
+    }
+
     pub(super) fn installed() -> Self {
         Self {
             installed: true,
@@ -30,11 +40,7 @@ pub(crate) fn huggingface_cache_health(
     files: &[String],
 ) -> HuggingFaceCacheHealth {
     if !huggingface_repo_cache_exists(repo_root) {
-        return HuggingFaceCacheHealth {
-            installed: false,
-            incomplete: false,
-            missing_files: Vec::new(),
-        };
+        return HuggingFaceCacheHealth::absent(Vec::new());
     }
     let snapshots = huggingface_snapshot_dirs(repo_root);
     if snapshots.is_empty() {
@@ -44,11 +50,7 @@ pub(crate) fn huggingface_cache_health(
         // repairable "incomplete": reporting incomplete surfaced a confusing "Cached files are
         // incomplete: snapshots/<revision>" banner for a tier that simply was never downloaded
         // (sc-9909). incomplete:false keeps it a clean not-installed state.
-        return HuggingFaceCacheHealth {
-            installed: false,
-            incomplete: false,
-            missing_files: vec!["snapshots/<revision>".to_owned()],
-        };
+        return HuggingFaceCacheHealth::absent(vec!["snapshots/<revision>".to_owned()]);
     }
     if !files.is_empty() {
         return huggingface_filtered_cache_health(&snapshots, files);
@@ -296,11 +298,7 @@ pub(super) fn huggingface_filtered_cache_health(
         // incomplete" warning + Fix button for a perfectly valid single-quant install (sc-9907).
         // "You didn't download this tier" (missing) must stay distinct from "this tier is
         // half-downloaded" (incomplete) so nothing upstream raises a spurious repair prompt.
-        HuggingFaceCacheHealth {
-            installed: false,
-            incomplete: false,
-            missing_files: missing,
-        }
+        HuggingFaceCacheHealth::absent(missing)
     } else {
         // Some expected files present but not all — an explicit file is absent, or a diffusers tier is
         // torn (weights missing). A re-fetch repairs it.

@@ -1521,8 +1521,9 @@ fn is_pin_exact_model(model_id: &str) -> bool {
 /// The cache health of a tier row's own files at the exact revision the row pins: every file the
 /// row names is present in THAT snapshot, and a whole tier folder glob (`q4-full/*`) holds a
 /// coherent set of weights. An older revision of the same repository never stands in for the
-/// pinned one. Missing when the row pins no immutable revision, names no files, or the pinned
-/// snapshot is absent.
+/// pinned one. Missing when the row pins no immutable revision or names no files; absent (not
+/// installed, nothing to repair) when the pinned snapshot was never downloaded, as
+/// `huggingface_cache_health` treats a repository with no cache.
 fn pinned_tier_cache_health(row: &Value, data_dir: &FsPath) -> HuggingFaceCacheHealth {
     let files = string_array_field(row, "files");
     let (Some(repo), Some(revision)) = (
@@ -1538,7 +1539,7 @@ fn pinned_tier_cache_health(row: &Value, data_dir: &FsPath) -> HuggingFaceCacheH
         sceneworks_core::hf_home::model_source_library(data_dir),
     );
     let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
-        return HuggingFaceCacheHealth::missing(files);
+        return HuggingFaceCacheHealth::absent(files);
     };
     let health = huggingface_filtered_cache_health(std::slice::from_ref(&snapshot), &files);
     if !health.installed {

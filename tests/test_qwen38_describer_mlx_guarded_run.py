@@ -6,6 +6,7 @@ the smoke binary: no model, no weights, no GPU. macOS-only, like tree_guard (`pr
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -190,3 +191,73 @@ def test_run_names_each_jobs_smoke_and_the_smokes_exist_in_the_worker():
         assert f"test_name={name}" in script, name
         module, function = name.split("::")
         assert f"async fn {function}()" in (worker / f"{module}.rs").read_text(), name
+
+
+# A stand-in `huggingface_hub`: `model_info` lists the pinned bf16 files at QWEN38_FAKE_SIZES, and
+# `snapshot_download` records its call and writes each listed file at its size (sparse, no data).
+FAKE_HUB = textwrap.dedent(
+    """
+    import json, os
+    from pathlib import Path
+    from types import SimpleNamespace
+    SIZES = json.loads(os.environ["QWEN38_FAKE_SIZES"])
+    class HfApi:
+        def model_info(self, repo, revision, files_metadata, token):
+            return SimpleNamespace(sha=revision, siblings=[SimpleNamespace(rfilename=n, size=s) for n, s in SIZES.items()])
+    def snapshot_download(repo_id, revision, cache_dir, allow_patterns, **_):
+        Path(os.environ["QWEN38_FAKE_CALLS"]).open("a").write(json.dumps([repo_id, revision, allow_patterns]) + "\\n")
+        snap = Path(cache_dir) / ("models--" + repo_id.replace("/", "--")) / "snapshots" / revision
+        for name, size in SIZES.items():
+            path = snap / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as file:
+                file.truncate(size)
+    """
+)
+
+
+def describer_provision_script() -> str:
+    """The describer branch's embedded provisioning Python in run.sh."""
+    blocks = [block.split("\nPY\n", 1)[0] for block in RUN_SH.read_text().split("<<'PY'")[1:]]
+    (script,) = [block.split("\n", 1)[1] for block in blocks if 'provision.plan("bf16")' in block]
+    return script
+
+
+@pytest.mark.parametrize("shard_missing", [True, False])
+def test_a_bf16_retry_with_its_metadata_but_a_missing_shard_downloads_it(tmp_path, shard_missing):
+    sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+    import qwen38_describer_provision as provision
+    sys.path.pop(0)
+    shards = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    sizes = {name: 1000 for name in provision.BF16_FILES}
+    shard_bytes = (provision.BF16_ESTIMATED_BYTES - sum(sizes.values())) // 2
+    sizes |= {name: shard_bytes for name in shards}
+    hub = tmp_path / "hub"
+    snap = hub / ("models--" + provision.BF16_REPO.replace("/", "--")) / "snapshots" / provision.BF16_REVISION
+    snap.mkdir(parents=True)
+    # An earlier, interrupted run: every metadata file and the index landed, one shard did not.
+    for name, size in sizes.items():
+        if shard_missing and name == shards[1]:
+            continue
+        with (snap / name).open("wb") as file:
+            file.truncate(size)
+    fake = tmp_path / "fake"
+    (fake / "huggingface_hub").mkdir(parents=True)
+    (fake / "huggingface_hub" / "__init__.py").write_text(FAKE_HUB)
+    calls = tmp_path / "calls.jsonl"
+    done = subprocess.run(
+        [sys.executable, "-B", "-", ], input=describer_provision_script(), capture_output=True,
+        text=True, timeout=60, check=False, cwd=ROOT,
+        env={"PATH": BASH_PATH, "PYTHONPATH": str(fake), "QWEN38_HUB": str(hub), "QWEN38_TIER": "bf16",
+             "QWEN38_FREE_GB": "500", "QWEN38_FAKE_SIZES": json.dumps(sizes),
+             "QWEN38_FAKE_CALLS": str(calls)},
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    downloads = calls.read_text().splitlines() if calls.exists() else []
+    if shard_missing:
+        assert [json.loads(line)[:2] for line in downloads] == [[provision.BF16_REPO, provision.BF16_REVISION]]
+        assert "model-*.safetensors" in json.loads(downloads[0])[2]
+        assert (snap / shards[1]).stat().st_size == shard_bytes
+    else:
+        assert downloads == [], "a complete snapshot is not downloaded again"
+        assert "Already present" in done.stdout, done.stdout

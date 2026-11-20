@@ -60,7 +60,7 @@ import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
 import { seedLastTiersFromServer } from "./lastTierStore.js";
-import { seedH3ExpanderModelFromServer } from "./minimaxH3ImageExpand.js";
+import { seedH3ExpanderModelFromServer } from "./h3ExpanderModelStore.js";
 import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
 import { seedStudioSettingsFromServer } from "./hooks/useStudioSettings.js";
 import { UpgradeError } from "./requestUpgrade.js";

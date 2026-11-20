@@ -179,6 +179,18 @@ rows = [r for r in specs["vision_describe_qwen3_8_27b"]["product"]["downloads"]
 if len(rows) != 1:
     sys.exit(f"expected one macOS {tier} row, found {len(rows)}")
 row = rows[0]
+if tier == "bf16":
+    # The full-precision row names its shards by glob (`model-*.safetensors`), so file presence
+    # alone reads a snapshot with its metadata but a missing shard as resident. Provision it the
+    # way the CUDA lane does: every published file, shards included, checked at its size.
+    sys.path.insert(0, "scripts/ci")
+    from pathlib import Path
+    import qwen38_describer_provision as provision
+    if (row["repo"], row["revision"]) != (provision.BF16_REPO, provision.BF16_REVISION):
+        sys.exit(f"::error::the bf16 row pins {row['repo']}@{row['revision']}, the provisioner "
+                 f"{provision.BF16_REPO}@{provision.BF16_REVISION}")
+    provision.provision_snapshot(Path(os.environ["QWEN38_HUB"]), *provision.plan("bf16"))
+    sys.exit(0)
 snap = os.path.join(os.environ["QWEN38_HUB"], "models--" + row["repo"].replace("/", "--"), "snapshots", row["revision"])
 present = all(os.path.isfile(os.path.join(snap, f)) for f in row["files"] if "*" not in f)
 if not present:
