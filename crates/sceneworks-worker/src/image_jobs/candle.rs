@@ -2235,10 +2235,11 @@ async fn generate_candle_registry_stream_using(
                 .get("candle")?
                 .get("turboFit")?;
             let calibration_abi = u32::try_from(turbo_fit.get("calibrationAbi")?.as_u64()?).ok()?;
-            let calibration_fingerprint = turbo_fit
-                .get("calibrationFingerprint")?
-                .as_str()?
-                .to_owned();
+            // sc-22735: the provider's safety check compares this against the identity of the tier
+            // it LOADED, so it must be the per-tier entry the fit was graded against — the q4
+            // scalar here rejected every bf16/q8 resident render with a handshake mismatch.
+            let calibration_fingerprint =
+                crate::vram_gate::krea_turbo_calibration_fingerprint(turbo_fit, tier)?.to_owned();
             let gb_to_bytes = |gb: f64| {
                 (gb * 1024.0 * 1024.0 * 1024.0)
                     .round()

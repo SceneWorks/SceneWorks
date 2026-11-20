@@ -489,6 +489,26 @@ pub(super) fn krea_phase_curve(phase: &JsonObject, geometry: CurveGeometry) -> O
 ///
 /// `None` for a missing or unrecognized value, which fails the fit closed rather than defaulting: a
 /// silently assumed shape is what let calibration ABI 2's load-shape axis do no work on this route.
+/// The calibration identity a Krea Turbo fit declares for `tier` (sc-22735).
+///
+/// The engine keys `krea_2_turbo`'s production calibration identity on the artifact-proven tier
+/// (`krea_turbo_production_calibration_fingerprint`): q4 keeps the measured scalar, bf16 and q8
+/// name their own cells. Every consumer that hands the manifest's identity to the provider — the
+/// fit grader AND the run context the provider's safety check compares — must read the same
+/// per-tier entry, or a bf16/q8 load is rejected with `calibration handshake mismatch` even
+/// though its fit was graded correctly. The scalar remains the fallback for a manifest that
+/// declares no per-tier map, so that older shape keeps its previous meaning exactly.
+pub(crate) fn krea_turbo_calibration_fingerprint<'a>(
+    turbo_fit: &'a Value,
+    tier: &str,
+) -> Option<&'a str> {
+    turbo_fit
+        .get("calibrationFingerprintByTier")
+        .and_then(|by_tier| by_tier.get(tier))
+        .or_else(|| turbo_fit.get("calibrationFingerprint"))?
+        .as_str()
+}
+
 pub(crate) fn krea_turbo_load_shape(turbo_fit: &Value) -> Option<gen_core::LoadShape> {
     match turbo_fit.get("loadShape")?.as_str()? {
         "eager_materialization" => Some(gen_core::LoadShape::EagerMaterialization),
@@ -828,13 +848,8 @@ fn krea_turbo_fit_priced_with_pag(
     let budget = budget?;
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
     // sc-22735: the identity the LOADED contract publishes is keyed on the artifact-proven tier, so
-    // the fingerprint this fit is graded against has to be read per tier. The scalar remains the
-    // measured q4 string and is the fallback for a manifest that declares no per-tier map.
-    let calibration_fingerprint = turbo_fit
-        .get("calibrationFingerprintByTier")
-        .and_then(|by_tier| by_tier.get(tier))
-        .or_else(|| turbo_fit.get("calibrationFingerprint"))?
-        .as_str()?;
+    // the fingerprint this fit is graded against has to be read per tier.
+    let calibration_fingerprint = krea_turbo_calibration_fingerprint(turbo_fit, tier)?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
     // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
     // worker took the shape from the provider alone, so the axis could not detect drift here. The

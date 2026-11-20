@@ -7191,6 +7191,92 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
 }
 
+/// An imported Krea checkpoint inherits the builtin Turbo provider's soft, macOS-only MLX VAE
+/// co-requisite (`inherit_provider_decoder_downloads`) so its decoder picker resolves the pinned
+/// source. That optional row must not decide where the MODEL runs: its own weights are local, so the
+/// inherited row was the entry's only download and vetoed every Candle route. On a Windows host the
+/// request then failed with the MLX route's "no eligible worker advertises the complete local
+/// source closure for mlx:macos". Seeding the shipped `krea_2_turbo` provider is what makes the
+/// donor row appear; with an empty builtin catalog this test passed even while the defect shipped.
+#[tokio::test]
+async fn imported_krea_keeps_candle_routes_despite_inherited_mlx_only_decoder() {
+    for platform in ["linux", "windows"] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+        std::fs::create_dir_all(model_path.parent().expect("model parent"))
+            .expect("model directory creates");
+        std::fs::write(&model_path, b"fixture weights").expect("model source writes");
+        let manifest_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+        write_empty_sibling_manifests(&manifest_dir);
+        let provider = sceneworks_core::builtin_manifests::builtin_model_entries()
+            .iter()
+            .find(|entry| entry["id"] == "krea_2_turbo")
+            .cloned()
+            .expect("krea_2_turbo is registered");
+        assert!(
+            provider["downloads"]
+                .as_array()
+                .expect("provider downloads")
+                .iter()
+                .any(|row| row["coRequisite"] == true
+                    && row["required"] == "soft"
+                    && row["platforms"] == json!(["macos"])),
+            "SANITY: the shipped provider still declares the macOS-only soft decoder donor"
+        );
+        std::fs::write(
+            manifest_dir.join("builtin.models.jsonc"),
+            json!({ "schemaVersion": 1, "models": [provider] }).to_string(),
+        )
+        .expect("builtin manifest writes");
+        std::fs::write(
+            manifest_dir.join("user.models.jsonc"),
+            json!({"schemaVersion": 1, "models": [{
+                "id": "user_krea", "name": "User Krea", "type": "image", "family": "krea_2",
+                "importSourceShape": "transformer_file", "downloads": [],
+                "paths": {"model": model_path}
+            }]})
+            .to_string(),
+        )
+        .expect("user manifest writes");
+        let mut settings = test_settings(&temp_dir);
+        settings.candle_required = true;
+        let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+        register_imported_fixture_worker(&state, "user_krea", &model_path, "candle", platform);
+
+        let (status, job) = request(
+            app,
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{platform}: an imported Krea entry must keep its Candle route: {job}"
+        );
+        let job_id = job["id"].as_str().expect("job id");
+        let binding = state
+            .jobs_store
+            .portable_model_binding(job_id)
+            .expect("binding reads")
+            .expect("binding is frozen");
+        assert!(
+            binding["routes"]
+                .get(format!("candle:{platform}"))
+                .is_some(),
+            "{platform}: the frozen binding must carry the Candle route: {binding}"
+        );
+    }
+}
+
 /// Run once per worker host shape whatever OS runs the test: imported Krea pose is served by the
 /// MLX/macOS worker and by the Candle worker on Linux and Windows (a Candle-required API).
 #[tokio::test]
