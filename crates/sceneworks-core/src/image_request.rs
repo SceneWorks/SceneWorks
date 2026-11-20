@@ -250,6 +250,7 @@ pub struct ImageAdvanced {
     pub controlnet_conditioning_scale: Option<Bound<f64>>,
     pub true_cfg_scale: Option<Bound<f64>>,
     pub strength: Option<Bound<f64>>,
+    pub top_level_strength_malformed: bool,
     pub reference_strength: Option<Bound<f64>>,
     pub denoising_strength: Option<Bound<f64>>,
     pub image_strength: Option<Bound<f64>>,
@@ -435,6 +436,8 @@ impl ImageAdvanced {
     }
 
     pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+        let (strength, top_level_strength_malformed) =
+            input.number_with_top_level_carrier("advanced", "strength", "strength")?;
         Ok(Self {
             sampler: input.text("advanced", "sampler")?,
             scheduler: input.text("advanced", "scheduler")?,
@@ -459,7 +462,8 @@ impl ImageAdvanced {
             controlnet_conditioning_scale: input
                 .number("advanced", "controlnetConditioningScale")?,
             true_cfg_scale: input.number("advanced", "trueCfgScale")?,
-            strength: input.number("advanced", "strength")?,
+            strength,
+            top_level_strength_malformed,
             reference_strength: input.number("advanced", "referenceStrength")?,
             denoising_strength: input.number("advanced", "denoisingStrength")?,
             image_strength: input.number("advanced", "imageStrength")?,
@@ -1007,36 +1011,23 @@ impl ImageRequest {
             .source_asset_id
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty());
-        let authored_strength = self.authored_advanced_f64("strength");
-        if let Some(strength) = authored_strength {
-            if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
-                return Err(format!(
-                    "{}: advanced.strength must be in [0.0, 1.0] without clamping when Low Res Start is active (got {strength})",
-                    self.model
-                ));
-            }
-        }
-        let executed_steps = if has_source {
-            let strength = authored_strength.unwrap_or(0.5);
-            let s = strength as f32;
-            let init_time_step = if s > 0.0 {
-                ((resolved_steps as f32 * s) as u32).max(1)
-            } else {
-                0
-            };
-            resolved_steps.saturating_sub(init_time_step)
-        } else {
-            resolved_steps
-        };
+        let authored_strength = self.resolved_authored_img2img_strength()?;
+        let executed_steps =
+            sceneworks_options::low_res_start::executed_steps_after_img2img_strength(
+                resolved_steps,
+                has_source,
+                authored_strength,
+            );
         if executed_steps < 2 || wire.k >= executed_steps {
             return Err(format!(
                 "{}: advanced.lowResStart.k must satisfy 1 <= k < executed_steps (got k={}, executed_steps={executed_steps})",
                 self.model, wire.k
             ));
         }
+        let (eff_width, eff_height) = self.pid_effective_base_dimensions();
         sceneworks_options::low_res_start::quantize_low_res_dimensions(
-            self.width,
-            self.height,
+            eff_width,
+            eff_height,
             wire.scale,
             sceneworks_options::low_res_start::LOW_RES_START_QUANTUM,
             sceneworks_options::low_res_start::LOW_RES_START_MIN_DIM,
@@ -1048,6 +1039,46 @@ impl ImageRequest {
             scale: Some(wire.scale as f32),
             estimate_source: gen_core::EstimateSource::EndpointEvaluation,
         }))
+    }
+
+    /// Return the authored img2img strength normalized across `advanced.strength` (preferred) and
+    /// top-level `strength`, validated to `[0.0, 1.0]` without clamping (`SW-7220`).
+    pub fn resolved_authored_img2img_strength(&self) -> Result<Option<f64>, String> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        if options.top_level_strength_malformed {
+            return Err(format!(
+                "{}: advanced.strength must be a finite number in [0.0, 1.0]",
+                self.model
+            ));
+        }
+        let Some(strength) = self.authored_advanced_f64("strength") else {
+            return Ok(None);
+        };
+        sceneworks_options::low_res_start::validate_img2img_strength_value(
+            strength,
+            "advanced.strength",
+        )
+        .map(Some)
+        .map_err(|error| format!("{}: {}", self.model, error.detail))
+    }
+
+    /// Effective base dimensions `(width, height)` for this request after PiD base reduction when
+    /// `usePid` is active on a PiD-eligible model (`SW-7221`).
+    pub fn pid_effective_base_dimensions(&self) -> (u32, u32) {
+        let use_pid = sceneworks_options::low_res_start::pid_backbone_for(&self.model).is_some()
+            && self.advanced_bool("usePid").unwrap_or(false);
+        let tier = sceneworks_options::low_res_start::pid_output_tier_from_str(
+            self.advanced_text("pidTarget"),
+        );
+        sceneworks_options::low_res_start::pid_effective_dims(
+            self.width,
+            self.height,
+            use_pid,
+            tier,
+        )
     }
 
     /// Refuse active `advanced.lowResStart` on bespoke lanes (ControlNet, IP-Adapter, PuLID,

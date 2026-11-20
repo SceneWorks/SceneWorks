@@ -1259,4 +1259,170 @@ mod tests {
         assert_eq!(recorded["estimate_source"], json!("previous_evaluation"));
         assert_eq!(recorded["estimator"], json!("previous_evaluation_v1"));
     }
+
+    #[test]
+    fn sw_7220_top_level_strength_shares_resolution_across_validation_image_request_and_worker_img2img(
+    ) {
+        let data = tempfile::tempdir().expect("data dir");
+        let settings = crate::Settings::for_test(data.path().to_path_buf());
+        let store = crate::ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store
+            .create_project("SW-7220 top-level strength")
+            .expect("project");
+        let project_path = std::path::PathBuf::from(&project.path);
+        let source_file = data.path().join("flux-source.png");
+        image::RgbImage::from_pixel(64, 64, image::Rgb([120, 80, 200]))
+            .save(&source_file)
+            .expect("source PNG");
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "flux-source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source_file,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("source asset");
+        let asset_id = asset["id"].as_str().expect("asset id");
+
+        let entry = json!({
+            "id": "flux_dev",
+            "family": "flux",
+            "type": "image",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        });
+        let entry_obj = entry.as_object().unwrap();
+
+        // Submission payload with ONLY top-level `strength: 0.25`, 8 steps, and K=5:
+        // init_time_step = floor(8 * 0.25) = 2 -> executed_steps = 8 - 2 = 6 -> K=5 is valid (1 <= 5 < 6).
+        let payload = json!({
+            "projectId": project.id,
+            "model": "flux_dev",
+            "mode": "text_to_image",
+            "prompt": "a stone bridge",
+            "sourceAssetId": asset_id,
+            "strength": 0.25,
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 8,
+                "lowResStart": { "version": 1, "k": 5, "scale": 0.5 }
+            },
+            "modelManifestEntry": entry.clone()
+        });
+        let authored = payload.as_object().unwrap();
+
+        // 1. Validation (`sceneworks-options::low_res_start::requested_low_res_start`) accepts top-level strength 0.25 and computes 6 executed steps:
+        let validated = sceneworks_core::options::low_res_start::requested_low_res_start(
+            "flux_dev",
+            authored,
+            authored["advanced"].as_object().unwrap(),
+            entry_obj,
+        )
+        .expect("validation accepts top-level strength 0.25 with K=5")
+        .expect("low_res_start active");
+        assert_eq!(validated.executed_steps, 6);
+        assert_eq!(validated.k, 5);
+
+        // 2. Core + worker lane controls (`ImageRequest::from_resolved` -> `resolve_lane_request_controls`)
+        // share the same top-level strength binding and accept K=5:
+        let req = ImageRequest::from_resolved(authored, authored).unwrap();
+        assert_eq!(
+            req.resolved_authored_img2img_strength().unwrap(),
+            Some(0.25)
+        );
+        let caps = honouring();
+        let resolved_controls =
+            resolve_lane_request_controls(&req, &caps, Some(3.5), None).unwrap();
+        assert_eq!(
+            resolved_controls.low_res_start,
+            Some(gen_core::LowResStartSpec::new(5, Some(0.5)))
+        );
+
+        // 3. Worker img2img source resolver (`resolve_flux1_ordinary_img2img_source`) resolves 0.25 (not default 0.5):
+        let (_img, worker_strength) =
+            crate::image_jobs::conditioning::resolve_flux1_ordinary_img2img_source(
+                &req,
+                &settings,
+                &project_path,
+            )
+            .expect("ordinary img2img source resolves")
+            .expect("source present");
+        assert!(
+            (worker_strength - 0.25).abs() < 1e-6,
+            "got {worker_strength}"
+        );
+    }
+
+    #[test]
+    fn sw_7221_use_pid_2k_validates_low_res_start_against_pid_effective_base_dimensions_end_to_end()
+    {
+        let entry = json!({
+            "id": "flux_dev",
+            "family": "flux",
+            "type": "image",
+            "ui": { "pid": true },
+            "defaults": {
+                "steps": 8,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        });
+        let entry_obj = entry.as_object().unwrap();
+
+        // 1024x1024 with usePid: true, pidTarget: "2k", and lowResStart.scale: 0.25:
+        // PiD 2K reduces effective base to 512x512, so scale 0.25 yields 128x128 < 256x256.
+        // Both submission validation AND worker lane control resolution reject it consistently!
+        let bad_payload = json!({
+            "projectId": "p",
+            "model": "flux_dev",
+            "mode": "text_to_image",
+            "prompt": "a cathedral",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 8,
+                "usePid": true,
+                "pidTarget": "2k",
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.25 }
+            },
+            "modelManifestEntry": entry.clone()
+        });
+        let bad_authored = bad_payload.as_object().unwrap();
+
+        let validation_err = sceneworks_core::options::low_res_start::requested_low_res_start(
+            "flux_dev",
+            bad_authored,
+            bad_authored["advanced"].as_object().unwrap(),
+            entry_obj,
+        )
+        .expect_err("submission validation must reject 128x128 reduced grid under PiD 2K");
+        assert_eq!(validation_err.field, "advanced.lowResStart.scale");
+        assert!(
+            validation_err.detail.contains("512x512 to 128x128"),
+            "{}",
+            validation_err.detail
+        );
+
+        let bad_req = ImageRequest::from_resolved(bad_authored, bad_authored).unwrap();
+        assert_eq!(bad_req.pid_effective_base_dimensions(), (512, 512));
+        let caps = honouring();
+        let worker_err = resolve_lane_request_controls(&bad_req, &caps, Some(3.5), None)
+            .expect_err("worker lane controls must reject 128x128 reduced grid under PiD 2K");
+        assert!(
+            worker_err.to_string().contains("512x512 to 128x128"),
+            "{worker_err}"
+        );
+    }
 }

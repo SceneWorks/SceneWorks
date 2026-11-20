@@ -3026,8 +3026,15 @@ pub fn revalidate_portable_import(
                     .and_then(|v| u32::try_from(v).ok())
                     .filter(|v| *v > 0)
                     .unwrap_or(sceneworks_options::low_res_start::LOW_RES_START_MIN_DIM);
+                let (eff_w, eff_h) =
+                    sceneworks_options::low_res_start::effective_base_dimensions_for_low_res_start(
+                        &share.model,
+                        w,
+                        h,
+                        &share_options,
+                    );
                 sceneworks_options::low_res_start::quantize_low_res_dimensions(
-                    w, h, cfg.scale, quantum, min_dim,
+                    eff_w, eff_h, cfg.scale, quantum, min_dim,
                 )
                 .is_ok()
             }

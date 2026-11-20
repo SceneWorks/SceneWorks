@@ -355,44 +355,7 @@ fn is_training_aux_model_id(source_id: &str) -> bool {
 }
 
 pub fn pid_backbone_for(model: &str) -> Option<&'static str> {
-    match model {
-        // qwenimage (sc-7845): Qwen-Image T2I + its strict-pose control variant (both the `qwen_image`
-        // model id), every Qwen-Image-Edit variant (all → the one `qwen_image_edit` engine), Krea 2.
-        "qwen_image"
-        | "qwen_image_edit"
-        | "qwen_image_edit_2509"
-        | "qwen_image_edit_2511"
-        | "qwen_image_edit_2511_lightning"
-        | "krea_2_turbo"
-        | "krea_2_raw" => Some("qwenimage"),
-        // flux (sc-7846): FLUX.1, Boogu-Image, Chroma, and Z-Image — Z-Image is in the FLUX.1 VAE latent
-        // space (PiD's zimage tags alias the flux checkpoint), not the qwenimage space.
-        "flux_dev" | "flux_schnell" | "pulid_flux_dev" | "boogu_image" | "boogu_image_turbo"
-        | "boogu_image_edit" | "chroma1_hd" | "chroma1_base" | "chroma1_flash"
-        | "z_image_turbo" | "z_image_edit" => Some("flux"),
-        // flux2 (sc-7847): FLUX.2-dev, every klein-9b variant, Lens, Ideogram 4 (packed 128-ch latent).
-        "flux2_dev"
-        | "flux2_klein_9b"
-        | "flux2_klein_9b_kv"
-        | "flux2_klein_9b_true_v2"
-        | "lens"
-        | "lens_turbo"
-        | "ideogram_4"
-        | "ideogram_4_turbo" => Some("flux2"),
-        // sdxl (sc-7848): SDXL base, RealVisXL (+ Lightning), Kolors (reuses the SDXL VAE). InstantID
-        // (sc-8370/8371) composes the SDXL VAE too, so its Angles/Poses latents decode through the same
-        // `sdxl` PiD student — the engine's `InstantId::with_pid` loads that one checkpoint.
-        // Illustrious-XL (epic 10609) ships the stock SDXL VAE (scaling_factor 0.13025 — verified on
-        // the converted turnkey), so its latents decode through the same `sdxl` PiD student.
-        "sdxl"
-        | "realvisxl"
-        | "realvisxl_lightning"
-        | "kolors"
-        | "instantid_realvisxl"
-        | "illustrious_xl_v1"
-        | "illustrious_xl_v2" => Some("sdxl"),
-        _ => None,
-    }
+    sceneworks_options::low_res_start::pid_backbone_for(model)
 }
 
 /// Strict-control depth needs the estimator only for automatic preprocessing: a supplied user
