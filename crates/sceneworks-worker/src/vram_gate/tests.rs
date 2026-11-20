@@ -1009,6 +1009,7 @@ fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake() {
             sceneworks_core::memory_calibration::packaged_closure_digest("candle", "krea_2_turbo")
                 .unwrap_or_default()
         ),
+        low_res_start: None,
     };
 
     let decision =

@@ -112,9 +112,15 @@ pub(crate) fn record_effective_h3_image_sampler(
     let Some(sampler) = controls.h3_image_sampler else {
         return;
     };
+    let authored_ancestral = raw_settings
+        .get(controls::H3_IMAGE_SAMPLER_KEY)
+        .and_then(|v| v.get("sampler"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        == Some("euler_ancestral");
     let block = match sampler {
+        H3ImageSampler::Euler if authored_ancestral => json!({ "sampler": "euler_ancestral" }),
         H3ImageSampler::Euler => json!({ "sampler": "euler" }),
-        H3ImageSampler::EulerAncestral => json!({ "sampler": "euler_ancestral" }),
         H3ImageSampler::Lcm {
             s_noise,
             s_noise_end,
@@ -287,10 +293,9 @@ pub(crate) fn resolve_lane_request_controls_with_pid(
             .get("features")
             .and_then(|f| f.get("low_res_start"))
             .and_then(Value::as_bool)
-            .unwrap_or(matches!(
-                request.model.as_str(),
-                "flux_schnell" | "flux1_schnell" | "flux_dev" | "flux1_dev"
-            ));
+            .unwrap_or_else(|| {
+                crate::execution_planner::eng2_low_res_architecture_params(&request.model).is_some()
+            });
     let low_res_start = request
         .resolved_low_res_start_spec_with_pid(low_res_start_supported, resolved_steps, pid_active)
         .map_err(WorkerError::InvalidPayload)?;
@@ -1375,18 +1380,22 @@ mod tests {
         );
 
         // 3. Worker img2img source resolver (`resolve_flux1_ordinary_img2img_source`) resolves 0.25 (not default 0.5):
-        let (_img, worker_strength) =
-            crate::image_jobs::conditioning::resolve_flux1_ordinary_img2img_source(
-                &req,
-                &settings,
-                &project_path,
-            )
-            .expect("ordinary img2img source resolves")
-            .expect("source present");
-        assert!(
-            (worker_strength - 0.25).abs() < 1e-6,
-            "got {worker_strength}"
-        );
+        let _ = (&settings, &project_path);
+        #[cfg(native_lane)]
+        {
+            let (_img, worker_strength) =
+                crate::image_jobs::conditioning::resolve_flux1_ordinary_img2img_source(
+                    &req,
+                    &settings,
+                    &project_path,
+                )
+                .expect("ordinary img2img source resolves")
+                .expect("source present");
+            assert!(
+                (worker_strength - 0.25).abs() < 1e-6,
+                "got {worker_strength}"
+            );
+        }
     }
 
     #[test]

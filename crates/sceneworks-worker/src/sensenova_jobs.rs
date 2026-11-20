@@ -449,6 +449,7 @@ fn sensenova_memory_context(
         predicted_peak_bytes,
         cache_state: gen_core::MemoryCacheState::Cold,
         evidence_revision: "worker-direct-ladder-v1".to_owned(),
+        low_res_start: None,
     }
 }
 
