@@ -1381,7 +1381,10 @@ async fn capture_portable_model_binding_inner(
     let authored_hash = canonical_authored_options_sha256(&authored_options)
         .map_err(|error| incomplete(error.to_string()))?;
     let mut routes = BTreeMap::new();
-    let mut last_route_error = None;
+    // Every authorized route that could not bind, with its own reason. Reporting only the last one
+    // made a Windows host whose Candle route failed read as a missing macOS worker, because the MLX
+    // route is visited first and a skipped Candle route never replaced its error.
+    let mut route_failures: Vec<(String, ApiError)> = Vec::new();
     for (backend, platform) in crate::portable_routes::eligible_portable_routes_resolved(
         job_type,
         payload,
@@ -1478,6 +1481,7 @@ async fn capture_portable_model_binding_inner(
                 })
         });
         let mut selected_route = None;
+        let mut route_error = None;
         for source_claims in &claim_sets {
             let mut models = Vec::with_capacity(entries.len());
             let mut failed = None;
@@ -1519,7 +1523,7 @@ async fn capture_portable_model_binding_inner(
                 }
             }
             if let Some(error) = failed {
-                last_route_error = Some(error);
+                route_error = Some(error);
                 continue;
             }
             let mut route = PortableRouteBinding::new(&backend, &platform, models)
@@ -1568,7 +1572,7 @@ async fn capture_portable_model_binding_inner(
                         .any(|claims| replay_route_claims_match(&route, payload, claims).is_ok())
                 };
                 if !proved {
-                    last_route_error = Some(incomplete(format!(
+                    route_error = Some(incomplete(format!(
                         "no eligible worker advertises the complete local source closure for {backend}:{platform}"
                     )));
                     continue;
@@ -1579,16 +1583,19 @@ async fn capture_portable_model_binding_inner(
         }
         if let Some(route) = selected_route {
             routes.insert(route.key(), route);
-        } else if worker_only_source && last_route_error.is_none() {
-            last_route_error = Some(incomplete(format!(
-                "no eligible worker advertises the complete selected source closure for {backend}:{platform}"
-            )));
+        } else {
+            // A worker-only source with no eligible worker yields no claim set, so the loop above
+            // never ran; that is this route's failure, not a reason to keep an earlier route's.
+            let error = route_error.unwrap_or_else(|| {
+                incomplete(format!(
+                    "no eligible worker advertises the complete selected source closure for {backend}:{platform}"
+                ))
+            });
+            route_failures.push((format!("{backend}:{platform}"), error));
         }
     }
     if routes.is_empty() {
-        return Err(last_route_error.unwrap_or_else(|| {
-            incomplete("no authorized worker route has an exact source binding")
-        }));
+        return Err(combined_route_failure(route_failures));
     }
     PortableJobBinding::new(authored_options, routes)
         .map(Some)
@@ -1639,6 +1646,31 @@ fn conversion_claim_tier_rank(
 
 fn incomplete(message: impl Into<String>) -> ApiError {
     ApiError::model_artifact_conflict(message.into(), "model_artifact_incomplete")
+}
+
+/// The refusal for a request no authorized route could bind. One failed route keeps its own error
+/// exactly. Several keep the last route's status and code (what clients branch on) but name every
+/// route's reason, so the operator sees the route their host actually serves.
+fn combined_route_failure(failures: Vec<(String, ApiError)>) -> ApiError {
+    let count = failures.len();
+    let mut failures = failures.into_iter();
+    let Some((first_route, first)) = failures.next() else {
+        return incomplete("no authorized worker route has an exact source binding");
+    };
+    if count == 1 {
+        return first;
+    }
+    let mut details = vec![format!("{first_route}: {}", first.detail)];
+    let mut last = first;
+    for (route, error) in failures {
+        details.push(format!("{route}: {}", error.detail));
+        last = error;
+    }
+    last.detail = format!(
+        "no authorized worker route could bind this request ({})",
+        details.join("; ")
+    );
+    last
 }
 
 struct TrainingBaseSelection {
