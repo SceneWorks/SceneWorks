@@ -1170,6 +1170,51 @@ impl<'a> BindingInput<'a> {
         .transpose()
     }
 
+    /// Bind a numeric option in `location` (`"advanced"`), normalizing an accepted top-level
+    /// carrier (`top_level_key`, e.g. `"strength"`) into the same typed [`Bound<f64>`] when the
+    /// `location` carrier was not explicitly authored (`SW-7220`).
+    ///
+    /// Returns `(bound, top_level_malformed)`:
+    /// - If `location.key` was authored, it takes precedence over `top_level_key`.
+    /// - Otherwise, if `top_level_key` is present and non-null, a finite number or legacy numeric
+    ///   string is bound with `Origin::Authored { spelling: top_level_key }`, and a non-numeric /
+    ///   non-finite value sets `top_level_malformed = true` so family/route validation can report
+    ///   a field-pointed error without breaking tolerant request construction.
+    pub fn number_with_top_level_carrier(
+        &self,
+        location: &str,
+        key: &str,
+        top_level_key: &'static str,
+    ) -> Result<(Option<Bound<f64>>, bool), BindingError> {
+        let bound = self.number(location, key)?;
+        if bound
+            .as_ref()
+            .is_some_and(|b| matches!(b.origin, Origin::Authored { .. }))
+        {
+            return Ok((bound, false));
+        }
+        if let Some(raw) = self
+            .authored
+            .get(top_level_key)
+            .filter(|v| !v.is_null())
+            .or_else(|| self.effective.get(top_level_key).filter(|v| !v.is_null()))
+        {
+            return match sceneworks_options::legacy_number(raw) {
+                Some(value) => Ok((
+                    Some(Bound {
+                        value,
+                        origin: Origin::Authored {
+                            spelling: top_level_key,
+                        },
+                    }),
+                    false,
+                )),
+                None => Ok((bound, true)),
+            };
+        }
+        Ok((bound, false))
+    }
+
     /// Bind an alias that the portable owner deliberately retains as a separate provider input.
     /// SenseNova interleave uses `timestepShift` itself, even when `schedulerShift` is also present.
     /// The ordinary `number` accessor follows the canonical key and would lose that distinction.

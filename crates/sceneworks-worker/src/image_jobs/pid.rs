@@ -75,62 +75,16 @@ fn pid_backbone_for(model: &str) -> Option<&'static str> {
 }
 
 /// PiD super-resolves the sampler latent by a FIXED 4× (`mlx_gen_pid` `sr_scale`, baked into every
-/// released student), so the *output* image is always `effective_base × 4`. There is no engine knob for
-/// the factor — the only lever on the output resolution is the base fed to the decode. `advanced.pidTarget`
-/// (opt-in, opaque pass-through like `usePid`) picks which tier that base×4 lands on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PidOutputTier {
-    /// ~2048-px-ceiling output: the effective base long side is capped to 512 (×4 = 2048). Lower
-    /// pixel-space decode peak (F-013 memory-relief valve).
-    Res2k,
-    /// `base × 4` at the requested base, untouched — the default and the byte-identical pre-sc-10054
-    /// behavior (a typical 1024 base → 4096 output).
-    Res4k,
-}
+/// released student), so the *output* image is always `effective_base × 4`. Shared with
+/// `sceneworks-options::low_res_start` (`SW-7221`).
+pub(crate) use sceneworks_core::options::low_res_start::{
+    pid_effective_dims, pid_output_tier_from_str, PidOutputTier,
+};
 
-/// PiD's fixed spatial super-resolution factor (`mlx_gen_pid` `sr_scale`). Output pixels = base × this.
-const PID_SR_SCALE: u32 = 4;
-/// Base-dimension granularity for the 2K tier. Every PiD-eligible engine requires the base width/height
-/// to be a multiple of at least 16 (`mlx-gen-flux` `model.rs` validates `is_multiple_of(16)`; the flux2
-/// packed latent is coarser). Snap the down-scaled 2K base to 32 so it stays legal for ALL backbones.
-const PID_DIM_MULTIPLE: u32 = 32;
-
-/// Resolve the requested PiD output tier from `advanced.pidTarget` (sc-10054). Default + any
-/// unrecognized value → `Res4k` (today's full-resolution behavior); only an explicit `"2k"` opts down.
+/// Resolve the requested PiD output tier from `advanced.pidTarget` (sc-10054, `SW-7221`). Default +
+/// any unrecognized value → `Res4k` (today's full-resolution behavior); only an explicit `"2k"` opts down.
 pub(crate) fn pid_output_tier(request: &ImageRequest) -> PidOutputTier {
-    match request.advanced_text("pidTarget").map(str::trim) {
-        Some(tier) if tier.eq_ignore_ascii_case("2k") => PidOutputTier::Res2k,
-        _ => PidOutputTier::Res4k,
-    }
-}
-
-/// The effective base (pre-super-resolve) dimensions to hand the engine so PiD's `base × 4` output lands
-/// on `tier`. Only reshapes when PiD actually runs (`use_pid`) AND the caller asked for `2k`; otherwise
-/// returns the request dims unchanged (the byte-identical default path — so a stray `pidTarget` on a
-/// non-PiD generation can never shrink a native-VAE image). For `2k`, scales the requested aspect down
-/// so the longer output side is ~2048 (base long side ≤ 512), snapping each side to `PID_DIM_MULTIPLE`
-/// (min 256). Never upscales: a base already at/under the 2K ceiling is left as-is.
-pub(crate) fn pid_effective_dims(
-    width: u32,
-    height: u32,
-    use_pid: bool,
-    tier: PidOutputTier,
-) -> (u32, u32) {
-    if !use_pid || tier == PidOutputTier::Res4k {
-        return (width, height);
-    }
-    let base_cap = 2048 / PID_SR_SCALE; // 512: max base long side for a ~2K output
-    let longest = width.max(height);
-    if longest <= base_cap {
-        return (width, height);
-    }
-    let scale = f64::from(base_cap) / f64::from(longest);
-    let snap = |v: u32| {
-        let scaled = (f64::from(v) * scale).round();
-        let rounded = (scaled / f64::from(PID_DIM_MULTIPLE)).round() as u32 * PID_DIM_MULTIPLE;
-        rounded.max(256)
-    };
-    (snap(width), snap(height))
+    pid_output_tier_from_str(request.advanced_text("pidTarget"))
 }
 
 /// True when the request opted into the PiD decoder via `advanced.usePid` (an opaque pass-through bool,
