@@ -18,9 +18,11 @@
 //! negative prompt at CFG 1.0) is refused too — the engine refuses both, so a 400 at enqueue is the
 //! honest place to say so.
 
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::contracts::JsonObject;
+use crate::request_validation::ValidationRefusal;
 
 /// `advanced` key of the CFG interval `[lo, hi]`.
 pub const CFG_INTERVAL_KEY: &str = "cfgInterval";
@@ -28,6 +30,183 @@ pub const CFG_INTERVAL_KEY: &str = "cfgInterval";
 pub const CAPTION_OVERFLOW_KEY: &str = "captionOverflow";
 /// `advanced` key of the schedule shift (shared with the scheduler-menu models).
 pub const SCHEDULER_SHIFT_KEY: &str = "schedulerShift";
+/// `advanced` key of the single-pass low-resolution start recipe (`SW-F332`).
+pub const LOW_RES_START_KEY: &str = "lowResStart";
+/// Supported recipe version for `advanced.lowResStart`.
+pub const LOW_RES_START_VERSION: u32 = 1;
+/// Minimum allowed scale factor for `advanced.lowResStart.scale`.
+pub const LOW_RES_START_SCALE_MIN: f64 = 0.25;
+/// Maximum allowed scale factor for `advanced.lowResStart.scale`.
+pub const LOW_RES_START_SCALE_MAX: f64 = 0.9;
+
+/// Canonical wire representation of `advanced.lowResStart`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LowResStartWireConfig {
+    pub version: u32,
+    pub k: u32,
+    pub scale: f64,
+}
+
+impl LowResStartWireConfig {
+    pub fn to_json_value(self) -> Value {
+        json!({
+            "version": self.version,
+            "k": self.k,
+            "scale": self.scale,
+        })
+    }
+}
+
+/// Whether the model manifest entry declares `features.low_res_start: true`.
+pub fn supports_low_res_start(model_manifest_entry: &JsonObject) -> bool {
+    model_manifest_entry
+        .get("features")
+        .and_then(|features| features.get("low_res_start"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn effective_steps_for_low_res_start(
+    advanced: &JsonObject,
+    model_manifest_entry: &JsonObject,
+) -> Option<u32> {
+    advanced
+        .get("steps")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .or_else(|| {
+            model_manifest_entry
+                .get("defaults")
+                .and_then(|defaults| defaults.get("steps"))
+                .and_then(Value::as_u64)
+        })
+        .and_then(|steps| u32::try_from(steps).ok())
+}
+
+/// Parse and validate `advanced.lowResStart` against the target model manifest entry.
+///
+/// Absent, `null`, or `false` => `Ok(None)`.
+/// Otherwise validates route support (`features.low_res_start == true`), recipe version (`1`),
+/// step budget (`1 <= k < executed_steps`), scale bounds (`0.25 <= scale <= 0.9`), and
+/// incompatibility with explicit multi-phase schedules (`advanced.phases`).
+pub fn requested_low_res_start(
+    advanced: &JsonObject,
+    model_manifest_entry: &JsonObject,
+) -> Result<Option<LowResStartWireConfig>, ValidationRefusal> {
+    let Some(raw) = advanced.get(LOW_RES_START_KEY) else {
+        return Ok(None);
+    };
+    if raw.is_null() || raw == &Value::Bool(false) {
+        return Ok(None);
+    }
+    if !supports_low_res_start(model_manifest_entry) {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart",
+            "The selected model route does not support Low Res Start.",
+        ));
+    }
+    let Some(obj) = raw.as_object() else {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart",
+            "advanced.lowResStart must be an object with { version: 1, k, scale }.",
+        ));
+    };
+    for key in obj.keys() {
+        if !matches!(key.as_str(), "version" | "k" | "scale") {
+            return Err(ValidationRefusal::new(
+                format!("advanced.lowResStart.{key}"),
+                format!("unknown advanced.lowResStart field `{key}`"),
+            ));
+        }
+    }
+    let Some(version_val) = obj.get("version") else {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart.version",
+            "advanced.lowResStart.version is required",
+        ));
+    };
+    let Some(version) = version_val
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v == LOW_RES_START_VERSION)
+    else {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart.version",
+            format!("unsupported advanced.lowResStart.version {version_val} (supported: {LOW_RES_START_VERSION})"),
+        ));
+    };
+    let Some(k) = obj
+        .get("k")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v >= 1)
+    else {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart.k",
+            "advanced.lowResStart.k must be an integer >= 1",
+        ));
+    };
+    if let Some(steps) = effective_steps_for_low_res_start(advanced, model_manifest_entry) {
+        if k >= steps {
+            return Err(ValidationRefusal::new(
+                "advanced.lowResStart.k",
+                format!(
+                    "advanced.lowResStart.k ({k}) must be strictly less than executed steps ({steps})"
+                ),
+            ));
+        }
+    }
+    let Some(scale) = obj.get("scale").and_then(Value::as_f64).filter(|v| {
+        v.is_finite() && (*v >= LOW_RES_START_SCALE_MIN && *v <= LOW_RES_START_SCALE_MAX)
+    }) else {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart.scale",
+            format!(
+                "advanced.lowResStart.scale must be a finite number in [{LOW_RES_START_SCALE_MIN}, {LOW_RES_START_SCALE_MAX}]"
+            ),
+        ));
+    };
+    if advanced
+        .get("phases")
+        .and_then(Value::as_array)
+        .is_some_and(|phases| !phases.is_empty())
+    {
+        return Err(ValidationRefusal::new(
+            "advanced.lowResStart",
+            "advanced.lowResStart cannot be combined with explicit multi-phase schedules (advanced.phases).",
+        ));
+    }
+    Ok(Some(LowResStartWireConfig { version, k, scale }))
+}
+
+/// Sanitize a candidate `advanced.lowResStart` JSON value into canonical `{ version: 1, k, scale }`.
+pub fn sanitize_share_low_res_start(value: &Value) -> Option<Value> {
+    let obj = value.as_object()?;
+    if obj
+        .keys()
+        .any(|k| !matches!(k.as_str(), "version" | "k" | "scale"))
+    {
+        return None;
+    }
+    let version = obj
+        .get("version")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v == LOW_RES_START_VERSION)?;
+    let k = obj
+        .get("k")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v >= 1)?;
+    let scale = obj.get("scale").and_then(Value::as_f64).filter(|v| {
+        v.is_finite() && *v >= LOW_RES_START_SCALE_MIN && *v <= LOW_RES_START_SCALE_MAX
+    })?;
+    Some(LowResStartWireConfig { version, k, scale }.to_json_value())
+}
 
 /// Keep raw H3 sampler lookup at the portable boundary. The core translates the block to
 /// gen-core's engine enum, which this crate intentionally does not depend on.

@@ -53,6 +53,7 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "mossImageAdvanced",
     "h3ImageSampler",
     "pag",
+    "lowResStart",
     "promptBatch",
     "mossOrdinarySettings",
     // FLUX.3's authored layout controls (`imageJobAdvanced.js`): the shared studio builder emits

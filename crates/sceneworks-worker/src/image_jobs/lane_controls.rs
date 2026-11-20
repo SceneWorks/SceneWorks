@@ -30,6 +30,9 @@ pub(crate) const ADAPTER_APPLY_KEY: &str = "adapterApply";
 pub(crate) const PREFIX_KV_CACHE_KEY: &str = super::PREFIX_KV_CACHE_RESULT_KEY;
 /// `rawAdapterSettings` key of the completed Perturbed-Attention Guidance receipt (SW-7180).
 pub(crate) const PAG_EXECUTION_REPORT_KEY: &str = sceneworks_core::options::pag::PAG_REPORT_KEY;
+/// `rawAdapterSettings` key of the completed Low-Resolution Start execution receipt (SW-6942).
+pub(crate) const LOW_RES_START_EXECUTION_REPORT_KEY: &str =
+    sceneworks_core::options::low_res_start::LOW_RES_START_REPORT_KEY;
 
 /// The resolved request controls one generic-lane render carries onto its `GenerationRequest`.
 /// `Default` is "the engine's own" for every field — what every model that declares none sends.
@@ -41,6 +44,8 @@ pub(crate) struct LaneRequestControls {
     pub(crate) h3_image_sampler: Option<gen_core::h3_image::H3ImageSampler>,
     /// Perturbed-Attention Guidance policy (SW-7180), from `advanced.pag`.
     pub(crate) pag: Option<gen_core::PagConfig>,
+    /// Two-phase Low-Resolution Start trajectory policy (SW-6942), from `advanced.lowResStart`.
+    pub(crate) low_res_start: Option<gen_core::LowResStartSpec>,
 }
 
 /// Record a provider's completed [`gen_core::PagExecutionReport`] into per-image facts under
@@ -55,6 +60,43 @@ pub(crate) fn record_pag_execution_report(
     let wire = sceneworks_core::options::pag::PagExecutionReportWire::from(report);
     if let Ok(value) = serde_json::to_value(wire) {
         facts.insert(PAG_EXECUTION_REPORT_KEY.to_owned(), value);
+    }
+}
+
+/// Record a provider's completed [`gen_core::LowResStartExecutionReport`] into per-image facts
+/// under `lowResStartExecutionReport` and as a canonical [`sceneworks_core::execution_receipt::LowResStartReceipt`]
+/// under `workerLowResStartReceipt`. Nothing is written when `lowResStart` did not execute (`None`).
+pub(crate) fn record_low_res_start_execution_report(
+    facts: &mut JsonObject,
+    low_res_start: Option<&gen_core::LowResStartExecutionReport>,
+) {
+    let Some(report) = low_res_start else {
+        return;
+    };
+    if let Ok(value) = serde_json::to_value(report) {
+        facts.insert(LOW_RES_START_EXECUTION_REPORT_KEY.to_owned(), value);
+    }
+    let receipt = sceneworks_core::execution_receipt::LowResStartReceipt {
+        version: report.version,
+        k: u32::try_from(report.k).unwrap_or(u32::MAX),
+        executed_steps: u32::try_from(report.executed_steps).unwrap_or(u32::MAX),
+        scale: sceneworks_core::execution_receipt::normalize_low_res_start_scale(f64::from(
+            report.scale,
+        )),
+        low_w: report.low_width,
+        low_h: report.low_height,
+        full_w: report.full_width,
+        full_h: report.full_height,
+        target_pass: report.estimate_provenance.pass_index,
+        estimator: report.estimator.clone(),
+        schedule_policy: sceneworks_core::execution_receipt::LOW_RES_START_SCHEDULE_POLICY_V1
+            .to_owned(),
+        transition_arithmetic: report.transition_arithmetic_id.clone(),
+        transition_seed_scheme: report.transition_seed_derivation_id.clone(),
+        selected_rung: None,
+    };
+    if let Ok(receipt_value) = serde_json::to_value(receipt) {
+        facts.insert("workerLowResStartReceipt".to_owned(), receipt_value);
     }
 }
 
@@ -206,11 +248,40 @@ pub(crate) fn resolve_lane_request_controls(
     let pag = request
         .resolved_pag_with_capability(caps.pag.as_ref())
         .map_err(WorkerError::InvalidPayload)?;
+    let default_steps = request
+        .model_manifest_entry
+        .get("defaults")
+        .and_then(|d| d.get("steps"))
+        .and_then(Value::as_u64)
+        .and_then(|s| u32::try_from(s).ok())
+        .unwrap_or(match request.model.as_str() {
+            "flux_schnell" | "flux1_schnell" => 4,
+            _ => 25,
+        });
+    let resolved_steps = request
+        .advanced_i64("steps")
+        .and_then(|s| u32::try_from(s).ok())
+        .unwrap_or(default_steps);
+    let low_res_start_supported = !caps.supports_phases
+        && caps.conditioning != [gen_core::ConditioningKind::Control]
+        && request
+            .model_manifest_entry
+            .get("features")
+            .and_then(|f| f.get("low_res_start"))
+            .and_then(Value::as_bool)
+            .unwrap_or(matches!(
+                request.model.as_str(),
+                "flux_schnell" | "flux1_schnell" | "flux_dev" | "flux1_dev"
+            ));
+    let low_res_start = request
+        .resolved_low_res_start_spec(low_res_start_supported, resolved_steps)
+        .map_err(WorkerError::InvalidPayload)?;
     Ok(LaneRequestControls {
         cfg_interval,
         caption_overflow: caption_overflow.map(engine_policy),
         h3_image_sampler,
         pag,
+        low_res_start,
     })
 }
 
@@ -628,6 +699,7 @@ mod tests {
                 caption_overflow: Some(CaptionOverflowPolicy::Error),
                 h3_image_sampler: None,
                 pag: None,
+                low_res_start: None,
             }
         );
         let none = resolve_lane_request_controls(
@@ -1098,5 +1170,93 @@ mod tests {
                 "totalSteps": 28
             }))
         );
+    }
+
+    #[test]
+    fn sw_6942_low_res_start_controls_resolve_against_descriptor_capability_and_record_execution_receipt(
+    ) {
+        let caps = honouring();
+        let payload = json!({
+            "projectId": "p",
+            "model": "flux_dev",
+            "prompt": "a tower",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 25,
+                "lowResStart": { "version": 1, "k": 8, "scale": 0.5 }
+            },
+            "modelManifestEntry": {
+                "id": "flux_dev",
+                "type": "image",
+                "features": { "low_res_start": true }
+            }
+        });
+        let obj = payload.as_object().unwrap();
+        let req = ImageRequest::from_resolved(obj, obj).unwrap();
+        let resolved = resolve_lane_request_controls(&req, &caps, Some(3.5), None).unwrap();
+        assert_eq!(
+            resolved.low_res_start,
+            Some(gen_core::LowResStartSpec::new(8, Some(0.5)))
+        );
+
+        // Provider whose capabilities conflict with `low_res_start` (e.g. `supports_phases`) refuses before load:
+        let mut multiphase_caps = honouring();
+        multiphase_caps.supports_phases = true;
+        let unsupported = resolve_lane_request_controls(&req, &multiphase_caps, Some(3.5), None)
+            .expect_err("provider with conflicting supports_phases must refuse");
+        assert!(
+            unsupported.to_string().contains("Low Res Start")
+                || unsupported.to_string().contains("lowResStart"),
+            "{unsupported}"
+        );
+
+        // Bespoke conditioned route rejection helper refuses `lowResStart` before load:
+        let bespoke_refusal = req
+            .reject_low_res_start("FLUX.1-dev strict-control")
+            .unwrap_err();
+        assert!(
+            bespoke_refusal.contains("FLUX.1-dev strict-control"),
+            "{bespoke_refusal}"
+        );
+
+        // Execution receipt records report and omits inactive report:
+        let mut facts = crate::JsonObject::new();
+        record_low_res_start_execution_report(&mut facts, None);
+        assert!(!facts.contains_key(LOW_RES_START_EXECUTION_REPORT_KEY));
+        let resolved_plan = gen_core::LowResStartSpec::new(8, Some(0.5))
+            .with_estimate_source(gen_core::EstimateSource::PreviousEvaluation)
+            .resolve_geometry("flux1_dev", 1024, 1024, 25, 8, 2, 16, 256)
+            .unwrap();
+        let sigmas: Vec<f32> = (0..=25).map(|i| 1.0 - (i as f32 / 25.0)).collect();
+        let report = resolved_plan
+            .execution_report(
+                0,
+                &sigmas,
+                gen_core::sampling::Solver::Euler,
+                "embedded_guidance",
+                3.5,
+                "base_dit",
+                "bf16",
+                2,
+                1,
+                16,
+                64,
+            )
+            .unwrap();
+        record_low_res_start_execution_report(&mut facts, Some(&report));
+        let recorded = facts
+            .get(LOW_RES_START_EXECUTION_REPORT_KEY)
+            .expect("execution report recorded");
+        assert_eq!(recorded["recipe_id"], json!("low_res_start"));
+        assert_eq!(recorded["version"], json!(1));
+        assert_eq!(recorded["k"], json!(8));
+        assert_eq!(recorded["executed_steps"], json!(25));
+        assert_eq!(recorded["low_width"], json!(512));
+        assert_eq!(recorded["low_height"], json!(512));
+        assert_eq!(recorded["full_width"], json!(1024));
+        assert_eq!(recorded["full_height"], json!(1024));
+        assert_eq!(recorded["estimate_source"], json!("previous_evaluation"));
+        assert_eq!(recorded["estimator"], json!("previous_evaluation_v1"));
     }
 }

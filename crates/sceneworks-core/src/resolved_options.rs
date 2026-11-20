@@ -137,6 +137,22 @@ pub struct RoutePidCheckpoint {
     pub filename: RouteField<String>,
 }
 
+/// Typed syntax projection for `advanced.lowResStart` (`SW-F332`).
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+pub struct RouteLowResStart {
+    #[serde(default)]
+    pub disabled: bool,
+    pub version: Option<u32>,
+    pub k: Option<u32>,
+    pub scale: Option<f64>,
+}
+
+/// Typed syntax projection for `advanced.memoryStrategy` (`SW-F332`).
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+pub struct RouteMemoryStrategy {
+    pub rung: Option<String>,
+}
+
 impl AppearanceAuthoredInputs {
     pub fn from_payload_syntax(payload: &JsonObject) -> Self {
         let advanced = payload.get("advanced").and_then(Value::as_object);
@@ -207,6 +223,8 @@ pub struct RouteOptionFacts {
     pub yue2_decoder: RouteField<String>,
     pub conv_rot: RouteField<bool>,
     pub angle_set: RouteField<bool>,
+    pub low_res_start: RouteField<RouteLowResStart>,
+    pub memory_strategy: RouteField<RouteMemoryStrategy>,
     /// The job's top-level `variant` (trimmed; blank is absent): the tier selection admission
     /// ranks above `advanced.quantTier` and `advanced.mlxQuantize`.
     pub variant: Option<String>,
@@ -379,6 +397,19 @@ impl RouteOptionFacts {
             conv_rot: field(advanced, "convRot", boolean),
             angle_set: field(advanced, "angleSet", |value| {
                 Some(sceneworks_options::legacy_image_flag(value))
+            }),
+            low_res_start: field(advanced, "lowResStart", |value| {
+                if value == &Value::Bool(false) {
+                    Some(RouteLowResStart {
+                        disabled: true,
+                        ..Default::default()
+                    })
+                } else {
+                    serde_json::from_value(value.clone()).ok()
+                }
+            }),
+            memory_strategy: field(advanced, "memoryStrategy", |value| {
+                serde_json::from_value(value.clone()).ok()
             }),
             variant: crate::payload_util::optional_id(payload, "variant"),
             legacy_quant_honored: payload

@@ -893,6 +893,17 @@ fn unavailable_completed_receipt(
             .transpose()
             .map_err(WorkerError::Json)?
             .unwrap_or_default(),
+        low_res_start: crate::image_jobs::extract_low_res_start_receipt_value(
+            &serde_json::Value::Object(result.clone()),
+        )
+        .or_else(|| {
+            writes
+                .and_then(|w| w.first())
+                .and_then(crate::image_jobs::extract_low_res_start_receipt_value)
+        })
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(WorkerError::Json)?,
     };
     if sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).is_err() {
         return Ok(None);

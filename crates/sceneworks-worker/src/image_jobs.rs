@@ -1140,6 +1140,85 @@ async fn run_image_generate_job_unexplained(
     Ok(())
 }
 
+/// Extract or convert a [`sceneworks_core::execution_receipt::LowResStartReceipt`] from a
+/// completed image fact (`serde_json::Value`) or job result map.
+pub(crate) fn extract_low_res_start_receipt_value(
+    fact: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if let Some(direct) = fact
+        .get("workerLowResStartReceipt")
+        .or_else(|| fact.pointer("/rawAdapterSettings/lowResStartReceipt"))
+    {
+        return Some(direct.clone());
+    }
+    let report = fact
+        .get(sceneworks_core::options::low_res_start::LOW_RES_START_REPORT_KEY)
+        .or_else(|| fact.pointer("/rawAdapterSettings/lowResStartExecutionReport"))?;
+    let obj = report.as_object()?;
+    let version = obj
+        .get("version")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let k = obj.get("k")?.as_u64().and_then(|v| u32::try_from(v).ok())?;
+    let executed_steps = obj
+        .get("executed_steps")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let scale = sceneworks_core::execution_receipt::normalize_low_res_start_scale(
+        obj.get("scale")?.as_f64()?,
+    );
+    let low_w = obj
+        .get("low_width")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let low_h = obj
+        .get("low_height")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let full_w = obj
+        .get("full_width")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let full_h = obj
+        .get("full_height")?
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())?;
+    let target_pass = report
+        .pointer("/estimate_provenance/pass_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(0);
+    let estimator = obj.get("estimator")?.as_str()?.to_owned();
+    let transition_arithmetic = obj
+        .get("transition_arithmetic_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(sceneworks_core::execution_receipt::LOW_RES_START_TRANSITION_ARITHMETIC_V1)
+        .to_owned();
+    let transition_seed_scheme = obj
+        .get("transition_seed_derivation_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(sceneworks_core::execution_receipt::LOW_RES_START_TRANSITION_SEED_SCHEME_V1)
+        .to_owned();
+    let receipt = sceneworks_core::execution_receipt::LowResStartReceipt {
+        version,
+        k,
+        executed_steps,
+        scale,
+        low_w,
+        low_h,
+        full_w,
+        full_h,
+        target_pass,
+        estimator,
+        schedule_policy: sceneworks_core::execution_receipt::LOW_RES_START_SCHEDULE_POLICY_V1
+            .to_owned(),
+        transition_arithmetic,
+        transition_seed_scheme,
+        selected_rung: None,
+    };
+    serde_json::to_value(receipt).ok()
+}
+
 /// Build the output map from files already written by this worker, after all
 /// inline variants are appended and before the terminal POST. A provider report
 /// belongs to the asset's producing render; request settings and sidecars never
@@ -1296,6 +1375,12 @@ fn image_execution_receipt(
         }),
         outputs,
         stages: Vec::new(),
+        low_res_start: asset_writes
+            .first()
+            .and_then(extract_low_res_start_receipt_value)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(WorkerError::Json)?,
     })
 }
 
@@ -1325,6 +1410,115 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
         "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
     })];
     assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
+
+    // End-to-end receipt test using actual lane-produced lowResStartExecutionReport facts:
+    let mut lane_facts = crate::JsonObject::new();
+    lane_facts.insert("assetId".into(), serde_json::json!("asset-one"));
+    lane_facts.insert("index".into(), serde_json::json!(0));
+    lane_facts.insert(
+        "mediaPath".into(),
+        serde_json::json!("assets/images/render.png"),
+    );
+    #[cfg(native_lane)]
+    {
+        let resolved_plan = gen_core::LowResStartSpec::new(8, Some(0.3333333_f32))
+            .with_estimate_source(gen_core::EstimateSource::EndpointEvaluation)
+            .resolve_geometry("flux1_dev", 1024, 1024, 28, 8, 2, 16, 256)
+            .unwrap();
+        let sigmas: Vec<f32> = (0..=28).map(|i| 1.0 - (i as f32 / 28.0)).collect();
+        let report = resolved_plan
+            .execution_report(
+                0,
+                &sigmas,
+                gen_core::sampling::Solver::Euler,
+                "embedded_guidance",
+                3.5,
+                "base_dit",
+                "bf16",
+                2,
+                1,
+                16,
+                42,
+            )
+            .unwrap();
+        lane_controls::record_low_res_start_execution_report(&mut lane_facts, Some(&report));
+    }
+    #[cfg(not(native_lane))]
+    {
+        lane_facts.insert(
+            "lowResStartExecutionReport".into(),
+            serde_json::json!({
+                "recipe_id": "low_res_start",
+                "version": 1,
+                "k": 8,
+                "executed_steps": 28,
+                "scale": 0.3333333_f32,
+                "low_width": 336,
+                "low_height": 336,
+                "full_width": 1024,
+                "full_height": 1024,
+                "estimator": "endpoint_evaluation_v1",
+                "estimate_provenance": { "pass_index": 0 },
+                "transition_arithmetic_id": "unpack_f32_bilinear_half_pixel_clamp_renoise_repack_v1",
+                "transition_seed_derivation_id": "low_res_start_transition_v1"
+            }),
+        );
+    }
+    let low_res_receipt =
+        image_execution_receipt(project.path(), &[serde_json::Value::Object(lane_facts)], 1)
+            .unwrap();
+    let recorded_low_res = low_res_receipt
+        .low_res_start
+        .clone()
+        .expect("lane-produced low_res_start report must populate receipt.low_res_start");
+    assert_eq!(recorded_low_res.version, 1);
+    assert_eq!(recorded_low_res.k, 8);
+    assert_eq!(recorded_low_res.executed_steps, 28);
+    assert!(
+        sceneworks_core::execution_receipt::low_res_start_scales_match(
+            recorded_low_res.scale,
+            0.3333333
+        )
+    );
+    assert_eq!(recorded_low_res.low_w, 336);
+    assert_eq!(recorded_low_res.low_h, 336);
+    assert_eq!(recorded_low_res.full_w, 1024);
+    assert_eq!(recorded_low_res.full_h, 1024);
+    assert_eq!(recorded_low_res.estimator, "endpoint_evaluation_v1");
+
+    // Verify completed-receipt-to-replay binding succeeds for a scale with >6 decimal places:
+    let trusted_receipt = sceneworks_core::execution_receipt::TrustedExecutionReceipt {
+        version: low_res_receipt.version,
+        job_id: "job-1".to_owned(),
+        job_type: "image_generate".to_owned(),
+        worker_id: "worker-1".to_owned(),
+        attempt_id: "attempt-1".to_owned(),
+        accepted_backend: "mlx".to_owned(),
+        accepted_device: "metal".to_owned(),
+        accepted_source_route: None,
+        inference_revision: "fd91147c4069d8ad8fedace3847e01415efaedc8".to_owned(),
+        accepted_binding_sha256: "binding-sha".to_owned(),
+        accepted_result_sha256: "result-sha".to_owned(),
+        execution: low_res_receipt.execution.clone(),
+        outputs: low_res_receipt.outputs.clone(),
+        stages: low_res_receipt.stages.clone(),
+        low_res_start: low_res_receipt.low_res_start.clone(),
+    };
+    let replay_payload = serde_json::json!({
+        "model": "flux_dev",
+        "mode": "text_to_image",
+        "width": 1024,
+        "height": 1024,
+        "advanced": {
+            "steps": 28,
+            "lowResStart": { "version": 1, "k": 8, "scale": 0.3333333 }
+        }
+    });
+    sceneworks_core::execution_receipt::require_low_res_start_replay_binding(
+        &trusted_receipt,
+        replay_payload.as_object().unwrap(),
+    )
+    .expect("completed receipt with >6 decimal scale must pass replay binding");
 }
 
 #[cfg(all(test, native_lane))]
@@ -2028,6 +2222,18 @@ fn attach_pag_report_to_share(
             sceneworks_core::options::pag::PAG_REPORT_KEY.to_owned(),
             report,
         );
+    }
+    if let Some(low_res) = raw_settings
+        .and_then(|raw| {
+            raw.get(sceneworks_core::options::image_sampling_controls::LOW_RES_START_KEY)
+        })
+        .and_then(sceneworks_core::workflow_share::sanitize_share_low_res_start)
+    {
+        share.advanced.insert(
+            sceneworks_core::options::image_sampling_controls::LOW_RES_START_KEY.to_owned(),
+            low_res,
+        );
+        share.schema_version = sceneworks_core::workflow_share::WORKFLOW_SHARE_SCHEMA_VERSION;
     }
 }
 
@@ -3958,3 +4164,69 @@ pub(crate) use artifact_resolution::resolved_artifact_provenance_tests;
 
 #[cfg(native_lane)]
 mod dispatch;
+
+#[cfg(test)]
+mod low_res_share_attachment_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn attach_pag_report_to_share_attaches_low_res_start_without_pag_and_round_trips_png_chunk() {
+        let facts = WorkflowAssetFacts {
+            mode: "text_to_image".to_owned(),
+            model: "z_image_turbo".to_owned(),
+            prompt: "fox in snow".to_owned(),
+            negative_prompt: String::new(),
+            seed: 42,
+            width: Some(1024),
+            height: Some(1024),
+        };
+        let scrubbed_payload = json!({
+            "mode": "text_to_image",
+            "model": "z_image_turbo",
+            "prompt": "fox in snow",
+            "width": 1024,
+            "height": 1024,
+            "advanced": { "steps": 9, "sampler": "euler" }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let mut share =
+            embeddable_workflow_share(&facts, &scrubbed_payload).expect("embeddable share");
+        assert_eq!(share.schema_version, 1);
+
+        let raw_settings = json!({
+            "steps": 9,
+            "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        attach_pag_report_to_share(&mut share, Some(&raw_settings));
+        assert_eq!(
+            share.schema_version,
+            sceneworks_core::workflow_share::WORKFLOW_SHARE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            share.advanced.get("lowResStart"),
+            Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let png_path = dir.path().join("attached_low_res.png");
+        let image = image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]));
+        write_workflow_chunk(&image, &png_path, Some(&share)).unwrap();
+        let read_back = sceneworks_core::workflow_png::read_workflow_chunk_file(&png_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_back.schema_version,
+            sceneworks_core::workflow_share::WORKFLOW_SHARE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            read_back.advanced.get("lowResStart"),
+            Some(&json!({ "version": 1, "k": 3, "scale": 0.5 }))
+        );
+    }
+}

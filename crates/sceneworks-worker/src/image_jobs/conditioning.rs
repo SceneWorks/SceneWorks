@@ -1795,6 +1795,46 @@ pub(super) struct LaneConditioning {
     /// Ideogram 4 inpaint/outpaint mask (white = repaint) threaded to `generate_one` as
     /// `Conditioning::Mask`. `None` for every other family / plain img2img.
     pub(super) ideogram_edit_mask: Option<Image>,
+    /// Base FLUX.1 ordinary single-source img2img (`§6.13`) input `(source_image, strength)`,
+    /// distinct from the XLabs IP-Adapter `Conditioning::Reference` path.
+    pub(super) flux_source_image: Option<(Image, f32)>,
+}
+
+/// Resolve an ordinary single-source img2img (`§6.13`) input `(source_image, strength)` for base
+/// FLUX.1 (`flux_schnell`, `flux_dev`) when `sourceAssetId` is supplied in `text_to_image` mode.
+#[cfg(native_lane)]
+pub(super) fn resolve_flux1_ordinary_img2img_source(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    if !matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+        || !matches!(request.mode.as_str(), "text_to_image" | "image_generation")
+    {
+        return Ok(None);
+    }
+    let Some(source_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let image = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        source_id,
+        project_path,
+    )?;
+    let strength = request.authored_advanced_f64("strength").unwrap_or(0.5);
+    if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{}: advanced.strength must be in [0.0, 1.0] without clamping (got {strength})",
+            request.model
+        )));
+    }
+    Ok(Some((image, strength as f32)))
 }
 
 /// Resolve the [`LaneConditioning`] for `request` on the generic MLX lane. Mirrors the historical
@@ -1865,6 +1905,20 @@ pub(super) fn resolve_generic_lane_conditioning(
             flux_ip_dir: Some(ip_dir),
             flux_true_cfg: true_cfg,
             ideogram_edit_mask: None,
+            flux_source_image: None,
+        })
+    } else if is_flux_model(&request.model)
+        && !has_reference
+        && non_empty(&request.source_asset_id)
+        && matches!(request.mode.as_str(), "text_to_image" | "image_generation")
+    {
+        Ok(LaneConditioning {
+            flux_source_image: resolve_flux1_ordinary_img2img_source(
+                request,
+                settings,
+                project_path,
+            )?,
+            ..Default::default()
         })
     } else if request.model == "kolors" && request.mode == "edit_image" {
         // Kolors img2img (sc-4765): `sourceAssetId` + `strength` → the engine's `Reference`
@@ -1886,6 +1940,7 @@ pub(super) fn resolve_generic_lane_conditioning(
             flux_ip_dir: Some(ip_dir),
             flux_true_cfg: None,
             ideogram_edit_mask: None,
+            flux_source_image: None,
         })
     } else if matches!(request.model.as_str(), "ideogram_4" | "ideogram_4_turbo")
         && request.mode == "edit_image"
@@ -1900,6 +1955,7 @@ pub(super) fn resolve_generic_lane_conditioning(
                 flux_ip_dir: None,
                 flux_true_cfg: None,
                 ideogram_edit_mask: mask,
+                flux_source_image: None,
             }),
             None => Ok(LaneConditioning::default()),
         }

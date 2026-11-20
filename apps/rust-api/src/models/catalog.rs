@@ -1021,6 +1021,8 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
     } else {
         object.remove("pag");
     }
+    object.remove("features");
+    object.remove("feature_details");
     project_imported_operation_surface(object, &routes);
 }
 

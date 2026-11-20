@@ -19,6 +19,12 @@ pub struct ModelSpec {
     /// Perturbed-Attention Guidance capability derived from native generator descriptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pag: Option<PagSpec>,
+    /// Computed Feature availability flags (`features.low_res_start`) derived from native generator descriptors (`HOOK-4`, `REG-3`, `OPT-2`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, bool>,
+    /// Computed Feature applicability details (`feature_details.low_res_start`) derived from native generator descriptors (`HOOK-4`, `REG-3`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub feature_details: BTreeMap<String, Value>,
     /// The primary image generator on each backend, retained for existing consumers.
     pub routes: BTreeMap<String, GeneratorRoute>,
     /// Video modes can select several native engines on the same backend.
@@ -194,6 +200,8 @@ pub struct GeneratorRoute {
     pub supported_guidance_methods: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pag: Option<PagRouteCapability>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub features: BTreeMap<String, Value>,
 }
 
 /// Preserve the calibration and memory-contract ABI payloads and their identity fields verbatim.

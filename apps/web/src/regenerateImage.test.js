@@ -178,4 +178,81 @@ describe("background MOSS edit regeneration", () => {
       expect(opts.onCreated).not.toHaveBeenCalled();
     }
   });
+
+  it("retains fresh-seed behavior while preserving authored lowResStart and stripping machine-specific rung fields (SW-6943)", async () => {
+    const lowResAsset = {
+      id: "asset-lowres",
+      projectId: "project-1",
+      type: "image",
+      lineage: { jobId: "job-lowres" },
+      recipe: {
+        mode: "text_to_image",
+        model: "z_image_turbo",
+        prompt: "mountain sunrise",
+        negativePrompt: "",
+        seed: 777,
+        loras: [],
+        normalizedSettings: { width: 1024, height: 1024, count: 1 },
+        rawAdapterSettings: {
+          steps: 9,
+          sampler: "euler",
+          lowResStart: { version: 1, k: 3, scale: 0.5 },
+          memoryStrategy: { rung: "tiled_vae" },
+          memoryEvidenceRevision: 2,
+        },
+      },
+    };
+    const request = imageRecipeRequest(lowResAsset);
+    expect(request.seed).toBeNull();
+    expect(request.advanced.lowResStart).toEqual({ version: 1, k: 3, scale: 0.5 });
+    expect(request.advanced).not.toHaveProperty("memoryStrategy");
+    expect(request.advanced).not.toHaveProperty("memoryEvidenceRevision");
+
+    apiFetch
+      .mockReset()
+      .mockResolvedValueOnce({
+        id: "job-lowres",
+        type: "image_generate",
+        projectId: "project-1",
+        payload: {
+          ...request,
+          seed: 777,
+          advanced: {
+            ...request.advanced,
+            memoryStrategy: { rung: "tiled_vae" },
+          },
+        },
+      })
+      .mockResolvedValueOnce({ id: "job-lowres-regen" });
+    await regenerateImage(
+      options({
+        asset: lowResAsset,
+        models: [{ id: "z_image_turbo", features: { low_res_start: true } }],
+        assets: [],
+      }),
+    );
+    const duplicateBody = JSON.parse(apiFetch.mock.calls[1][2].body);
+    expect(duplicateBody.payloadChanges.seed).toEqual(expect.any(Number));
+    expect(duplicateBody.payloadChanges.seeds).toEqual([]);
+
+    // Fallback recipe replay (when original job is purged) sends the full stripped request with lowResStart preserved.
+    const orphanAsset = { ...lowResAsset, lineage: {} };
+    apiFetch.mockReset().mockResolvedValueOnce({ id: "job-lowres-fallback" });
+    await regenerateImage(
+      options({
+        asset: orphanAsset,
+        models: [{ id: "z_image_turbo", features: { low_res_start: true } }],
+        assets: [],
+      }),
+    );
+    const createBody = JSON.parse(apiFetch.mock.calls[0][2].body);
+    expect(createBody.seed).toBeNull();
+    expect(createBody.advanced.lowResStart).toEqual({
+      version: 1,
+      k: 3,
+      scale: 0.5,
+    });
+    expect(createBody.advanced).not.toHaveProperty("memoryStrategy");
+    expect(createBody.advanced).not.toHaveProperty("memoryEvidenceRevision");
+  });
 });

@@ -298,6 +298,7 @@ pub struct ImageAdvanced {
     pub moss_image_edit: Option<Bound<crate::moss_image::EditOptions>>,
     pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
     pub pag: Option<Bound<sceneworks_options::pag::PagWireConfig>>,
+    pub low_res_start: Option<Bound<sceneworks_options::low_res_start::LowResStartWireConfig>>,
 }
 
 /// The `advanced.mlxQuantize` bit count of a standard tier name (`q4`, `q8`, `bf16`).
@@ -429,6 +430,7 @@ impl ImageAdvanced {
         put!(moss_image_edit, "mossImageEdit");
         put!(moss_image_advanced, "mossImageAdvanced");
         put!(pag, "pag");
+        put!(low_res_start, "lowResStart");
         wire
     }
 
@@ -504,6 +506,7 @@ impl ImageAdvanced {
             moss_image_edit: input.structured("advanced", "mossImageEdit")?,
             moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
             pag: input.structured("advanced", "pag")?,
+            low_res_start: input.structured("advanced", "lowResStart")?,
         })
     }
 }
@@ -911,6 +914,154 @@ impl ImageRequest {
         if cfg.scale > 0.0 {
             return Err(format!(
                 "{}: Perturbed-Attention Guidance (advanced.pag) is not supported on the {lane_label} lane",
+                self.model
+            ));
+        }
+        Ok(())
+    }
+
+    /// Return the resolved `advanced.lowResStart` wire config when bound on this request.
+    pub fn resolved_low_res_start(
+        &self,
+    ) -> Option<sceneworks_options::low_res_start::LowResStartWireConfig> {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .low_res_start
+            .as_ref()
+            .map(|bound| bound.value.clone())
+    }
+
+    /// Resolve typed `advanced.lowResStart` against the linked provider's `supports_low_res_start`
+    /// capability and the request's resolved step count (`SW-6942`: `FEAT-1`, `PIPE-2`, `E5`).
+    pub fn resolved_low_res_start_spec(
+        &self,
+        supports_low_res_start: bool,
+        resolved_steps: u32,
+    ) -> Result<Option<gen_core::LowResStartSpec>, String> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let Some(bound) = options.low_res_start.as_ref() else {
+            return Ok(None);
+        };
+        if !supports_low_res_start {
+            return Err(format!(
+                "{}: The selected model route does not support Low Res Start.",
+                self.model
+            ));
+        }
+        let wire = &bound.value;
+        wire.validate_bounds()
+            .map_err(|error| format!("{}: {}", self.model, error.detail))?;
+        if options.phases.as_ref().is_some_and(|b| !b.value.is_empty()) {
+            return Err(format!(
+                "{}: Low Res Start cannot be combined with multi-phase sampling (advanced.phases).",
+                self.model
+            ));
+        }
+        if !matches!(self.mode.as_str(), "text_to_image" | "image_generation") {
+            return Err(format!(
+                "{}: Low Res Start is only supported for text-to-image or ordinary single-source img2img, not mode '{}'.",
+                self.model, self.mode
+            ));
+        }
+        let has_forbidden_conditioning = self
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            || !self.reference_asset_ids.is_empty()
+            || self
+                .mask_asset_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .character_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .character_look_id
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || options.poses.as_ref().is_some_and(|b| !b.value.is_empty())
+            || options
+                .control_image
+                .as_ref()
+                .is_some_and(|b| !b.value.trim().is_empty())
+            || options
+                .control_mode
+                .as_ref()
+                .is_some_and(|b| !b.value.trim().is_empty())
+            || options.control_weights.is_some()
+            || options.ip_adapter_repo.as_ref().is_some_and(|b| {
+                matches!(b.origin, Origin::Authored { .. }) && !b.value.trim().is_empty()
+            });
+        if has_forbidden_conditioning {
+            return Err(format!(
+                "{}: Low Res Start cannot be combined with pass-0 edit, reference, IP-Adapter, identity, or control conditioning.",
+                self.model
+            ));
+        }
+        let has_source = self
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let authored_strength = self.authored_advanced_f64("strength");
+        if let Some(strength) = authored_strength {
+            if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
+                return Err(format!(
+                    "{}: advanced.strength must be in [0.0, 1.0] without clamping when Low Res Start is active (got {strength})",
+                    self.model
+                ));
+            }
+        }
+        let executed_steps = if has_source {
+            let strength = authored_strength.unwrap_or(0.5);
+            let s = strength as f32;
+            let init_time_step = if s > 0.0 {
+                ((resolved_steps as f32 * s) as u32).max(1)
+            } else {
+                0
+            };
+            resolved_steps.saturating_sub(init_time_step)
+        } else {
+            resolved_steps
+        };
+        if executed_steps < 2 || wire.k >= executed_steps {
+            return Err(format!(
+                "{}: advanced.lowResStart.k must satisfy 1 <= k < executed_steps (got k={}, executed_steps={executed_steps})",
+                self.model, wire.k
+            ));
+        }
+        sceneworks_options::low_res_start::quantize_low_res_dimensions(
+            self.width,
+            self.height,
+            wire.scale,
+            sceneworks_options::low_res_start::LOW_RES_START_QUANTUM,
+            sceneworks_options::low_res_start::LOW_RES_START_MIN_DIM,
+        )
+        .map_err(|error| format!("{}: {}", self.model, error.detail))?;
+        Ok(Some(gen_core::LowResStartSpec {
+            version: wire.version,
+            k: wire.k as usize,
+            scale: Some(wire.scale as f32),
+            estimate_source: gen_core::EstimateSource::EndpointEvaluation,
+        }))
+    }
+
+    /// Refuse active `advanced.lowResStart` on bespoke lanes (ControlNet, IP-Adapter, PuLID,
+    /// multi-phase, external ComfyUI, etc.) that cannot execute low-res generation.
+    pub fn reject_low_res_start(&self, lane_label: &str) -> Result<(), String> {
+        if self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .low_res_start
+            .is_some()
+        {
+            return Err(format!(
+                "{}: Low Res Start (advanced.lowResStart) is not supported on the {lane_label} lane",
                 self.model
             ));
         }

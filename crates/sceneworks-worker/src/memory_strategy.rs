@@ -2838,6 +2838,7 @@ mod tests {
                     overflow: None,
                 }),
                 pag: None,
+                low_res_start: None,
             })
         }
     }

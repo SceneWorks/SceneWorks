@@ -515,6 +515,9 @@ pub(super) async fn generate_candle_flux1_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    request
+        .reject_low_res_start("FLUX.1-dev strict-control")
+        .map_err(WorkerError::InvalidPayload)?;
     let _ = super::sampling::resolve_bespoke_pag(request)?;
     let base = resolve_flux1_control_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("FLUX.1-dev base (FLUX.1-dev) weights not found".to_owned())

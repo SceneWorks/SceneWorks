@@ -13,12 +13,18 @@ import { recipeToStudioPatch } from "./screens/imageStudio/recipeToStudioPatch.j
 import {
   ADVANCED_PREFILL,
   assetImportedWorkflow,
+  isLowResStartActive,
   looksLikeWorkflowCandidate,
   MAX_WORKFLOW_INSPECT_BYTES,
+  OMITTED_LOW_RES_START,
   PREFILL_CONTROL,
   PREFILL_NONE,
   PREFILL_PROMPT,
   recipeFromWorkflowShare,
+  revalidatePortableWorkflowShare,
+  validateLowResStartShare,
+  WORKFLOW_SHARE_LEGACY_VERSION,
+  WORKFLOW_SHARE_SCHEMA_VERSION,
   workflowHasMissingInputs,
   workflowInputSlots,
   workflowInstallable,
@@ -28,6 +34,7 @@ import {
   workflowNotRestored,
   workflowPhases,
   workflowReplaySeed,
+  workflowShareSchemaVersion,
   workflowResolutionLabel,
   workflowSettingRows,
   workflowUnresolved,
@@ -1104,6 +1111,172 @@ describe("PAG exported workflow replay", () => {
       label: "PAG execution receipt",
       restored: false,
       value: "Recorded",
+    });
+  });
+});
+
+describe("Low Res Start share versioning and portable import revalidation (SW-6943)", () => {
+  it("emits outer schemaVersion 2 for active lowResStart and schemaVersion 1 for expressible content", () => {
+    expect(isLowResStartActive(undefined)).toBe(false);
+    expect(isLowResStartActive(null)).toBe(false);
+    expect(isLowResStartActive(false)).toBe(false);
+    expect(isLowResStartActive({ version: 1, k: 3, scale: 0.5 })).toBe(true);
+
+    expect(workflowShareSchemaVersion({ advanced: { steps: 9 } })).toBe(WORKFLOW_SHARE_LEGACY_VERSION);
+    expect(workflowShareSchemaVersion({ advanced: { lowResStart: null } })).toBe(WORKFLOW_SHARE_LEGACY_VERSION);
+    expect(workflowShareSchemaVersion({ advanced: { lowResStart: false } })).toBe(WORKFLOW_SHARE_LEGACY_VERSION);
+    expect(workflowShareSchemaVersion({ advanced: { lowResStart: { version: 1, k: 3, scale: 0.5 } } }))
+      .toBe(WORKFLOW_SHARE_SCHEMA_VERSION);
+  });
+
+  it("refuses unknown outer schema versions, missing recipe version, and higher lowResStart.version", () => {
+    const activeV2 = share({
+      schemaVersion: 2,
+      advanced: { steps: 9, lowResStart: { version: 1, k: 3, scale: 0.5 } },
+    });
+    expect(validateLowResStartShare(activeV2)).toEqual({ ok: true, schemaVersion: 2 });
+
+    expect(validateLowResStartShare({ ...activeV2, schemaVersion: 3 })).toMatchObject({
+      ok: false,
+      code: "UnsupportedSchemaVersion",
+      field: "schemaVersion",
+    });
+
+    expect(
+      validateLowResStartShare({
+        ...activeV2,
+        advanced: { lowResStart: { k: 3, scale: 0.5 } },
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: "MissingRecipeVersion",
+      field: "advanced.lowResStart.version",
+    });
+
+    expect(
+      validateLowResStartShare({
+        ...activeV2,
+        advanced: { lowResStart: { version: 2, k: 3, scale: 0.5 } },
+      }),
+    ).toMatchObject({
+      ok: false,
+      code: "UnsupportedSchemaVersion",
+      field: "advanced.lowResStart.version",
+    });
+  });
+
+  it("revalidates portable import against local route availability and records advanced.lowResStart in omitted when stripped", () => {
+    const activeV2 = share({
+      schemaVersion: 2,
+      model: "z_image_turbo",
+      width: 1024,
+      height: 1024,
+      advanced: { steps: 9, lowResStart: { version: 1, k: 3, scale: 0.5 } },
+    });
+    const supportedEntry = {
+      id: "z_image_turbo",
+      defaults: { steps: 9 },
+      resolution: { multipleOf: 16, minDimension: 64 },
+      features: { low_res_start: true },
+    };
+    const kept = revalidatePortableWorkflowShare(activeV2, supportedEntry);
+    expect(kept.schemaVersion).toBe(2);
+    expect(kept.advanced.lowResStart).toEqual({ version: 1, k: 3, scale: 0.5 });
+
+    const unsupportedEntry = {
+      id: "flux_dev",
+      defaults: { steps: 28 },
+      features: {},
+    };
+    const stripped = revalidatePortableWorkflowShare(activeV2, unsupportedEntry);
+    expect(stripped.schemaVersion).toBe(1);
+    expect(stripped.advanced.lowResStart).toBeUndefined();
+    expect(stripped.omitted).toContain(OMITTED_LOW_RES_START);
+
+    // 512x512 with scale=0.25 produces 128x128 < canonical minDimension 256 when resolution is omitted:
+    const tooSmallGridV2 = share({
+      schemaVersion: 2,
+      model: "flux_dev",
+      width: 512,
+      height: 512,
+      advanced: { steps: 28, lowResStart: { version: 1, k: 3, scale: 0.25 } },
+    });
+    const entryWithoutResolutionOverride = {
+      id: "flux_dev",
+      defaults: { steps: 28 },
+      features: { low_res_start: true },
+    };
+    const strippedSmallGrid = revalidatePortableWorkflowShare(
+      tooSmallGridV2,
+      entryWithoutResolutionOverride,
+    );
+    expect(strippedSmallGrid.schemaVersion).toBe(1);
+    expect(strippedSmallGrid.advanced.lowResStart).toBeUndefined();
+    expect(strippedSmallGrid.omitted).toContain(OMITTED_LOW_RES_START);
+  });
+
+  it("restores a supported v2 low-res start workflow through recipeFromWorkflowShare into Studio state", () => {
+    const fluxV2Share = share({
+      schemaVersion: 2,
+      model: "flux_dev",
+      mode: "text_to_image",
+      width: 1024,
+      height: 1024,
+      advanced: {
+        steps: 28,
+        guidanceScale: 3.5,
+        sampler: "euler",
+        resolution: "1024x1024",
+        lowResStart: { version: 1, k: 8, scale: 0.5 },
+      },
+    });
+    const fluxReport = report({
+      model: {
+        slug: "flux_dev",
+        state: "resolved",
+        catalogId: "flux_dev",
+        name: "FLUX.1 Dev",
+        detail: "FLUX.1 Dev is installed on this machine.",
+      },
+    });
+    const fluxModels = [
+      {
+        id: "flux_dev",
+        defaults: { steps: 28 },
+        resolution: { multipleOf: 16, minDimension: 256 },
+        features: { low_res_start: true },
+      },
+    ];
+
+    const rows = workflowSettingRows(fluxV2Share, fluxReport, { models: fluxModels });
+    const lowResRow = rows.find((row) => row.key === "lowResStart");
+    expect(lowResRow).toMatchObject({
+      key: "lowResStart",
+      restored: true,
+    });
+    expect(workflowNotRestored(fluxV2Share, fluxReport, { models: fluxModels })).toEqual([]);
+
+    const recipe = recipeFromWorkflowShare(fluxV2Share, fluxReport, { models: fluxModels });
+    expect(recipe.rawAdapterSettings.lowResStart).toEqual({
+      version: 1,
+      k: 8,
+      scale: 0.5,
+    });
+
+    const patch = recipeToStudioPatch(
+      { view: "Image", recipe },
+      {
+        model: "flux_dev",
+        advancedDefaultsModel: "flux_dev",
+        mossEditActive: false,
+        recipeMode: (r) => r.mode,
+      },
+    );
+    expect(patch.values.lowResStart).toEqual({
+      version: 1,
+      enabled: true,
+      k: 8,
+      scale: 0.5,
     });
   });
 });

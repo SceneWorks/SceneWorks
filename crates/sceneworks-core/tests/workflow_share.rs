@@ -2375,6 +2375,11 @@ const WORKFLOW_READ_SURFACE: &[(&str, &str, &str)] = &[
         "Reads an envelope back out of chunk text.",
     ),
     (
+        "crates/sceneworks-core/src/workflow_share.rs",
+        "revalidate_portable_import",
+        "Revalidates an imported envelope against local model/backend route support and bounds (SW-6943).",
+    ),
+    (
         "crates/sceneworks-core/src/workflow_png.rs",
         "read_workflow_chunk",
         "Reads the chunk out of PNG bytes.",
