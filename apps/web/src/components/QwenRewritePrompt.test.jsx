@@ -3,6 +3,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QwenRewritePromptControl } from "./QwenRewritePromptControl.jsx";
+import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
 
 // Qwen-Image 2.1's official prompt rewriter, exercised with a FIXTURE reply (sc-24113).
 //
@@ -156,6 +157,46 @@ describe("QwenRewritePromptControl (sc-24113)", () => {
     expect(onApplyResolution).toHaveBeenCalledWith("2752x1536");
     // The two decisions are independent: taking the ratio must not apply the prompt.
     expect(onApply).not.toHaveBeenCalled();
+  });
+
+  it("says when a reply was cut short, and offers no size the reply never reached", async () => {
+    const onApply = vi.fn();
+    render(
+      <QwenRewritePromptControl
+        copy={H3_IMAGE_EXPAND_COPY}
+        modelId="minimax_h3_image"
+        onApply={onApply}
+        onApplyResolution={() => {}}
+        prompt="a lighthouse"
+        rewritePrompt={async () => ({
+          refinedPrompt: "A lighthouse on a basalt headland.",
+          rewriteSuggestion: { workflow: "t2i", rewriterModelId: "vision_describe_qwen3_8_27b", truncated: true },
+        })}
+        suggestedResolutionFor={(suggestion) => h3ImageProposedResolution(suggestion?.whRatio, null, "2048x2048")}
+      />,
+    );
+    await act(async () => buttonContaining(container, "Expand prompt").click());
+    await settle({ microtasks: 8 });
+    // The kept caption is still offered for review and Apply, with a note that it was cut short.
+    expect(draft().value).toBe("A lighthouse on a basalt headland.");
+    expect(container.textContent).toContain(H3_IMAGE_EXPAND_COPY.truncated);
+    expect(buttonByText(container, "Use this size")).toBeUndefined();
+    await act(async () => buttonByText(container, "Apply").click());
+    expect(onApply).toHaveBeenCalledWith("A lighthouse on a basalt headland.");
+  });
+
+  it("shows no cut-short note for a complete reply", async () => {
+    render(
+      <QwenRewritePromptControl
+        modelId="qwen_image_2_1"
+        onApply={() => {}}
+        prompt="a cinematic harbour"
+        rewritePrompt={async () => T2I_RESULT}
+      />,
+    );
+    await act(async () => buttonContaining(container, "Rewrite prompt").click());
+    await settle({ microtasks: 8 });
+    expect(container.textContent).not.toContain("ran out of room");
   });
 
   it("selects the editing rewriter from the request, and says which reference the output follows", async () => {
