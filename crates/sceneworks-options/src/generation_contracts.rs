@@ -706,6 +706,11 @@ pub struct PromptRefineRequest {
     /// short and other-model requests run dense with a reason, and the job result's
     /// `generation.kvCache` records what ran.
     pub kv_compression: Option<String>,
+    /// MiniMax-H3-Image prompt expansion only (SW-7208): the model the expander runs,
+    /// `minimax_h3_image_pe` (MiniMax-H3-Image-PE) or `vision_describe_qwen3_8_27b` (the
+    /// abliterated Qwen3.8-27B the dataset describer uses). Absent takes the saved
+    /// `h3ImageExpanderModel` UI preference, else MiniMax-H3-Image-PE.
+    pub expander_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

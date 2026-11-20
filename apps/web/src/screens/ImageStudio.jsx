@@ -142,6 +142,7 @@ import { usePidState, useStrictControlState } from "./imageStudio/useImageContro
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
+import { useH3Expander } from "../minimaxH3ImageExpand.js";
 import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { useValidation } from "../validation/useValidation.js";
@@ -161,7 +162,7 @@ import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { BATCH_EXPAND_MAX, H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
 import { isModelMissing } from "../modelMissing.js";
-import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, MINIMAX_H3_IMAGE_PE_MODEL_ID, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
+import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 
@@ -2066,26 +2067,29 @@ export function ImageStudio() {
     typeof qwenRewritePrompt === "function";
   // SW-7102 — MiniMax-H3-Image's optional prompt expander. One checkpoint serves text-to-image and
   // edit (references present, read as `<Picture N>` in the same order the render takes), and the
-  // tile renders only when it is installed, exactly like the Qwen rewriter above.
-  const h3ExpandModel = useMemo(
-    () =>
-      h3ImageExpanderAppliesTo(selectedModel)
-        ? models.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID)
-        : undefined,
-    [models, selectedModel],
-  );
-  const h3ExpandAvailable =
-    Boolean(h3ExpandModel) &&
-    h3ExpandModel.installState !== "missing" &&
-    typeof h3ImageExpandPrompt === "function";
+  // tile renders only when it is installed, exactly like the Qwen rewriter above. SW-7208: it runs
+  // the saved model of the two, MiniMax-H3-Image-PE or the abliterated describer.
+  const h3Expander = useH3Expander({
+    models,
+    applies: h3ImageExpanderAppliesTo(selectedModel),
+    expandPrompt: h3ImageExpandPrompt,
+    downloadConditionalComponents,
+  });
+  const h3ExpandModel = h3Expander.model;
+  const h3ExpandAvailable = h3Expander.available;
   // In batch mode the Expand prompt tool is part of Run batch: every resolved prompt is expanded
   // first, then the images are queued with the expansions (useImageBatchRun). Single-image
-  // generation keeps the review-and-apply control.
+  // generation keeps the review-and-apply control. The batch runs the saved expander model; a
+  // saved model that cannot run blocks Run batch with the same message the single control shows.
   const h3BatchExpandOn = batchMode && h3ExpandAvailable && promptTool === "h3Expand";
   const [h3BatchUseSizes, setH3BatchUseSizes] = useState(false);
-  const h3BatchExpandTooMany = h3BatchExpandOn && batchJobCount > BATCH_EXPAND_MAX
-    ? H3_IMAGE_EXPAND_COPY.batch.tooMany(batchJobCount, BATCH_EXPAND_MAX)
-    : "";
+  const h3BatchExpandTooMany = !h3BatchExpandOn
+    ? ""
+    : typeof h3Expander.prompt !== "function"
+      ? H3_IMAGE_EXPAND_COPY.missing(false, h3ExpandModel?.name || H3_IMAGE_EXPAND_COPY.defaultModelName)
+      : batchJobCount > BATCH_EXPAND_MAX
+        ? H3_IMAGE_EXPAND_COPY.batch.tooMany(batchJobCount, BATCH_EXPAND_MAX)
+        : "";
   const imageReference = useImageReferenceStatus({
     enabled: mode === "text_to_image" && supportsImg2img,
     assetId: img2imgReferenceAssetId,
@@ -3075,7 +3079,7 @@ export function ImageStudio() {
   onMagicExpand,
   batchExpansion: h3BatchExpandOn
     ? {
-        expandPrompt: h3ImageExpandPrompt,
+        expandPrompt: h3Expander.prompt,
         copy: H3_IMAGE_EXPAND_COPY,
         modelId: model,
         referenceAssetIds: qwenRewriteReferenceIds,
@@ -3223,7 +3227,8 @@ export function ImageStudio() {
             h3BatchUseSizes={h3BatchUseSizes}
             setH3BatchUseSizes={setH3BatchUseSizes}
             h3ExpandModel={h3ExpandModel}
-            h3ExpandPrompt={h3ImageExpandPrompt}
+            h3ExpandPrompt={h3Expander.prompt}
+            h3ExpandPicker={h3Expander.picker}
             resolution={resolution}
             selectedModel={selectedModel}
             flux3LayoutAvailable={flux3LayoutAvailable}

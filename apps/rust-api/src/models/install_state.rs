@@ -814,7 +814,12 @@ pub(super) fn install_state_for(
         // A receipt proves the primary files exist, not that their dependencies still do.
         // Do not let it override missing dependencies. A partial nonbreaking primary update
         // may still use its complete older receipt.
-        let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
+        // A pin-exact model's job loads only the pinned snapshot, so older files stay an update
+        // offer, never an install.
+        let usable_stale = stale_files_present
+            && !breaking_update
+            && !tier_dependencies_missing
+            && !is_pin_exact_model(model_id);
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if is_flux3_runtime_model(model_id) {
             if cache_installed || (cache_incomplete && !managed_installed) {
@@ -1500,6 +1505,122 @@ pub(crate) fn installed_variant_keys(model: &Value, data_dir: &FsPath) -> Vec<St
         .collect()
 }
 
+/// The models whose jobs load a tier at its row's pinned revision and nowhere else: the Qwen3.8
+/// describer and the MiniMax-H3-Image prompt expander. For these, the Model Manager badge, the
+/// job-admission check and the worker agree on that one snapshot, so a re-pin never leaves an
+/// older cached revision reading "Installed" while the job refuses it.
+const PIN_EXACT_MODEL_IDS: [&str; 2] = [
+    sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID,
+    sceneworks_core::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID,
+];
+
+fn is_pin_exact_model(model_id: &str) -> bool {
+    PIN_EXACT_MODEL_IDS.contains(&model_id)
+}
+
+/// The cache health of a tier row's own files at the exact revision the row pins: every file the
+/// row names is present in THAT snapshot, and a whole tier folder glob (`q4-full/*`) holds a
+/// coherent set of weights. An older revision of the same repository never stands in for the
+/// pinned one. Missing when the row pins no immutable revision or names no files; absent (not
+/// installed, nothing to repair) when the pinned snapshot was never downloaded, as
+/// `huggingface_cache_health` treats a repository with no cache.
+fn pinned_tier_cache_health(row: &Value, data_dir: &FsPath) -> HuggingFaceCacheHealth {
+    let files = string_array_field(row, "files");
+    let (Some(repo), Some(revision)) = (
+        row.get("repo").and_then(Value::as_str),
+        row.get("revision").and_then(Value::as_str),
+    ) else {
+        return HuggingFaceCacheHealth::missing(files);
+    };
+    if files.is_empty() {
+        return HuggingFaceCacheHealth::missing(vec![format!("{repo}@{revision}")]);
+    }
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
+        return HuggingFaceCacheHealth::absent(files);
+    };
+    let health = huggingface_filtered_cache_health(std::slice::from_ref(&snapshot), &files);
+    if !health.installed {
+        return health;
+    }
+    // A whole tier folder glob (`q4-full/*`, the H3 expander's tiers) is satisfied by any one
+    // file. A folder holding a shard index needs every shard it names; a folder without one needs
+    // at least one `*.safetensors`, so a leftover `config.json` alone is not a tier.
+    let on_disk = snapshot_files(&snapshot);
+    let mut missing = Vec::new();
+    for pattern in &files {
+        let Some(folder) = whole_subdir_glob_tier(pattern) else {
+            continue;
+        };
+        let in_folder = on_disk
+            .iter()
+            .filter(|file| pattern_matches(pattern, file))
+            .cloned()
+            .collect::<Vec<_>>();
+        let indexes = in_folder
+            .iter()
+            .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !indexes.is_empty() {
+            missing.extend(torn_shard_indexes_in(&snapshot, &indexes));
+        } else if !in_folder
+            .iter()
+            .any(|file| file.to_ascii_lowercase().ends_with(".safetensors"))
+        {
+            missing.push(format!("{folder}/*.safetensors"));
+        }
+    }
+    if missing.is_empty() {
+        health
+    } else {
+        HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: true,
+            missing_files: missing,
+        }
+    }
+}
+
+/// The non-soft co-requisite rows that gate `variant` of `model` (any installed option of a choice
+/// group satisfies it, sc-22998), each with its cache health.
+fn required_co_requisite_health(
+    model: &Value,
+    data_dir: &FsPath,
+    variant: Option<&str>,
+) -> Vec<(Value, Option<HuggingFaceCacheHealth>)> {
+    co_requisite_rows_gating_install(
+        model_co_requisite_downloads_for_variant_all_options(model, variant),
+        |download| model_co_requisite_presence(model, data_dir, download),
+    )
+    .into_iter()
+    .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+    .map(|download| {
+        let health = model_co_requisite_cache_health(model, data_dir, &download);
+        (download, health)
+    })
+    .collect()
+}
+
+/// Whether `tier` of `model` (already narrowed to this host's platform) is installed at the exact
+/// revision its download row pins ([`pinned_tier_cache_health`]) with every required co-requisite
+/// (the expander's upstream `prompt/` files) installed too, so a job admitted on this answer runs
+/// on the files the row pins. `false` when the row is missing.
+pub(crate) fn pinned_variant_installed(model: &Value, tier: &str, data_dir: &FsPath) -> bool {
+    let Some(row) = model_variant_downloads(model)
+        .into_iter()
+        .find(|row| row.get("variant").and_then(Value::as_str).map(str::trim) == Some(tier))
+    else {
+        return false;
+    };
+    pinned_tier_cache_health(row, data_dir).installed
+        && required_co_requisite_health(model, data_dir, Some(tier))
+            .iter()
+            .all(|(_, health)| health.as_ref().is_some_and(|health| health.installed))
+}
+
 // Build the per-variant install state for every selected download entry. Each entry is probed
 // independently against the HF cache using that tier's own `files` filter, so the catalog can
 // advertise (e.g.) bf16 installed while q4 is missing.
@@ -1525,6 +1646,10 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
             let cache_health = (!loop_model)
                 .then(|| superseded_revision_tier_cache_health(data_dir, entry, &files)).flatten()
                 .or_else(|| {
+                    is_pin_exact_model(model_id)
+                        .then(|| pinned_tier_cache_health(entry, data_dir))
+                })
+                .or_else(|| {
                     model_cache_health_for_download(
                         model_id,
                         &repo,
@@ -1549,8 +1674,13 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
             // installed after any single tier's download (sc-9909). Require the tier's own files to
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            let managed_installed = if loop_model || is_flux3_runtime_model(model_id) {
-                false // The pinned snapshot rule already judged this source.
+            // FLUX 3: the shared receipt resolver already judged this root. A pin-exact model
+            // (or the Loop utility): only the pinned snapshot, judged above, is what the job loads.
+            let managed_installed = if loop_model
+                || is_flux3_runtime_model(model_id)
+                || is_pin_exact_model(model_id)
+            {
+                false
             } else {
                 managed_tier_installed(&managed_path, &files)
             };
@@ -1631,17 +1761,11 @@ pub(super) fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<Mode
             let mut dependencies_missing = false;
             if installed || cache_incomplete {
                 // Any installed option of a choice group satisfies it (sc-22998).
-                for download in co_requisite_rows_gating_install(
-                    model_co_requisite_downloads_for_variant_all_options(
-                        model,
-                        entry.get("variant").and_then(Value::as_str),
-                    ),
-                    |download| model_co_requisite_presence(model, data_dir, download),
-                )
-                .into_iter()
-                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
-                {
-                    let health = model_co_requisite_cache_health(model, data_dir, &download);
+                for (download, health) in required_co_requisite_health(
+                    model,
+                    data_dir,
+                    entry.get("variant").and_then(Value::as_str),
+                ) {
                     if health.as_ref().is_some_and(|health| health.installed) {
                         continue;
                     }

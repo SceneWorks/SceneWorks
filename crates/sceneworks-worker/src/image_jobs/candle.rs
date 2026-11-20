@@ -683,12 +683,21 @@ async fn generate_candle_registry_stream_using(
     // The same request controls the MLX arm resolves (sc-25681): CFG interval, caption-overflow
     // policy and the CFG-bound negative prompt, each refused before load when the linked engine
     // does not honour it or CFG-off would make it inert. Inert for every model that sends none.
+    // Per-generation PiD decode (epic 7840): resolved before `resolve_lane_request_controls_with_pid`
+    // so `lowResStart` dimension validation shares the effective PiD activation decision (`SW-7221`).
+    let pid_weights = if convrot.is_some() {
+        None
+    } else {
+        resolve_pid_weights(request, &settings.data_dir, &request.model)?
+    };
+    let use_pid = pid_weights.is_some();
     let negative_prompt = resolve_negative_prompt(request, &model);
-    let lane_controls = lane_controls::resolve_lane_request_controls(
+    let lane_controls = lane_controls::resolve_lane_request_controls_with_pid(
         request,
         &model.descriptor.capabilities,
         guidance,
         negative_prompt.as_deref(),
+        use_pid,
     )?;
 
     // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
@@ -844,22 +853,6 @@ async fn generate_candle_registry_stream_using(
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
     // sc-9092) — the same `model_repo` the MLX path records.
     let repo = model_repo(request, &model);
-    // Per-generation PiD decode (epic 7840): resolve the PiD checkpoint + Gemma for this model's latent
-    // space when `advanced.usePid` is set and the snapshots are cached; otherwise keep the native VAE.
-    // `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch). Every candle image
-    // provider reads `spec.pid` (candle-gen sc-7853: sdxl/flux/flux2/qwen-image/z-image/chroma/boogu/
-    // ideogram/kolors/krea/lens), so this un-gates the toggle across the whole off-Mac catalog — using the
-    // SAME `resolve_pid_weights` model→backbone gate as the macOS lane (a non-eligible model → `None` →
-    // native VAE, so this is a no-op for anything without a PiD backbone).
-    // ConvRot (sc-9300) does not combine with a PiD decode overlay — the int8 DiT consume path replaces
-    // the transformer wholesale and is not PiD-wired (the candle-gen krea engine rejects the combo). So
-    // suppress PiD when ConvRot is selected; every non-ConvRot job resolves PiD exactly as before.
-    let pid_weights = if convrot.is_some() {
-        None
-    } else {
-        resolve_pid_weights(request, &settings.data_dir, &request.model)?
-    };
-    let use_pid = pid_weights.is_some();
     // A native prompt batch (sc-25681): ONE engine call over `prompts × count` images, refused
     // before load when the linked engine cannot render it or a per-image lane feature is in use.
     let native_batch = lane_controls::resolve_native_prompt_batch(

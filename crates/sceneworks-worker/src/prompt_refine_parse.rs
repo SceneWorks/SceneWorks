@@ -29,6 +29,9 @@ pub(super) struct RefineRequest {
 pub(super) struct H3Expand {
     pub(super) request: gen_core::core_llm::TextLlmRequest,
     pub(super) reply: H3ExpandReply,
+    /// The installed Qwen3.8-27B block draft the expander's load names (SW-7204), at its tier's
+    /// precision; `None` when none is installed.
+    pub(super) block_draft: Option<crate::qwen38_block_draft::BlockDraftChoice>,
 }
 
 /// What an expansion reply is parsed against.
@@ -36,7 +39,15 @@ pub(crate) struct H3ExpandReply {
     pub(crate) workflow: crate::minimax_h3_image_prompt_expand::Workflow,
     pub(crate) aspect: gen_core::core_llm::minimax_h3_image_pe::AspectSelection,
     pub(crate) allowed_ratios: Vec<String>,
+    /// The expander model that runs (SW-7208), recorded on the result.
+    pub(crate) model_id: &'static str,
     pub(crate) tier: Option<&'static str>,
+    /// The `LoadSpec` source the expander was loaded from (set by the job once it builds the load
+    /// spec), recorded on the result's `executionIdentity.weightsDir`.
+    pub(crate) weights_source: String,
+    /// What the expansion decoded with (SW-7204, set by the job after the generation): proposer,
+    /// block draft and per-pass counts, recorded on `executionIdentity.decode`. `Null` until set.
+    pub(crate) decode: Value,
 }
 
 pub(super) async fn parse_refine_request(
@@ -161,14 +172,31 @@ pub(super) async fn parse_refine_request(
     // `None` for every other task.
     let qwen_rewriter = (task == RefineTask::QwenImageRewrite)
         .then(|| crate::qwen_prompt_rewrite::Rewriter::for_reference_count(image_refs.len()));
+    // SW-7208: the model an expansion runs, MiniMax-H3-Image-PE unless the job names the
+    // abliterated describer. `None` for every other task.
+    let expander_model = (task == RefineTask::MiniMaxH3ImageExpand)
+        .then(|| {
+            sceneworks_core::contracts::minimax_h3_image_expander_model(
+                payload
+                    .get(sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_KEY)
+                    .and_then(Value::as_str),
+            )
+            .map_err(|unknown| {
+                WorkerError::InvalidPayload(format!(
+                    "`{unknown}` is not a MiniMax-H3-Image prompt expander model; use {}",
+                    sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPANDER_MODEL_IDS.join(" or ")
+                ))
+            })
+        })
+        .transpose()?;
     let model = crate::payload::trimmed_string(payload.get("model"))
         .map(str::to_owned)
         // A rewrite defaults to its own selected checkpoint, not to the generic Anubis refiner.
         // An explicit `payload.model` still wins, which is how the real-weight smoke pins a local
         // snapshot path — the same override the film planner uses.
         .unwrap_or_else(|| {
-            if task == RefineTask::MiniMaxH3ImageExpand {
-                return gen_core::core_llm::minimax_h3_image_pe::REPO.to_owned();
+            if let Some(expander) = expander_model {
+                return crate::minimax_h3_image_prompt_expand::default_repo(expander).to_owned();
             }
             qwen_rewriter
                 .map(|rewriter| rewriter.repo().to_owned())
@@ -220,6 +248,15 @@ pub(super) async fn parse_refine_request(
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        // The entry is the chosen model's: an expansion never runs one model's weights under the
+        // other's name.
+        let expander = expander_model.expect("the expand task always names its model");
+        let entry_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+        if entry_id != expander {
+            return Err(WorkerError::InvalidPayload(format!(
+                "this expansion runs `{expander}` but its `modelManifestEntry` is `{entry_id}`"
+            )));
+        }
         let override_dir = crate::payload::trimmed_string(payload.get("model"))
             .map(|path| resolve_app_managed_model_dir(settings, path, "prompt-refine model path"))
             .transpose()?;
@@ -344,8 +381,16 @@ pub(super) async fn parse_refine_request(
                     workflow: expand::Workflow::for_reference_count(references.len()),
                     aspect,
                     allowed_ratios: files.params().aspect_ratios.clone(),
+                    model_id: dirs.model_id,
                     tier: dirs.tier,
+                    weights_source: String::new(),
+                    decode: Value::Null,
                 },
+                block_draft: crate::qwen38_block_draft::installed_block_draft(
+                    &settings.data_dir,
+                    dirs.model_id,
+                    dirs.tier,
+                ),
             });
             (String::new(), String::new())
         }

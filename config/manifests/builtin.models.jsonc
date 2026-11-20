@@ -15301,12 +15301,17 @@
       // which never carries `prompt/` — has them.
       //
       // TIERS. nvfp4 is MiniMax's published ModelOpt NVFP4 checkpoint (17,916,124,008 B of weights),
-      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7099 MLX
-      // conversions (`SceneWorks/minimax-h3-image-pe/{q8,q4}/`), published and pinned; their sizes are the hosted
-      // totals. Each tier has two rows under one variant, narrowed to the host OS before the worker sees the entry:
-      // the MLX layout (`q8/`, macOS) and the Candle layout (`candle-q8/`, Windows/Linux). bf16 is the dense
-      // `convert_snapshot_to_bf16` snapshot both backends load, published once at `bf16/` (one row, no platform
-      // narrowing) by inference's `minimax-h3-image-publish-candle-bf16` profile.
+      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. q8/q4 are the SW-7202 fully
+      // quantized conversions (inference `prepare_snapshot` recipes `q8-full` / `q4-full`, SW-7201): q8 stores every
+      // language-model matrix 8-bit (`lm_head`, `embed_tokens` and every Gated DeltaNet `in_proj_a`/`in_proj_b`
+      // included); q4 is a 4-bit body with those matrices 8-bit; the vision tower stays dense. They replace the
+      // SW-7099 plain conversions (`q8/`, `q4/`, `candle-q8/`, `candle-q4/` @ fdcc4059, still in the repository for
+      // installs pinned to that revision) and are published by inference `qwen38-full-tiers.yml` (model
+      // `expander`). Each tier has two rows under one variant, narrowed to the host OS before the worker sees the
+      // entry: the MLX layout (`q8-full/`, macOS) and the Candle layout (`candle-q8-full/`, Windows/Linux); the worker
+      // loads the folder the row's files name. bf16 is the dense `convert_snapshot_to_bf16` snapshot both backends
+      // load, published once at `bf16/` (one row, no platform narrowing) by inference's
+      // `minimax-h3-image-publish-candle-bf16` profile.
       "id": "minimax_h3_image_pe",
       "autoDownload": false,
       "macOnly": false,
@@ -15352,48 +15357,54 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
           "variant": "q8",
-          "files": ["q8/*"],
+          "files": ["q8-full/*"],
           // MLX layout (macOS); the Candle layout is the Windows/Linux row below.
           "platforms": ["macos"],
-          // Hub tree at the pinned revision: q8/ 31,927,190,423 B (7 files).
-          "estimatedSizeBytes": 31927190423,
-          "footprint": { "diskSizeBytes": 31927190423 }
+          // Published by qwen38-full-tiers.yml (expander, mlx) at b0efd86d; size: every file of the
+          // folder (README, SOURCE_REVISION, config, sidecars, tokenizer, one model.safetensors; 9 files).
+          "estimatedSizeBytes": 29521228377,
+          "footprint": { "diskSizeBytes": 29521228377 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
           "variant": "q8",
-          "files": ["candle-q8/*"],
+          "files": ["candle-q8-full/*"],
           "platforms": ["windows", "linux"],
-          // Hub tree at the pinned revision: candle-q8/ 31,927,191,452 B (11 files, four weight shards).
-          "estimatedSizeBytes": 31927191452,
-          "footprint": { "diskSizeBytes": 31927191452 }
+          // Published by qwen38-full-tiers.yml (expander, candle) at 17cd59fb, which b0efd86d (the MLX
+          // publication on top of it) keeps byte-identical; one revision serves both layouts. Size: every
+          // file of the folder (sidecars, shard index, 4 shards; 13 files).
+          "estimatedSizeBytes": 29521202308,
+          "footprint": { "diskSizeBytes": 29521202308 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
           "variant": "q4",
-          "files": ["q4/*"],
+          "files": ["q4-full/*"],
           // MLX layout (macOS); the Candle layout is the Windows/Linux row below.
           "platforms": ["macos"],
-          // Hub tree at the pinned revision: q4/ 19,763,707,887 B (7 files).
-          "estimatedSizeBytes": 19763707887,
-          "footprint": { "diskSizeBytes": 19763707887 }
+          // Published by qwen38-full-tiers.yml (expander, mlx) at b0efd86d; size: every file of the
+          // folder (README, SOURCE_REVISION, config, sidecars, tokenizer, one model.safetensors; 9 files).
+          "estimatedSizeBytes": 17357767509,
+          "footprint": { "diskSizeBytes": 17357767509 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-image-pe",
-          "revision": "fdcc4059dbdd02c0bab889e7f6b64fb3ed36c30b",
+          "revision": "b0efd86df40968dcdcaebfbf4267ae1bce9431b5",
           "variant": "q4",
-          "files": ["candle-q4/*"],
+          "files": ["candle-q4-full/*"],
           "platforms": ["windows", "linux"],
-          // Hub tree at the pinned revision: candle-q4/ 19,763,709,780 B (11 files, four weight shards).
-          "estimatedSizeBytes": 19763709780,
-          "footprint": { "diskSizeBytes": 19763709780 }
+          // Published by qwen38-full-tiers.yml (expander, candle) at 17cd59fb, which b0efd86d (the MLX
+          // publication on top of it) keeps byte-identical; one revision serves both layouts. Size: every
+          // file of the folder (sidecars, shard index, 4 shards; 13 files).
+          "estimatedSizeBytes": 17357728848,
+          "footprint": { "diskSizeBytes": 17357728848 }
         },
         // The prompt files, read at run time from the upstream snapshot for every tier.
         {
@@ -15411,6 +15422,59 @@
             "prompt/edit/task_prompt.txt"
           ],
           "estimatedSizeBytes": 56282
+        },
+        // SW-7203 (SW-F374 E13): the block-draft models for Qwen3.8-27B decoding, installed with every tier of this
+        // model. Both are Apache-2.0 SceneWorks re-hosts at pinned revisions with the upstream weights and config unmodified (the DFlash2 re-host adds a LICENSE file with the Apache-2.0 text, since upstream has none, and a README provenance note):
+        // tencent/Qwen3.8-27B-DSpine-b16 @ 260a6c23 (DSpine) and incoai/Qwen3.8-27B-DFlash2 @ 015e7956 (DFlash2).
+        // Soft: the model is fully usable without them (decode falls back to MTP / plain decoding), so a missing
+        // or stale draft never gates install state. No componentId yet: the engine reads them in SW-7193.
+        // Each row's own `license` keeps it outside the MiniMax acknowledgment on the prompt expander (see the
+        // `license` schema note): the drafts are Apache-2.0 and must not demand MiniMax's terms.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+          "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 4051845726,
+          "footprint": { "diskSizeBytes": 4051845726 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dflash2",
+          "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 3848830679,
+          "footprint": { "diskSizeBytes": 3848830679 }
+        }
+      ],
+      // SW-7208 (SW-F374 E7): the expander can also run the abliterated Qwen3.8-27B describer
+      // (`vision_describe_qwen3_8_27b`) with these same prompt files and reply contract. That choice
+      // needs MiniMax's prompt files but not this entry's weights, so the five files are also a
+      // conditional component of their own: `POST .../conditional-components/describer_prompt_expansion/download`
+      // fetches only them, behind this entry's licence acknowledgment. They are the `prompt`
+      // co-requisite's files at its revision, so an installed expander tier already satisfies it.
+      "conditionalComponents": [
+        {
+          "componentId": "prompt",
+          "requiredFor": ["describer_prompt_expansion"],
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+          "files": [
+            "prompt/manifest.json",
+            "prompt/t2i/system_prompt.txt",
+            "prompt/t2i/task_prompt.txt",
+            "prompt/t2i/request_params.json",
+            "prompt/edit/task_prompt.txt"
+          ],
+          "estimatedSizeBytes": 56282,
+          "license": "MiniMax-H3-Image Community License"
         }
       ],
       "paths": {
@@ -16228,10 +16292,16 @@
       // Hugging Face API on 2026-11-13 at the pinned revision). It runs on the same native TextLlm
       // path as the Vision Captioner: JSON-constrained decode, thinking off.
       //
-      // TIERS. q4 (the default) and q8 are quantised ahead of time with mlx-llm's
-      // `prepare_snapshot` (inference 4a36a7f8) and served from the SceneWorks re-host
-      // `SceneWorks/qwen3.8-27b-abliterated-mlx` @ 76f3c445 as self-contained `q4/` and `q8/`
-      // folders (vision tower kept bf16). bf16 is the upstream repository (18 shards, 55.6 GB).
+      // TIERS. q4 (the default) and q8 are the fully quantized tiers (SW-7202, feature SW-F374):
+      // quantised ahead of time with `prepare_snapshot` recipes `q4-full` / `q8-full` (SW-7201) by
+      // inference `qwen38-full-tiers.yml` (model `describer`) and served as self-contained
+      // `q4-full/` and `q8-full/` folders of the SceneWorks re-host
+      // `SceneWorks/qwen3.8-27b-abliterated-mlx`. q8 stores every language-model matrix 8-bit
+      // (`lm_head`, `embed_tokens` and every Gated DeltaNet `in_proj_a`/`in_proj_b` included); q4 is a
+      // 4-bit body with those matrices 8-bit (decision D3/E15). The vision tower stays bf16. The
+      // earlier plain `q4/` / `q8/` folders (@ 76f3c445 here, @ accaccc1 on the Candle re-host) stay in
+      // the repositories for installs pinned to those revisions; the worker loads the folder the
+      // row's files name. bf16 is the upstream repository (18 shards, 55.6 GB).
       // Load-time quantisation is deliberately not offered: MLX load admission prices it at twice
       // the bf16 source, and a q4 user must not download the 55.6 GB. A describe job names its
       // tier as the request's `variant`, so source admission selects the row the worker loads.
@@ -16239,54 +16309,62 @@
       // MLX and Candle store a quantised tier in different formats, so each engine has its own
       // re-host: the `macos` rows above are MLX snapshots, and the `windows`/`linux` rows are
       // candle-llm `prepare_snapshot` tiers (stored GGML blocks) from
-      // `SceneWorks/qwen3.8-27b-abliterated-candle` @ accaccc1. Exactly one q4 and one q8 row is in
-      // scope on any platform. Candle q4 was loaded on Metal and grounded on an image (peak
-      // footprint 41 GB).
+      // `SceneWorks/qwen3.8-27b-abliterated-candle`. Exactly one q4 and one q8 row is in scope on any
+      // platform.
       //
       // MEMORY FLOORS (registry evidence.json, `mlx` / `candle` `minMemoryGbByTier`, GiB). A describe
       // job reads its tier's floor on the worker's lane and refuses before any image when the
       // worker cannot hold it. The scalar `minMemoryGb` of each lane is the bf16 floor, the
-      // conservative fallback for a tier with no row.
+      // conservative fallback for a tier with no row. The q4 and q8 floors are measured on the
+      // shipped full tiers (SW-7202, inference pin 99b92d73d): one cold describe of a 1536x1536
+      // synthetic scene per tier, model load included.
       //   candle (checked as-is against the card's free VRAM, no slack added): each floor is the
       //   smallest whole GiB that is at least BOTH the engine's own load requirement and the
       //   measured peak, so the worker never admits a load the engine then refuses. The engine
-      //   requirement is candle-llm's CUDA load admission (inference 4a36a7f, provider.rs
-      //   load_memory_estimate_as and admission.rs load_memory_requirements): the dense source
-      //   held on the device plus 25% of it, the quantised projection copy, and the 64 MiB
-      //   CUDA-graph parameter cache. A prepared tier's stored GGML blocks stay on the host while
-      //   loading, so the 25% applies only to its dense remainder (embeddings, head, norms, vision
-      //   tower: 6.06 GB); on bf16 it applies to the whole 55.6 GB payload.
-      //     q4 22 — engine 22,279,852,166 B (21,248 MiB); measured peak above baseline 21,993 MiB
-      //             at 512x384 (qwen38-describer-validation run 43604077657) and 21,995 MiB at
-      //             1536x1536 (run 43665994831): the same 21.48 GiB at both sizes. 22 GiB is
-      //             22,528 MiB. A 24 GB card (24,564 MiB total) is admitted with up to 2,036 MiB
-      //             already in use.
-      //     q8 34 — engine 35,291,474,440 B (33,657 MiB); measured peak 34,409 MiB (run
-      //             43604907453). 34 GiB is 34,816 MiB.
+      //   requirement is candle-llm's CUDA load admission (provider.rs load_memory_estimate_as and
+      //   admission.rs load_memory_requirements) at inference 99b92d73d, computed from the pinned
+      //   snapshots' safetensors headers: the dense source held on the device plus 25% of it, the
+      //   quantised copy built from the stored GGML blocks, and the 64 MiB CUDA-graph parameter
+      //   cache. A full tier stores its embedding, head and `in_proj_a`/`in_proj_b` as GGML blocks
+      //   too, so its dense source is only the vision tower and norms (0.93 GB, against 6.06 GB on
+      //   the plain tiers). The measured peak is the card's high-water above the pre-load baseline
+      //   (qwen38-describer-validation.yml on GPU-e4b79931, nvidia-smi polled every 100 ms).
+      //     q4 21 — engine 17,875,551,126 B (17,048 MiB); measured peak above baseline 21,061 MiB
+      //             (run 44464665126; 23,043 MiB peak over a 1,982 MiB baseline; 35.2 s). 21 GiB is
+      //             21,504 MiB. A 24 GB card (24,564 MiB total) is admitted with up to 3,060 MiB
+      //             already in use; the plain tier's 22 admitted up to 2,036 MiB.
+      //     q8 33 — engine 30,251,474,194 B (28,851 MiB); measured peak 32,965 MiB (run
+      //             44464684497; 34,947 MiB peak over 1,982 MiB; 45.7 s). 33 GiB is 33,792 MiB.
       //     bf16 65 — engine 69,520,866,634 B (66,300 MiB); measured peak above baseline
       //               57,121 MiB (run 43687782761) and 57,319 MiB (run 43701927797), both at
       //               1536x1536. 65 GiB is 66,560 MiB: only 260 MiB above the engine's figure, which
       //               the engine reads after this process's own CUDA context exists.
       //   `candle.measured` stays false: the floors are set by the engine's load requirement, not
       //   by a calibrated measurement, so the block cannot claim calibrated evidence.
-      //   mlx (total unified memory, peak / 0.9 as the catalog's MLX fit rule, rounded up):
-      //     q4 28 — two measured describe peaks (worker footprint, dev Mac, describe through the
-      //             app): about 22 GiB on a smaller image (its size not recorded), and 25.0 on a
-      //             1536x1536 image (2026-11-14). The floor is from the larger: 25.0 / 0.9 = 27.8.
-      //     q8 41 — DERIVED, not measured: 30.15 GiB of files + the 6.38 GiB the 25.0 q4 peak
-      //             holds above its 18.62 GiB of files = 36.53; / 0.9 = 40.6
-      //     bf16 65 — UNMEASURED, derived the same way: 51.76 GiB of files + 6.38 = 58.14; / 0.9 =
-      //               64.6
+      //   mlx (total unified memory; the worker process's peak phys_footprint / 0.9, the catalog's
+      //   MLX fit rule, rounded up; qwen38-describer-mlx-validation.yml on nax-macos, the external
+      //   guard's root_lifetime_max, ri_phys_footprint):
+      //     q4 27 — 25,688,127,912 B = 23.924 GiB (run 44471737483, 177 s); / 0.9 = 26.58.
+      //     q8 40 — 38,021,601,816 B = 35.410 GiB (run 44471749511, 384 s); / 0.9 = 39.34.
+      //     bf16 66 — UNMEASURED, DERIVED: 51.76 GiB of files plus the 7.54 GiB the measured q4
+      //               peak holds above its 16.38 GiB of files (q8: 7.50 above 27.91) = 59.30;
+      //               / 0.9 = 65.9.
       //   These floors are what the worker admits from. The Model Manager's host-size quote for
       //   this entry does NOT use them: it still comes from the catalog's image-generation estimate
       //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
-      //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 28).
+      //   floor on MLX (about 34 GB quoted for q4, where the worker admits from 27).
       //
-      // Each row names every file the loader reads (the q4/q8 rows list the six files of their
-      // tier folder rather than a `<tier>/*` glob), so a tier counts as installed only when every
-      // listed file is present in one cached revision: the API's install state, the job's tier
-      // check and the worker all apply that rule, so a cancelled tier download never looks
-      // installed (the lesson of the retired Qwen3.6-27B film planner's README-only pin).
+      // Each row names every file the loader reads rather than a `<tier>/*` glob (which one file
+      // satisfies), so a tier counts as installed only when every listed file is present in the
+      // row's pinned revision: the API's install state, the job's tier check and the worker all
+      // apply that rule, so a cancelled tier download never looks installed (the lesson of the
+      // retired Qwen3.6-27B film planner's README-only pin). The MLX q4/q8 folders hold one
+      // `model.safetensors`. The
+      // Candle q4/q8 folders are sharded like their bf16 source: candle-llm `prepare_snapshot`
+      // writes one output shard per source shard under the source's name (18 for this model) plus
+      // a fresh `model.safetensors.index.json`, so those rows name the index and the
+      // `model-*.safetensors` shard glob, as the bf16 row does, and every shard the index names
+      // must be present.
       //
       // FILM PLANNER. This entry is also the Video Editor's native film planner
       // (`film_workspace::NATIVE_FILM_PLANNER_MODEL_ID`): one Qwen3.8 27B download serves both
@@ -16306,44 +16384,68 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
-          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "revision": "310a42a672353c6465a69a243a2b8339320ec991",
           "variant": "q4",
           "default": true,
-          "files": ["q4/config.json", "q4/generation_config.json", "q4/chat_template.jinja", "q4/tokenizer.json", "q4/tokenizer_config.json", "q4/model.safetensors"],
+          "files": ["q4-full/config.json", "q4-full/generation_config.json", "q4-full/chat_template.jinja", "q4-full/tokenizer.json", "q4-full/tokenizer_config.json", "q4-full/model.safetensors"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 19995477764,
-          "footprint": { "diskSizeBytes": 19995477764 }
+          // Published by qwen38-full-tiers.yml (describer, mlx) at 310a42a6. Size: the six files this
+          // row names, from the publication report (the folder also holds README.md and SOURCE_REVISION.json).
+          "estimatedSizeBytes": 17589535350,
+          "footprint": { "diskSizeBytes": 17589535350 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
-          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "revision": "310a42a672353c6465a69a243a2b8339320ec991",
           "variant": "q8",
-          "files": ["q8/config.json", "q8/generation_config.json", "q8/chat_template.jinja", "q8/tokenizer.json", "q8/tokenizer_config.json", "q8/model.safetensors"],
+          "files": ["q8-full/config.json", "q8-full/generation_config.json", "q8-full/chat_template.jinja", "q8-full/tokenizer.json", "q8-full/tokenizer_config.json", "q8-full/model.safetensors"],
           "platforms": ["macos"],
-          "estimatedSizeBytes": 32371297322,
-          "footprint": { "diskSizeBytes": 32371297322 }
+          // Published by qwen38-full-tiers.yml (describer, mlx) at 310a42a6. Size: the six files this
+          // row names, from the publication report (the folder also holds README.md and SOURCE_REVISION.json).
+          "estimatedSizeBytes": 29965333100,
+          "footprint": { "diskSizeBytes": 29965333100 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
-          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "revision": "f76e0088020724953fd129a0004fa78bd9fee8cc",
           "variant": "q4",
           "default": true,
-          "files": ["q4/config.json", "q4/generation_config.json", "q4/chat_template.jinja", "q4/tokenizer.json", "q4/tokenizer_config.json", "q4/model.safetensors"],
+          "files": [
+            "q4-full/config.json",
+            "q4-full/generation_config.json",
+            "q4-full/chat_template.jinja",
+            "q4-full/tokenizer.json",
+            "q4-full/tokenizer_config.json",
+            "q4-full/model.safetensors.index.json",
+            "q4-full/model-*.safetensors"
+          ],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 19995370331,
-          "footprint": { "diskSizeBytes": 19995370331 }
+          // Published by qwen38-full-tiers.yml (describer, candle) at f76e0088. Size: the files this row
+          // names (five sidecars, the index, 18 shards), from the publication report.
+          "estimatedSizeBytes": 17589495082,
+          "footprint": { "diskSizeBytes": 17589495082 }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
-          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "revision": "f76e0088020724953fd129a0004fa78bd9fee8cc",
           "variant": "q8",
-          "files": ["q8/config.json", "q8/generation_config.json", "q8/chat_template.jinja", "q8/tokenizer.json", "q8/tokenizer_config.json", "q8/model.safetensors"],
+          "files": [
+            "q8-full/config.json",
+            "q8-full/generation_config.json",
+            "q8-full/chat_template.jinja",
+            "q8-full/tokenizer.json",
+            "q8-full/tokenizer_config.json",
+            "q8-full/model.safetensors.index.json",
+            "q8-full/model-*.safetensors"
+          ],
           "platforms": ["windows", "linux"],
-          "estimatedSizeBytes": 32371188675,
-          "footprint": { "diskSizeBytes": 32371188675 }
+          // Published by qwen38-full-tiers.yml (describer, candle) at f76e0088. Size: the files this row
+          // names (five sidecars, the index, 18 shards), from the publication report.
+          "estimatedSizeBytes": 29965305376,
+          "footprint": { "diskSizeBytes": 29965305376 }
         },
         {
           "provider": "huggingface",
@@ -16362,6 +16464,35 @@
             "model-*.safetensors"
           ],
           "estimatedSizeBytes": 55575900000
+        },
+        // SW-7203 (SW-F374 E13): the block-draft models for Qwen3.8-27B decoding, installed with every tier of this
+        // model. Both are Apache-2.0 SceneWorks re-hosts at pinned revisions with the upstream weights and config unmodified (the DFlash2 re-host adds a LICENSE file with the Apache-2.0 text, since upstream has none, and a README provenance note):
+        // tencent/Qwen3.8-27B-DSpine-b16 @ 260a6c23 (DSpine) and incoai/Qwen3.8-27B-DFlash2 @ 015e7956 (DFlash2).
+        // Soft: the model is fully usable without them (decode falls back to MTP / plain decoding), so a missing
+        // or stale draft never gates install state. No componentId yet: the engine reads them in SW-7193.
+        // Each row's own `license` keeps it outside the MiniMax acknowledgment on the prompt expander (see the
+        // `license` schema note): the drafts are Apache-2.0 and must not demand MiniMax's terms.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dspine-b16",
+          "revision": "8e450d7faf38238b64580163a7d3dd7e44af759d",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 4051845726,
+          "footprint": { "diskSizeBytes": 4051845726 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-dflash2",
+          "revision": "9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9",
+          "coRequisite": true,
+          "required": "soft",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "LICENSE"],
+          "estimatedSizeBytes": 3848830679,
+          "footprint": { "diskSizeBytes": 3848830679 }
         }
       ],
       "paths": {

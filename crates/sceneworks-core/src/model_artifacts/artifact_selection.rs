@@ -1531,6 +1531,101 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// SW-7202 AC3 ("a user who picks either tier downloads only that tier"): installing q4 or q8
+    /// of the MiniMax-H3-Image prompt expander or of the Qwen3.8 27B describer plans, on every OS,
+    /// exactly that tier's own row in the OS's layout plus the entry's tier-agnostic co-requisites
+    /// (the expander's upstream `prompt/` files and both models' block drafts) — never another
+    /// tier's row. These are the calls `POST /api/v1/models/:id/download` makes after narrowing
+    /// the catalog to its host: `model_download_for_variant`, then
+    /// `resolve_co_requisite_choices` and `model_co_requisite_downloads_for_selection`.
+    #[test]
+    fn installing_a_qwen38_tier_plans_only_that_tier_and_its_co_requisites_on_every_os() {
+        let folder = |row: &Value| -> String {
+            let files: Vec<&str> = row["files"]
+                .as_array()
+                .expect("the row names files")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let folders: std::collections::BTreeSet<&str> = files
+                .iter()
+                .map(|file| file.split_once('/').map_or("", |(dir, _)| dir))
+                .collect();
+            assert_eq!(folders.len(), 1, "one folder per tier row: {row}");
+            folders.into_iter().next().unwrap().to_owned()
+        };
+        for (os, layout) in [("macos", "mlx"), ("windows", "candle"), ("linux", "candle")] {
+            for (id, tier_repo) in [
+                ("minimax_h3_image_pe", "SceneWorks/minimax-h3-image-pe"),
+                (
+                    "vision_describe_qwen3_8_27b",
+                    if layout == "mlx" {
+                        "SceneWorks/qwen3.8-27b-abliterated-mlx"
+                    } else {
+                        "SceneWorks/qwen3.8-27b-abliterated-candle"
+                    },
+                ),
+            ] {
+                let mut model = Value::Object(
+                    crate::builtin_manifests::builtin_model_entry(id)
+                        .unwrap_or_else(|| panic!("{id} ships"))
+                        .clone(),
+                );
+                retain_downloads_for_os(&mut model, os);
+                let all_co_requisites = model_co_requisite_downloads(&model);
+                assert!(
+                    !all_co_requisites.is_empty(),
+                    "{id}: co-requisites declared"
+                );
+                if id == "minimax_h3_image_pe" {
+                    assert!(
+                        all_co_requisites
+                            .iter()
+                            .any(|row| row["componentId"] == "prompt"),
+                        "{id}: the prompt files are a co-requisite"
+                    );
+                }
+                for tier in ["q4", "q8"] {
+                    let other = if tier == "q4" { "q8" } else { "q4" };
+                    let expected_folder = match (id, layout) {
+                        ("minimax_h3_image_pe", "candle") => format!("candle-{tier}-full"),
+                        _ => format!("{tier}-full"),
+                    };
+                    let primary = model_download_for_variant(&model, tier)
+                        .unwrap_or_else(|| panic!("{os} {id}: a {tier} row"));
+                    assert!(!is_pending_artifact_download(&primary), "{os} {id} {tier}");
+                    assert_eq!(primary["repo"], tier_repo, "{os} {id} {tier}");
+                    assert_eq!(folder(&primary), expected_folder, "{os} {id} {tier}");
+                    let choices =
+                        resolve_co_requisite_choices(&model, Some(tier), &BTreeMap::new())
+                            .expect("no choice groups to resolve");
+                    let co_requisites =
+                        model_co_requisite_downloads_for_selection(&model, Some(tier), &choices);
+                    assert_eq!(
+                        co_requisites, all_co_requisites,
+                        "{os} {id} {tier}: every tier-agnostic co-requisite, nothing else"
+                    );
+                    let other_folder = folder(
+                        &model_download_for_variant(&model, other)
+                            .unwrap_or_else(|| panic!("{os} {id}: a {other} row")),
+                    );
+                    for row in std::iter::once(&primary).chain(co_requisites.iter()) {
+                        assert!(
+                            row.get("variant").is_none_or(|variant| variant == tier),
+                            "{os} {id} {tier}: plans a {other} row: {row}"
+                        );
+                        assert!(
+                            !row["files"]
+                                .to_string()
+                                .contains(&format!("\"{other_folder}/")),
+                            "{os} {id} {tier}: plans files of {other_folder}/: {row}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// SW-F363 audit: for MiniMax-H3-Image (render and training) and its prompt expander, the tier
     /// a job is admitted with ([`admitted_runtime_variant`], read by BOTH the API's portable
     /// admission and the worker's portable guard) rebuilds an artifact closure whose primary row
@@ -1621,7 +1716,7 @@ mod tests {
                 .as_deref(),
                 Some("bf16")
             );
-            // The expander: its frozen `peTier`, in this OS's layout (`q4/` on macOS, `candle-q4/`
+            // The expander: its frozen `peTier`, in this OS's layout (`q4-full/` on macOS, `candle-q4-full/`
             // on Windows/Linux); NVFP4 exists only on the CUDA hosts.
             let mut expander_tiers = vec!["q8", "q4"];
             if backend == "candle" {
@@ -1644,16 +1739,11 @@ mod tests {
                 let row = primary(&expander, tier, payload);
                 assert_eq!(row["variant"], tier, "{os} expander {tier}");
                 let first_file = row["files"][0].as_str().unwrap_or_default();
+                // SW-7202: the converted tiers are the fully quantized `-full` folders.
                 let expected_prefix = match (tier, backend) {
-                    ("nvfp4", _) => "",
-                    (_, "mlx") => tier,
-                    _ => {
-                        if tier == "q8" {
-                            "candle-q8"
-                        } else {
-                            "candle-q4"
-                        }
-                    }
+                    ("nvfp4", _) => String::new(),
+                    (_, "mlx") => format!("{tier}-full"),
+                    _ => format!("candle-{tier}-full"),
                 };
                 if !expected_prefix.is_empty() {
                     assert!(

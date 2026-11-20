@@ -178,6 +178,9 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         source_files: &[
             "crates/sceneworks-worker/src/loop_utility.rs",
             "crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs",
+            // SW-7204: the Qwen3.8-27B block draft the describer and the expander load beside the
+            // tier, resolved at its catalog-pinned revision.
+            "crates/sceneworks-worker/src/qwen38_block_draft.rs",
         ],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
@@ -603,6 +606,10 @@ mod tests {
         "crates/sceneworks-worker/src/smoke_support.rs",
         // sc-26243: off-Mac sibling compiled only under cfg(all(test, not(macos), backend-candle)).
         "crates/sceneworks-worker/src/flux3_candle_footprint.rs",
+        // SW-7202: the MiniMax-H3-Image prompt expander's q4/q8 validation, an #[ignore]d test
+        // module compiled only under cfg(all(test, native_lane)) and run only by its dispatched
+        // workflow (qwen38-describer-validation.yml, job=expander).
+        "crates/sceneworks-worker/src/h3_prompt_expander_gpu_smoke.rs",
         // sc-27092: the imported ComfyUI-quantized (scalar fp8 / MXFP8) worker smoke — an
         // #[ignore]d test module, the same shape as the NVFP4 smoke below.
         "crates/sceneworks-worker/src/imported_comfy_quant_gpu_smoke.rs",

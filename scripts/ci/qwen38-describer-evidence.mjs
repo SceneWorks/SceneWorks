@@ -3,6 +3,27 @@
 // resource receipt, and fails unless the described fields are filled and the guard completed. `pose` and
 // `camera` may be empty strings: the output contract allows them when the image shows no people or
 // no camera character.
+//
+// With `SCENEWORKS_QWEN38_VALIDATION_JOB=expander` it validates the MiniMax-H3-Image prompt expander
+// smoke's `expander-result.json` instead (SW-7202): the selected q4/q8 Candle tier at its pinned
+// folder (the folder the job LOADED, its result's `executionIdentity.weightsDir`), the upstream
+// prompt files at their pinned revision and a complete well-formed expansion. `tier_isolated` is
+// true when no other expander tier folder was in the snapshot: a fresh-hub run that proves the job
+// needed only the selected tier.
+//
+// `SCENEWORKS_H3_EXPANDER_MODEL=abliterated` (SW-7208) validates an expansion run by the abliterated
+// Qwen3.8-27B describer instead of MiniMax-H3-Image-PE: the describer's own pinned Candle tier
+// folder, the same upstream prompt files and output contract, and a result that names the
+// describer as the model that ran.
+//
+// `SCENEWORKS_QWEN38_BLOCK_DRAFT` (SW-7204) re-checks the smoke's block-draft record. Every request
+// sends `speculative: auto`, checked linearly, and the smoke records auto's decision for the
+// installed draft (`block_draft.auto.runsDraft`, from core-llm's measured AUTO_BLOCK_DRAFT_DECISIONS:
+// MLX q4/q8 prefer the draft, Candle/CUDA and bf16 keep MTP). `record` (the default) only carries
+// the record into the evidence; `on` requires linear checking in every phase and, where auto runs
+// the draft, the block draft to have run with a named pinned draft and precision, more than one
+// accepted token per target pass and no fallback, and elsewhere the draft not to have run, with the
+// record saying why; `no_fit` requires the job to have run without the draft and to name why.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -21,16 +42,21 @@ const SPECS_FILE = fileURLToPath(new URL('../../config/manifests/registry/specs.
 
 // Each tier's pinned snapshot on the Candle lane, read from the compiled catalog (the source the
 // worker's catalog reads): the repository, its pinned revision, and the weights folder relative to
-// the hub cache (`models--<repo>/snapshots/<revision>`, then `<tier>/` for a quantised tier).
+// the hub cache (`models--<repo>/snapshots/<revision>`, then for a quantised tier the folder its
+// row's files name, e.g. `q4-full/`, the folder the worker loads).
 export function pinnedSnapshots(specs = JSON.parse(readFileSync(SPECS_FILE, 'utf8'))) {
   const rows = specs?.[CATALOG_ID]?.product?.downloads ?? [];
   return Object.freeze(Object.fromEntries(TIERS.map((tier) => {
     const repo = tier === 'bf16' ? UPSTREAM_REPO : REHOST_REPO;
     const matches = rows.filter((row) => row.repo === repo && row.variant === tier);
     assert.equal(matches.length, 1, `the catalog has one ${repo} ${tier} row`);
-    const { revision } = matches[0];
+    const { revision, files } = matches[0];
     assert.match(String(revision), /^[a-f0-9]{40}$/, `the catalog pins ${repo} ${tier} to an exact revision`);
-    const relativeDir = [`models--${repo.replace('/', '--')}`, 'snapshots', revision, ...(tier === 'bf16' ? [] : [tier])].join('/');
+    const folders = new Set((files ?? []).map((file) => String(file).split('/').slice(0, -1).join('/')));
+    assert.equal(folders.size, 1, `the catalog's ${repo} ${tier} row names one folder`);
+    const [folder] = folders;
+    assert.equal(folder === '', tier === 'bf16', `only full precision loads from the ${repo} snapshot root`);
+    const relativeDir = [`models--${repo.replace('/', '--')}`, 'snapshots', revision, ...(folder ? [folder] : [])].join('/');
     return [tier, Object.freeze({ repo, revision, relativeDir })];
   })));
 }
@@ -61,11 +87,7 @@ export function validateResult(result, tier, imageSide = 'default', pinned = pin
     || (!MAY_BE_EMPTY.includes(name) && !result.fields[name].trim()));
   assert.deepEqual(empty, [], `described fields are empty: ${empty.join(', ')}`);
   assert(Number.isFinite(result.wall_seconds) && result.wall_seconds > 0, 'wall time is missing');
-  const memory = result.gpu_memory;
-  for (const key of ['baseline_mib', 'peak_mib', 'peak_delta_mib']) {
-    assert(Number.isInteger(memory?.[key]) && memory[key] >= 0, `gpu_memory.${key} is missing`);
-  }
-  assert(memory.peak_mib > 0, 'peak GPU memory was never sampled');
+  const memory = validateGpuMemory(result.gpu_memory);
   return {
     tier: result.tier,
     revision: result.revision,
@@ -75,6 +97,162 @@ export function validateResult(result, tier, imageSide = 'default', pinned = pin
     gpu_memory: memory,
     image: result.image,
   };
+}
+
+// The prompt expander (SW-7202): its catalog id, the Candle tiers' re-host and the published tiers.
+export const JOBS = Object.freeze(['describer', 'expander']);
+export const EXPANDER_CATALOG_ID = 'minimax_h3_image_pe';
+export const EXPANDER_REPO = 'SceneWorks/minimax-h3-image-pe';
+export const EXPANDER_TIERS = Object.freeze(['q4', 'q8']);
+export const EXPANDER_TEST_NAME = 'h3_prompt_expander_expands_a_prompt_on_cuda';
+// The expander's models (SW-7208): the workflow's `expander_model` input -> the catalog id that runs.
+export const EXPANDER_MODELS = Object.freeze({ minimax: EXPANDER_CATALOG_ID, abliterated: CATALOG_ID });
+
+// Each published expander tier's pinned Candle folder (the Windows/Linux row's), and the `prompt`
+// co-requisite's upstream snapshot, from the compiled catalog.
+export function expanderPinnedSnapshots(specs = JSON.parse(readFileSync(SPECS_FILE, 'utf8'))) {
+  const rows = specs?.[EXPANDER_CATALOG_ID]?.product?.downloads ?? [];
+  const tiers = Object.fromEntries(EXPANDER_TIERS.map((tier) => {
+    const matches = rows.filter((row) => row.repo === EXPANDER_REPO && row.variant === tier
+      && (row.platforms ?? []).includes('windows'));
+    assert.equal(matches.length, 1, `the catalog has one Candle ${EXPANDER_REPO} ${tier} row`);
+    const { revision, files } = matches[0];
+    assert.match(String(revision), /^[a-f0-9]{40}$/, `the catalog pins ${EXPANDER_REPO} ${tier} to an exact revision`);
+    assert.equal(files?.length, 1, `the catalog's ${tier} row names one folder`);
+    const [folder, rest] = String(files[0]).split('/');
+    assert.equal(rest, '*', `the catalog's ${tier} row names its whole folder`);
+    const relativeDir = [`models--${EXPANDER_REPO.replace('/', '--')}`, 'snapshots', revision, folder].join('/');
+    return [tier, Object.freeze({ repo: EXPANDER_REPO, revision, relativeDir })];
+  }));
+  const prompts = rows.filter((row) => row.coRequisite === true && row.componentId === 'prompt');
+  assert.equal(prompts.length, 1, 'the catalog has one prompt co-requisite');
+  return Object.freeze({ ...tiers, prompt: Object.freeze({ repo: prompts[0].repo, revision: prompts[0].revision }) });
+}
+
+function validateGpuMemory(memory) {
+  for (const key of ['baseline_mib', 'peak_mib', 'peak_delta_mib']) {
+    assert(Number.isInteger(memory?.[key]) && memory[key] >= 0, `gpu_memory.${key} is missing`);
+  }
+  assert(memory.peak_mib > 0, 'peak GPU memory was never sampled');
+  return memory;
+}
+
+// The pinned tier folders `model` loads on the Candle lane, with the expander's prompt snapshot:
+// MiniMax-H3-Image-PE's own tiers, or the describer's quantised tiers.
+export function expanderModelSnapshots(model = 'minimax') {
+  const expander = expanderPinnedSnapshots();
+  if (model === 'minimax') return expander;
+  const describer = pinnedSnapshots();
+  return Object.freeze({ q4: describer.q4, q8: describer.q8, prompt: expander.prompt });
+}
+
+export function validateExpanderResult(result, tier, pinned = expanderPinnedSnapshots(), model = 'minimax') {
+  assert(EXPANDER_TIERS.includes(tier), `requested expander tier must be one of ${EXPANDER_TIERS.join(', ')}`);
+  assert(Object.hasOwn(EXPANDER_MODELS, model), `expander model must be one of ${Object.keys(EXPANDER_MODELS).join(', ')}`);
+  assert.equal(result?.schema_version, 1, 'unknown expander result schema');
+  assert.equal(result.job, 'expander', 'result is not from the expander smoke');
+  // An older result names no model: it is MiniMax-H3-Image-PE's.
+  assert.equal(result.expander_model ?? 'minimax', model, 'result is from another expander model');
+  assert.equal(result.catalog_id ?? EXPANDER_CATALOG_ID, EXPANDER_MODELS[model],
+    'result names another catalog entry than the requested model');
+  if (result.rewriter_model_id !== undefined) {
+    assert.equal(result.rewriter_model_id, EXPANDER_MODELS[model], 'the job record names another model than ran');
+  }
+  assert.equal(typeof result.test_fqn, 'string');
+  assert.equal(result.test_fqn.split('::').at(-1), EXPANDER_TEST_NAME, 'result is not from the expander smoke');
+  assert.equal(result.backend, 'candle', 'the CUDA run must be the Candle backend');
+  assert.equal(result.tier, tier, 'result tier differs from the requested tier');
+  assert.equal(result.suggestion_tier, tier, 'the suggestion block names another tier than requested');
+  const expected = pinned[tier];
+  assert.equal(result.repo, expected.repo, `the ${tier} tier must load from ${expected.repo}`);
+  assert.equal(result.revision, expected.revision, `the ${tier} tier must load the pinned revision ${expected.revision}`);
+  assert(typeof result.weights_dir === 'string'
+    && result.weights_dir.replaceAll('\\', '/').replace(/\/+$/, '').endsWith(`/${expected.relativeDir}`),
+  `the job must have loaded the pinned tier folder .../${expected.relativeDir}`);
+  assert.deepEqual(result.prompt_files, { repo: pinned.prompt.repo, revision: pinned.prompt.revision },
+    'the prompt files must come from the pinned upstream snapshot');
+  assert(Array.isArray(result.other_tiers_present)
+    && result.other_tiers_present.every((folder) => typeof folder === 'string'), 'other_tiers_present is missing');
+  const tierIsolated = result.other_tiers_present.length === 0;
+  assert.equal(result.tier_isolated, tierIsolated, 'tier_isolated disagrees with other_tiers_present');
+  assert.equal(typeof result.prompt, 'string', 'the input prompt is missing');
+  const expanded = result.expanded_prompt;
+  assert(typeof expanded === 'string' && expanded.trim(), 'the expanded prompt is empty');
+  assert.notEqual(expanded.trim(), result.prompt.trim(), 'the prompt came back unexpanded');
+  assert(!/<\/?think>/.test(expanded), 'the reasoning block leaked into the expansion');
+  assert.match(String(result.wh_ratio), /^[1-9]\d*:[1-9]\d*$/, 'the proposed aspect ratio is not W:H');
+  assert.equal(result.workflow, 't2i');
+  const generation = result.generation;
+  assert.equal(generation?.finishReason, 'stop', 'the reply was not completed');
+  const generated = generation?.usage?.generatedTokens;
+  assert(Number.isInteger(generated) && generated > 0 && generated < generation.maxNewTokens,
+    'the reply ran to its budget');
+  assert(Number.isFinite(result.wall_seconds) && result.wall_seconds > 0, 'wall time is missing');
+  return {
+    expander_model: model,
+    catalog_id: EXPANDER_MODELS[model],
+    tier: result.tier,
+    revision: result.revision,
+    prompt: result.prompt,
+    expanded_prompt: expanded,
+    wh_ratio: result.wh_ratio,
+    generation,
+    weights_dir: result.weights_dir,
+    other_tiers_present: result.other_tiers_present,
+    tier_isolated: tierIsolated,
+    wall_seconds: result.wall_seconds,
+    wall_time_scope: result.wall_time_scope,
+    gpu_memory: validateGpuMemory(result.memory),
+  };
+}
+
+// What a run checks about the block drafter (SW-7204), and the record the smoke wrote.
+export const BLOCK_DRAFT_CHECKS = Object.freeze(['record', 'on', 'no_fit']);
+
+// One phase's decode block. `runsDraft`: auto's decision for the installed draft on the run's
+// backend and tier (the smoke's `block_draft.auto`).
+function validateDecodeBlock(decode, check, phase, runsDraft) {
+  if (check === 'on') {
+    assert.equal(decode?.verify, 'linear', `${phase}: the target did not check linearly`);
+    if (runsDraft) {
+      assert.equal(decode.proposer, 'block_draft', `${phase}: the block draft did not run`);
+      assert(typeof decode.draft?.repo === 'string' && /^[a-f0-9]{40}$/.test(decode.draft?.revision ?? ''),
+        `${phase}: the record names no pinned draft`);
+      assert(['q8', 'q4'].includes(decode.draft?.precision), `${phase}: the record names no draft precision`);
+      assert(Number.isFinite(decode.acceptedTokensPerPass) && decode.acceptedTokensPerPass > 1,
+        `${phase}: accepted tokens per target pass is not above 1.0`);
+      assert.equal(decode.draftFallback, null, `${phase}: the draft fell back`);
+    } else {
+      assert(decode.proposer !== 'block_draft' && decode.draft == null,
+        `${phase}: auto ran the block draft where it keeps MTP`);
+      assert(typeof decode.draftFallback === 'string' && decode.draftFallback.length > 0,
+        `${phase}: the record does not say why the draft did not run`);
+    }
+  } else {
+    assert.notEqual(decode?.proposer, 'block_draft', `${phase}: the draft ran although it could not fit`);
+    // Where auto keeps MTP the load never names the draft, so auto's reason stands in for the refusal.
+    assert(typeof decode?.draftFallback === 'string'
+      && (decode.draftFallback.includes('beside the target') || !runsDraft),
+      `${phase}: the record does not say the draft did not fit`);
+  }
+}
+
+// The smoke's block-draft record for `job`: the describer's `{describe, condense}` blocks, or the
+// expander's one block.
+export function validateBlockDraft(blockDraft, check = 'record', job = 'describer') {
+  assert(BLOCK_DRAFT_CHECKS.includes(check), `block-draft check must be one of ${BLOCK_DRAFT_CHECKS.join(', ')}`);
+  if (check === 'record') return blockDraft ?? null;
+  assert.equal(blockDraft?.check, check, `the smoke ran the ${blockDraft?.check ?? 'no'} block-draft check, not ${check}`);
+  const runsDraft = blockDraft.auto?.runsDraft;
+  assert.equal(typeof runsDraft, 'boolean', "the record does not carry auto's decision for the draft");
+  const decode = blockDraft.decode;
+  if (job === 'expander') {
+    validateDecodeBlock(decode, check, 'expand', runsDraft);
+  } else {
+    validateDecodeBlock(decode?.describe, check, 'describe', runsDraft);
+    validateDecodeBlock(decode?.condense, check, 'condense', runsDraft);
+  }
+  return blockDraft;
 }
 
 // The guard policy each GPU admission must have run under. The wrapper has one admission rule for
@@ -99,13 +277,40 @@ async function readBoundedJson(file) {
 }
 
 export function summary(evidence) {
-  const lines = [`## Qwen3.8 27B describer CUDA validation`, '', `Accepted: **${evidence.accepted}**`, ''];
+  const expander = evidence.job === 'expander';
+  const title = expander ? 'MiniMax-H3-Image prompt expander CUDA validation' : 'Qwen3.8 27B describer CUDA validation';
+  const lines = [`## ${title}`, '', `Accepted: **${evidence.accepted}**`, ''];
   if (evidence.error) lines.push(`Error: ${evidence.error}`, '');
   lines.push('GPU admission: shared (shared-free-memory guard: per-GPU lock and owned child, admitted on free '
     + 'memory and a stable window, no idle check; the card may be shared with the desktop). The peak below was '
     + 'measured on a shared card: card-wide, above the smoke\'s own baseline.', '');
   const result = evidence.result;
-  if (result) {
+  const decode = result?.block_draft?.decode;
+  // One line per decode block: the describer's describe and condense, or the expander's one.
+  const blocks = decode && (expander ? [['expand', decode]]
+    : [['describe', decode.describe], ['condense', decode.condense]].filter(([, block]) => block));
+  for (const [phase, block] of blocks || []) {
+    lines.push(`Block draft ${phase} (${evidence.block_draft_check ?? 'record'}): proposer \`${block.proposer}\`, `
+      + `draft ${block.draft ? `\`${block.draft.repo}@${block.draft.revision}\` ${block.draft.format} ${block.draft.precision}` : 'none'}, `
+      + `${block.verify ?? 'no'} checking, ${block.targetPasses} target passes, `
+      + `${block.rowsCheckedPerPass ?? 'n/a'} rows checked and `
+      + `${block.acceptedTokensPerPass ?? 'n/a'} tokens accepted per pass`
+      + `${block.draftFallback ? `; draft fallback: ${block.draftFallback}` : ''}`, '');
+  }
+  if (result && expander) {
+    const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
+    lines.push(`Model: \`${result.catalog_id ?? EXPANDER_CATALOG_ID}\``, '',
+      `Tier: \`${result.tier}\` at \`${result.revision}\``, '',
+      `Loaded weights: \`${result.weights_dir}\``, '',
+      `Tier isolated: **${result.tier_isolated}** (other tier folders present: `
+        + `${result.other_tiers_present.length ? result.other_tiers_present.join(', ') : 'none'})`, '',
+      `Wall time: ${result.wall_seconds.toFixed(1)} s (${result.wall_time_scope})`, '',
+      `Generated tokens: ${result.generation.usage.generatedTokens} of ${result.generation.maxNewTokens}; `
+        + `proposed aspect ratio ${result.wh_ratio}`, '',
+      `Peak GPU memory: ${mib(result.gpu_memory.peak_mib)}; baseline ${mib(result.gpu_memory.baseline_mib)}; `
+        + `delta ${mib(result.gpu_memory.peak_delta_mib)}`, '',
+      `Prompt: ${result.prompt}`, '', `> ${result.expanded_prompt.replace(/\s+/g, ' ')}`, '');
+  } else if (result) {
     const mib = (value) => `${value} MiB (${(value / 1024).toFixed(2)} GiB)`;
     lines.push(`Tier: \`${result.tier}\` at \`${result.revision}\``, '',
       `Image: ${result.image.kind}, ${result.image.width}x${result.image.height}`, '',
@@ -123,16 +328,26 @@ export function summary(evidence) {
 // rule (the per-GPU lock and owned child, no idle check), and it needs a completed receipt of that
 // policy. The peak is measured above the smoke's own baseline, on a card other programs may also
 // use, so it is labelled as such.
-export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'shared') {
+export async function stage(outputDir, receiptFile, tier, imageSide = 'default', admission = 'shared',
+  job = 'describer', expanderModel = 'minimax', blockDraft = 'record') {
   assert(Object.hasOwn(ADMISSION_POLICIES, admission), `unsupported GPU admission ${admission}`);
-  const evidence = { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide,
-    gpu_admission: admission };
+  assert(JOBS.includes(job), `unsupported job ${job}`);
+  const evidence = job === 'expander'
+    ? { schema_version: 1, job, accepted: false, requested_tier: tier, requested_expander_model: expanderModel,
+      gpu_admission: admission }
+    : { schema_version: 1, accepted: false, requested_tier: tier, requested_image_side: imageSide,
+      gpu_admission: admission };
   const artifact = path.join(outputDir, 'artifact');
   await fs.mkdir(artifact, { recursive: true });
   let failure = null;
   try {
-    evidence.result = validateResult(
-      await readBoundedJson(path.join(outputDir, 'describer-result.json')), tier, imageSide);
+    const raw = await readBoundedJson(path.join(outputDir,
+      job === 'expander' ? 'expander-result.json' : 'describer-result.json'));
+    evidence.result = job === 'expander'
+      ? validateExpanderResult(raw, tier, expanderModelSnapshots(expanderModel), expanderModel)
+      : validateResult(raw, tier, imageSide);
+    evidence.block_draft_check = blockDraft;
+    evidence.result.block_draft = validateBlockDraft(raw.block_draft, blockDraft, job);
     evidence.result.gpu_memory = { ...evidence.result.gpu_memory, measured_on: 'shared-card' };
   } catch (error) {
     failure = error;
@@ -163,9 +378,13 @@ export async function main(env = process.env) {
   const receiptFile = path.join(env.RUNNER_TEMP,
     `sceneworks-cuda-execution-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${GUARD_ACTOR}`, 'resource-receipt.json');
   const imageSide = env.SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE?.trim() || 'default';
-  const evidence = await stage(outputDir, receiptFile, tier, imageSide);
+  const job = env.SCENEWORKS_QWEN38_VALIDATION_JOB?.trim() || 'describer';
+  const expanderModel = env.SCENEWORKS_H3_EXPANDER_MODEL?.trim() || 'minimax';
+  const blockDraft = env.SCENEWORKS_QWEN38_BLOCK_DRAFT?.trim() || 'record';
+  const evidence = await stage(outputDir, receiptFile, tier, imageSide, 'shared', job, expanderModel, blockDraft);
   if (env.GITHUB_STEP_SUMMARY) await fs.appendFile(env.GITHUB_STEP_SUMMARY, summary(evidence));
-  console.log(`Qwen3.8 27B describer validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);
+  const name = job === 'expander' ? 'MiniMax-H3-Image prompt expander' : 'Qwen3.8 27B describer';
+  console.log(`${name} validation accepted=${evidence.accepted}${evidence.error ? `: ${evidence.error}` : ''}`);
   if (!evidence.accepted) process.exitCode = 1;
 }
 

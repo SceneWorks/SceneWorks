@@ -6,7 +6,15 @@ import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, unmountRoot } from "./testUtils/dom.js";
-import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "./minimaxH3ImageExpand.js";
+import {
+  H3_IMAGE_EXPAND_COPY,
+  h3ExpanderChoices,
+  h3ImageProposedResolution,
+  readH3ExpanderModel,
+  resolveH3Expander,
+  seedH3ExpanderModelFromServer,
+  writeH3ExpanderModel,
+} from "./minimaxH3ImageExpand.js";
 import { writeSimpleStudioSnapshot } from "./simpleStudioStore.js";
 
 // SW-7102 (feature SW-F363): MiniMax-H3-Image's prompt expander in both Image Studio views, from
@@ -480,5 +488,178 @@ describe("the Expand prompt wording", () => {
     expect(H3_IMAGE_EXPAND_COPY.hint).toContain("not changed on its own");
     expect(H3_IMAGE_EXPAND_COPY.editHint(2)).toContain("<Picture 1>…<Picture 2>");
     expect(H3_IMAGE_EXPAND_COPY.editHint(1)).toContain("1 reference in order");
+  });
+});
+
+// SW-7208: the expander runs the model the user picks — MiniMax-H3-Image-PE or the abliterated
+// Qwen3.8-27B the describer uses — and the pick is saved.
+const DESCRIBER = withState("vision_describe_qwen3_8_27b", "installed");
+const withPrompts = (entry, installState) => ({
+  ...entry,
+  conditionalPurposes: { describer_prompt_expansion: { installState } },
+});
+
+describe("the expander model choice (SW-7208)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("needs an expander tier, or a describer tier plus MiniMax's prompt files", () => {
+    const missingPe = withState("minimax_h3_image_pe", "missing");
+    const missingDescriber = withState("vision_describe_qwen3_8_27b", "missing");
+    const states = (models) =>
+      Object.fromEntries(h3ExpanderChoices(models).map((choice) => [choice.id, choice.missing]));
+    expect(states([withPrompts(PE, "installed"), DESCRIBER])).toEqual({
+      minimax_h3_image_pe: null,
+      vision_describe_qwen3_8_27b: null,
+    });
+    // The describer alone lacks the prompt files; MiniMax-H3-Image-PE's weights are never needed.
+    expect(states([withPrompts(missingPe, "missing"), DESCRIBER])).toEqual({
+      minimax_h3_image_pe: "weights",
+      vision_describe_qwen3_8_27b: "prompts",
+    });
+    expect(states([withPrompts(missingPe, "installed"), DESCRIBER])).toEqual({
+      minimax_h3_image_pe: "weights",
+      vision_describe_qwen3_8_27b: null,
+    });
+    expect(states([withPrompts(PE, "installed"), missingDescriber])).toEqual({
+      minimax_h3_image_pe: null,
+      vision_describe_qwen3_8_27b: "weights",
+    });
+  });
+
+  it("runs the saved model while it can, else the one that can", () => {
+    const both = [withPrompts(PE, "installed"), DESCRIBER];
+    expect(resolveH3Expander(both, "vision_describe_qwen3_8_27b").selected.id).toBe("vision_describe_qwen3_8_27b");
+    expect(resolveH3Expander(both, "minimax_h3_image_pe").selected.id).toBe("minimax_h3_image_pe");
+    const peOnly = [withPrompts(PE, "installed"), withState("vision_describe_qwen3_8_27b", "missing")];
+    expect(resolveH3Expander(peOnly, "vision_describe_qwen3_8_27b").selected.id).toBe("minimax_h3_image_pe");
+    // The describer without the prompt files is still offered, so its panel can fetch them.
+    const describerOnly = [withPrompts(withState("minimax_h3_image_pe", "missing"), "missing"), DESCRIBER];
+    const { selected, offered } = resolveH3Expander(describerOnly, "minimax_h3_image_pe");
+    expect(offered).toBe(true);
+    expect(selected).toMatchObject({ id: "vision_describe_qwen3_8_27b", available: false, missing: "prompts" });
+    expect(resolveH3Expander([withState("minimax_h3_image_pe", "missing")], null).offered).toBe(false);
+  });
+
+  it("saves the pick locally and to the durable preference the API reads", async () => {
+    const { apiFetch } = await import("./api.js");
+    expect(readH3ExpanderModel()).toBe("minimax_h3_image_pe");
+    writeH3ExpanderModel("vision_describe_qwen3_8_27b");
+    expect(readH3ExpanderModel()).toBe("vision_describe_qwen3_8_27b");
+    const put = apiFetch.mock.calls.find(([path, , options]) =>
+      String(path).includes("ui-preferences") && options?.method === "PUT");
+    expect(JSON.parse(put[2].body)).toEqual({ h3ImageExpanderModel: "vision_describe_qwen3_8_27b" });
+    // An unknown stored value reads as the default; a server seed outside the two is ignored.
+    seedH3ExpanderModelFromServer("minimax_h3");
+    expect(readH3ExpanderModel()).toBe("vision_describe_qwen3_8_27b");
+    seedH3ExpanderModelFromServer("minimax_h3_image_pe");
+    expect(readH3ExpanderModel()).toBe("minimax_h3_image_pe");
+  });
+
+  it("never offers MiniMax-H3-Image-PE as the dataset describer", async () => {
+    const { DESCRIBE_MODELS } = await import("./components/DatasetPromptBatchDialog.jsx");
+    const ids = DESCRIBE_MODELS.flatMap((entry) => [entry.id, entry.repo]);
+    expect(ids).toContain("vision_describe_qwen3_8_27b");
+    for (const forbidden of ["minimax_h3_image_pe", "MiniMaxAI/MiniMax-H3-Image-PE", "SceneWorks/minimax-h3-image-pe"]) {
+      expect(ids).not.toContain(forbidden);
+    }
+  });
+});
+
+describe("picking the expander model in the advanced Image Studio (SW-7208)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(value) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={value}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  const radio = (id) => container.querySelector(`input[name="h3-expander-model"][value="${id}"]`);
+
+  it("expands with the picked model and keeps the pick", async () => {
+    const value = context([H3_IMAGE, withPrompts(PE, "installed"), DESCRIBER]);
+    await render(value);
+    await act(async () =>
+      setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
+    );
+    await click(buttonWithText(container, "Expand prompt"));
+    expect(radio("minimax_h3_image_pe").checked).toBe(true);
+    await click(radio("vision_describe_qwen3_8_27b"));
+    expect(radio("vision_describe_qwen3_8_27b").checked).toBe(true);
+    await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
+    await act(async () => {});
+    expect(value.h3ImageExpandPrompt).toHaveBeenLastCalledWith(
+      expect.objectContaining({ prompt: "a lighthouse in fog", expanderModelId: "vision_describe_qwen3_8_27b" }),
+    );
+    expect(readH3ExpanderModel()).toBe("vision_describe_qwen3_8_27b");
+  });
+
+  // Run batch expands with the same picked model as the single-prompt control.
+  it("expands a batch with the picked model", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ model: "minimax_h3_image", count: 1, batchMode: true, batchPromptsText: "a fox\na heron" }),
+    );
+    const value = context([H3_IMAGE, withPrompts(PE, "installed"), DESCRIBER], {
+      h3ImageExpandPrompt: vi.fn(async ({ prompt }) => ({ refinedPrompt: `Expanded ${prompt}` })),
+      createImageJob: vi.fn(async () => ({ id: `job-${Math.random()}`, status: "queued" })),
+    });
+    await render(value);
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(radio("vision_describe_qwen3_8_27b"));
+    await click(buttonWithText(container, "Expand & run batch · 2"));
+    for (let round = 0; round < 6; round += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(value.h3ImageExpandPrompt.mock.calls.map(([request]) => [request.prompt, request.expanderModelId])).toEqual([
+      ["a fox", "vision_describe_qwen3_8_27b"],
+      ["a heron", "vision_describe_qwen3_8_27b"],
+    ]);
+    expect(value.createImageJob.mock.calls.map(([request]) => request.prompt)).toEqual([
+      "Expanded a fox",
+      "Expanded a heron",
+    ]);
+  });
+
+  it("offers MiniMax's prompt files alone when the describer lacks them", async () => {
+    const downloadConditionalComponents = vi.fn(async () => ({ jobs: [] }));
+    const value = context(
+      [H3_IMAGE, withPrompts(withState("minimax_h3_image_pe", "missing"), "missing"), DESCRIBER],
+      { downloadConditionalComponents },
+    );
+    await render(value);
+    await act(async () =>
+      setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
+    );
+    await click(buttonWithText(container, "Expand prompt"));
+    expect(radio("minimax_h3_image_pe").disabled).toBe(true);
+    expect(radio("vision_describe_qwen3_8_27b").checked).toBe(true);
+    expect(container.textContent).toContain("needs MiniMax’s prompt files");
+    // Nothing to run yet: the expand button waits for the prompt files.
+    expect(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt").disabled).toBe(true);
+    await click(buttonWithText(container, "Download MiniMax’s prompt files"));
+    expect(downloadConditionalComponents).toHaveBeenCalledWith("minimax_h3_image_pe", "describer_prompt_expansion");
+    expect(value.h3ImageExpandPrompt).not.toHaveBeenCalled();
   });
 });

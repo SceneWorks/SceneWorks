@@ -1827,13 +1827,10 @@ pub(super) fn resolve_flux1_ordinary_img2img_source(
         source_id,
         project_path,
     )?;
-    let strength = request.authored_advanced_f64("strength").unwrap_or(0.5);
-    if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{}: advanced.strength must be in [0.0, 1.0] without clamping (got {strength})",
-            request.model
-        )));
-    }
+    let strength = request
+        .resolved_authored_img2img_strength()
+        .map_err(WorkerError::InvalidPayload)?
+        .unwrap_or(0.5);
     Ok(Some((image, strength as f32)))
 }
 

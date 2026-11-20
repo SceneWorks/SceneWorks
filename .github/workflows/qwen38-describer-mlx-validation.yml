@@ -1,0 +1,178 @@
+name: Qwen3.8 27B describer MLX validation
+
+# Real model inference is opt-in, never ordinary PR/main CI (SW-7202). The MLX twin of
+# qwen38-describer-validation.yml: describes one synthetic scene with the worker's Qwen3.8 27B
+# describer on the catalog's pinned MLX tier, on the Mac `mac_runner` names (the script refuses any
+# other runner), and records the process's exact peak footprint under the
+# external phys_footprint guard. That peak is the MLX floor's measured anchor
+# (floor = ceil(peak GiB / 0.9)). Fetches the tier into the task-owned hub when it is not resident.
+#
+# `job: expander` runs the MiniMax-H3-Image prompt expander smoke instead (SW-7202): one production
+# prompt_refine expand job on the selected MLX tier (q4-full/ or q8-full/ of
+# SceneWorks/minimax-h3-image-pe), with the upstream prompt/ files of MiniMaxAI/MiniMax-H3-Image-PE,
+# both fetched at their catalog revisions; only the selected tier is fetched. q4 and q8 only.
+# `fresh_hub: true` (expander only) fetches them into a new run-scoped hub, removed afterwards, so
+# the evidence records tier_isolated=true. `expander_model: abliterated` (SW-7208) runs the expansion
+# with the abliterated describer's own MLX tier folder and the same MiniMax prompt files instead.
+#
+# GitHub dispatches only workflows that exist on the default branch, so until this file is on main
+# dispatch it through qwen38-describer-validation.yml (`-f backend=mlx`), which calls this file as a
+# reusable workflow from the ref it was dispatched on. Direct `workflow_dispatch` works once on main.
+#
+# `nax-macos-2` (label `rw-llm`) is the default Mac. Its drive was replaced on 2026-11-19 and its hub
+# starts empty: run.sh downloads the pinned tier, the prompt files (expander job only) and the selected block drafts into the
+# hub when they are missing (it refuses a download that would leave under 25 GB free). `nax-macos`
+# (label `rw-starvector`) is Michael's dev Mac: choose it only on a loan he approved for that run; its
+# hub and build target live on /Volumes/Models.
+#
+# `block_draft` (SW-7204) picks what the run checks about the Qwen3.8-27B block drafter. Every
+# request sends `speculative: auto`, checked linearly; both jobs load an installed draft (DFlash2 /
+# DSpine) only where core-llm's measured decision prefers it (MLX q4/q8, SW-7200) and otherwise
+# record why auto keeps MTP. `record` (the default) records the decode blocks (proposer, draft,
+# precision, verify, target passes, rows checked and accepted tokens per pass; the describer's
+# describe and condense separately) and asserts nothing about them; `on` requires linear checking
+# and, where auto prefers the draft, the draft to run at the tier's draft precision with more than
+# one accepted token per target pass and no fallback (elsewhere the draft must not run and the
+# record must say why); `no_fit` caps the engine's load budget
+# so the draft cannot fit beside the target and requires the job to complete without it, its
+# record naming why. Only `on` / `no_fit` fetch the drafts (run.sh).
+on:
+  workflow_call:
+    inputs:
+      job:
+        description: describer or expander
+        required: false
+        type: string
+        default: describer
+      fresh_hub:
+        description: expander only - a fresh run-scoped hub holding only the selected tier
+        required: false
+        type: boolean
+        default: false
+      expander_model:
+        description: expander only - minimax or abliterated
+        required: false
+        type: string
+        default: minimax
+      block_draft:
+        description: record, on or no_fit
+        required: false
+        type: string
+        default: record
+      tier:
+        description: MLX tier to describe with (q4, q8 or bf16)
+        required: true
+        type: string
+      image_side:
+        description: Synthetic scene size ("1536" or "default")
+        required: false
+        type: string
+        default: "1536"
+      mac_runner:
+        description: nax-macos-2 (default; run.sh downloads missing weights into its empty hub) or nax-macos (Michael's dev Mac, only on a loan he approved)
+        required: false
+        type: string
+        default: nax-macos-2
+  workflow_dispatch:
+    inputs:
+      job:
+        description: describer (Qwen3.8 27B describer smoke) or expander (MiniMax-H3-Image prompt expander smoke, q4/q8 only)
+        required: true
+        type: choice
+        options: [describer, expander]
+        default: describer
+      fresh_hub:
+        description: expander only - run against a fresh run-scoped hub holding only the selected tier (proves tier isolation; downloads the tier)
+        required: false
+        type: boolean
+        default: false
+      expander_model:
+        description: expander only - minimax (MiniMax-H3-Image-PE) or abliterated (the describer's Qwen3.8-27B with MiniMax's prompt files)
+        required: false
+        type: choice
+        options: [minimax, abliterated]
+        default: minimax
+      block_draft:
+        description: record (record the decode block only), on (where auto prefers the block draft, MLX q4/q8, require it to run; elsewhere require MTP and the recorded reason), or no_fit (cap the load budget so the draft cannot fit; require the job to complete without it)
+        required: false
+        type: choice
+        options: [record, "on", no_fit]
+        default: record
+      tier:
+        description: MLX tier to describe with (q4/q8 pre-quantised, bf16 full precision)
+        required: true
+        type: choice
+        options: [q4, q8, bf16]
+        default: q4
+      image_side:
+        description: Synthetic scene size (1536x1536 by default, the floor's sizing image, or 512x384)
+        required: true
+        type: choice
+        options: ["1536", default]
+        default: "1536"
+      mac_runner:
+        description: nax-macos-2 (default; run.sh downloads missing weights into its empty hub) or nax-macos (Michael's dev Mac, only on a loan he approved)
+        required: true
+        type: choice
+        options: [nax-macos, nax-macos-2]
+        default: nax-macos-2
+
+permissions:
+  contents: read
+
+jobs:
+  qwen38-describer-mlx:
+    runs-on: [self-hosted, macOS, ARM64, "${{ inputs.mac_runner == 'nax-macos' && 'rw-starvector' || 'rw-llm' }}"]
+    timeout-minutes: 120
+    concurrency:
+      group: qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      QWEN38_JOB: ${{ inputs.job }}
+      QWEN38_FRESH_HUB: ${{ inputs.fresh_hub }}
+      QWEN38_EXPANDER_MODEL: ${{ inputs.expander_model || 'minimax' }}
+      QWEN38_BLOCK_DRAFT: ${{ inputs.block_draft || 'record' }}
+      QWEN38_TIER: ${{ inputs.tier }}
+      QWEN38_IMAGE_SIDE: ${{ inputs.image_side }}
+      QWEN38_MAC_RUNNER: ${{ inputs.mac_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Refuse any runner but the selected Mac before build
+        run: |
+          echo "runner: $RUNNER_NAME (selected: $QWEN38_MAC_RUNNER)"
+          [[ "$RUNNER_NAME" == "$QWEN38_MAC_RUNNER" ]] || { echo "::error::selected $QWEN38_MAC_RUNNER but landed on $RUNNER_NAME"; exit 1; }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Guarded describer run
+        env:
+          QWEN38_EVIDENCE_DIR: ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/ci/qwen38-describer-mlx/run.sh
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-mlx-{0}', inputs.tier) || format('h3-expander-mlx-{0}', inputs.tier)) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-draft-${{ inputs.block_draft || 'record' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.txt
+            ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/*.log
+            ${{ runner.temp }}/qwen38-describer-mlx-${{ github.run_id }}-${{ github.run_attempt }}/result/
+          if-no-files-found: warn
+          retention-days: 30

@@ -55,12 +55,12 @@ import {
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
   h3ImageExpanderAppliesTo,
-  MINIMAX_H3_IMAGE_PE_MODEL_ID,
   qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
 } from "../constants.js";
-import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
+import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution, useH3Expander } from "../minimaxH3ImageExpand.js";
+import { H3ExpanderModelPicker } from "../components/H3ExpanderModelPicker.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
@@ -111,6 +111,7 @@ export function SimpleImageStudio() {
     createLoraDownloadJob,
     qwenRewritePrompt,
     h3ImageExpandPrompt,
+    downloadConditionalComponents,
     activeProject,
     characters = [],
     importAsset,
@@ -398,17 +399,15 @@ export function SimpleImageStudio() {
     typeof qwenRewritePrompt === "function";
   // SW-7102 — MiniMax-H3-Image's optional prompt expander, under the same gates as the Qwen
   // rewriter: installed or absent, user-started, reviewed before it replaces the prompt.
-  const h3ExpandModel = useMemo(
-    () =>
-      h3ImageExpanderAppliesTo(selectedModel)
-        ? catalogModels.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID) ?? null
-        : null,
-    [catalogModels, selectedModel],
-  );
-  const h3ExpandAvailable =
-    Boolean(h3ExpandModel) &&
-    h3ExpandModel.installState !== "missing" &&
-    typeof h3ImageExpandPrompt === "function";
+  // SW-7208: it runs the saved model of the two, MiniMax-H3-Image-PE or the abliterated describer.
+  const h3Expander = useH3Expander({
+    models: catalogModels,
+    applies: h3ImageExpanderAppliesTo(selectedModel),
+    expandPrompt: h3ImageExpandPrompt,
+    downloadConditionalComponents,
+  });
+  const h3ExpandModel = h3Expander.model;
+  const h3ExpandAvailable = h3Expander.available;
   // Accept a rewriter's or expander's offered size. sc-24114: never silently ignored — a preset the
   // chips offer is selected, anything else lands as the free size in the (opened) Advanced fold,
   // like the classic studio.
@@ -650,6 +649,7 @@ export function SimpleImageStudio() {
         {/* SW-7102 — MiniMax-H3-Image's prompt expander: the same review-and-accept control, its
             expansion in an editable box with Apply / Keep original, its proposed size a separate
             offer. Absent unless the expander is installed. */}
+        {h3ExpandAvailable && h3ExpandOpen ? <H3ExpanderModelPicker {...h3Expander.picker} /> : null}
         {h3ExpandAvailable && h3ExpandOpen ? (
           <QwenRewritePromptControl
             copy={H3_IMAGE_EXPAND_COPY}
@@ -660,7 +660,7 @@ export function SimpleImageStudio() {
             prompt={prompt}
             referenceAssetIds={qwenRewriteReferenceIds}
             rewriteModel={h3ExpandModel}
-            rewritePrompt={h3ImageExpandPrompt}
+            rewritePrompt={h3Expander.prompt}
             suggestedResolutionFor={(suggestion) =>
               h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
             }

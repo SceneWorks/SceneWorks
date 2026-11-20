@@ -114,6 +114,23 @@ fn resolve_max_new_tokens(
         })
 }
 
+/// The engine-built H3 expansion `request` (SW-7102) as the job runs it: the request
+/// [`adopt_prepared_request`] makes (the engine's messages, recipe, budget, reasoning knobs and
+/// reply schema, with this job's cancel flag, progress observer and KV opt-in), sending `auto`
+/// checked linearly (SW-7204: the engine runs a resident block draft where it measured faster,
+/// MTP otherwise).
+#[cfg(any(test, native_lane))]
+pub(crate) fn prepare_expansion_request(
+    request: gen_core::core_llm::TextLlmRequest,
+    cancel: gen_core::core_llm::CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+) -> gen_core::core_llm::TextLlmRequest {
+    let mut request = adopt_prepared_request(request, cancel, kv_compression);
+    (request.speculative, request.speculative_verify) =
+        crate::qwen38_block_draft::expansion_speculation();
+    request
+}
+
 /// Apply the JSON grammar only when it cannot capture a reasoning model inside its thinking
 /// channel. Qwen3.6 opens `<think>` in the rendered generation prompt for both `Enabled` and
 /// `Auto`; a JSON mask then rejects the `</think>` marker, so the complete JSON value lands in
@@ -937,9 +954,13 @@ pub(crate) async fn run_prompt_refine_job(
     } = parse_refine_request(settings, job).await?;
     // SW-7102: an expansion runs the request the engine assembled; only its reply contract travels
     // on to the completion.
-    let (prepared_request, h3_expand_reply) = match h3_expand {
-        Some(H3Expand { request, reply }) => (Some(request), Some(reply)),
-        None => (None, None),
+    let (prepared_request, h3_expand_reply, block_draft) = match h3_expand {
+        Some(H3Expand {
+            request,
+            reply,
+            block_draft,
+        }) => (Some(request), Some(reply), block_draft),
+        None => (None, None, None),
     };
     // Attribute the run to the active backend (MLX on macOS, candle off-Mac) on the streamed progress
     // + UI architecture pill (mirrors the image/video paths), not the gpu-id device label.
@@ -981,19 +1002,31 @@ pub(crate) async fn run_prompt_refine_job(
     // `generator_cache`). `with_cached_refiner` runs the closure ON that thread, so the `!Send`
     // provider never crosses a thread boundary; only the `String` result comes back. Wrapping it in a
     // The spawned task is joined by the shared stream supervisor, including on cancel/API failure.
-    let refine_spec = gen_core::core_llm::LoadSpec {
-        source: weights_dir.to_string_lossy().into_owned(),
-        // See `catalog_semantic_jobs`: an explicit projector artifact is only for a separable
-        // Prism GGUF load. The refiners (including the vision tasks) load snapshot directories
-        // that carry their own projector, so the default `projector_source: None` preserves the
-        // existing behaviour; every other load option keeps its default as well.
-        ..Default::default()
-    };
+    let refine_spec = crate::qwen38_block_draft::with_block_draft(
+        gen_core::core_llm::LoadSpec {
+            source: weights_dir.to_string_lossy().into_owned(),
+            // See `catalog_semantic_jobs`: an explicit projector artifact is only for a separable
+            // Prism GGUF load. The refiners (including the vision tasks) load snapshot directories
+            // that carry their own projector, so the default `projector_source: None` preserves the
+            // existing behaviour; every other load option keeps its default as well.
+            ..Default::default()
+        },
+        // SW-7204: an expansion's load names the installed Qwen3.8-27B block draft; the engine
+        // prices it beside the target and loads the target alone when it does not fit.
+        block_draft.as_ref(),
+    );
+    // SW-7202: an expansion records the source it actually loads, so its result names the tier
+    // folder that ran rather than echoing the requested tier.
+    let h3_expand_reply = h3_expand_reply.map(|mut reply| {
+        reply.weights_source = refine_spec.source.clone();
+        reply
+    });
     // Whether the decode is constrained to valid JSON (the caption tasks and the film plan, sc-22713)
     // and whether a reference image rides the user turn (the vision tasks) — copied out of the `Copy`
     // `RefineTask` into plain bools so the blocking closure below names no enum, keeping its capture
     // set minimal.
     let emits_json = task.emits_json();
+    let is_h3_expand = h3_expand_reply.is_some();
     // sc-24113: the blocking closure's image invariant is "this task DECLARES it takes reference
     // images", not "this task is a vision task" — the Qwen rewrite carries images while
     // `is_vision()` is false. Copied out as a bool for the same reason `emits_json` is: so the
@@ -1032,7 +1065,7 @@ pub(crate) async fn run_prompt_refine_job(
         refine_spec,
         refine_reqs,
         "prompt-refine load failed",
-        move |refiner| -> WorkerResult<(gen_core::core_llm::TextLlmOutput, Value)> {
+        move |refiner| -> WorkerResult<(gen_core::core_llm::TextLlmOutput, Value, Value)> {
             emit_event(
                 "prompt_refine_load_start",
                 json!({ "jobId": job_id, "engine": engine_label }),
@@ -1059,8 +1092,11 @@ pub(crate) async fn run_prompt_refine_job(
             // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
             let output = {
                 use gen_core::core_llm::{Content, Message, Role, Sampling, StreamEvent};
+                // SW-7102: the engine-built expansion request keeps its messages, sampling recipe,
+                // budget, reasoning knobs and reply schema; it gains this job's cancel flag,
+                // progress observer and KV opt-in, and (SW-7204) `auto` checked linearly.
                 let request = if let Some(request) = prepared_request {
-                    adopt_prepared_request(request, blocking_cancel.clone(), kv_compression)
+                    prepare_expansion_request(request, blocking_cancel.clone(), kv_compression)
                 } else {
                     let mut messages = Vec::with_capacity(2);
                     if !system.trim().is_empty() {
@@ -1197,7 +1233,19 @@ pub(crate) async fn run_prompt_refine_job(
                         }
                     }
                 };
-                generate_refined(refiner, &request, &mut on_event, &job_id)?
+                let (output, kv_cache) =
+                    generate_refined(refiner, &request, &mut on_event, &job_id)?;
+                // SW-7204: an expansion records what it decoded with.
+                let decode = if is_h3_expand {
+                    crate::qwen38_block_draft::decode_record(
+                        output.decode.as_ref(),
+                        refiner.load_report().as_ref(),
+                        block_draft.as_ref(),
+                    )
+                } else {
+                    Value::Null
+                };
+                (output, kv_cache, decode)
             };
 
             Ok(output)
@@ -1237,8 +1285,12 @@ pub(crate) async fn run_prompt_refine_job(
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    let (output, kv_cache) =
+    let (output, kv_cache, decode) =
         result.map_err(|error| task_join_error("prompt refine task join", error))??;
+    let h3_expand_reply = h3_expand_reply.map(|mut reply| {
+        reply.decode = decode;
+        reply
+    });
     // Preserve the terminal coalesced snapshot even when generation finishes between ticks.
     let latest = *progress_rx.borrow();
     if let Some((current, total)) = next_progress_post(latest, last_posted) {

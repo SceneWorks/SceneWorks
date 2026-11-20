@@ -212,9 +212,14 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // SW-F373 adds three SenseNova-Loop-9B listings. The 159 prior rows and Illustrious file lists match.
 // SW-F369 adds ostris' MiniMax-H3-Image training adapter (ostris/minimax_h3_training_adapter
 // @e4e119ca…): 162 keys; every prior row is unchanged.
+// SW-7203 adds the Qwen3.8-27B block-draft re-hosts (SceneWorks/qwen3.8-27b-dspine-b16 @8e450d7f…,
+// SceneWorks/qwen3.8-27b-dflash2 @9030fabf…). SW-7202 re-pins the fully quantized Qwen3.8 describer
+// and H3 prompt-expander tiers (SceneWorks/qwen3.8-27b-abliterated-mlx @310a42a6…,
+// SceneWorks/qwen3.8-27b-abliterated-candle @f76e0088…, SceneWorks/minimax-h3-image-pe @b0efd86d…),
+// replacing their three earlier keys: 164 keys; every other row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "d0801d496453222410dafaf85d31ef66da1ca662f5a9e180e9496db1bec88d51";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "f118dec4dd40af01df8e6a1d7659b14b64e8c04acd3a3c2ccde8fff0a1af906a";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

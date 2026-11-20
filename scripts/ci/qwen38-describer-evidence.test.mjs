@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, main, pinnedSnapshots, stage, summary, validateReceipt,
-  validateResult } from './qwen38-describer-evidence.mjs';
+import { BLOCK_DRAFT_CHECKS, validateBlockDraft, EXPANDER_REPO, EXPANDER_TEST_NAME, FIELDS, GUARD_ACTOR, REHOST_REPO, TEST_NAME, UPSTREAM_REPO, expanderModelSnapshots, expanderPinnedSnapshots,
+  main, pinnedSnapshots, stage, summary, validateExpanderResult, validateReceipt, validateResult } from './qwen38-describer-evidence.mjs';
 
 const PINNED = pinnedSnapshots();
 
@@ -70,7 +70,8 @@ for (const [name, mutate, tier] of [
   ['another cached revision', (copy) => { copy.revision = 'b'.repeat(40); }, 'q4'],
   ['a quantised tier from the upstream repository', (copy) => { copy.repo = UPSTREAM_REPO; }, 'q4'],
   ['a weights folder outside the pinned snapshot', (copy) => { copy.weights_dir = 'E:\\huggingface\\hub\\fixture'; }, 'q4'],
-  ['a quantised tier at the snapshot root', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4$/, ''); }, 'q4'],
+  ['a quantised tier at the snapshot root', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4-full$/, ''); }, 'q4'],
+  ['a quantised tier in its older plain folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/\\q4-full$/, '\\q4'); }, 'q4'],
   ['missing wall time', (copy) => { delete copy.wall_seconds; }, 'q4'],
   ['missing peak memory', (copy) => { delete copy.gpu_memory.peak_mib; }, 'q4'],
   ['a peak that was never sampled', (copy) => { copy.gpu_memory.peak_mib = 0; }, 'q4'],
@@ -87,7 +88,7 @@ test('each tier pins its own repository, revision and weights folder from the ca
   for (const tier of ['q4', 'q8']) {
     assert.equal(PINNED[tier].repo, REHOST_REPO);
     assert.equal(PINNED[tier].relativeDir,
-      `models--SceneWorks--qwen3.8-27b-abliterated-candle/snapshots/${PINNED[tier].revision}/${tier}`);
+      `models--SceneWorks--qwen3.8-27b-abliterated-candle/snapshots/${PINNED[tier].revision}/${tier}-full`);
   }
   assert.equal(PINNED.bf16.repo, UPSTREAM_REPO);
   assert.equal(PINNED.bf16.relativeDir, `models--huihui-ai--Huihui-Qwen3.8-27B-abliterated/snapshots/${PINNED.bf16.revision}`);
@@ -218,3 +219,264 @@ test('main reads the guard receipt for this run and sets a failing exit code', (
   assert.equal(evidence.resource_receipt.resource_completed, true);
   assert.equal(evidence.accepted, false);
 }));
+
+// ---- the MiniMax-H3-Image prompt expander (job=expander, SW-7202) ------------------------------
+const EXPANDER = expanderPinnedSnapshots();
+
+function expanderResult(tier = 'q4') {
+  return {
+    schema_version: 1, job: 'expander',
+    test_fqn: `h3_prompt_expander_gpu_smoke::${EXPANDER_TEST_NAME}`,
+    backend: 'candle', repo: EXPANDER[tier].repo, revision: EXPANDER[tier].revision, tier, suggestion_tier: tier,
+    weights_dir: `E:\\huggingface\\hub\\${EXPANDER[tier].relativeDir.replaceAll('/', '\\')}`,
+    other_tiers_present: [], tier_isolated: true,
+    prompt_files: { repo: EXPANDER.prompt.repo, revision: EXPANDER.prompt.revision },
+    prompt: 'a lighthouse', expanded_prompt: 'A weathered lighthouse | on a basalt headland at dusk.',
+    wh_ratio: '9:16', workflow: 't2i',
+    // The recipe's own budget (`request_params.json` max_tokens at the pinned revision).
+    generation: { finishReason: 'stop', usage: { promptTokens: 900, generatedTokens: 1200 }, maxNewTokens: 4096 },
+    wall_seconds: 61.5, wall_time_scope: 'fixture',
+    memory: { gpu_index: '1', baseline_mib: 500, peak_mib: 21000, peak_delta_mib: 20500, method: 'fixture' },
+  };
+}
+
+test('the expander tiers pin their Candle folders and the upstream prompt snapshot from the catalog', () => {
+  for (const tier of ['q4', 'q8']) {
+    assert.equal(EXPANDER[tier].repo, EXPANDER_REPO);
+    assert.equal(EXPANDER[tier].relativeDir,
+      `models--SceneWorks--minimax-h3-image-pe/snapshots/${EXPANDER[tier].revision}/candle-${tier}-full`);
+  }
+  assert.equal(EXPANDER.prompt.repo, 'MiniMaxAI/MiniMax-H3-Image-PE');
+  assert.match(EXPANDER.prompt.revision, /^[a-f0-9]{40}$/);
+  assert.throws(() => expanderPinnedSnapshots({ minimax_h3_image_pe: { product: { downloads: [] } } }), /one Candle/);
+});
+test('a complete expander result is accepted for its own tier', () => {
+  const accepted = validateExpanderResult(expanderResult('q8'), 'q8');
+  assert.equal(accepted.tier, 'q8');
+  assert.equal(accepted.wh_ratio, '9:16');
+  assert.equal(accepted.gpu_memory.peak_mib, 21000);
+});
+for (const [name, mutate, tier] of [
+  ['an unpublished tier', () => {}, 'bf16'],
+  ['a different tier than requested', (copy) => { copy.tier = 'q8'; }, 'q4'],
+  ['a suggestion block naming another tier', (copy) => { copy.suggestion_tier = 'q8'; }, 'q4'],
+  ['a tier_isolated flag that hides another tier', (copy) => { copy.other_tiers_present = ['candle-q8-full']; }, 'q4'],
+  ['a tier_isolated flag that is missing', (copy) => { delete copy.tier_isolated; }, 'q4'],
+  ['a describer result', (copy) => { copy.job = 'describer'; }, 'q4'],
+  ['another test', (copy) => { copy.test_fqn = 'other::test'; }, 'q4'],
+  ['the MLX backend', (copy) => { copy.backend = 'mlx'; }, 'q4'],
+  ['another cached revision', (copy) => { copy.revision = 'b'.repeat(40); }, 'q4'],
+  ['the other tier folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/candle-q4-full$/, 'candle-q8-full'); }, 'q4'],
+  ['the MLX layout folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/candle-q4-full$/, 'q4-full'); }, 'q4'],
+  ['the older plain folder', (copy) => { copy.weights_dir = copy.weights_dir.replace(/candle-q4-full$/, 'candle-q4'); }, 'q4'],
+  ['prompt files from another revision', (copy) => { copy.prompt_files.revision = 'c'.repeat(40); }, 'q4'],
+  ['an empty expansion', (copy) => { copy.expanded_prompt = '  '; }, 'q4'],
+  ['an unexpanded prompt', (copy) => { copy.expanded_prompt = 'a lighthouse'; }, 'q4'],
+  ['a leaked reasoning block', (copy) => { copy.expanded_prompt += ' </think>'; }, 'q4'],
+  ['a malformed ratio', (copy) => { copy.wh_ratio = 'tall'; }, 'q4'],
+  ['the edit workflow', (copy) => { copy.workflow = 'edit'; }, 'q4'],
+  ['a reply cut off at its budget', (copy) => { copy.generation.finishReason = 'length'; }, 'q4'],
+  ['a reply that used the whole budget', (copy) => { copy.generation.usage.generatedTokens = 4096; }, 'q4'],
+  ['an unrecorded tier listing', (copy) => { delete copy.other_tiers_present; }, 'q4'],
+  ['missing peak memory', (copy) => { delete copy.memory.peak_mib; }, 'q4'],
+]) {
+  test(`reject an expander result with ${name}`, () => {
+    const copy = expanderResult();
+    mutate(copy);
+    assert.throws(() => validateExpanderResult(copy, tier));
+  });
+}
+test('a run on a cache holding another tier is accepted but recorded as not isolated', () => {
+  const shared = validateExpanderResult({ ...expanderResult(), other_tiers_present: ['candle-q8-full'],
+    tier_isolated: false }, 'q4');
+  assert.equal(shared.tier_isolated, false);
+  assert.equal(validateExpanderResult(expanderResult(), 'q4').tier_isolated, true);
+});
+test('the expander summary names the loaded folder, the isolation, the ratio and the expansion', () => {
+  const text = summary({ job: 'expander', accepted: true, gpu_admission: 'shared',
+    result: validateExpanderResult({ ...expanderResult(), other_tiers_present: ['candle-q8-full'],
+      tier_isolated: false }, 'q4') });
+  assert.match(text, /## MiniMax-H3-Image prompt expander CUDA validation/);
+  assert.match(text, /Tier isolated: \*\*false\*\* \(other tier folders present: candle-q8-full\)/);
+  assert.match(text, /Loaded weights: `E:\\huggingface\\hub\\models--SceneWorks--minimax-h3-image-pe/);
+  assert.match(summary({ job: 'expander', accepted: true, result: validateExpanderResult(expanderResult(), 'q4') }),
+    /Tier isolated: \*\*true\*\* \(other tier folders present: none\)/);
+  assert.match(text, /proposed aspect ratio 9:16/);
+  assert.match(text, /> A weathered lighthouse/);
+  assert.match(text, /Peak GPU memory: 21000 MiB/);
+});
+test('staging an expander run reads its own result and keeps the receipt', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'expander-result.json'), JSON.stringify(expanderResult()));
+  await fs.writeFile(path.join(directory, 'receipt.json'), JSON.stringify(receipt()));
+  const evidence = await stage(output, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared', 'expander');
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.job, 'expander');
+  assert.equal(evidence.result.gpu_memory.measured_on, 'shared-card');
+  assert.deepEqual((await fs.readdir(path.join(output, 'artifact'))).sort(), ['evidence.json', 'resource-receipt.json']);
+  // A describer result does not satisfy an expander run.
+  const crossed = path.join(directory, 'crossed');
+  await fs.mkdir(crossed);
+  await fs.writeFile(path.join(crossed, 'describer-result.json'), JSON.stringify(result()));
+  const wrong = await stage(crossed, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared', 'expander');
+  assert.equal(wrong.accepted, false);
+  assert.match(wrong.error, /expander-result\.json/);
+  await assert.rejects(stage(output, path.join(directory, 'receipt.json'), 'q4', 'default', 'shared', 'captioner'), /job/);
+}));
+test('main validates the expander when the workflow selects job=expander', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'expander-result.json'), JSON.stringify(expanderResult('q8')));
+  const receiptDir = path.join(directory, `sceneworks-cuda-execution-7-1-${GUARD_ACTOR}`);
+  await fs.mkdir(receiptDir);
+  await fs.writeFile(path.join(receiptDir, 'resource-receipt.json'), JSON.stringify(receipt()));
+  const previous = process.exitCode;
+  try {
+    await main({ MODEL_PROOF_OUTPUT_DIR: output, SCENEWORKS_QWEN38_DESCRIBER_TIER: 'q8',
+      SCENEWORKS_QWEN38_VALIDATION_JOB: 'expander', RUNNER_TEMP: directory, GITHUB_RUN_ID: '7', GITHUB_RUN_ATTEMPT: '1' });
+    assert.notEqual(process.exitCode, 1);
+  } finally {
+    process.exitCode = previous;
+  }
+  const evidence = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.result.tier, 'q8');
+}));
+
+// ---- the abliterated describer as the expander's model (SW-7208) --------------------------------
+function abliteratedResult(tier = 'q4') {
+  const pinned = expanderModelSnapshots('abliterated');
+  return {
+    ...expanderResult(tier),
+    expander_model: 'abliterated', catalog_id: 'vision_describe_qwen3_8_27b',
+    rewriter_model_id: 'vision_describe_qwen3_8_27b',
+    repo: pinned[tier].repo, revision: pinned[tier].revision,
+    weights_dir: `E:\\huggingface\\hub\\${pinned[tier].relativeDir.replaceAll('/', '\\')}`,
+  };
+}
+
+test('the abliterated expander loads the describer tier folders with the expander prompt files', () => {
+  const pinned = expanderModelSnapshots('abliterated');
+  for (const tier of ['q4', 'q8']) {
+    assert.equal(pinned[tier].repo, REHOST_REPO);
+    assert.match(pinned[tier].relativeDir, new RegExp(`/${tier}-full$`));
+  }
+  assert.deepEqual(pinned.prompt, EXPANDER.prompt);
+  const accepted = validateExpanderResult(abliteratedResult('q8'), 'q8', pinned, 'abliterated');
+  assert.equal(accepted.catalog_id, 'vision_describe_qwen3_8_27b');
+  assert.equal(accepted.expander_model, 'abliterated');
+});
+test('an expander result is accepted only for the model that ran', () => {
+  const pinned = expanderModelSnapshots('abliterated');
+  // MiniMax-H3-Image-PE's result does not satisfy an abliterated request, nor the reverse.
+  assert.throws(() => validateExpanderResult(expanderResult(), 'q4', pinned, 'abliterated'), /another expander model/);
+  assert.throws(() => validateExpanderResult(abliteratedResult(), 'q4', EXPANDER, 'minimax'), /another expander model/);
+  // The job record must name the model that ran.
+  assert.throws(() => validateExpanderResult({ ...abliteratedResult(), rewriter_model_id: 'minimax_h3_image_pe' }, 'q4',
+    pinned, 'abliterated'), /names another model/);
+  // The describer's folder under the expander's name is refused.
+  assert.throws(() => validateExpanderResult({ ...abliteratedResult(), expander_model: 'minimax',
+    catalog_id: 'minimax_h3_image_pe', rewriter_model_id: 'minimax_h3_image_pe' }, 'q4', EXPANDER, 'minimax'));
+  assert.throws(() => validateExpanderResult(abliteratedResult(), 'q4', pinned, 'captioner'), /expander model/);
+});
+test('main validates the abliterated expander when the workflow selects it', () => scratch(async (directory) => {
+  const output = path.join(directory, 'proof');
+  await fs.mkdir(output);
+  await fs.writeFile(path.join(output, 'expander-result.json'), JSON.stringify(abliteratedResult('q4')));
+  const receiptDir = path.join(directory, `sceneworks-cuda-execution-9-1-${GUARD_ACTOR}`);
+  await fs.mkdir(receiptDir);
+  await fs.writeFile(path.join(receiptDir, 'resource-receipt.json'), JSON.stringify(receipt()));
+  const previous = process.exitCode;
+  try {
+    await main({ MODEL_PROOF_OUTPUT_DIR: output, SCENEWORKS_QWEN38_DESCRIBER_TIER: 'q4',
+      SCENEWORKS_QWEN38_VALIDATION_JOB: 'expander', SCENEWORKS_H3_EXPANDER_MODEL: 'abliterated',
+      RUNNER_TEMP: directory, GITHUB_RUN_ID: '9', GITHUB_RUN_ATTEMPT: '1' });
+    assert.notEqual(process.exitCode, 1);
+  } finally {
+    process.exitCode = previous;
+  }
+  const evidence = JSON.parse(await fs.readFile(path.join(output, 'artifact', 'evidence.json'), 'utf8'));
+  assert.equal(evidence.accepted, true, evidence.error);
+  assert.equal(evidence.requested_expander_model, 'abliterated');
+  assert.equal(evidence.result.catalog_id, 'vision_describe_qwen3_8_27b');
+  assert.match(summary(evidence), /Model: `vision_describe_qwen3_8_27b`/);
+}));
+
+// SW-7204: the block-draft record the smoke wrote, re-checked per the run's `block_draft` input.
+// Every request sends `auto` checked linearly; `auto` records whether it runs the installed draft.
+function block(overrides = {}) {
+  return {
+    proposer: 'block_draft', verify: 'linear', targetPasses: 40, rowsCheckedPerPass: 4.5,
+    acceptedTokensPerPass: 2.4, draftFallback: null, fallbacks: [],
+    draft: { repo: 'SceneWorks/qwen3.8-27b-dflash2', revision: '9030fabfb5e3ca0c5c180f84927af86aa9f9a2e9',
+      format: 'dflash2', precision: 'q4' },
+    ...overrides,
+  };
+}
+const RUNS = { runsDraft: true, decidedFor: 'Mlx q4', keepsMtp: null };
+const KEEPS_MTP_REASON = 'block draft: auto keeps MTP on CandleCuda q4 (run 44516873473: loses)';
+const KEEPS = { runsDraft: false, decidedFor: 'CandleCuda q4', keepsMtp: KEEPS_MTP_REASON };
+const expanderDraft = (check, overrides = {}, auto = RUNS) => ({ check, decode: block(overrides), auto });
+const describerDraft = (check, describe = {}, condense = {}, auto = RUNS) =>
+  ({ check, decode: { describe: block(describe), condense: block(condense) }, auto });
+const MTP = { proposer: 'mtp', draft: null, draftFallback: KEEPS_MTP_REASON };
+const NO_FIT = { proposer: 'mtp', draft: null,
+  draftFallback: "draft model: its load needs an estimated 2 bytes beside the target's 9, but only 10 bytes are available" };
+
+test('the block-draft checks are record, on and no_fit, and record asserts nothing', () => {
+  assert.deepEqual(BLOCK_DRAFT_CHECKS, ['record', 'on', 'no_fit']);
+  assert.equal(validateBlockDraft(undefined), null);
+  assert.throws(() => validateBlockDraft(expanderDraft('on'), 'sometimes', 'expander'), /must be one of/);
+});
+
+test("an on run needs auto's recorded decision", () => {
+  assert.throws(() => validateBlockDraft({ check: 'on', decode: block() }, 'on', 'expander'), /auto's decision/);
+});
+
+test('where auto runs the draft, an on run needs it at its precision, linear, above one token per pass', () => {
+  const on = (overrides) => () => validateBlockDraft(expanderDraft('on', overrides), 'on', 'expander');
+  assert.deepEqual(on({})(), expanderDraft('on'));
+  assert.throws(() => validateBlockDraft(expanderDraft('record'), 'on', 'expander'), /ran the record block-draft check/);
+  assert.throws(on({ proposer: 'mtp' }), /did not run/);
+  // Tree checking is never requested.
+  assert.throws(on({ verify: 'tree' }), /did not check linearly/);
+  assert.throws(on({ acceptedTokensPerPass: 1 }), /above 1.0/);
+  assert.throws(on({ draftFallback: 'x' }), /fell back/);
+});
+
+test('where auto keeps MTP, an on run needs the draft unused and the reason recorded', () => {
+  const on = (overrides) => () => validateBlockDraft(expanderDraft('on', overrides, KEEPS), 'on', 'expander');
+  assert.deepEqual(on(MTP)(), expanderDraft('on', MTP, KEEPS));
+  assert.throws(on({}), /keeps MTP/);
+  assert.throws(on({ ...MTP, draftFallback: null }), /why the draft did not run/);
+  assert.throws(on({ ...MTP, verify: 'tree' }), /did not check linearly/);
+});
+
+test('an on describer run checks the image describe and the text condense separately', () => {
+  const on = (describe, condense, auto) => () => validateBlockDraft(describerDraft('on', describe, condense, auto), 'on');
+  assert.deepEqual(on({}, {})(), describerDraft('on'));
+  assert.deepEqual(on(MTP, MTP, KEEPS)(), describerDraft('on', MTP, MTP, KEEPS));
+  assert.throws(on({ verify: 'tree' }, {}), /describe: the target did not check linearly/);
+  assert.throws(on({ acceptedTokensPerPass: 0.9 }, {}), /describe: accepted tokens/);
+  assert.throws(on({}, { proposer: 'mtp' }), /condense: the block draft did not run/);
+  assert.throws(on(MTP, {}, KEEPS), /condense: auto ran the block draft/);
+});
+
+test('a no_fit run where auto keeps MTP passes on its recorded reason', () => {
+  assert.deepEqual(validateBlockDraft(expanderDraft('no_fit', MTP, KEEPS), 'no_fit', 'expander'),
+    expanderDraft('no_fit', MTP, KEEPS));
+  assert.throws(() => validateBlockDraft(expanderDraft('no_fit', MTP), 'no_fit', 'expander'), /did not fit/);
+});
+
+test('a no_fit run must decode without the draft in every phase and name why', () => {
+  assert.deepEqual(validateBlockDraft(expanderDraft('no_fit', NO_FIT), 'no_fit', 'expander'),
+    expanderDraft('no_fit', NO_FIT));
+  assert.deepEqual(validateBlockDraft(describerDraft('no_fit', NO_FIT, NO_FIT), 'no_fit'),
+    describerDraft('no_fit', NO_FIT, NO_FIT));
+  assert.throws(() => validateBlockDraft(expanderDraft('no_fit'), 'no_fit', 'expander'), /could not fit/);
+  assert.throws(() => validateBlockDraft(describerDraft('no_fit', NO_FIT, {}), 'no_fit'), /condense: the draft ran/);
+  assert.throws(() => validateBlockDraft(expanderDraft('no_fit', { proposer: 'mtp', draft: null }), 'no_fit',
+    'expander'), /did not fit/);
+});
+
