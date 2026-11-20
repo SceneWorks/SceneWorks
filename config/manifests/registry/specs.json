@@ -49658,7 +49658,12 @@
           "default"
         ],
         "schedulers": [
-          "default"
+          "default",
+          "simple",
+          "sgm_uniform",
+          "beta",
+          "normal",
+          "beta_1_1"
         ]
       },
       "loraCompatibility": {
@@ -49722,9 +49727,16 @@
         },
         "samplers": [
           "euler",
-          "lcm"
+          "lcm",
+          "euler_ancestral"
         ],
-        "schedulers": [],
+        "schedulers": [
+          "simple",
+          "sgm_uniform",
+          "beta",
+          "normal",
+          "beta_1_1"
+        ],
         "supported_guidance_methods": [],
         "supported_quants": [
           "q4",
@@ -49757,9 +49769,16 @@
         },
         "samplers": [
           "euler",
-          "lcm"
+          "lcm",
+          "euler_ancestral"
         ],
-        "schedulers": [],
+        "schedulers": [
+          "simple",
+          "sgm_uniform",
+          "beta",
+          "normal",
+          "beta_1_1"
+        ],
         "supported_guidance_methods": [],
         "supported_quants": [
           "q4",

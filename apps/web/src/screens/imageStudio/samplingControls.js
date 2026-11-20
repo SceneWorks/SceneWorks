@@ -28,11 +28,16 @@ export const promptBatchSize = (model, count) =>
 // SW-7106: MiniMax-H3-Image's sampler (`image.supportsH3ImageSampler`). LCM is the default (decided
 // 2026-11-12): ComfyUI's stochastic re-noise step, whose noise scale ramps from `sNoise` (step 0)
 // to `sNoiseEnd` (last step), with optional noise clipping. Euler is the released deterministic
-// step and stays selectable.
+// step and stays selectable. SW-7224: Euler ancestral is ComfyUI's rectified-flow ancestral step
+// (eta 1, s_noise 1); it has no tunable fields.
 export const H3_IMAGE_SAMPLER_LABELS = {
   euler: "Euler (official)",
+  euler_ancestral: "Euler ancestral",
   lcm: "LCM (stochastic re-noise)",
 };
+
+// The samplers whose block is just `{sampler}`: no LCM noise fields.
+const H3_IMAGE_PLAIN_SAMPLERS = ["euler", "euler_ancestral"];
 
 export const H3_IMAGE_LCM_FIELDS = [
   { key: "sNoise", label: "Noise scale start", min: 0.01, max: 2, step: 0.01 },
@@ -44,9 +49,10 @@ export const h3ImageSamplerDefaults = () => ({ sampler: "lcm", sNoise: 1.1, sNoi
 
 export const supportsH3ImageSampler = (model) => Boolean(model?.image?.supportsH3ImageSampler);
 
-// The `advanced.h3ImageSampler` block to send: null for a model without the control. Both samplers
-// are sent explicitly (the job record shows what ran, and a selected recipe preset's server-side
-// expansion can never replace the user's choice). Euler is `{sampler: "euler"}`. `error` names the first LCM field out of range.
+// The `advanced.h3ImageSampler` block to send: null for a model without the control. Every sampler
+// is sent explicitly (the job record shows what ran, and a selected recipe preset's server-side
+// expansion can never replace the user's choice). Euler is `{sampler: "euler"}` and Euler ancestral
+// `{sampler: "euler_ancestral"}`. `error` names the first LCM field out of range.
 // The bounds compare in f32: the worker records each scale as an f32, so a replayed 0.01 comes back
 // as 0.009999999776482582 and must still sit inside [0.01, …] — while a truly out-of-range value,
 // which differs at f32 precision, is still refused.
@@ -55,7 +61,7 @@ const withinF32Bounds = (value, min, max) =>
 
 export function resolveH3ImageSampler({ model, options }) {
   if (!supportsH3ImageSampler(model)) return { block: null, error: null };
-  if (options?.sampler === "euler") return { block: { sampler: "euler" }, error: null };
+  if (H3_IMAGE_PLAIN_SAMPLERS.includes(options?.sampler)) return { block: { sampler: options.sampler }, error: null };
   const block = { sampler: "lcm" };
   for (const { key, label, min, max } of H3_IMAGE_LCM_FIELDS) {
     const raw = options[key];
@@ -75,12 +81,13 @@ export function resolveH3ImageSampler({ model, options }) {
 // 0.9 when sNoise is also omitted, else equal to the given sNoise (ComfyUI's constant scale);
 // noiseClipStd 0. Only a recipe with NO sampler block at all predates this feature recording it:
 // it ran Euler, so it replays as Euler, and the LCM fields keep their defaults (1.1 / 0.9 / 0) for
-// when the control is switched to LCM.
+// when the control is switched to LCM. A recorded Euler ancestral block replays as Euler ancestral.
 // Each restored number is shown as the shortest decimal with the same f32 value: the worker
 // records the scales as f32, so a UI 0.01 comes back as 0.009999999776482582, which the number
 // input's native `min="0.01"` would flag as out of range and the form would refuse to submit.
 export function h3ImageSamplerFromRecipe(recorded) {
   const defaults = h3ImageSamplerDefaults();
+  if (recorded?.sampler === "euler_ancestral") return { ...defaults, sampler: "euler_ancestral" };
   if (recorded?.sampler !== "lcm") return { ...defaults, sampler: "euler" };
   const sNoise = f32Decimal(recorded.sNoise ?? defaults.sNoise);
   return {

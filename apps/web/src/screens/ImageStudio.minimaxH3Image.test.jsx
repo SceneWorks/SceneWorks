@@ -193,6 +193,7 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
     expect(samplerSelect().value).toBe("lcm");
     expect([...samplerSelect().options].map((option) => option.textContent)).toEqual([
       "Euler (official)",
+      "Euler ancestral",
       "LCM (stochastic re-noise)",
     ]);
     expect(field(container, "Noise scale start").value).toBe("1.1");

@@ -20,7 +20,8 @@ pub fn supports_h3_image_sampler(entry: &JsonObject) -> bool {
 
 /// `advanced.h3ImageSampler`, typed (SW-7106). Absent or `null` ⇒ `Ok(None)` (the engine runs the
 /// sampler `advanced.sampler` names; the worker then applies the LCM default). Otherwise an object
-/// `{"sampler": "euler"}` or `{"sampler": "lcm", "sNoise"?, "sNoiseEnd"?, "noiseClipStd"?}`: an
+/// `{"sampler": "euler"}`, `{"sampler": "euler_ancestral"}` (SW-7224) or
+/// `{"sampler": "lcm", "sNoise"?, "sNoiseEnd"?, "noiseClipStd"?}`: an
 /// omitted LCM parameter takes the engine's H3-Image default (`sNoise` 1.1, `sNoiseEnd` 0.9,
 /// `noiseClipStd` 0 = off); a `sNoise` given without `sNoiseEnd` is held constant, and the values must satisfy the engine's own rules (finite,
 /// `sNoise > 0`, `sNoiseEnd >= 0`, `noiseClipStd >= 0`). An unknown field, an LCM parameter on
@@ -62,15 +63,26 @@ pub fn requested_h3_image_sampler(
         .get("sampler")
         .and_then(Value::as_str)
         .map(str::trim)
-        .ok_or_else(|| format!("advanced.{key}.sampler must be \"euler\" or \"lcm\""))?;
+        .ok_or_else(|| {
+            format!("advanced.{key}.sampler must be \"euler\", \"euler_ancestral\" or \"lcm\"")
+        })?;
     let sampler = match name {
-        "euler" => {
+        "euler" | "euler_ancestral" => {
+            let label = if name == "euler" {
+                "Euler"
+            } else {
+                "Euler ancestral"
+            };
             if let Some(field) = PARAMS.iter().find(|field| block.contains_key(**field)) {
                 return Err(format!(
-                    "advanced.{key}.{field} applies only to the LCM sampler, not Euler"
+                    "advanced.{key}.{field} applies only to the LCM sampler, not {label}"
                 ));
             }
-            H3ImageSampler::Euler
+            if name == "euler" {
+                H3ImageSampler::Euler
+            } else {
+                H3ImageSampler::EulerAncestral
+            }
         }
         "lcm" => {
             // With neither scale given, run the engine's 1.1 -> 0.9 ramp. A start scale given
@@ -89,8 +101,8 @@ pub fn requested_h3_image_sampler(
         }
         other => {
             return Err(format!(
-                "advanced.{key}.sampler \"{other}\" is not a MiniMax-H3-Image sampler (use euler \
-                 or lcm)"
+                "advanced.{key}.sampler \"{other}\" is not a MiniMax-H3-Image sampler (use euler, \
+                 euler_ancestral or lcm)"
             ))
         }
     };
@@ -170,6 +182,23 @@ mod h3_tests {
         assert!(supports_h3_image_sampler(&entry));
         assert!(image_sampling_control_error("minimax_h3_image", &lcm, "", &entry).is_none());
         assert!(requested_h3_image_sampler(&lcm).unwrap().is_some());
+
+        // SW-7224: euler_ancestral is a block sampler with no LCM parameters.
+        let ancestral = object(json!({"h3ImageSampler":{"sampler":"euler_ancestral"}}));
+        assert_eq!(
+            requested_h3_image_sampler(&ancestral).unwrap(),
+            Some(gen_core::h3_image::H3ImageSampler::EulerAncestral)
+        );
+        let ancestral_noise =
+            object(json!({"h3ImageSampler":{"sampler":"euler_ancestral","sNoise":1.2}}));
+        assert!(requested_h3_image_sampler(&ancestral_noise)
+            .unwrap_err()
+            .contains("not Euler ancestral"));
+        let disagree = object(json!({
+            "sampler": "euler",
+            "h3ImageSampler": {"sampler": "euler_ancestral"}
+        }));
+        assert!(requested_h3_image_sampler(&disagree).is_err());
 
         let invalid = object(json!({"h3ImageSampler":{"sampler":"euler","sNoise":1.2}}));
         assert!(

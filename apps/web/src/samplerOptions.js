@@ -26,6 +26,8 @@ export const SCHEDULER_LABELS = {
   exponential: "Exponential",
   sgm_uniform: "SGM uniform",
   beta: "Beta",
+  // SW-7224: ComfyUI-ppm's `beta_1_1`, the beta scheduler at alpha = beta = 1 (MiniMax-H3-Image).
+  beta_1_1: "Beta 1/1 (α = β = 1)",
   ddim_uniform: "DDIM uniform",
 };
 
@@ -60,6 +62,7 @@ const SCHEDULER_ORDER = [
   "exponential",
   "sgm_uniform",
   "beta",
+  "beta_1_1",
   "ddim_uniform",
 ];
 const GUIDANCE_METHOD_ORDER = ["cfg", "cfg_rescale", "apg", "cfg_pp"];

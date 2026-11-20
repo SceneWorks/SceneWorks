@@ -14190,8 +14190,8 @@
       // No classifier-free guidance and no negative prompt (`gen_core::h3_image` refuses both), so
       // Image Studio hides those controls rather than offering knobs the engine refuses. The six
       // sigmas are fixed (`pdd_config.json`, never shifted), so there is no scheduler shift either.
-      // `supportsH3ImageSampler` (SW-7106): Image Studio offers ComfyUI's LCM re-noise step (default, 1.1 / 0.9 / 0)
-      // or the released Euler step through `advanced.h3ImageSampler`.
+      // `supportsH3ImageSampler` (SW-7106): Image Studio offers ComfyUI's LCM re-noise step (default, 1.1 / 0.9 / 0),
+      // the released Euler step or (SW-7224) ComfyUI's Euler ancestral through `advanced.h3ImageSampler`.
       "image": { "supportsGuidance": false, "supportsNegativePrompt": false, "supportsSchedulerShift": false, "supportsH3ImageSampler": true, "maxPromptTokens": 4096 },
       // E23 — the licence gate. MiniMax-H3-Image ships under its OWN agreement (the MiniMax-H3-Image
       // Community License Agreement, dated November 10, 2026), which is MiniMax-H3's text with the
@@ -14396,10 +14396,12 @@
         "maxReferenceAssets": 16,
         "hardMinSteps": 6,
         "hardMaxSteps": 6,
-        // One fixed six-sigma schedule; no generic sampler or scheduler menu. The sampler (Euler or
-        // LCM) is chosen through `image.supportsH3ImageSampler` / `advanced.h3ImageSampler` (SW-7106).
+        // Six steps. No generic sampler menu: the sampler (Euler, Euler ancestral or LCM) is chosen
+        // through `image.supportsH3ImageSampler` / `advanced.h3ImageSampler` (SW-7106, SW-7224).
+        // SW-7224: ComfyUI's schedulers over H3-Image's model sampling; "default" is the published
+        // PDD grid. A step that crosses grid points mixes the PDD heads it spans, as ComfyUI does.
         "samplers": ["default"],
-        "schedulers": ["default"]
+        "schedulers": ["default", "simple", "sgm_uniform", "beta", "normal", "beta_1_1"]
       },
       // SW-7101: H3-Image LoRAs only — its own family token, never `minimax-h3` (E26). Both engines
       // install them as forward-time residuals on every tier (SW-7096).

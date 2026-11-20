@@ -451,7 +451,8 @@
         "beta",
         "ddim_uniform",
         "shift",
-        "beta57"
+        "beta57",
+        "beta_1_1"
       ],
       "description": "Sigma schedule advertised by shipped model backends. \"default\" preserves the engine's native schedule; shift and beta57 remain valid for current backend-specific catalog entries."
     },
