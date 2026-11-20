@@ -216,6 +216,21 @@ FAKE_HUB = textwrap.dedent(
 )
 
 
+# Loaded at interpreter start from the fake package's directory: the provisioner's free-space
+# reading (`shutil.disk_usage`) reports QWEN38_FAKE_FREE_BYTES, so the test never depends on the
+# host's disk. The production check itself is unchanged.
+FAKE_FREE_SPACE = textwrap.dedent(
+    """
+    import os, shutil
+    _real = shutil.disk_usage
+    def disk_usage(path):
+        usage = _real(path)
+        return type(usage)(usage.total, usage.used, int(os.environ["QWEN38_FAKE_FREE_BYTES"]))
+    shutil.disk_usage = disk_usage
+    """
+)
+
+
 def describer_provision_script() -> str:
     """The describer branch's embedded provisioning Python in run.sh."""
     blocks = [block.split("\nPY\n", 1)[0] for block in RUN_SH.read_text().split("<<'PY'")[1:]]
@@ -244,13 +259,16 @@ def test_a_bf16_retry_with_its_metadata_but_a_missing_shard_downloads_it(tmp_pat
     fake = tmp_path / "fake"
     (fake / "huggingface_hub").mkdir(parents=True)
     (fake / "huggingface_hub" / "__init__.py").write_text(FAKE_HUB)
+    (fake / "sitecustomize.py").write_text(FAKE_FREE_SPACE)
     calls = tmp_path / "calls.jsonl"
     done = subprocess.run(
         [sys.executable, "-B", "-", ], input=describer_provision_script(), capture_output=True,
         text=True, timeout=60, check=False, cwd=ROOT,
         env={"PATH": BASH_PATH, "PYTHONPATH": str(fake), "QWEN38_HUB": str(hub), "QWEN38_TIER": "bf16",
              "QWEN38_FREE_GB": "500", "QWEN38_FAKE_SIZES": json.dumps(sizes),
-             "QWEN38_FAKE_CALLS": str(calls)},
+             "QWEN38_FAKE_CALLS": str(calls),
+             # Exactly the bf16 minimum, whatever the host has free.
+             "QWEN38_FAKE_FREE_BYTES": str(provision.BF16_MIN_FREE_BYTES)},
     )
     assert done.returncode == 0, done.stdout + done.stderr
     downloads = calls.read_text().splitlines() if calls.exists() else []
