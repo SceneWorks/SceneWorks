@@ -449,15 +449,23 @@ pub(super) async fn generate_stream_using(
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
+    // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
+    // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
+    // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
+    // Resolved before `resolve_lane_request_controls_with_pid` so `lowResStart` dimension validation
+    // shares the effective PiD activation decision (`SW-7221`).
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
     // The request controls beyond the positional knobs (sc-25681): CFG interval and caption-overflow
     // policy against the linked descriptor, plus the CFG-bound negative prompt
     // (`image.negativePromptRequiresGuidance`, Iris-3B) — each refused before load when the engine
     // does not honour it or CFG-off would make it inert, never dropped.
-    let lane_controls = lane_controls::resolve_lane_request_controls(
+    let lane_controls = lane_controls::resolve_lane_request_controls_with_pid(
         request,
         &model.descriptor.capabilities,
         guidance,
         negative_prompt.as_deref(),
+        use_pid,
     )?;
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
@@ -525,11 +533,6 @@ pub(super) async fn generate_stream_using(
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
     // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
     let enhance = PromptEnhance::from_resolved(request)?;
-    // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
-    // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
-    // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
-    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
-    let use_pid = pid_weights.is_some();
     // A native prompt batch (sc-25681): ONE engine call over `prompts × count` images, refused
     // before load when the linked engine cannot render it or a per-image lane feature is in use.
     let native_batch = lane_controls::resolve_native_prompt_batch(

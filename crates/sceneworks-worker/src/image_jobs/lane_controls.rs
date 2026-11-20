@@ -146,11 +146,28 @@ fn engine_policy(policy: CaptionOverflow) -> CaptionOverflowPolicy {
 /// * `advanced.schedulerShift` — validated (> 0) for a model that declares the shift axis;
 /// * a non-empty negative prompt on a model declaring `image.negativePromptRequiresGuidance` at
 ///   guidance 1.0 (the engine refuses it; sc-25679 dropped it, sc-25681 refuses it like the API).
+#[cfg(test)]
 pub(crate) fn resolve_lane_request_controls(
     request: &ImageRequest,
     caps: &Capabilities,
     guidance: Option<f32>,
     negative_prompt: Option<&str>,
+) -> WorkerResult<LaneRequestControls> {
+    resolve_lane_request_controls_with_pid(
+        request,
+        caps,
+        guidance,
+        negative_prompt,
+        request.portable_aux_has_bound_pid(),
+    )
+}
+
+pub(crate) fn resolve_lane_request_controls_with_pid(
+    request: &ImageRequest,
+    caps: &Capabilities,
+    guidance: Option<f32>,
+    negative_prompt: Option<&str>,
+    pid_active: bool,
 ) -> WorkerResult<LaneRequestControls> {
     let refuse =
         |message: String| WorkerError::InvalidPayload(format!("{}: {message}", request.model));
@@ -274,7 +291,7 @@ pub(crate) fn resolve_lane_request_controls(
                 "flux_schnell" | "flux1_schnell" | "flux_dev" | "flux1_dev"
             ));
     let low_res_start = request
-        .resolved_low_res_start_spec(low_res_start_supported, resolved_steps)
+        .resolved_low_res_start_spec_with_pid(low_res_start_supported, resolved_steps, pid_active)
         .map_err(WorkerError::InvalidPayload)?;
     Ok(LaneRequestControls {
         cfg_interval,
@@ -1400,29 +1417,122 @@ mod tests {
             "modelManifestEntry": entry.clone()
         });
         let bad_authored = bad_payload.as_object().unwrap();
+        let bad_req = ImageRequest::from_resolved(bad_authored, bad_authored).unwrap();
+        let caps = honouring();
 
-        let validation_err = sceneworks_core::options::low_res_start::requested_low_res_start(
-            "flux_dev",
-            bad_authored,
-            bad_authored["advanced"].as_object().unwrap(),
-            entry_obj,
+        // 1. With cached PiD checkpoint + Gemma snapshot on disk (`resolve_pid_weights` -> `Some`),
+        // PiD is effectively active (`use_pid == true`), reducing the base from 1024x1024 to
+        // 512x512; both options validation and worker lane controls reject scale 0.25 (128x128 < 256):
+        let cached_root = tempfile::tempdir().unwrap();
+        let cached_hub = cached_root.path().join("hub");
+        let _cached_guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            cached_root.path().to_path_buf(),
+            cached_hub.clone(),
+        );
+        let pid_snap = cached_hub.join(
+            "models--SceneWorks--pid-flux/snapshots/1111111111111111111111111111111111111111",
+        );
+        let gemma_snap = cached_hub.join(
+            "models--SceneWorks--gemma-2-2b-it/snapshots/2222222222222222222222222222222222222222",
+        );
+        std::fs::create_dir_all(&pid_snap).unwrap();
+        std::fs::create_dir_all(&gemma_snap).unwrap();
+        std::fs::write(pid_snap.join("pid_flux_2k.safetensors"), b"pid").unwrap();
+        std::fs::write(gemma_snap.join("config.json"), b"{}").unwrap();
+
+        let active_pid = crate::image_jobs::pid::resolve_pid_weights(
+            &bad_req,
+            cached_root.path(),
+            &bad_req.model,
         )
-        .expect_err("submission validation must reject 128x128 reduced grid under PiD 2K");
+        .unwrap()
+        .is_some();
+        assert!(
+            active_pid,
+            "PiD weights must resolve when checkpoint and Gemma exist"
+        );
+
+        let validation_err =
+            sceneworks_core::options::low_res_start::requested_low_res_start_with_pid_active(
+                "flux_dev",
+                bad_authored,
+                bad_authored["advanced"].as_object().unwrap(),
+                entry_obj,
+                active_pid,
+            )
+            .expect_err(
+                "submission validation must reject 128x128 reduced grid under active PiD 2K",
+            );
         assert_eq!(validation_err.field, "advanced.lowResStart.scale");
         assert!(
             validation_err.detail.contains("512x512 to 128x128"),
             "{}",
             validation_err.detail
         );
-
-        let bad_req = ImageRequest::from_resolved(bad_authored, bad_authored).unwrap();
-        assert_eq!(bad_req.pid_effective_base_dimensions(), (512, 512));
-        let caps = honouring();
-        let worker_err = resolve_lane_request_controls(&bad_req, &caps, Some(3.5), None)
-            .expect_err("worker lane controls must reject 128x128 reduced grid under PiD 2K");
+        assert_eq!(
+            bad_req.pid_effective_base_dimensions(active_pid),
+            (512, 512)
+        );
+        let worker_err =
+            resolve_lane_request_controls_with_pid(&bad_req, &caps, Some(3.5), None, active_pid)
+                .expect_err(
+                    "worker lane controls must reject 128x128 reduced grid under active PiD 2K",
+                );
         assert!(
             worker_err.to_string().contains("512x512 to 128x128"),
             "{worker_err}"
+        );
+
+        // 2. When PiD checkpoint or Gemma snapshot is absent on disk (`resolve_pid_weights` -> `None`),
+        // execution falls back to the native VAE (`use_pid == false`) and retains the 1024x1024 base,
+        // so scale 0.25 produces a valid 256x256 low-resolution grid in both validation and worker execution:
+        let empty_root = tempfile::tempdir().unwrap();
+        let empty_hub = empty_root.path().join("hub");
+        let _empty_guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            empty_root.path().to_path_buf(),
+            empty_hub,
+        );
+        let fallback_pid = crate::image_jobs::pid::resolve_pid_weights(
+            &bad_req,
+            empty_root.path(),
+            &bad_req.model,
+        )
+        .unwrap()
+        .is_some();
+        assert!(
+            !fallback_pid,
+            "missing PiD checkpoint must fall back to native VAE"
+        );
+
+        let fallback_validated = sceneworks_core::options::low_res_start::requested_low_res_start(
+            "flux_dev",
+            bad_authored,
+            bad_authored["advanced"].as_object().unwrap(),
+            entry_obj,
+        )
+        .expect("missing-checkpoint fallback must pass static validation at 1024x1024 -> 256x256")
+        .expect("present");
+        assert_eq!(
+            (fallback_validated.low_width, fallback_validated.low_height),
+            (256, 256)
+        );
+        assert_eq!(
+            (
+                fallback_validated.full_width,
+                fallback_validated.full_height
+            ),
+            (1024, 1024)
+        );
+        assert_eq!(
+            bad_req.pid_effective_base_dimensions(fallback_pid),
+            (1024, 1024)
+        );
+        let fallback_controls =
+            resolve_lane_request_controls_with_pid(&bad_req, &caps, Some(3.5), None, fallback_pid)
+                .expect("worker lane controls must allow 1024x1024 -> 256x256 when PiD falls back to native VAE");
+        assert_eq!(
+            fallback_controls.low_res_start,
+            Some(gen_core::LowResStartSpec::new(3, Some(0.25)))
         );
     }
 }

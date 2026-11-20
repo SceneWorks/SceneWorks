@@ -938,10 +938,29 @@ impl ImageRequest {
 
     /// Resolve typed `advanced.lowResStart` against the linked provider's `supports_low_res_start`
     /// capability and the request's resolved step count (`SW-6942`: `FEAT-1`, `PIPE-2`, `E5`).
+    ///
+    /// Uses bound portable auxiliary PiD paths (`portable_aux_has_bound_pid`) when no explicit
+    /// `pid_active` decision is passed; worker lanes that resolve PiD weights against `data_dir`
+    /// call [`Self::resolved_low_res_start_spec_with_pid`] (`SW-7221`).
     pub fn resolved_low_res_start_spec(
         &self,
         supports_low_res_start: bool,
         resolved_steps: u32,
+    ) -> Result<Option<gen_core::LowResStartSpec>, String> {
+        self.resolved_low_res_start_spec_with_pid(
+            supports_low_res_start,
+            resolved_steps,
+            self.portable_aux_has_bound_pid(),
+        )
+    }
+
+    /// Resolve typed `advanced.lowResStart` with the effective PiD activation flag (`pid_active`)
+    /// from weight resolution (`resolve_pid_weights`) (`SW-7221`).
+    pub fn resolved_low_res_start_spec_with_pid(
+        &self,
+        supports_low_res_start: bool,
+        resolved_steps: u32,
+        pid_active: bool,
     ) -> Result<Option<gen_core::LowResStartSpec>, String> {
         let options = self
             .resolved_advanced
@@ -1024,7 +1043,7 @@ impl ImageRequest {
                 self.model, wire.k
             ));
         }
-        let (eff_width, eff_height) = self.pid_effective_base_dimensions();
+        let (eff_width, eff_height) = self.pid_effective_base_dimensions(pid_active);
         sceneworks_options::low_res_start::quantize_low_res_dimensions(
             eff_width,
             eff_height,
@@ -1065,10 +1084,19 @@ impl ImageRequest {
         .map_err(|error| format!("{}: {}", self.model, error.detail))
     }
 
+    /// Whether bound portable auxiliary source paths (`portable_aux`) include both `pid_checkpoint`
+    /// and `pid_gemma` (`SW-7221`).
+    pub fn portable_aux_has_bound_pid(&self) -> bool {
+        self.portable_aux.path("pid_checkpoint").is_some()
+            && self.portable_aux.path("pid_gemma").is_some()
+    }
+
     /// Effective base dimensions `(width, height)` for this request after PiD base reduction when
-    /// `usePid` is active on a PiD-eligible model (`SW-7221`).
-    pub fn pid_effective_base_dimensions(&self) -> (u32, u32) {
-        let use_pid = sceneworks_options::low_res_start::pid_backbone_for(&self.model).is_some()
+    /// `usePid` is requested and PiD is effectively active (`pid_active`) on a PiD-eligible model
+    /// (`SW-7221`).
+    pub fn pid_effective_base_dimensions(&self, pid_active: bool) -> (u32, u32) {
+        let use_pid = pid_active
+            && sceneworks_options::low_res_start::pid_backbone_for(&self.model).is_some()
             && self.advanced_bool("usePid").unwrap_or(false);
         let tier = sceneworks_options::low_res_start::pid_output_tier_from_str(
             self.advanced_text("pidTarget"),

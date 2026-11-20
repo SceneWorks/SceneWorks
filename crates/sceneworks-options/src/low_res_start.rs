@@ -244,16 +244,46 @@ pub fn pid_effective_dims(
     (snap(width), snap(height))
 }
 
+/// Whether `advanced` or `entry` proves that PiD decode weights are bound or active for this
+/// payload (`SW-7221`). When PiD checkpoint or Gemma snapshots are absent on disk, the worker's
+/// `resolve_pid_weights` returns `None` and execution falls back to the native VAE at the
+/// requested base dimensions; static pre-weight-resolution validation therefore reduces base
+/// dimensions only when PiD activation is confirmed (bound portable aux paths or an explicit
+/// `pidActive` fact, or via [`requested_low_res_start_with_pid_active`]).
+pub fn pid_bound_in_payload(advanced: &JsonObject, entry: &JsonObject) -> bool {
+    let bound_in_aux = advanced
+        .get("__portableAuxPaths")
+        .and_then(Value::as_object)
+        .is_some_and(|aux| {
+            aux.get("pid_checkpoint")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+                && aux
+                    .get("pid_gemma")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+        });
+    let active_in_entry = entry.get("pidActive").and_then(Value::as_bool) == Some(true)
+        || entry
+            .get("optionRouteFacts")
+            .and_then(|facts| facts.get("pidActive"))
+            .and_then(Value::as_bool)
+            == Some(true);
+    bound_in_aux || active_in_entry
+}
+
 /// Resolve the effective base dimensions `(width, height)` for `lowResStart` validation on a raw
-/// option map, accounting for PiD base reduction when `usePid` is active on a PiD-eligible model
-/// (`SW-7221`).
+/// option map, accounting for PiD base reduction when `usePid` is requested and PiD is effectively
+/// active (`pid_active`) on a PiD-eligible model (`SW-7221`).
 pub fn effective_base_dimensions_for_low_res_start(
     model: &str,
     width: u32,
     height: u32,
     advanced: &JsonObject,
+    pid_active: bool,
 ) -> (u32, u32) {
-    let use_pid = pid_backbone_for(model).is_some()
+    let use_pid = pid_active
+        && pid_backbone_for(model).is_some()
         && advanced.get("usePid").is_some_and(crate::legacy_image_flag);
     let tier = pid_output_tier_from_str(advanced.get("pidTarget").and_then(Value::as_str));
     pid_effective_dims(width, height, use_pid, tier)
@@ -375,11 +405,34 @@ fn has_nonnull(map: &JsonObject, key: &str) -> bool {
 /// Validate `advanced.lowResStart` on a request payload against `entry["features"]["low_res_start"]`,
 /// executed step count `M` (after img2img strength truncation), target geometry, and pass-0
 /// conditioning exclusions (`FEAT-1`, `PIPE-2`, `E5`).
+///
+/// Static validation before weight resolution only applies PiD 2K base-dimension reduction when
+/// PiD activation is bound/confirmed in `advanced` or `entry` ([`pid_bound_in_payload`]); callers
+/// that have resolved whether PiD weights are present on disk use
+/// [`requested_low_res_start_with_pid_active`] (`SW-7221`).
 pub fn requested_low_res_start(
     model: &str,
     payload: &JsonObject,
     advanced: &JsonObject,
     entry: &JsonObject,
+) -> Result<Option<LowResStartResolved>, ValidationRefusal> {
+    requested_low_res_start_with_pid_active(
+        model,
+        payload,
+        advanced,
+        entry,
+        pid_bound_in_payload(advanced, entry),
+    )
+}
+
+/// Validate `advanced.lowResStart` with an explicit effective PiD activation flag (`pid_active`)
+/// shared with worker weight resolution (`resolve_pid_weights`) (`SW-7221`).
+pub fn requested_low_res_start_with_pid_active(
+    model: &str,
+    payload: &JsonObject,
+    advanced: &JsonObject,
+    entry: &JsonObject,
+    pid_active: bool,
 ) -> Result<Option<LowResStartResolved>, ValidationRefusal> {
     let Some(raw) = advanced
         .get(LOW_RES_START_KEY)
@@ -462,6 +515,7 @@ pub fn requested_low_res_start(
         authored_width,
         authored_height,
         advanced,
+        pid_active,
     );
     let (low_width, low_height) = quantize_low_res_dimensions(
         full_width,
@@ -769,8 +823,8 @@ mod tests {
     #[test]
     fn sw_7221_use_pid_2k_validates_low_res_start_against_pid_effective_base_dimensions() {
         let entry = flux_dev_entry();
-        // 1024x1024 with usePid: true and pidTarget: "2k" reduces effective base to 512x512.
-        // At scale 0.25, 512 * 0.25 = 128 < 256 -> refused at validation time!
+        // 1024x1024 with usePid: true and pidTarget: "2k" reduces effective base to 512x512 when PiD is active.
+        // At scale 0.25, 512 * 0.25 = 128 < 256 -> refused when PiD is active!
         let pid_2k_too_small = json!({
             "model": "flux_dev",
             "mode": "text_to_image",
@@ -784,13 +838,14 @@ mod tests {
             }
         });
         let obj = pid_2k_too_small.as_object().unwrap();
-        let err = requested_low_res_start(
+        let err = requested_low_res_start_with_pid_active(
             "flux_dev",
             obj,
             obj["advanced"].as_object().unwrap(),
             &entry,
+            true,
         )
-        .expect_err("1024x1024 with usePid=true, pidTarget=2k, scale=0.25 must be refused");
+        .expect_err("1024x1024 with active PiD 2k and scale=0.25 must be refused");
         assert_eq!(err.field, "advanced.lowResStart.scale");
         assert!(
             err.detail.contains("512x512 to 128x128"),
@@ -798,7 +853,43 @@ mod tests {
             err.detail
         );
 
-        // At scale 0.5, 512 * 0.5 = 256 >= 256 -> accepted with 256x256 -> 512x512!
+        // When PiD weights are absent (pid_active = false, or unbound static payload), execution
+        // falls back to native VAE at 1024x1024 -> scale 0.25 produces a valid 256x256 grid:
+        let fallback_resolved = requested_low_res_start(
+            "flux_dev",
+            obj,
+            obj["advanced"].as_object().unwrap(),
+            &entry,
+        )
+        .expect("missing-checkpoint fallback to native VAE at 1024x1024 must remain valid")
+        .expect("present");
+        assert_eq!(
+            (fallback_resolved.low_width, fallback_resolved.low_height),
+            (256, 256)
+        );
+        assert_eq!(
+            (fallback_resolved.full_width, fallback_resolved.full_height),
+            (1024, 1024)
+        );
+
+        // When portable aux paths bind pid_checkpoint + pid_gemma, static requested_low_res_start
+        // also recognizes PiD as active and refuses 128x128:
+        let mut bound_payload = pid_2k_too_small.clone();
+        bound_payload["advanced"]["__portableAuxPaths"] = json!({
+            "pid_checkpoint": "/tmp/pid_flux",
+            "pid_gemma": "/tmp/gemma"
+        });
+        let bound_obj = bound_payload.as_object().unwrap();
+        let bound_err = requested_low_res_start(
+            "flux_dev",
+            bound_obj,
+            bound_obj["advanced"].as_object().unwrap(),
+            &entry,
+        )
+        .expect_err("bound PiD 2k with scale=0.25 must be refused");
+        assert!(bound_err.detail.contains("512x512 to 128x128"));
+
+        // At scale 0.5 with active PiD, 512 * 0.5 = 256 >= 256 -> accepted with 256x256 -> 512x512!
         let pid_2k_valid = json!({
             "model": "flux_dev",
             "mode": "text_to_image",
@@ -812,11 +903,12 @@ mod tests {
             }
         });
         let valid_obj = pid_2k_valid.as_object().unwrap();
-        let resolved = requested_low_res_start(
+        let resolved = requested_low_res_start_with_pid_active(
             "flux_dev",
             valid_obj,
             valid_obj["advanced"].as_object().unwrap(),
             &entry,
+            true,
         )
         .expect("scale 0.5 on 512x512 PiD 2k base is valid")
         .expect("present");
