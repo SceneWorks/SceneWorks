@@ -385,11 +385,14 @@ pub fn resolve_executed_steps(
     ))
 }
 
-fn route_uses_reference_asset_for_plain_img2img(
+/// Whether a single `referenceAssetId` on `model` represents a plain img2img initial source image
+/// rather than pass-0 reference, IP-Adapter, identity, or multi-source conditioning (`SW-6946`).
+pub fn route_admits_reference_asset_for_plain_img2img(
     model: &str,
-    payload: &JsonObject,
-    advanced: &JsonObject,
     entry: &JsonObject,
+    has_source_asset_id: bool,
+    has_ip_adapter_repo: bool,
+    reference_strength: Option<f64>,
 ) -> bool {
     let family = entry
         .get("family")
@@ -408,8 +411,9 @@ fn route_uses_reference_asset_for_plain_img2img(
         || model.contains("fill")
         || model.contains("redux")
         || model.contains("inpaint")
-        || has_nonempty_str(advanced, "ipAdapterRepo")
-        || has_nonempty_str(payload, "sourceAssetId")
+        || has_ip_adapter_repo
+        || has_source_asset_id
+        || reference_strength.is_some_and(|strength| !strength.is_finite() || strength > 0.0)
     {
         return false;
     }
@@ -438,12 +442,35 @@ fn route_uses_reference_asset_for_plain_img2img(
             | "sdxl"
             | "realvisxl"
             | "realvisxl_lightning"
-            | "kolors"
             | "illustrious_xl_v1"
             | "illustrious_xl_v2"
             | "chroma"
             | "anima"
             | "pixart_sigma"
+    )
+}
+
+fn parse_reference_strength(advanced: &JsonObject) -> Option<f64> {
+    let raw = advanced.get("referenceStrength").filter(|v| !v.is_null())?;
+    Some(
+        raw.as_f64()
+            .or_else(|| raw.as_str()?.trim().parse::<f64>().ok())
+            .unwrap_or(f64::NAN),
+    )
+}
+
+fn route_uses_reference_asset_for_plain_img2img(
+    model: &str,
+    payload: &JsonObject,
+    advanced: &JsonObject,
+    entry: &JsonObject,
+) -> bool {
+    route_admits_reference_asset_for_plain_img2img(
+        model,
+        entry,
+        has_nonempty_str(payload, "sourceAssetId"),
+        has_nonempty_str(advanced, "ipAdapterRepo"),
+        parse_reference_strength(advanced),
     )
 }
 
@@ -1079,6 +1106,113 @@ mod tests {
             )
             .expect_err("combined sourceAssetId + referenceAssetId must be refused");
             assert_eq!(err.field, "advanced.lowResStart", "{model}");
+
+            // Positive referenceStrength activates Character Studio identity initialization, which must be refused:
+            let mut identity_init = m3_payload.clone();
+            identity_init["advanced"]["referenceStrength"] = json!(0.6);
+            let err = requested_low_res_start(
+                model,
+                &identity_init,
+                identity_init["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("positive referenceStrength must be refused as identity conditioning");
+            assert_eq!(err.field, "advanced.lowResStart", "{model}");
         }
+
+        // Kolors does not set ui.img2img: true; referenceAssetId in text_to_image mode activates
+        // IP-Adapter-Plus image prompt conditioning and must be refused with lowResStart:
+        let kolors_entry = json!({
+            "id": "kolors",
+            "family": "kolors",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let kolors_payload = json!({
+            "model": "kolors",
+            "mode": "text_to_image",
+            "referenceAssetId": "ref_ip_adapter",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "kolors",
+            &kolors_payload,
+            kolors_payload["advanced"].as_object().unwrap(),
+            &kolors_entry,
+        )
+        .expect_err("kolors referenceAssetId activates IP-Adapter-Plus and must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        // z_image_turbo admits plain referenceAssetId when referenceStrength is absent or 0.0,
+        // and refuses it when referenceStrength > 0.0 (Character Studio identity init):
+        let z_image_entry = json!({
+            "id": "z_image_turbo",
+            "family": "z-image",
+            "defaults": {
+                "steps": 8,
+                "resolution": "1024x1024"
+            },
+            "ui": {
+                "img2img": true
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let z_plain_payload = json!({
+            "model": "z_image_turbo",
+            "mode": "text_to_image",
+            "referenceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 8,
+                "strength": 0.5,
+                "referenceStrength": 0.0,
+                "lowResStart": { "version": 1, "k": 2, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let z_resolved = requested_low_res_start(
+            "z_image_turbo",
+            &z_plain_payload,
+            z_plain_payload["advanced"].as_object().unwrap(),
+            &z_image_entry,
+        )
+        .expect("z_image_turbo with referenceStrength 0.0 is plain img2img")
+        .expect("present");
+        assert_eq!(z_resolved.executed_steps, 4);
+
+        let mut z_identity_payload = z_plain_payload.clone();
+        z_identity_payload["advanced"]["referenceStrength"] = json!(0.6);
+        let err = requested_low_res_start(
+            "z_image_turbo",
+            &z_identity_payload,
+            z_identity_payload["advanced"].as_object().unwrap(),
+            &z_image_entry,
+        )
+        .expect_err("z_image_turbo with referenceStrength > 0 must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
     }
 }

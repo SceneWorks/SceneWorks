@@ -990,10 +990,27 @@ impl ImageRequest {
                 self.model, self.mode
             ));
         }
-        let has_forbidden_conditioning = self
+        let has_source_asset_id = self
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_reference_asset_id = self
             .reference_asset_id
             .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_authored_ip_adapter_repo = options.ip_adapter_repo.as_ref().is_some_and(|b| {
+            matches!(b.origin, Origin::Authored { .. }) && !b.value.trim().is_empty()
+        });
+        let plain_img2img_reference_asset = has_reference_asset_id
+            && sceneworks_options::low_res_start::route_admits_reference_asset_for_plain_img2img(
+                &self.model,
+                &self.model_manifest_entry,
+                has_source_asset_id,
+                has_authored_ip_adapter_repo,
+                self.advanced_f64("referenceStrength"),
+            );
+        let disallow_reference_asset_id = has_reference_asset_id && !plain_img2img_reference_asset;
+        let has_forbidden_conditioning = disallow_reference_asset_id
             || !self.reference_asset_ids.is_empty()
             || self
                 .mask_asset_id
@@ -1017,19 +1034,14 @@ impl ImageRequest {
                 .as_ref()
                 .is_some_and(|b| !b.value.trim().is_empty())
             || options.control_weights.is_some()
-            || options.ip_adapter_repo.as_ref().is_some_and(|b| {
-                matches!(b.origin, Origin::Authored { .. }) && !b.value.trim().is_empty()
-            });
+            || has_authored_ip_adapter_repo;
         if has_forbidden_conditioning {
             return Err(format!(
                 "{}: Low Res Start cannot be combined with pass-0 edit, reference, IP-Adapter, identity, or control conditioning.",
                 self.model
             ));
         }
-        let has_source = self
-            .source_asset_id
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty());
+        let has_source = has_source_asset_id || plain_img2img_reference_asset;
         let authored_strength = self.resolved_authored_img2img_strength()?;
         let executed_steps =
             sceneworks_options::low_res_start::executed_steps_after_img2img_strength(
@@ -2468,6 +2480,126 @@ mod tests {
         )
         .expect("conflict refused");
         assert!(reason.contains("flux3_klein"), "{reason}");
+    }
+
+    #[test]
+    fn sw_6946_resolved_low_res_start_spec_admits_plain_img2img_reference_asset_and_rejects_identity_or_ip_adapter(
+    ) {
+        for model in ["sd3_5_medium", "flux2_dev"] {
+            let valid = payload(json!({
+                "projectId": "p",
+                "model": model,
+                "mode": "text_to_image",
+                "referenceAssetId": "src_1200x700",
+                "width": 1024,
+                "height": 768,
+                "advanced": {
+                    "steps": 10,
+                    "strength": 0.4,
+                    "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+                }
+            }));
+            let request = ImageRequest::from_resolved(&valid, &valid).unwrap();
+            let spec = request
+                .resolved_low_res_start_spec_with_pid(true, 10, false)
+                .expect("plain img2img reference_asset_id must resolve")
+                .expect("lowResStart active");
+            assert_eq!(spec.k, 3, "{model}");
+            assert_eq!(spec.scale, Some(0.5), "{model}");
+
+            // Strength 0.4 with 10 steps truncates executed_steps M to 6; k=6 must be refused:
+            let k_too_large = payload(json!({
+                "projectId": "p",
+                "model": model,
+                "mode": "text_to_image",
+                "referenceAssetId": "src_1200x700",
+                "width": 1024,
+                "height": 768,
+                "advanced": {
+                    "steps": 10,
+                    "strength": 0.4,
+                    "lowResStart": { "version": 1, "k": 6, "scale": 0.5 }
+                }
+            }));
+            let err = ImageRequest::from_resolved(&k_too_large, &k_too_large)
+                .unwrap()
+                .resolved_low_res_start_spec_with_pid(true, 10, false)
+                .expect_err("k >= executed_steps after reference_asset_id strength truncation must be refused");
+            assert!(
+                err.contains("executed_steps=6"),
+                "{model}: unexpected error {err}"
+            );
+
+            // Combined source_asset_id + reference_asset_id must be refused:
+            let dual_source = payload(json!({
+                "projectId": "p",
+                "model": model,
+                "mode": "text_to_image",
+                "sourceAssetId": "src_1",
+                "referenceAssetId": "ref_1",
+                "width": 1024,
+                "height": 768,
+                "advanced": {
+                    "steps": 10,
+                    "strength": 0.4,
+                    "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+                }
+            }));
+            let err = ImageRequest::from_resolved(&dual_source, &dual_source)
+                .unwrap()
+                .resolved_low_res_start_spec_with_pid(true, 10, false)
+                .expect_err("combined source_asset_id + reference_asset_id must be refused");
+            assert!(
+                err.contains("Low Res Start cannot be combined with pass-0"),
+                "{model}: unexpected error {err}"
+            );
+
+            // Positive referenceStrength activates identity conditioning and must be refused:
+            let identity_init = payload(json!({
+                "projectId": "p",
+                "model": model,
+                "mode": "text_to_image",
+                "referenceAssetId": "ref_1",
+                "width": 1024,
+                "height": 768,
+                "advanced": {
+                    "steps": 10,
+                    "referenceStrength": 0.6,
+                    "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+                }
+            }));
+            let err = ImageRequest::from_resolved(&identity_init, &identity_init)
+                .unwrap()
+                .resolved_low_res_start_spec_with_pid(true, 10, false)
+                .expect_err("positive referenceStrength must be refused");
+            assert!(
+                err.contains("Low Res Start cannot be combined with pass-0"),
+                "{model}: unexpected error {err}"
+            );
+        }
+
+        for forbidden_model in ["flux_dev", "kolors"] {
+            let payload = payload(json!({
+                "projectId": "p",
+                "model": forbidden_model,
+                "mode": "text_to_image",
+                "referenceAssetId": "ref_1",
+                "width": 1024,
+                "height": 1024,
+                "advanced": {
+                    "steps": 10,
+                    "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+                }
+            }));
+            let err = ImageRequest::from_resolved(&payload, &payload)
+                .unwrap()
+                .resolved_low_res_start_spec_with_pid(true, 10, false)
+                .expect_err("flux_dev and kolors must refuse reference_asset_id with lowResStart");
+            assert!(
+                err.contains("Low Res Start cannot be combined with pass-0"),
+                "{forbidden_model}: unexpected error {err}"
+            );
+        }
     }
 }
 
