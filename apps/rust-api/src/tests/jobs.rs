@@ -7038,15 +7038,11 @@ async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuse
 /// refuses an imported request shape the resolved provider registration cannot execute; the merged
 /// boundary never ran that check, so a retry could swap `advanced` for one carrying a shape the
 /// backend has no route for.
-fn register_imported_fixture_worker(
-    state: &crate::AppState,
+/// The registered `model` claim a worker publishes for an imported fixture source.
+fn imported_fixture_claim(
     model_id: &str,
     source: &std::path::Path,
-    backend: &str,
-    platform: &str,
-) {
-    use sceneworks_core::contracts::WorkerCapability;
-    use sceneworks_core::jobs_store::RegisterWorker;
+) -> sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim {
     use sceneworks_core::model_artifacts::portable_binding::{
         portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
         PortableSourceProvenance,
@@ -7077,9 +7073,21 @@ fn register_imported_fixture_worker(
         &portable_file_ledger_sha256(&files).expect("ledger hash"),
     )
     .expect("source ID");
-    let claim =
-        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
-            .expect("worker claim");
+    PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+        .expect("worker claim")
+}
+
+fn register_imported_fixture_worker(
+    state: &crate::AppState,
+    model_id: &str,
+    source: &std::path::Path,
+    backend: &str,
+    platform: &str,
+) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+
+    let claim = imported_fixture_claim(model_id, source);
     let mut capabilities = vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate];
     if backend == "candle" {
         capabilities.push(WorkerCapability::Unknown("candle".into()));
@@ -7280,6 +7288,151 @@ async fn imported_krea_keeps_candle_routes_despite_inherited_mlx_only_decoder() 
                 .is_some(),
             "{platform}: the frozen binding must carry the Candle route: {binding}"
         );
+    }
+}
+
+/// Workers no longer hash their sources at startup; a source with no recorded verdict is verified
+/// when a job needs it. Enqueue finds no live claim for the import, challenges the eligible keyed
+/// worker with the exact files, and binds as soon as that worker proves them. A worker that cannot
+/// prove them answers so, and the refusal returns promptly instead of after the challenge timeout.
+#[tokio::test]
+async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
+    use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
+
+    for proves in [true, false] {
+        let temp = tempfile::tempdir().expect("temp dir creates");
+        let model_path = temp.path().join("data/imported/user-krea.safetensors");
+        std::fs::create_dir_all(model_path.parent().expect("model parent"))
+            .expect("model directory creates");
+        std::fs::write(&model_path, b"fixture weights").expect("model source writes");
+        let manifest_dir = temp.path().join("config/manifests");
+        std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+        write_empty_sibling_manifests(&manifest_dir);
+        std::fs::write(
+            manifest_dir.join("builtin.models.jsonc"),
+            r#"{ "schemaVersion": 1, "models": [] }"#,
+        )
+        .expect("builtin manifest writes");
+        std::fs::write(
+            manifest_dir.join("user.models.jsonc"),
+            json!({"schemaVersion": 1, "models": [{
+                "id": "user_krea", "name": "User Krea", "type": "image", "family": "krea_2",
+                "importSourceShape": "transformer_file", "paths": {"model": model_path}
+            }]})
+            .to_string(),
+        )
+        .expect("user manifest writes");
+        let mut settings = test_settings(&temp);
+        settings.candle_required = true;
+        let master =
+            sceneworks_core::worker_proof::load_or_create_master(&settings.credentials_dir)
+                .expect("worker proof master");
+        let key = sceneworks_core::worker_proof::derive_worker_key(&master, "verify-worker")
+            .expect("worker key");
+        let (app, _state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+
+        // A keyed Candle worker whose verdict store does not cover the import yet: it advertises
+        // nothing for it.
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/register",
+            json!({"workerId":"verify-worker","gpuId":"cuda:0","platform":"linux",
+                "capabilities":["gpu","image_generate","candle"],"loadedModels":[],
+                "portableProofKey":key,"portableSourceClaims":[]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let claim = imported_fixture_claim("user_krea", &model_path);
+        let worker = {
+            let (app, key, claim) = (app.clone(), key.clone(), claim.clone());
+            tokio::spawn(async move {
+                let heartbeat = |claims: Value| {
+                    let app = app.clone();
+                    let key = key.clone();
+                    async move {
+                        let (status, body) = request(
+                            app,
+                            "POST",
+                            "/api/v1/workers/verify-worker/heartbeat",
+                            json!({"status":"idle","currentJobId":null,"loadedModels":[],
+                                "portableProofKey":key,"portableSourceClaims":claims}),
+                        )
+                        .await;
+                        assert_eq!(status, StatusCode::OK, "{body}");
+                    }
+                };
+                loop {
+                    let (_, challenges) = request(
+                        app.clone(),
+                        "POST",
+                        "/api/v1/workers/verify-worker/portable-source-challenges",
+                        json!({"capability":key}),
+                    )
+                    .await;
+                    let Some(challenge) =
+                        challenges.as_array().and_then(|list| list.first()).cloned()
+                    else {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    };
+                    // The challenge names exactly the source the job needs.
+                    assert_eq!(challenge["sourceId"], json!(claim.source_id));
+                    assert_eq!(challenge["files"], json!(claim.files));
+                    let claims = if proves { json!([claim]) } else { json!([]) };
+                    heartbeat(claims.clone()).await;
+                    let answer = if proves {
+                        portable_file_ledger_sha256(&claim.files).expect("ledger")
+                    } else {
+                        "unproved".to_owned()
+                    };
+                    let (status, _) = request(
+                        app.clone(),
+                        "POST",
+                        "/api/v1/workers/verify-worker/portable-source-proof",
+                        json!({"id":challenge["id"],"capability":key,"ledgerSha256":answer}),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK);
+                    // The ordinary heartbeat that follows an answer.
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    heartbeat(claims).await;
+                    return;
+                }
+            })
+        };
+
+        let started = std::time::Instant::now();
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({"projectId": "project-1", "model": "user_krea", "mode": "text_to_image",
+                "prompt": "mist over hills", "count": 1}),
+        )
+        .await;
+        // Bounded: enqueue that never challenges the worker must fail here, not hang the suite.
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), worker).await;
+        assert!(
+            matches!(answered, Ok(Ok(()))),
+            "enqueue must challenge the worker for the unadvertised source ({status}: {job})"
+        );
+        if proves {
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "a source proved on demand must admit the job: {job}"
+            );
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{job}");
+            assert_eq!(job["code"], "model_artifact_incomplete", "{job}");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(30),
+                "an answered, unproved challenge must not wait out its timeout ({:?})",
+                started.elapsed()
+            );
+        }
     }
 }
 

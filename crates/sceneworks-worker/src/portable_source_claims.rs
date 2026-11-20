@@ -67,6 +67,17 @@ pub(crate) fn start_app_managed_challenges(
 ) {
     let attempts = CHALLENGE_ATTEMPTS.get_or_init(|| Mutex::new(BTreeMap::new()));
     let slots = CHALLENGE_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    // A challenge stays pending at the API until the admission waiting on it retires it. Answer
+    // each one once; only a new challenge starts a new attempt.
+    let challenges = {
+        let mut answered = answered_challenges();
+        let now = Instant::now();
+        answered.retain(|_, at| now.duration_since(*at) < ANSWERED_CHALLENGE_MEMORY);
+        challenges
+            .into_iter()
+            .filter(|challenge| !answered.contains_key(&challenge.id))
+            .collect::<Vec<_>>()
+    };
     let mut grouped = BTreeMap::<String, Vec<PortableSourceChallenge>>::new();
     for challenge in challenges {
         grouped
@@ -81,6 +92,25 @@ pub(crate) fn start_app_managed_challenges(
         let now = Instant::now();
         guard.retain(|_, until| *until > now);
         if guard.contains_key(&source_id) {
+            drop(guard);
+            // A running attempt answers every challenge for its source when it finishes. One that
+            // just finished already published whatever it proved, so answer this one now.
+            let running = running_challenges().contains(&source_id);
+            if !running {
+                let ids = group.into_iter().map(|entry| entry.id).collect();
+                let (api, settings, capability) =
+                    (api.clone(), settings.clone(), capability.clone());
+                tokio::spawn(async move {
+                    post_challenge_answers(
+                        &api,
+                        &settings,
+                        &capability,
+                        ids,
+                        UNPROVED_CHALLENGE_ANSWER,
+                    )
+                    .await;
+                });
+            }
             continue;
         }
         let Ok(permit) = slots.clone().try_acquire_owned() else {
@@ -88,6 +118,7 @@ pub(crate) fn start_app_managed_challenges(
         };
         guard.insert(source_id.clone(), now + Duration::from_secs(2 * 60 + 10));
         drop(guard);
+        running_challenges().insert(source_id.clone());
         let challenge = group.remove(0);
         let mut ids = group
             .into_iter()
@@ -109,31 +140,29 @@ pub(crate) fn start_app_managed_challenges(
             })
             .await
             .is_ok_and(|result| result.unwrap_or(false));
-            if proved {
-                if let Ok(ledger_sha256) = ledger {
-                    let path = format!(
-                        "/api/v1/workers/{}/portable-source-challenges",
-                        settings.worker_id
-                    );
-                    let fresh: WorkerResult<Vec<PortableSourceChallenge>> = api
-                        .post_json(&path, &serde_json::json!({"capability":capability}))
-                        .await;
-                    if let Ok(fresh) = fresh {
-                        ids.extend(
-                            fresh
-                                .into_iter()
-                                .filter(|entry| entry.source_id == source_id)
-                                .map(|entry| entry.id),
-                        );
-                    }
-                    for id in ids {
-                        let _: WorkerResult<serde_json::Value> = api.post_json(
-                            &format!("/api/v1/workers/{}/portable-source-proof", settings.worker_id),
-                            &serde_json::json!({"id":id,"capability":capability,"ledgerSha256":ledger_sha256}),
-                        ).await;
-                    }
-                }
+            // Always answer, proved or not: an admission waiting on this challenge stops as soon
+            // as every asked worker has answered. Only the exact ledger counts as a proof.
+            let answer = proved
+                .then(|| ledger.ok())
+                .flatten()
+                .unwrap_or_else(|| UNPROVED_CHALLENGE_ANSWER.to_owned());
+            let path = format!(
+                "/api/v1/workers/{}/portable-source-challenges",
+                settings.worker_id
+            );
+            let fresh: WorkerResult<Vec<PortableSourceChallenge>> = api
+                .post_json(&path, &serde_json::json!({"capability":capability}))
+                .await;
+            if let Ok(fresh) = fresh {
+                ids.extend(
+                    fresh
+                        .into_iter()
+                        .filter(|entry| entry.source_id == source_id)
+                        .map(|entry| entry.id),
+                );
             }
+            post_challenge_answers(&api, &settings, &capability, ids, &answer).await;
+            running_challenges().remove(&source_id);
             if let Some(attempts) = CHALLENGE_ATTEMPTS.get() {
                 attempts
                     .lock()
@@ -144,8 +173,98 @@ pub(crate) fn start_app_managed_challenges(
     }
 }
 
-/// Resolve a path-free, API-authored probe against this worker's declared model roots. A claim
-/// is published only after the complete local file set, sizes and hashes match the challenge.
+/// How long this worker remembers a challenge it has answered.
+const ANSWERED_CHALLENGE_MEMORY: Duration = Duration::from_secs(5 * 60);
+
+fn answered_challenges() -> std::sync::MutexGuard<'static, BTreeMap<String, Instant>> {
+    static ANSWERED: OnceLock<Mutex<BTreeMap<String, Instant>>> = OnceLock::new();
+    ANSWERED
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn running_challenges() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
+    static RUNNING: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
+    RUNNING
+        .get_or_init(|| Mutex::new(std::collections::BTreeSet::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Post `answer` (the exact ledger when proved) for each challenge id, remembering it as answered.
+async fn post_challenge_answers(
+    api: &crate::api_client::ApiClient,
+    settings: &Settings,
+    capability: &str,
+    ids: std::collections::BTreeSet<String>,
+    answer: &str,
+) {
+    for id in ids {
+        let posted: WorkerResult<serde_json::Value> = api
+            .post_json(
+                &format!(
+                    "/api/v1/workers/{}/portable-source-proof",
+                    settings.worker_id
+                ),
+                &serde_json::json!({"id":id,"capability":capability,"ledgerSha256":answer}),
+            )
+            .await;
+        if posted.is_ok() {
+            answered_challenges().insert(id, Instant::now());
+        }
+    }
+}
+
+/// The challenge `source_id` asking for one complete verification pass of this worker's registered
+/// sources. Mirrors `FULL_INVENTORY_CHALLENGE_SOURCE` in the API's portable admission.
+const FULL_INVENTORY_CHALLENGE_SOURCE: &str = "sceneworks:full-source-inventory";
+
+/// The answer a worker posts when it could not prove a challenge: never a valid ledger, so it only
+/// tells the waiting admission that this worker's attempt is over.
+const UNPROVED_CHALLENGE_ANSWER: &str = "unproved";
+
+/// Prove `challenge` from this worker's OWN registered sources, reading only files whose sizes
+/// the challenge names. The claim published is the one this worker's capture produced — its id,
+/// provenance and files — and only when it is exactly the challenged claim.
+fn prove_registered_challenge(
+    settings: &Settings,
+    challenge: &PortableSourceChallenge,
+) -> Option<PortableSourceClaim> {
+    let sizes = challenge.files.iter().map(|file| file.size_bytes).collect();
+    let mut proved = None;
+    with_hash_permission(HashPermission::Sizes(sizes), || {
+        collect_source_claims(settings, |claim| {
+            if proved.is_none()
+                && claim.source_id == challenge.source_id
+                && claim.files == challenge.files
+            {
+                proved = Some(claim);
+            }
+        });
+    });
+    proved
+}
+
+/// One complete verification pass on demand: every registered source is captured, hashing what
+/// the verdict store cannot vouch for, and published as proved until the worker restarts.
+fn full_inventory_pass(settings: &Settings) {
+    let mut claims = Vec::new();
+    with_hash_permission(HashPermission::Any, || {
+        collect_source_claims(settings, |claim| claims.push(claim));
+    });
+    let mut inventory = pending_inventory()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for claim in claims {
+        inventory.publish_probe(claim);
+    }
+}
+
+/// Resolve a path-free, API-authored probe. A full-inventory request runs one verification pass;
+/// a named source is proved from this worker's registered sources first, then against its declared
+/// model roots. A claim is published only after the complete local file set, sizes and hashes
+/// match the challenge.
 pub(crate) fn prove_app_managed_challenges(
     settings: &Settings,
     challenges: Vec<PortableSourceChallenge>,
@@ -154,6 +273,18 @@ pub(crate) fn prove_app_managed_challenges(
     let mut seen = std::collections::BTreeSet::new();
     for challenge in challenges {
         if !seen.insert(challenge.source_id.clone()) {
+            continue;
+        }
+        if challenge.source_id == FULL_INVENTORY_CHALLENGE_SOURCE {
+            full_inventory_pass(settings);
+            continue;
+        }
+        if let Some(claim) = prove_registered_challenge(settings, &challenge) {
+            pending_inventory()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .publish_probe(claim);
+            published = true;
             continue;
         }
         let _challenge_id = challenge.id;
@@ -441,7 +572,9 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
 }
 
 /// Heartbeats schedule a bounded background rescan so imports, conversions, and trained LoRAs
-/// appear without a worker restart. Hashing never runs on the heartbeat path.
+/// appear without a worker restart. Neither the heartbeat path nor the rescan reads model bytes;
+/// a source becomes advertised once anything on this host (its download, an import, admission or
+/// an on-demand proof) has recorded its verdict.
 pub(crate) fn refresh_background_inventory(settings: Settings) {
     let now = Instant::now();
     let hash = catalog_hash(&settings);
@@ -465,11 +598,13 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
                 let _ = crate::load_progress::spawn_blocking(move || {
                     #[cfg(test)]
                     let _fixture_cache_root = fixture_cache_root;
-                    registered_priority_overlay_source_claims(&settings, |claim| {
-                        pending_inventory()
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .publish(claim);
+                    with_hash_permission(HashPermission::RecordedOnly, || {
+                        registered_priority_overlay_source_claims(&settings, |claim| {
+                            pending_inventory()
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .publish(claim);
+                        });
                     });
                 })
                 .await;
@@ -482,9 +617,11 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
     start_background_inventory(settings);
 }
 
-/// Registration stays fast even when installed source closure spans terabytes. Exactly one
-/// blocking inventory hashes it in the background. Each completed source is published on the
-/// next ordinary heartbeat; unverified sources remain ineligible until their own hash completes.
+/// Registration stays fast even when installed source closure spans terabytes. One background
+/// inventory advertises every source whose files the host's verdict store already proves; it never
+/// reads model bytes ([`HashPermission::RecordedOnly`]), so a restart costs record lookups, not a
+/// re-read of every checkpoint. A source with no valid verdict (a new import, a moved stamp) is
+/// not advertised here: it is verified when a job needs it, by the on-demand source proof.
 pub(crate) fn start_background_inventory(settings: Settings) {
     // Registration replaces only this worker's server-side claim vector. Another worker in the
     // same process must retain its independent publication progress across this registration.
@@ -512,12 +649,14 @@ pub(crate) fn start_background_inventory(settings: Settings) {
             #[cfg(test)]
             let _fixture_cache_root = fixture_cache_root;
             let mut scanned = Vec::new();
-            collect_source_claims(&settings, |claim| {
-                scanned.push(claim.clone());
-                pending_inventory()
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .publish(claim);
+            with_hash_permission(HashPermission::RecordedOnly, || {
+                collect_source_claims(&settings, |claim| {
+                    scanned.push(claim.clone());
+                    pending_inventory()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .publish(claim);
+                });
             });
             scanned.sort_by(|left, right| left.source_id.cmp(&right.source_id));
             scanned.dedup_by(|left, right| left.source_id == right.source_id);
@@ -927,7 +1066,7 @@ fn registered_model_digest_source_claims(
         {
             // Only the trusted plan store may expose a linked library layer. It verifies the
             // approved root, compiled plan, and source bytes before availability is advertised.
-            if let Ok(resolved) = checkpoint_plans.resolve(checkpoint_id) {
+            if let Ok(resolved) = resolve_checkpoint_plan(&checkpoint_plans, checkpoint_id) {
                 for layer in resolved.layers {
                     if let Ok(files) =
                         capture_registered_files(&source_store(settings), &layer.path)
@@ -1736,7 +1875,7 @@ pub(crate) fn registered_model_content_path(
     {
         let store =
             sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
-        if let Ok(resolved) = store.resolve(checkpoint_id) {
+        if let Ok(resolved) = resolve_checkpoint_plan(&store, checkpoint_id) {
             candidates.extend(resolved.layers.into_iter().map(|layer| layer.path));
         }
     }
@@ -2043,6 +2182,67 @@ fn capture_tree(
     Ok(())
 }
 
+/// What a source capture on this thread may read to establish a file's digest.
+///
+/// The background inventory never reads model bytes: it advertises a source only when the host's
+/// verdict store already proves every file ([`HashPermission::RecordedOnly`]). A source the store
+/// cannot vouch for (a new import, a file whose stamp moved) is verified when a job needs it: API
+/// admission challenges the workers with the exact files, and the proof captures under
+/// [`HashPermission::Sizes`], reading only files of those sizes. Every other capture — the
+/// pre-loader guard included — hashes as it always has.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HashPermission {
+    #[default]
+    Any,
+    RecordedOnly,
+    Sizes(std::collections::BTreeSet<u64>),
+}
+
+thread_local! {
+    static HASH_PERMISSION: std::cell::RefCell<HashPermission> =
+        const { std::cell::RefCell::new(HashPermission::Any) };
+}
+
+/// Run `capture` with `permission` governing every source hash on this thread, restoring the
+/// previous permission afterwards (also on unwind).
+pub(crate) fn with_hash_permission<T>(
+    permission: HashPermission,
+    capture: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<HashPermission>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                HASH_PERMISSION.with(|cell| *cell.borrow_mut() = previous);
+            }
+        }
+    }
+    let _restore = Restore(Some(HASH_PERMISSION.with(|cell| cell.replace(permission))));
+    capture()
+}
+
+fn may_hash(size_bytes: u64) -> bool {
+    HASH_PERMISSION.with(|cell| match &*cell.borrow() {
+        HashPermission::Any => true,
+        HashPermission::RecordedOnly => false,
+        HashPermission::Sizes(sizes) => sizes.contains(&size_bytes),
+    })
+}
+
+/// Resolve a checkpoint plan under this thread's [`HashPermission`]: a layer whose persisted stamp
+/// is trusted costs nothing; one that needs a hash is read only when the permission allows its size.
+fn resolve_checkpoint_plan(
+    store: &sceneworks_core::checkpoint_plan_store::CheckpointPlanStore,
+    checkpoint_id: &str,
+) -> Result<
+    sceneworks_core::checkpoint_plan_store::ResolvedCheckpointV1,
+    sceneworks_core::checkpoint_plan_store::CheckpointPlanError,
+> {
+    store.resolve_hashing_only(checkpoint_id, &|path| {
+        std::fs::metadata(path).is_ok_and(|metadata| may_hash(metadata.len()))
+    })
+}
+
 /// This host's hash-once store, the one API admission and the worker runtime share.
 fn source_store(settings: &Settings) -> VerifiedSourceCache {
     VerifiedSourceCache::for_data_dir(&settings.data_dir)
@@ -2076,13 +2276,28 @@ fn capture_one(
         ));
     }
     let real = std::fs::canonicalize(path).map_err(WorkerError::Io)?;
-    let (sha256, _verification) = store.sha256(&real, &|| Ok(())).map_err(|error| {
-        if std::fs::metadata(&real).map(|now| now.len()).ok() != Some(metadata.len()) {
-            WorkerError::InvalidPayload("auxiliary source changed while hashing".to_owned())
-        } else {
-            WorkerError::Io(error)
+    let sha256 = match store.recorded(&real) {
+        Some(recorded) => recorded,
+        None if may_hash(metadata.len()) => {
+            store
+                .sha256(&real, &|| Ok(()))
+                .map_err(|error| {
+                    if std::fs::metadata(&real).map(|now| now.len()).ok() != Some(metadata.len()) {
+                        WorkerError::InvalidPayload(
+                            "auxiliary source changed while hashing".to_owned(),
+                        )
+                    } else {
+                        WorkerError::Io(error)
+                    }
+                })?
+                .0
         }
-    })?;
+        None => {
+            return Err(WorkerError::InvalidPayload(
+                "source is not yet verified on this host".to_owned(),
+            ))
+        }
+    };
     found.push(PortableArtifactFile {
         relative_path,
         size_bytes: metadata.len(),
@@ -2095,6 +2310,56 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The inventory never reads model bytes: under `RecordedOnly` a file without a verdict is not
+    /// advertised and is not read. An on-demand proof (`Sizes`) reads only the files of the sizes
+    /// it names, and the verdict it records is what the next cache-only inventory advertises —
+    /// without reading the file again. Every other capture still hashes as before.
+    #[test]
+    fn inventory_reads_no_bytes_and_on_demand_proof_reads_only_named_sizes() {
+        use sceneworks_core::verified_source_cache::read_counts;
+        let temp = tempfile::tempdir().unwrap();
+        let store = VerifiedSourceCache::new(temp.path().join("verdicts"));
+        let named = temp.path().join("named.safetensors");
+        let other = temp.path().join("other.safetensors");
+        std::fs::write(&named, b"abc").unwrap();
+        std::fs::write(&other, b"abcde").unwrap();
+        let (named, other) = (
+            std::fs::canonicalize(&named).unwrap(),
+            std::fs::canonicalize(&other).unwrap(),
+        );
+        // Settle both files past the stamp's racy window so a verdict can be recorded.
+        std::thread::sleep(Duration::from_millis(60));
+
+        with_hash_permission(HashPermission::RecordedOnly, || {
+            assert!(capture_registered_files(&store, &named).is_err());
+            assert!(capture_registered_files(&store, &other).is_err());
+        });
+        assert_eq!(read_counts::of(&named), 0, "the inventory read no bytes");
+        assert_eq!(read_counts::of(&other), 0, "the inventory read no bytes");
+
+        with_hash_permission(HashPermission::Sizes([3].into()), || {
+            assert!(capture_registered_files(&store, &named).is_ok());
+            assert!(capture_registered_files(&store, &other).is_err());
+        });
+        assert_eq!(read_counts::of(&named), 1, "the named size was verified");
+        assert_eq!(read_counts::of(&other), 0, "another size was not read");
+
+        with_hash_permission(HashPermission::RecordedOnly, || {
+            assert!(
+                capture_registered_files(&store, &named).is_ok(),
+                "a proved source is advertised from its verdict"
+            );
+        });
+        assert_eq!(read_counts::of(&named), 1, "advertising it read nothing");
+
+        assert!(capture_registered_files(&store, &other).is_ok());
+        assert_eq!(
+            read_counts::of(&other),
+            1,
+            "an ordinary capture still hashes"
+        );
+    }
 
     /// Review finding 7: a read-only worker consumer of `user.models.jsonc` goes through the shared
     /// version normalizer, so a future-version file advertises nothing instead of being read as

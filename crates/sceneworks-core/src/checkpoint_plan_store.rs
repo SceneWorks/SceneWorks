@@ -2509,6 +2509,36 @@ impl CheckpointPlanStore {
         self.resolve_with_check_and_verification(checkpoint_id, &|| Ok(()), observe)
     }
 
+    /// [`Self::resolve`] that reads a layer's bytes only when `may_hash(path)` allows it.
+    ///
+    /// A layer whose persisted stamp is trusted resolves without being read, exactly as in
+    /// [`Self::resolve`]. A layer that would have to be hashed and that `may_hash` refuses ends the
+    /// resolve with an `Interrupted` I/O error before a single byte is read, refreshing nothing.
+    /// A source inventory uses this to advertise only what is already verified (`|_| false`), or
+    /// to verify only the files an on-demand source proof names.
+    pub fn resolve_hashing_only(
+        &self,
+        checkpoint_id: &str,
+        may_hash: &dyn Fn(&Path) -> bool,
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        let refused = std::cell::Cell::new(false);
+        self.resolve_with_check_and_verification(
+            checkpoint_id,
+            &|| {
+                if refused.get() {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "hashing this checkpoint layer is not permitted",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            // `Some(path)` brackets the start of a hash, `None` its end.
+            |path| refused.set(path.is_some_and(|path| !may_hash(path))),
+        )
+    }
+
     /// Both: the cooperative `check` between bounded hash reads, and the `observe` brackets
     /// around each actual content verification.
     pub fn resolve_with_check_and_verification(

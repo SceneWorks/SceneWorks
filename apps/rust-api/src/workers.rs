@@ -376,6 +376,7 @@ pub(crate) async fn publish_portable_source_proof(
                 .expires_at
                 .is_some_and(|until| until > std::time::Instant::now())
     }) {
+        challenge.answered_worker_ids.insert(worker_id.clone());
         if let Ok(expected) =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
                 &challenge.files,

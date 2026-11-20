@@ -45,6 +45,10 @@ pub(crate) struct PortableSourceChallenge {
     pub(crate) expires_at: Option<Instant>,
     #[serde(skip)]
     pub(crate) proved_worker_ids: BTreeSet<String>,
+    /// Workers that finished their attempt at this challenge, proved or not, so an admission
+    /// waiting on it stops as soon as every asked worker has answered.
+    #[serde(skip)]
+    pub(crate) answered_worker_ids: BTreeSet<String>,
     #[serde(skip)]
     pub(crate) allowed_worker_ids: BTreeSet<String>,
 }
@@ -278,6 +282,7 @@ async fn wait_for_utility_source_proof(
             files: member.files.clone(),
             expires_at: Some(Instant::now() + SOURCE_CHALLENGE_TIMEOUT),
             proved_worker_ids: BTreeSet::new(),
+            answered_worker_ids: BTreeSet::new(),
             allowed_worker_ids,
         },
     );
@@ -326,6 +331,196 @@ async fn wait_for_utility_source_proof(
             return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The challenge `source_id` that asks a worker for one complete verification pass of its own
+/// registered sources (hashing what its verdict store cannot vouch for), rather than for one named
+/// source. The worker mirrors this string.
+pub(crate) const FULL_INVENTORY_CHALLENGE_SOURCE: &str = "sceneworks:full-source-inventory";
+
+/// After every asked worker has answered its challenge, how long admission keeps retrying so the
+/// claims a proof published reach the API on that worker's next heartbeat.
+const SOURCE_PROOF_ANSWER_GRACE: Duration = Duration::from_secs(20);
+
+/// Sources one admission attempt could not prove from any live worker's advertisement, and the
+/// authenticated workers eligible to verify them now.
+///
+/// Workers no longer hash sources at startup: their inventory advertises only what the host's
+/// verdict store already proves. Whatever it cannot vouch for is verified here, when a job needs
+/// it. A Digest source is challenged by its exact claim id and files; a route that needed
+/// worker-advertised sources the API cannot name files for asks for one full verification pass.
+#[derive(Default)]
+pub(crate) struct SourceProofRequests {
+    pending: std::sync::Mutex<PendingSourceProof>,
+}
+
+#[derive(Default)]
+struct PendingSourceProof {
+    sources: BTreeMap<String, Vec<PortableArtifactFile>>,
+    full_inventory: bool,
+    workers: BTreeSet<String>,
+}
+
+impl SourceProofRequests {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PendingSourceProof> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn is_empty(&self) -> bool {
+        let pending = self.lock();
+        pending.workers.is_empty() || (pending.sources.is_empty() && !pending.full_inventory)
+    }
+}
+
+/// Record that `backend:platform` needs `sources` (or a full pass), addressed to the authenticated
+/// workers that route could use. A route with no such worker records nothing: there is nobody to ask.
+#[allow(clippy::too_many_arguments)]
+async fn record_source_proof_request(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    backend: &str,
+    platform: &str,
+    requests: Option<&SourceProofRequests>,
+    sources: Vec<(String, Vec<PortableArtifactFile>)>,
+    full_inventory: bool,
+) -> Result<(), ApiError> {
+    let Some(requests) = requests else {
+        return Ok(());
+    };
+    if sources.is_empty() && !full_inventory {
+        return Ok(());
+    }
+    let eligible = state
+        .jobs_store
+        .portable_source_claim_sets_for_job_route_with_ids(
+            backend,
+            platform,
+            requested_gpu,
+            state.settings.worker_timeout_seconds,
+            job_type,
+            payload,
+        )
+        .map_err(|error| incomplete(format!("worker source claims are unavailable: {error}")))?;
+    let authenticated = state.authenticated_worker_claims.lock().await;
+    let workers = eligible
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| authenticated.contains_key(id))
+        .collect::<Vec<_>>();
+    drop(authenticated);
+    if workers.is_empty() {
+        return Ok(());
+    }
+    let mut pending = requests.lock();
+    pending.workers.extend(workers);
+    pending.sources.extend(sources);
+    pending.full_inventory |= full_inventory;
+    Ok(())
+}
+
+/// The Digest members of `route` that no claim set advertises with their exact files.
+fn unclaimed_digest_members(
+    route: &PortableRouteBinding,
+    payload: &JsonObject,
+    claim_sets: &[Vec<PortableSourceClaim>],
+) -> Vec<(String, Vec<PortableArtifactFile>)> {
+    let value = Value::Object(payload.clone());
+    let mut missing = Vec::new();
+    for model in &route.models {
+        for member in &model.members {
+            if !matches!(member.source, PortableSourceIdentity::Digest { .. }) {
+                continue;
+            }
+            let Ok(source_id) = registered_digest_member_claim_id(model, member, &value) else {
+                continue;
+            };
+            let advertised = claim_sets.iter().flatten().any(|claim| {
+                claim.source_id == source_id
+                    && claim.provenance == PortableSourceProvenance::OperatorOverride
+                    && claim.files == member.files
+            });
+            if !advertised {
+                missing.push((source_id, member.files.clone()));
+            }
+        }
+    }
+    missing
+}
+
+fn is_incomplete_source_refusal(error: &ApiError) -> bool {
+    error.code == Some("model_artifact_incomplete")
+}
+
+/// Post the recorded challenges; returns their ids and the workers asked.
+fn issue_source_proof_challenges(
+    state: &AppState,
+    requests: &SourceProofRequests,
+) -> (Vec<String>, BTreeSet<String>) {
+    let pending = std::mem::take(&mut *requests.lock());
+    let expires_at = Some(Instant::now() + SOURCE_CHALLENGE_TIMEOUT);
+    let mut challenges = pending.sources.into_iter().collect::<Vec<_>>();
+    if pending.full_inventory {
+        challenges.push((FULL_INVENTORY_CHALLENGE_SOURCE.to_owned(), Vec::new()));
+    }
+    let mut store = state.portable_source_challenges.lock();
+    let ids = challenges
+        .into_iter()
+        .map(|(source_id, files)| {
+            let id = uuid::Uuid::new_v4().to_string();
+            store.insert(
+                id.clone(),
+                PortableSourceChallenge {
+                    id: id.clone(),
+                    source_id,
+                    files,
+                    expires_at,
+                    proved_worker_ids: BTreeSet::new(),
+                    answered_worker_ids: BTreeSet::new(),
+                    allowed_worker_ids: pending.workers.clone(),
+                },
+            );
+            id
+        })
+        .collect();
+    (ids, pending.workers)
+}
+
+/// Whether every worker in `workers` has heartbeated since `since`, so whatever it published
+/// before answering has reached this API process.
+async fn workers_heartbeated_since(
+    state: &AppState,
+    workers: &BTreeSet<String>,
+    since: Instant,
+) -> bool {
+    let authenticated = state.authenticated_worker_claims.lock().await;
+    workers.iter().all(|worker| {
+        authenticated
+            .get(worker)
+            .is_some_and(|record| record.seen_at > since)
+    })
+}
+
+/// Whether every asked worker has answered every challenge in `ids`.
+fn source_proof_challenges_answered(state: &AppState, ids: &[String]) -> bool {
+    let store = state.portable_source_challenges.lock();
+    ids.iter().all(|id| {
+        store.get(id).is_none_or(|challenge| {
+            challenge
+                .allowed_worker_ids
+                .is_subset(&challenge.answered_worker_ids)
+        })
+    })
+}
+
+fn retire_source_proof_challenges(state: &AppState, ids: &[String]) {
+    let mut store = state.portable_source_challenges.lock();
+    for id in ids {
+        store.remove(id);
     }
 }
 
@@ -961,7 +1156,63 @@ pub(crate) async fn capture_portable_model_binding(
     requested_gpu: &str,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
     crate::models::ensure_payload_run_licenses_acknowledged(state, job_type, payload).await?;
-    capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, None).await
+    let requests = SourceProofRequests::default();
+    let first = capture_portable_model_binding_inner(
+        state,
+        job_type,
+        payload,
+        requested_gpu,
+        None,
+        Some(&requests),
+    )
+    .await;
+    match &first {
+        Err(error) if is_incomplete_source_refusal(error) && !requests.is_empty() => {}
+        _ => return first,
+    }
+    // Verify on use: ask the eligible workers to prove what this request needs, then retry until
+    // their claims bind a route, the refusal is no longer about missing sources, or every asked
+    // worker has answered and its proof had a heartbeat to arrive.
+    let _capacity = state
+        .portable_source_probe_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| incomplete("local source proof capacity is closed"))?;
+    let (challenges, workers) = issue_source_proof_challenges(state, &requests);
+    let deadline = Instant::now() + SOURCE_CHALLENGE_TIMEOUT;
+    let mut answered_at: Option<Instant> = None;
+    let mut settled = false;
+    let outcome = loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let attempt = capture_portable_model_binding_inner(
+            state,
+            job_type,
+            payload,
+            requested_gpu,
+            None,
+            None,
+        )
+        .await;
+        if !matches!(&attempt, Err(error) if is_incomplete_source_refusal(error)) {
+            break attempt;
+        }
+        // `settled` was set last round: this attempt already saw every post-answer claim.
+        if settled
+            || Instant::now() >= deadline
+            || answered_at.is_some_and(|at| at.elapsed() >= SOURCE_PROOF_ANSWER_GRACE)
+        {
+            break attempt;
+        }
+        if answered_at.is_none() && source_proof_challenges_answered(state, &challenges) {
+            answered_at = Some(Instant::now());
+        }
+        if let Some(at) = answered_at {
+            settled = workers_heartbeated_since(state, &workers, at).await;
+        }
+    };
+    retire_source_proof_challenges(state, &challenges);
+    outcome
 }
 
 /// Replay keeps the admitted immutable source even when a mutable repository head moves.
@@ -1315,6 +1566,7 @@ async fn capture_portable_model_binding_inner(
     payload: &JsonObject,
     requested_gpu: &str,
     frozen: Option<&PortableJobBinding>,
+    proof_requests: Option<&SourceProofRequests>,
 ) -> Result<Option<PortableJobBinding>, ApiError> {
     if *job_type == JobType::ModelConvert {
         for key in ["sourceFile", "upscalerFile"] {
@@ -1482,6 +1734,9 @@ async fn capture_portable_model_binding_inner(
         });
         let mut selected_route = None;
         let mut route_error = None;
+        // Exact local sources no live claim covers, and whether a worker-claim capture failed.
+        let mut unproved_sources = Vec::new();
+        let mut capture_failed = false;
         for source_claims in &claim_sets {
             let mut models = Vec::with_capacity(entries.len());
             let mut failed = None;
@@ -1523,6 +1778,7 @@ async fn capture_portable_model_binding_inner(
                 }
             }
             if let Some(error) = failed {
+                capture_failed = true;
                 route_error = Some(error);
                 continue;
             }
@@ -1572,6 +1828,13 @@ async fn capture_portable_model_binding_inner(
                         .any(|claims| replay_route_claims_match(&route, payload, claims).is_ok())
                 };
                 if !proved {
+                    if !route_has_local_utility_primary(job_type, &route) {
+                        for source in unclaimed_digest_members(&route, payload, &proof_sets) {
+                            if !unproved_sources.contains(&source) {
+                                unproved_sources.push(source);
+                            }
+                        }
+                    }
                     route_error = Some(incomplete(format!(
                         "no eligible worker advertises the complete local source closure for {backend}:{platform}"
                     )));
@@ -1584,6 +1847,21 @@ async fn capture_portable_model_binding_inner(
         if let Some(route) = selected_route {
             routes.insert(route.key(), route);
         } else {
+            // Verify on use: an exact local source no live claim covers is challenged by its files;
+            // a worker-claim source the capture could not find (its worker has not verified it
+            // yet) needs that worker's full verification pass.
+            record_source_proof_request(
+                state,
+                job_type,
+                payload,
+                requested_gpu,
+                &backend,
+                &platform,
+                proof_requests,
+                unproved_sources,
+                uses_worker_claims && (capture_failed || claim_sets.is_empty()),
+            )
+            .await?;
             // A worker-only source with no eligible worker yields no claim set, so the loop above
             // never ran; that is this route's failure, not a reason to keep an earlier route's.
             let error = route_error.unwrap_or_else(|| {
