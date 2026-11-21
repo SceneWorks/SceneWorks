@@ -52,6 +52,7 @@ enum Envelope {
     /// repeatability or sampling. The worker's live reserve is applied separately.
     MeasuredAggregate {
         observed_peak_bytes: u64,
+        classified_peak_bytes: u64,
         co_live_extra_bytes: u64,
         uncertainty_allowance_bytes: u64,
         review_sha256: String,
@@ -70,12 +71,18 @@ impl Envelope {
             }
             Self::MeasuredAggregate {
                 observed_peak_bytes,
+                classified_peak_bytes,
                 co_live_extra_bytes,
                 uncertainty_allowance_bytes,
                 review_sha256,
-            } if *observed_peak_bytes > 0 && valid_hex(review_sha256, 64) => observed_peak_bytes
-                .checked_add(*co_live_extra_bytes)
-                .and_then(|covered| covered.checked_add(*uncertainty_allowance_bytes)),
+            } if *observed_peak_bytes > 0
+                && classified_peak_bytes >= observed_peak_bytes
+                && valid_hex(review_sha256, 64) =>
+            {
+                classified_peak_bytes
+                    .checked_add(*co_live_extra_bytes)
+                    .and_then(|covered| covered.checked_add(*uncertainty_allowance_bytes))
+            }
             _ => return Err("capture has no reviewed physical bound or measured aggregate".into()),
         };
         upper

@@ -509,7 +509,7 @@ fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices
     );
     let mut empirical = projection.clone();
     let pool = if os == "macos" { "unified" } else { "device" };
-    empirical[0]["bounds"][pool] = json!({"basis":"measured_aggregate","observed_peak_bytes":cap,
+    empirical[0]["bounds"][pool] = json!({"basis":"measured_aggregate","observed_peak_bytes":cap-256,"classified_peak_bytes":cap,
         "co_live_extra_bytes":512,"uncertainty_allowance_bytes":256,"review_sha256":"c".repeat(64)});
     let bytes_empirical = serde_json::to_vec(&empirical).unwrap();
     let price = verify(&bytes_empirical, &sha256_bytes(&bytes_empirical))
