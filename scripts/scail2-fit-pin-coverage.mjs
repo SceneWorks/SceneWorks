@@ -15,6 +15,8 @@ const revision = /^[0-9a-f]{40}$/u;
 // image follow-up. Other files in scripts/ci include production artifact producers.
 const proofInputs = new Set([
   "scripts/ci/scail2_plural_fit.py",
+  "scripts/ci/scail_plural/README.md",
+  "scripts/ci/stage_pinned_hub_snapshots.py",
   "scripts/ci/video_tier1_comparison.py",
   "scripts/ci/video_tier1_cuda_diagnostic.py",
   "scripts/ci/video_tier1_cuda_diagnostic_retained.json",
@@ -24,6 +26,7 @@ const proofInputs = new Set([
   "scripts/media_campaign_windows.py",
   "scripts/tests/test_flux1_cuda_probe.py",
   "scripts/tests/test_scail2_plural_fit.py",
+  "scripts/tests/test_stage_pinned_hub_snapshots.py",
   "scripts/tests/test_video_tier1_cuda_diagnostic.py",
   "scripts/tests/test_video_tier1_followup.py",
   "scripts/tests/test_wan_tier1_comparison.py",
