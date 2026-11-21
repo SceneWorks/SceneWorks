@@ -1334,14 +1334,14 @@ mod tests {
     }
 
     #[test]
-    fn sw_7220_top_level_strength_shares_resolution_across_validation_image_request_and_worker_img2img(
-    ) {
+    fn source_asset_low_res_start_validates_routes_and_resolves_img2img() {
         let data = tempfile::tempdir().expect("data dir");
         let settings = crate::Settings::for_test(data.path().to_path_buf());
         let store = crate::ProjectStore::new(settings.data_dir.clone(), "worker");
         let project = store
             .create_project("SW-7220 top-level strength")
             .expect("project");
+        #[cfg(native_lane)]
         let project_path = std::path::PathBuf::from(&project.path);
         let source_file = data.path().join("flux-source.png");
         image::RgbImage::from_pixel(64, 64, image::Rgb([120, 80, 200]))
@@ -1361,82 +1361,120 @@ mod tests {
             .expect("source asset");
         let asset_id = asset["id"].as_str().expect("asset id");
 
-        let entry = json!({
-            "id": "flux_dev",
-            "family": "flux",
-            "type": "image",
-            "defaults": {
-                "steps": 28,
-                "resolution": "1024x1024"
-            },
-            "features": {
-                "low_res_start": true
-            }
-        });
-        let entry_obj = entry.as_object().unwrap();
+        use sceneworks_core::contracts::JobType;
+        use sceneworks_core::jobs_store::native_route_claims_request;
+        use sceneworks_core::options::low_res_start::requested_low_res_start;
 
-        // Submission payload with ONLY top-level `strength: 0.25`, 8 steps, and K=5:
-        // init_time_step = floor(8 * 0.25) = 2 -> executed_steps = 8 - 2 = 6 -> K=5 is valid (1 <= 5 < 6).
-        let payload = json!({
-            "projectId": project.id,
-            "model": "flux_dev",
-            "mode": "text_to_image",
-            "prompt": "a stone bridge",
-            "sourceAssetId": asset_id,
-            "strength": 0.25,
-            "width": 1024,
-            "height": 1024,
-            "advanced": {
-                "steps": 8,
-                "lowResStart": { "version": 1, "k": 5, "scale": 0.5 }
-            },
-            "modelManifestEntry": entry.clone()
-        });
-        let authored = payload.as_object().unwrap();
-
-        // 1. Validation (`sceneworks-options::low_res_start::requested_low_res_start`) accepts top-level strength 0.25 and computes 6 executed steps:
-        let validated = sceneworks_core::options::low_res_start::requested_low_res_start(
+        for model in [
+            "flux_schnell",
             "flux_dev",
-            authored,
-            authored["advanced"].as_object().unwrap(),
-            entry_obj,
-        )
-        .expect("validation accepts top-level strength 0.25 with K=5")
-        .expect("low_res_start active");
-        assert_eq!(validated.executed_steps, 6);
-        assert_eq!(validated.k, 5);
-
-        // 2. Core + worker lane controls (`ImageRequest::from_resolved` -> `resolve_lane_request_controls`)
-        // share the same top-level strength binding and accept K=5:
-        let req = ImageRequest::from_resolved(authored, authored).unwrap();
-        assert_eq!(
-            req.resolved_authored_img2img_strength().unwrap(),
-            Some(0.25)
-        );
-        let caps = honouring();
-        let resolved_controls =
-            resolve_lane_request_controls(&req, &caps, Some(3.5), None).unwrap();
-        assert_eq!(
-            resolved_controls.low_res_start,
-            Some(gen_core::LowResStartSpec::new(5, Some(0.5)))
-        );
-
-        // 3. Worker img2img source resolver (`resolve_flux1_ordinary_img2img_source`) resolves 0.25 (not default 0.5):
-        let _ = (&settings, &project_path);
-        #[cfg(native_lane)]
-        {
-            let (_img, worker_strength) =
-                crate::image_jobs::conditioning::resolve_flux1_ordinary_img2img_source(
-                    &req,
-                    &settings,
-                    &project_path,
+            "flux2_dev",
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "boogu_image",
+            "z_image",
+            "z_image_turbo",
+            "kolors",
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ] {
+            let entry = json!({
+                "id": model, "type": "image",
+                "defaults": { "steps": 28, "resolution": "1024x1024" },
+                "features": { "low_res_start": true }
+            });
+            let mut payload = json!({
+                "projectId": project.id,
+                "model": model,
+                "mode": "text_to_image",
+                "prompt": "a stone bridge",
+                "sourceAssetId": asset_id,
+                "strength": 0.25,
+                "width": 1024,
+                "height": 1024,
+                "advanced": {
+                    "steps": 8,
+                    "lowResStart": { "version": 1, "k": 5, "scale": 0.5 }
+                },
+                "modelManifestEntry": entry.clone()
+            });
+            for mode in ["text_to_image", "image_generation"] {
+                payload["mode"] = json!(mode);
+                let authored = payload.as_object().unwrap();
+                let validated = requested_low_res_start(
+                    model,
+                    authored,
+                    authored["advanced"].as_object().unwrap(),
+                    entry.as_object().unwrap(),
                 )
-                .expect("ordinary img2img source resolves")
-                .expect("source present");
-            assert!(
-                (worker_strength - 0.25).abs() < 1e-6,
-                "got {worker_strength}"
-            );
+                .unwrap_or_else(|err| panic!("{model}/{mode}: {err:?}"))
+                .expect("low_res_start active");
+                assert_eq!(validated.executed_steps, 6);
+                assert_eq!(validated.k, 5);
+
+                for backend in ["candle", "mlx"] {
+                    assert!(
+                        native_route_claims_request(backend, &JobType::ImageGenerate, authored)
+                            .unwrap(),
+                        "{backend} must claim {model}/{mode}"
+                    );
+                }
+
+                let req = ImageRequest::from_resolved(authored, authored).unwrap();
+                assert_eq!(
+                    req.resolved_authored_img2img_strength().unwrap(),
+                    Some(0.25)
+                );
+                let controls =
+                    resolve_lane_request_controls(&req, &honouring(), Some(3.5), None).unwrap();
+                assert_eq!(
+                    controls.low_res_start,
+                    Some(gen_core::LowResStartSpec::new(5, Some(0.5)))
+                );
+
+                #[cfg(native_lane)]
+                {
+                    let (image, strength) =
+                        crate::image_jobs::conditioning::resolve_ordinary_img2img_source(
+                            &req,
+                            &settings,
+                            &project_path,
+                        )
+                        .unwrap()
+                        .expect("ordinary img2img source");
+                    assert_eq!((image.width, image.height), (64, 64));
+                    assert_eq!(strength, 0.25);
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    let conditioning =
+                        crate::image_jobs::conditioning::resolve_generic_lane_conditioning(
+                            &req,
+                            &settings,
+                            &project_path,
+                            false,
+                        )
+                        .unwrap();
+                    let image_and_strength = if matches!(model, "sana_1600m" | "boogu_image") {
+                        assert!(conditioning.flux_source_image.is_none());
+                        conditioning.identity_init
+                    } else {
+                        assert!(conditioning.identity_init.is_none());
+                        conditioning.flux_source_image
+                    };
+                    let (image, strength) = image_and_strength.expect("MLX img2img source");
+                    assert_eq!((image.width, image.height), (64, 64));
+                    assert_eq!(strength, 0.25);
+                }
+            }
         }
     }
 

@@ -12,7 +12,7 @@ use crate::jobs_store::routing::catalog::{
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_string, has_nonempty_array,
     has_nonempty_or_malformed_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    qwen_image_2_1_reference_ids, SENSENOVA_MODEL_IDS,
+    qwen_image_2_1_reference_ids, source_asset_refused_for_plain_img2img, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -122,7 +122,7 @@ fn image_request_mlx_eligible_with_context(
             qwen_edit_mlx_eligible_with_facts(payload, context.options)
         }
         "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2" | "flux2_dev" => {
-            flux2_mlx_eligible_with_facts(payload, context.options)
+            flux2_mlx_eligible_with_facts(model, payload, context.options)
         }
         // Illustrious-XL shares the `sdxl` engine and its full conditioning surface (epic 10609).
         "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2" => true,
@@ -143,7 +143,7 @@ fn image_request_mlx_eligible_with_context(
         "krea_2_turbo" | "krea_2_raw" => krea_mlx_eligible_with_facts(payload, context.options),
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
         "sana_1600m" | "sana_sprint_1600m" => {
-            sana_mlx_eligible_with_facts(payload, context.options)
+            sana_mlx_eligible_with_facts(model, payload, context.options)
         }
         "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
         "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => {
@@ -355,10 +355,11 @@ pub(crate) fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
 #[cfg(test)]
 pub(crate) fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
-    flux2_mlx_eligible_with_facts(payload, &facts)
+    flux2_mlx_eligible_with_facts("flux2_dev", payload, &facts)
 }
 
 fn flux2_mlx_eligible_with_facts(
+    model: &str,
     payload: &Map<String, Value>,
     facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
@@ -383,7 +384,7 @@ fn flux2_mlx_eligible_with_facts(
     matches!(mode, None | Some("image_generation" | "text_to_image"))
         && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
         && !has_nonempty_or_malformed_string(payload, "referenceAssetId")
-        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        && !source_asset_refused_for_plain_img2img(model, payload)
 }
 
 /// Qwen-Image (sc-3024 / strict pose sc-3575) MLX-routing conditions: text-to-image,
@@ -933,12 +934,15 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 }
 
 fn sana_mlx_eligible_with_facts(
+    model: &str,
     payload: &Map<String, Value>,
     facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
         && !has_malformed_optional_string(payload, "referenceAssetId")
-        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        && !source_asset_refused_for_plain_img2img(model, payload)
+        && !(has_nonempty_string(payload, "referenceAssetId")
+            && has_nonempty_string(payload, "sourceAssetId"))
         && !["referenceAssetIds", "controls", "controlnets"]
             .iter()
             .any(|key| has_nonempty_or_malformed_array(payload, key))

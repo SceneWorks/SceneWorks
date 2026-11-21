@@ -794,15 +794,21 @@ async fn generate_candle_registry_stream_using(
     } else {
         None
     };
-    let flux_source_image = if edit_reference.is_none()
+    let source_image = if edit_reference.is_none()
         && img2img_reference.is_none()
         && edit_refs.is_empty()
         && !has_reference
     {
-        super::conditioning::resolve_flux1_ordinary_img2img_source(request, settings, project_path)?
+        super::conditioning::resolve_ordinary_img2img_source(request, settings, project_path)?
     } else {
         None
     };
+    let (img2img_reference, flux_source_image) =
+        if super::conditioning::ordinary_img2img_uses_reference_slot(&request.model) {
+            (img2img_reference.or(source_image), None)
+        } else {
+            (img2img_reference, source_image)
+        };
     let (width, height) = (request.width, request.height);
     // Per-payload sampler / scheduler / schedule-shift, mirroring the MLX `generate_stream` lane (the
     // 1753 front-half advanced carrier — epic 7114 P5, sc-7127). RealVisXL Lightning (sc-7176) forces the

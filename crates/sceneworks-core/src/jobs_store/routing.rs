@@ -245,6 +245,17 @@ pub(super) fn has_nonempty_or_malformed_string(payload: &Map<String, Value>, key
     }
 }
 
+/// Check whether the generic img2img lane can consume an authored source carrier.
+fn source_asset_refused_for_plain_img2img(model: &str, payload: &Map<String, Value>) -> bool {
+    has_nonempty_or_malformed_string(payload, "sourceAssetId")
+        && !(has_nonempty_string(payload, "sourceAssetId")
+            && matches!(
+                payload.get("mode").and_then(Value::as_str),
+                None | Some("text_to_image" | "image_generation")
+            )
+            && crate::options::low_res_start::route_admits_source_asset_for_plain_img2img(model))
+}
+
 /// True when an optional string carrier is present in a shape that is neither a string nor `null`.
 /// Missing, `null`, and any string (blank included) are well-formed "not supplied or supplied"
 /// encodings; a number/bool/array/object is an authored value no route can consume and must fail

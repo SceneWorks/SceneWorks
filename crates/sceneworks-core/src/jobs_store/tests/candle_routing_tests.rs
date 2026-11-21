@@ -5481,7 +5481,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
             json!({
                 "prompt": "p",
                 "mode": "edit_image",
-                "sourceAssetId": "asset_1",
+                "maskAssetId": "asset_1",
                 "loras": [{ "id": "lora_1" }],
                 "advanced": {
                     "poses": [{ "id": "pose_1" }],
@@ -5494,7 +5494,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
             json!({
                 "prompt": "p",
                 "mode": "text_to_image",
-                "sourceAssetId": "asset_1",
+                "maskAssetId": "asset_1",
                 "loras": [{ "id": "lora_1" }],
                 "advanced": {
                     "poses": [{ "id": "pose_1" }],

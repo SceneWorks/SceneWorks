@@ -849,11 +849,10 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             Some(model),
             "conditioning carrier the candle SANA lane cannot consume",
             &format!(
-                "the candle SANA lane consumes exactly one `referenceAssetId` and nothing else — \
-                 no source/mask, no plural reference set, no controls, no user LoRA, no pose or \
-                 phase schedule, and no quant tier. This request carries {carried}, so the lane \
-                 fails it closed rather than dropping the carrier and rendering a plain \
-                 text-to-image.{also}",
+                "the candle SANA lane accepts a single img2img asset (a `referenceAssetId`, or \
+                 `sourceAssetId` on base SANA in text-to-image mode). The lane cannot combine it \
+                 with a second asset, a mask, plural references, controls, user LoRA, a pose or \
+                 phase schedule, or a quant tier. This request carries {carried}.{also}",
                 carried = if carriers.is_empty() {
                     "one of those carriers".to_owned()
                 } else {
