@@ -1313,6 +1313,26 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       shared_contract_digest:closure.sharedContractDigest, tree_diff_sha256:sha256("diff")};
     const changed = { compiledPin:target, coverage:[coverage], closures:{inferenceRevision:target,providers:{[(mlx?"mlx":"candle")+":scail2_14b"]:closure}} };
     assert.deepEqual(read(projected, changed), rows);
+    const split = structuredClone(projected), six = split.at(-1);
+    six.inference_revision = "3".repeat(40);
+    six.artifact_id = 1562;
+    six.receipt_sha256 = sha256("separate quiet six run");
+    const both = { ...changed, coverage: [...changed.coverage, { ...coverage, capture_revision: six.inference_revision,
+      tree_diff_sha256: sha256("six to compiled target") }] };
+    assert.throws(() => read(split, changed), /no packaged native/);
+    if (mlx) assert.throws(() => read(split, both), /no packaged native/);
+    else {
+      const joined = read(split, both);
+      assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
+        split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));
+      for (const key of ["provider_digest", "shared_contract_digest", "target_revision"]) {
+        assert.throws(() => read(split, { ...both, coverage:[coverage, {...both.coverage[1], [key]:sha256("crossed")}] }));
+      }
+      const altered = structuredClone(split);
+      altered[4].guard_policy_sha256 = sha256("different capture guard");
+      assert.throws(() => read(altered, both), /no packaged native/);
+      assert.deepEqual(read([...split, altered[4]], both), joined);
+    }
     assert.throws(() => read(projected, { ...changed, coverage:[] }), /no packaged native/);
     assert.throws(() => read(projected, { ...changed, coverage:[{ ...coverage, provider_digest:sha256("wrong") }] }), /no packaged native/);
   }

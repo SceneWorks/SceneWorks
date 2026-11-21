@@ -137,12 +137,16 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     if (mlx) assert.ok(b.mlx_decode_budget_bytes <= price.grossUnifiedBytes, "decoder budget exceeds unified price");
     // The worker authenticates the index, hardware and compatible compiled pin before quoting.
     const nativePolicy = JSON.stringify([row.device, row.runtime, ...(!mlx ? [adapter.cuda_uuid, adapter.luid, adapter.node_mask] : []), a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
-    const campaign = JSON.stringify([nativePolicy, row.inference_revision, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null]);
+    // Each Windows count has its own complete measurement. Every cross-revision donor above
+    // must identify the compiled pin's provider and shared contract before counts can be joined.
+    const campaign = JSON.stringify([nativePolicy, mlx ? row.inference_revision : null, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null]);
     rows.push({ device: row.device, runtime: row.runtime, ...(!mlx ? { captureAdapter: adapter } : {}), nativePolicy, campaign, references: a.references,
-      sha256: row.receipt_sha256, artifactId: row.artifact_id, price, acceleratorBytes: mlx ? price.grossUnifiedBytes : price.grossDeviceBytes });
+      inferenceRevision: row.inference_revision, sha256: row.receipt_sha256, artifactId: row.artifact_id, price, acceleratorBytes: mlx ? price.grossUnifiedBytes : price.grossDeviceBytes });
   }
   const complete = rows.filter((row) => counts.every((n) => rows.some((r) => r.campaign === row.campaign && r.references === n)));
   assert.ok(complete.length, `no packaged native SCAIL q4 evidence covering the required counts on the same ${platform} policy`);
+  // Windows acceptance claims five exact counts under a single guard and device policy.
+  if (!mlx) return complete;
   // The worker can also try an independently reviewed, cheaper quotation for this native policy.
   // Keep such rows available for exact donor matching and the isolated negative budget.
   return rows.filter((row) => complete.some((r) => r.nativePolicy === row.nativePolicy));
