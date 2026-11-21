@@ -9,6 +9,45 @@ import pytest
 tool = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/project-scail2-memory.py"))
 
 
+def windows_guard():
+    adapter = {
+        "cuda_uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+        "counter": r"\GPU Process Memory(*)\Dedicated Usage",
+        "luid": "luid_0x00000000_0x0001e266",
+        "physical_node": 0,
+        "node_mask": 1,
+    }
+    dedicated = {
+        "adapter": adapter,
+        "pid": 41,
+        "created_filetime": 900,
+        "error": None,
+        "missing_active_polls": 0,
+        "samples": [[901, 60], [902, 93]],
+    }
+    return adapter, {
+        "pid": 41,
+        "peak_gpu_bytes": 80,
+        "admission": {"gpuGlobalUsedBaselineBytes": 20, "cudaDeviceUuid": adapter["cuda_uuid"]},
+        "cuda_attribution": {
+            "wddm_dedicated": dedicated,
+            "pid_peak_bytes": 77,
+            "unknown_pid_polls": 1,
+            "global_upper_bytes": 120,
+            "pool_fallback_peak_bytes": 80,
+        },
+        "fit_observation": {
+            "wddm_shared": dict(dedicated, samples=[[901, 0], [902, 2]]),
+            "wddm_shared_counter": "GPU Process Memory/Shared Usage",
+            "card_samples_monotonic_ns_free_owned_or_fallback_bytes": [
+                [1, 190, 0],
+                [2, 95, 80],
+                [3, 140, 40],
+            ],
+        },
+    }
+
+
 @pytest.mark.parametrize("backend", ["mlx", "cuda"])
 def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path, backend):
     mlx = backend == "mlx"
@@ -26,6 +65,11 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
             "policySha256": "b" * 64,
         },
     }
+    if not mlx:
+        adapter, cuda = windows_guard()
+        guard["admission"].update(cuda.pop("admission"))
+        guard.update(cuda)
+        axes["floor_device_bytes"] = 70
     guard_name = "count-4.supervisor.json"
     guard_file = tmp_path / guard_name
     guard_file.write_text(json.dumps(guard))
@@ -63,6 +107,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
                 "candidate_row_pending_physical_review": row,
             }
         },
+        "adapter": None if mlx else adapter,
         "hardware": {
             "chip": "board",
             "name": "board",
@@ -110,9 +155,76 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
     assert result["axes"] == axes
     if not mlx:
         assert result["bounds"]["device"]["guard_ceiling_bytes"] == 160
+        review["domains"]["device"] = empirical
+        review_file.write_text(json.dumps(review))
+        measured = project()
+        assert measured["bounds"]["device"]["observed_peak_bytes"] == 80
+        assert measured["bounds"]["device"]["classified_peak_bytes"] == 100
+        assert measured["bounds"]["host"]["classified_peak_bytes"] == 145
     guard_file.write_text("{}")
     with pytest.raises(ValueError, match="guard record changed"):
         project()
     receipt_file.write_text("{}")
     with pytest.raises(ValueError, match="different receipt"):
         project()
+
+
+def test_windows_device_peak_deducts_each_card_baseline_only_from_its_own_series():
+    peak = tool["windows_device_peak"]
+    adapter, guard = windows_guard()
+    native = {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}}
+    assert peak(guard, native, adapter, 120) == 100
+    guard["admission"]["gpuGlobalUsedBaselineBytes"] = 60
+    assert peak(guard, native, adapter, 120) == 95
+    free = guard["fit_observation"]["card_samples_monotonic_ns_free_owned_or_fallback_bytes"]
+    free[1][1] = 145
+    assert peak(guard, native, adapter, 120) == 93
+    # A mixture of owned and unknown ticks may still have a higher attributable PID peak.
+    attrs = guard["cuda_attribution"]
+    attrs["pid_peak_bytes"] = guard["peak_gpu_bytes"] = 103
+    assert peak(guard, native, adapter, 120) == 103
+    attrs.update(unknown_pid_polls=0, global_upper_bytes=0, pool_fallback_peak_bytes=0)
+    assert peak(guard, native, adapter, 103) == 103
+    native["axes"]["floor_device_bytes"] = 110
+    assert peak(guard, native, adapter, 110) == 110
+    native["allocator_peak"] = 115
+    assert peak(guard, native, adapter, 115) == 115
+
+
+CARD = ("fit_observation", "card_samples_monotonic_ns_free_owned_or_fallback_bytes")
+DEDICATED = ("cuda_attribution", "wddm_dedicated")
+BASELINE = ("admission", "gpuGlobalUsedBaselineBytes")
+MISSING = object()
+
+
+@pytest.mark.parametrize(
+    ("path", "invalid"),
+    [
+        (BASELINE, MISSING),
+        (BASELINE, -1),
+        ((*CARD, 1, 0), 1),
+        (CARD, []),
+        ((*CARD, 2, 1), None),
+        ((*DEDICATED, "pid"), 42),
+        ((*DEDICATED, "adapter"), {}),
+        ((*DEDICATED, "missing_active_polls"), 1),
+        ((*DEDICATED, "error"), "owned process identity is unavailable"),
+        ((*DEDICATED, "samples", 1, 0), 901),
+        (("fit_observation", "wddm_shared", "created_filetime"), 901),
+        ((*DEDICATED, "samples", 0, 1), 0),
+        (("cuda_attribution", "global_upper_bytes"), 0),
+    ],
+)
+def test_windows_device_peak_refuses_incomplete_or_crossed_attribution(path, invalid):
+    adapter, guard = windows_guard()
+    parent = guard
+    for key in path[:-1]:
+        parent = parent[key]
+    if invalid is MISSING:
+        del parent[path[-1]]
+    else:
+        parent[path[-1]] = invalid
+    with pytest.raises(ValueError):
+        tool["windows_device_peak"](
+            guard, {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}}, adapter, 120
+        )
