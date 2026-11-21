@@ -1791,12 +1791,22 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     && self.contract.load_shape == gen_core::LoadShape::EagerMaterialization
                     && load_policy == OffloadPolicy::Resident)
                     .then_some(&self.contract.asset_facts);
-                let denoise = planned
-                    .denoise_live_bytes
-                    .checked_add(weights.map_or(0, |facts| facts.transformer_bytes));
-                let decode = planned
-                    .decode_live_bytes
-                    .checked_add(weights.map_or(0, |facts| facts.decoder_bytes));
+                let with_credit = |live, stage_weight| {
+                    planned_phase_before_credit(
+                        live,
+                        stage_weight,
+                        self.contract.total_resident_bytes(),
+                        self.attributable_resident_bytes,
+                    )
+                };
+                let denoise = with_credit(
+                    planned.denoise_live_bytes,
+                    weights.map_or(0, |f| f.transformer_bytes),
+                );
+                let decode = with_credit(
+                    planned.decode_live_bytes,
+                    weights.map_or(0, |f| f.decoder_bytes),
+                );
                 let (Some(denoise), Some(decode)) = (denoise, decode) else {
                     self.accounting_error = Some("planned video phase byte bound overflow".into());
                     return VideoRungSelection::Undecidable;
@@ -2847,6 +2857,38 @@ impl<'a> NativeQuantRequest<'a> {
                 .map(|n| n as usize)
                 .unwrap_or(native.default_evaluations),
         )
+    }
+}
+
+/// The ladder subtracts the observed weight credit once from the final phase envelope.
+/// Include that credit here so it can never cancel new live buffers. Without per-component
+/// attribution, any weight outside the cached set could belong to this stage.
+fn planned_phase_before_credit(
+    live: u64,
+    stage_weight: u64,
+    total_weights: u64,
+    credit: u64,
+) -> Option<u64> {
+    let uncovered = stage_weight.min(total_weights.checked_sub(credit)?);
+    live.checked_add(uncovered)?.checked_add(credit)
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn admit_video_host_bytes(
+    needed: u64,
+    available: Option<u64>,
+) -> crate::WorkerResult<()> {
+    if needed == 0 {
+        return Ok(());
+    }
+    match available {
+        Some(available) if needed <= available => Ok(()),
+        Some(available) => Err(crate::WorkerError::InvalidPayload(format!(
+            "planned video output needs {needed} additional host bytes, only {available} are available"
+        ))),
+        None => Err(crate::WorkerError::InvalidPayload(format!(
+            "planned video output needs {needed} additional host bytes, but available host RAM could not be verified"
+        ))),
     }
 }
 

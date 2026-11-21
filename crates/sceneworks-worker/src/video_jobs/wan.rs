@@ -2998,6 +2998,11 @@ pub(super) async fn generate_video_using(
                 })
                 .await
                 .map_err(|error| WorkerError::Engine(error.to_string()))??;
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(
+                    "Video generation canceled during reservation preparation.".into(),
+                ));
+            }
             let cold_h3_receipt = h3_receipt.clone();
             let load_generator = move |id: &str, spec: &LoadSpec| {
                 if let Some(receipt) = &cold_h3_receipt {
@@ -3261,11 +3266,7 @@ pub(super) async fn generate_video_using(
                     if needed > 0 {
                         let available = host_probe_runtime
                             .block_on(crate::yue2_admission::host_available_bytes());
-                        if let Some(available) = available.filter(|&available| needed > available) {
-                            return Err(WorkerError::InvalidPayload(format!(
-                                "{engine_id} planned video output requires {needed} additional host bytes; only {available} are available"
-                            )));
-                        }
+                        crate::video_admission::admit_video_host_bytes(needed, available)?;
                     }
                 }
                 let context = apply_video_admission_outcome(&mut request, outcome)?;
