@@ -1133,6 +1133,8 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const contract = { compiledPin: revision, coverage: [], closures: {} };
     const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
       hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
+    if (!mlx) receipt.adapter = { cuda_uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", counter: String.raw`\GPU Process Memory(*)\Dedicated Usage`,
+      luid: "luid_0x00000000_0x0001e266", physical_node: 0, node_mask: 1 };
     for (const n of counts) {
       // Pinned SCAIL window values by count: packed tokens, final FFN rows, CUDA query rows and scores.
       const [tokens, tail, rows, scores] = [
@@ -1148,8 +1150,20 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         source_shape_sha256:sha256("fixture shape "+n), load_policy:(mlx?"None":"Some(Q4)")+"/Bf16/Resident/EagerMaterialization",
         execution_policy:[{name:mlx?"SCAIL2_COMPUTE_BF16":"CANDLE_DEQUANTIZE_ALL",value:null}], floor_host_bytes:0, floor_device_bytes:0, floor_unified_bytes:0 };
       const name = `count-${n}.supervisor.json`;
-      receipt.logs[name] = { sha256:await put(name, { returncode:0, pid:n+100, lifetime_peak_host_bytes:90, peak_host_bytes:95,
-        admission:{ childFootprintCapBytes:200, childGpuCapBytes:160, policySha256:sha256("policy") } }) };
+      const guard = { returncode: 0, pid: n + 100, lifetime_peak_host_bytes: 90, peak_host_bytes: 95,
+        admission: { childFootprintCapBytes: 200, childGpuCapBytes: 160, policySha256: sha256("policy") } };
+      if (!mlx) {
+        // Whole-card growth is 120 - 20 bytes; PID, native pool and WDDM samples already describe the child.
+        const wddmProcess = { adapter: receipt.adapter, pid: guard.pid, created_filetime: 900 + n, error: null, missing_active_polls: 0 };
+        Object.assign(guard.admission, { cudaDeviceUuid: receipt.adapter.cuda_uuid, gpuGlobalUsedBaselineBytes: 20 });
+        guard.peak_gpu_bytes = 80;
+        guard.cuda_attribution = { wddm_dedicated: { ...wddmProcess, samples: [[901, 60], [902, 93]] },
+          pid_peak_bytes: 77, unknown_pid_polls: 1, global_upper_bytes: 120, pool_fallback_peak_bytes: 80 };
+        guard.fit_observation = { wddm_shared: { ...wddmProcess, samples: [[901, 0], [902, 2]] },
+          wddm_shared_counter: "GPU Process Memory/Shared Usage",
+          card_samples_monotonic_ns_free_owned_or_fallback_bytes: [[1, 190, 0], [2, 95, 80], [3, 140, 40]] };
+      }
+      receipt.logs[name] = { sha256: await put(name, guard) };
       receipt.counts[n] = { accepted:true, claim:{post_execution_verified:true}, native: {axes, pid:n+100, prompt_tokens:[512,512], allocator_peak:80},
         candidate_row_pending_physical_review:{ platform:mlx?"macos":"windows", device:"board", runtime:"runtime", inference_revision:revision,
           witness:{ axes, text_tokens:512, gross_host_bytes:145, gross_unified_bytes:140, gross_device_bytes:120, mlx_decode_budget_bytes:16 } } };
