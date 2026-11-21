@@ -1,1 +1,210 @@
-[]
+[
+  {
+    "accepted": true,
+    "artifact_id": 14708838289,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "mlx",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "SCAIL2_COMPUTE_BF16",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_FFN_SEQ_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_ATTN_QUERY_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_EVAL_PER_BLOCK",
+          "value": null
+        },
+        {
+          "name": "MLX_BFS_MAX_WIDTH",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_OPS_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_MB_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_FAST_SYNCH",
+          "value": null
+        },
+        {
+          "name": "MLX_ENABLE_TF32",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_GPU_ARCH",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 0,
+      "floor_host_bytes": 0,
+      "floor_unified_bytes": 888975360,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "None/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 2,
+      "schedule_bytes": 320,
+      "source_bytes": 112619520,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "67c3280e3d3dea8a07a5f6b231d0b67302e8898be5de0fa71a9b1ce93b2b003a",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 48,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 1944,
+          "mlx_unsplit_ffn": true,
+          "self_attention_query_rows": 0,
+          "self_attention_score_elements": 0,
+          "tokens": 26520
+        }
+      ]
+    },
+    "bounds": {
+      "measurement": "darwin_lifetime_footprint",
+      "mlx_decode_budget_bytes": 30064771072,
+      "unified": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 29126468560,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 29126468560,
+        "review_sha256": "aa14041ce050f0ff99d534add6db821bbb1f0eb8ea9097a8ecc0190256a1007c",
+        "uncertainty_allowance_bytes": 938302512
+      }
+    },
+    "device": "Apple M5 Max",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b93851878ec71fe85a82a4adeb8eb330e7d77b39899b059c87a087b631ae6554",
+    "inference_revision": "54f288263184fa60f0b0a998caedb0309757468d",
+    "platform": "macos",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "81f4d751e4c44671e723412be8ff38bbc29224afe517b51a98476e464f87d14b",
+    "runtime": "26B131"
+  },
+  {
+    "accepted": true,
+    "artifact_id": 14708838289,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "mlx",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "SCAIL2_COMPUTE_BF16",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_FFN_SEQ_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_ATTN_QUERY_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_EVAL_PER_BLOCK",
+          "value": null
+        },
+        {
+          "name": "MLX_BFS_MAX_WIDTH",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_OPS_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_MB_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_FAST_SYNCH",
+          "value": null
+        },
+        {
+          "name": "MLX_ENABLE_TF32",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_GPU_ARCH",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 0,
+      "floor_host_bytes": 0,
+      "floor_unified_bytes": 898560000,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "None/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 6,
+      "schedule_bytes": 320,
+      "source_bytes": 122204160,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "5b0dee676047670ce1bc402ee4a142e50ca32e53e3459b22ff3e83764fb8bca5",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 48,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 8184,
+          "mlx_unsplit_ffn": true,
+          "self_attention_query_rows": 0,
+          "self_attention_score_elements": 0,
+          "tokens": 32760
+        }
+      ]
+    },
+    "bounds": {
+      "measurement": "darwin_lifetime_footprint",
+      "mlx_decode_budget_bytes": 30064771072,
+      "unified": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 30355858720,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 30355858720,
+        "review_sha256": "2781b1c4c105a6107aeabb16270c5137dd9df0ce6b2ce7bfad222d6239867640",
+        "uncertainty_allowance_bytes": 0
+      }
+    },
+    "device": "Apple M5 Max",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b93851878ec71fe85a82a4adeb8eb330e7d77b39899b059c87a087b631ae6554",
+    "inference_revision": "54f288263184fa60f0b0a998caedb0309757468d",
+    "platform": "macos",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "81f4d751e4c44671e723412be8ff38bbc29224afe517b51a98476e464f87d14b",
+    "runtime": "26B131"
+  }
+]

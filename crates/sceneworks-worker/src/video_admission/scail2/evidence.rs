@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 const INDEX: &[u8] = include_bytes!("../../../../../config/scail2-plural-memory.json");
 const APPROVED_INDEX_SHA256: &str =
-    "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570";
+    "693e2a0caa6bb7b2b678661deda0dda41230a4eb01f40ac48a2fcc04fba8a0db";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,7 +167,7 @@ fn permits_revision(capture: &str, target: &str, backend: Scail2FitBackend) -> b
             // Approve this digest only after reviewing the entire Git delta and matching both
             // closure digests offline. Runtime uses the certified immutable pair.
             const APPROVED: &str =
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570";
+                "58c5476e3929f39e419019e6613aae90b3f768761aea2ef1fd0163b1f2e0e731";
             approved_pin_coverage(BYTES, APPROVED).unwrap_or_default()
         })
         .iter()
