@@ -2,6 +2,8 @@ use super::adapters::resolve_prepared_adapters;
 use super::adapters::PreparedAdapters;
 #[cfg(not(target_os = "macos"))]
 use super::admit_conditioning_paths;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::base_admission::prepared_adapter_source_bytes;
 use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
 use super::checkpoint_plan::checkpoint_plan_operation;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
@@ -2192,6 +2194,72 @@ impl PreparedKreaHires {
     }
 }
 
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(super) fn candle_hires_missing_weight_bytes(
+    facts: &gen_core::MemoryAssetFacts,
+    encoder_bytes: u64,
+    adapter_bytes: u64,
+    base_is_retained: bool,
+    encoder_is_retained: bool,
+) -> WorkerResult<u64> {
+    if facts.conditioning_bytes == 0
+        || facts.transformer_bytes == 0
+        || encoder_bytes == 0
+        || facts.decoder_bytes < encoder_bytes
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Imported Krea Hires.fix could not price the pinned transformer, text encoder and VAE."
+                .into(),
+        ));
+    }
+    let base = if base_is_retained {
+        0
+    } else {
+        facts
+            .base_bytes
+            .saturating_sub(encoder_bytes)
+            .saturating_add(adapter_bytes)
+    };
+    Ok(if encoder_is_retained {
+        base
+    } else {
+        base.saturating_add(encoder_bytes)
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn candle_hires_same_key_retry_charges_physically_missing_weights() {
+    let facts = gen_core::MemoryAssetFacts {
+        base_bytes: 3_100,
+        conditioning_bytes: 900,
+        transformer_bytes: 1_800,
+        decoder_bytes: 400,
+        overlay_bytes: 0,
+    };
+    let encoder_bytes = 300;
+    let adapter_bytes = 150;
+    let budget = gen_core::MemoryBudget {
+        total_bytes: 3_000,
+        committed_bytes: 500,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 0,
+    };
+    let cold_or_rejected =
+        candle_hires_missing_weight_bytes(&facts, encoder_bytes, adapter_bytes, false, false)
+            .unwrap();
+    let base_only =
+        candle_hires_missing_weight_bytes(&facts, encoder_bytes, adapter_bytes, true, false)
+            .unwrap();
+    let both = candle_hires_missing_weight_bytes(&facts, encoder_bytes, adapter_bytes, true, true)
+        .unwrap();
+    assert_eq!(cold_or_rejected, 3_250);
+    assert!(!budget.fits(cold_or_rejected));
+    assert_eq!(base_only, 300);
+    assert!(budget.fits(base_only));
+    assert_eq!(both, 0);
+}
+
 /// Candle's imported checkpoint uses the source floor and explicit workspaces. Scope geometry
 /// comes from each compiled pass and runtime identity from the loaded contract.
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
@@ -2251,7 +2319,7 @@ pub(super) fn candle_hires_context(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_hires_admitted_budget(
     gpu_id: &str,
-    cache_state: gen_core::MemoryCacheState,
+    base_is_retained: bool,
 ) -> WorkerResult<gen_core::MemoryBudget> {
     let raw = crate::vram_gate::live_capped_budget_fresh_blocking(gpu_id).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -2263,7 +2331,7 @@ fn candle_hires_admitted_budget(
         total_bytes: bytes(raw.total_gb),
         committed_bytes: bytes((raw.total_gb - raw.free_gb).max(0.0)),
         reclaimable_bytes: 0,
-        reserved_headroom_bytes: if cache_state == gen_core::MemoryCacheState::Cold {
+        reserved_headroom_bytes: if !base_is_retained {
             bytes(crate::vram_gate::HEADROOM_GB)
         } else {
             0
@@ -2693,12 +2761,27 @@ pub(super) async fn generate_krea_imported_stream(
         0
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let hires_encoder = if hires_memory.is_some() {
+    let hires_weights = if hires_memory.is_some() {
+        let runtime = crate::inference_runtime::media();
+        let contract = runtime
+            .memory_strategy_contract(engine_id, &spec)
+            .map_err(|error| super::render::preload_plan_error(engine_id, error))?
+            .ok_or_else(|| {
+                WorkerError::Engine("Candle Krea Hires.fix has no pre-load memory contract".into())
+            })?;
         let encoder = runtime_cuda::providers::krea::hires_encoder_weights(&spec)
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
         let quant = runtime_cuda::providers::krea::actual_quant_tier(&spec, engine_id)
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
-        Some((encoder, quant))
+        let adapter_bytes = prepared_adapter_source_bytes(&spec)?;
+        let cold_bytes = candle_hires_missing_weight_bytes(
+            &contract.asset_facts,
+            encoder.device_bytes,
+            adapter_bytes,
+            false,
+            false,
+        )?;
+        Some((cold_bytes, encoder.device_bytes, adapter_bytes, quant))
     } else {
         None
     };
@@ -2722,17 +2805,16 @@ pub(super) async fn generate_krea_imported_stream(
         } else {
             floor
         };
-        floor
-            .with_pag_workspace(
-                phase_pag_workspace
-                    .or_else(|| hires_memory.as_ref().map(|hires| hires.pag_workspace_bytes))
-                    .unwrap_or(0),
-            )
-            .with_hires_workspace(hires_workspace_bytes.saturating_add(
-                hires_encoder.as_ref().map_or(0, |(encoder, _)| {
-                    encoder.device_bytes.saturating_sub(encoder.source_bytes)
-                }),
-            ))
+        let floor = floor.with_pag_workspace(
+            phase_pag_workspace
+                .or_else(|| hires_memory.as_ref().map(|hires| hires.pag_workspace_bytes))
+                .unwrap_or(0),
+        );
+        if let Some((cold_bytes, ..)) = hires_weights {
+            floor.with_hires_workspace(cold_bytes, hires_workspace_bytes)
+        } else {
+            floor
+        }
     };
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
@@ -2838,10 +2920,8 @@ pub(super) async fn generate_krea_imported_stream(
                             .with_loaded_placement(loaded_policy)?
                             .generate(model, None, None, preview, &cancel, on_progress),
                         KreaImportedItem::Hires(render) => (|| {
-                            let (memory, (encoder, quant)) = hires_memory
-                                .as_ref()
-                                .zip(hires_encoder.as_ref())
-                                .ok_or_else(|| {
+                            let (memory, (_, encoder_bytes, adapter_bytes, quant)) =
+                                hires_memory.as_ref().zip(hires_weights).ok_or_else(|| {
                                     WorkerError::Engine(
                                         "Krea Hires.fix has no admitted workspace".into(),
                                     )
@@ -2851,15 +2931,31 @@ pub(super) async fn generate_krea_imported_stream(
                             } else {
                                 gen_core::MemoryCacheState::Warm
                             };
-                            let budget = candle_hires_admitted_budget(&gpu_id, cache_state)?;
-                            let source_bytes = if cache_state == gen_core::MemoryCacheState::Cold {
-                                incoming_reclaimable_weight_bytes.saturating_add(
-                                    encoder.device_bytes.saturating_sub(encoder.source_bytes),
+                            let contract = model.memory_strategy_contract().ok_or_else(|| {
+                                WorkerError::Engine(
+                                    "Candle Krea Hires.fix has no loaded memory contract".into(),
                                 )
-                            } else {
-                                // Cache identity alone does not prove the lazy encoder is resident.
-                                encoder.device_bytes
-                            };
+                            })?;
+                            let residency = model.retained_component_state().map_err(|error| {
+                                crate::generation_error(
+                                    "read Candle Krea component residency",
+                                    error,
+                                )
+                            })?;
+                            let base_is_retained = residency
+                                .as_ref()
+                                .is_some_and(|state| state.base_components);
+                            let encoder_is_retained = residency
+                                .as_ref()
+                                .is_some_and(|state| state.reference_encoder);
+                            let budget = candle_hires_admitted_budget(&gpu_id, base_is_retained)?;
+                            let source_bytes = candle_hires_missing_weight_bytes(
+                                &contract.asset_facts,
+                                encoder_bytes,
+                                adapter_bytes,
+                                base_is_retained,
+                                encoder_is_retained,
+                            )?;
                             let needed_bytes = source_bytes
                                 .saturating_add(memory.workspace_bytes)
                                 .saturating_add(memory.pag_workspace_bytes);
@@ -2869,16 +2965,11 @@ pub(super) async fn generate_krea_imported_stream(
                                     budget.effective_bytes()
                                 )));
                             }
-                            let contract = model.memory_strategy_contract().ok_or_else(|| {
-                                WorkerError::Engine(
-                                    "Candle Krea Hires.fix has no loaded memory contract".into(),
-                                )
-                            })?;
                             let (base, refine) = render.passes();
                             let context = |pass| {
                                 candle_hires_context(
                                     contract,
-                                    *quant,
+                                    quant,
                                     pass,
                                     cache_state,
                                     budget,
