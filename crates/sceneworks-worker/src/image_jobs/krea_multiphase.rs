@@ -437,6 +437,58 @@ fn krea_multiphase_raw_settings(
     raw
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn candle_phase_adapter_memory(
+    spec: &gen_core::LoadSpec,
+    phases: &[gen_core::GenerationPhase],
+) -> WorkerResult<runtime_cuda::providers::krea::PhaseAdapterMemory> {
+    let bound = runtime_cuda::providers::krea::phase_adapter_memory(spec, phases)
+        .map_err(|error| super::render::preload_plan_error(KREA_RAW_MODEL_ID, error))?;
+    if bound.host_bytes > 0 {
+        if let Some(available) = crate::yue2_admission::host_available_bytes().await {
+            if bound.host_bytes > available {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Krea multi-phase adapters need {} host bytes, but only {available} are available",
+                    bound.host_bytes,
+                )));
+            }
+        }
+    }
+    Ok(bound)
+}
+
+/// An imported generator may be a warm hit, where its resident factors are already paid for but
+/// its next phase workspace has never been allocated. Check the incremental device bytes against
+/// current free VRAM without granting reclaim credit for the generator we are about to use.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) async fn admit_warm_candle_phase_workspace(
+    gpu_id: &str,
+    needed_bytes: u64,
+) -> WorkerResult<()> {
+    if needed_bytes == 0 {
+        return Ok(());
+    }
+    let budget = crate::vram_gate::live_capped_budget(gpu_id).await;
+    let needed_gib = needed_bytes as f64 / crate::fit_gate::BYTES_PER_GIB;
+    if crate::vram_gate::load_plan(Some(needed_gib), None, budget, false)
+        == crate::vram_gate::LoadPlan::Reject
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Krea multi-phase adapters need {needed_bytes} additional device bytes on GPU {gpu_id}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn mlx_phase_adapter_workspace(
+    spec: &gen_core::LoadSpec,
+    request: &GenerationRequest,
+) -> WorkerResult<u64> {
+    runtime_macos::providers::krea::multiphase::adapter_phase_additional_bytes(spec, request)
+        .map_err(|error| super::render::preload_plan_error(KREA_RAW_MODEL_ID, error))
+}
+
 /// A single image's phased trajectory, compiled against the selected load specification before
 /// either native lane can materialize the generator.
 pub(super) struct PreparedKreaMultiphase {
@@ -658,10 +710,6 @@ pub(super) async fn generate_krea_multiphase_stream(
     // per `request.loras` entry, in order, so `LoadSpec::adapters[i]` is `request.loras[i]` and a
     // phase's lora `index` selects it directly.
     let adapters = resolve_adapters(request, settings)?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let adapter_resident_bytes = adapters.iter().fold(0_u64, |total, adapter| {
-        total.saturating_add(gen_core::safetensors_path_bytes(&adapter.path))
-    });
     let phases = build_generation_phases(&specs);
     let total_steps: u32 = specs.iter().map(|phase| phase.steps).sum();
     let pag_workspace_bytes = crate::execution_planner::pag_workspace_bytes(
@@ -673,17 +721,6 @@ pub(super) async fn generate_krea_multiphase_stream(
         sampling_controls.pag.as_ref(),
     );
 
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let offload_policy = admit_candle_base(
-        request,
-        settings,
-        &weights_dir,
-        "Krea multi-phase",
-        CandleBaseEvidence::Catalog,
-        adapter_resident_bytes.saturating_add(pag_workspace_bytes),
-        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
-    )
-    .await?;
     let repo = model_repo(request, &raw_model);
     let adapter_label = raw_model.adapter_label();
     let text_style_gain = resolve_text_style_gain(request);
@@ -715,7 +752,11 @@ pub(super) async fn generate_krea_multiphase_stream(
     let unattached_spec = spec;
     let attached_spec =
         attach_manifest_text_encoder(unattached_spec, engine_id, request, settings)?;
-    let spec = attached_spec.into_load_spec();
+    let mut spec = attached_spec.into_load_spec();
+    if !spec.adapters.is_empty() && !spec.prepared_file_pins().is_prepared() {
+        spec.prepare_file_sources()
+            .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
+    }
     #[cfg(target_os = "macos")]
     let spec = {
         let resolved_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
@@ -746,22 +787,35 @@ pub(super) async fn generate_krea_multiphase_stream(
         shaped
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let adapter_device_bytes = candle_phase_adapter_memory(&spec, &phases)
+        .await?
+        .device_bytes;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let offload_policy = admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Krea multi-phase",
+        CandleBaseEvidence::Catalog,
+        adapter_device_bytes.saturating_add(pag_workspace_bytes),
+        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
+    )
+    .await?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 
-    let work = prepare_multiphase_work(
-        engine_id,
-        &spec,
-        GenerationRequest {
-            negative_prompt,
-            width,
-            height,
-            guidance,
-            text_style_gain,
-            phases: Some(phases),
-            ..sampling_controls
-        },
-        work,
-    )?;
+    let phase_request = GenerationRequest {
+        negative_prompt,
+        width,
+        height,
+        guidance,
+        text_style_gain,
+        phases: Some(phases),
+        ..sampling_controls
+    };
+    #[cfg(target_os = "macos")]
+    let phase_adapter_workspace = mlx_phase_adapter_workspace(&spec, &phase_request)?;
+    let work = prepare_multiphase_work(engine_id, &spec, phase_request, work)?;
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (generation_memory, memory_strategy_context) = {
@@ -773,7 +827,7 @@ pub(super) async fn generate_krea_multiphase_stream(
         let predicted_peak_gb = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
             &request.model_manifest_entry,
             tier,
-            adapter_resident_bytes,
+            adapter_device_bytes,
         );
         let evaluation =
             crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources_and_pag(
@@ -805,7 +859,7 @@ pub(super) async fn generate_krea_multiphase_stream(
                 budget,
                 raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
                 predicted_peak_gb,
-                adapter_resident_bytes,
+                adapter_device_bytes,
                 if reclaimable_gb > 0.0 {
                     gen_core::MemoryCacheState::Warm
                 } else {
@@ -831,6 +885,7 @@ pub(super) async fn generate_krea_multiphase_stream(
         Some(&request.model_manifest_entry),
         None,
     )
+    .with_phase_adapter_workspace(phase_adapter_workspace)
     .with_resolved_artifact_tier(resolved_mlx_artifact_tier(&weights_dir, quant_bits))?;
     #[cfg(target_os = "macos")]
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {

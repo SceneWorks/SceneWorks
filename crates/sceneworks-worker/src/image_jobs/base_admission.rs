@@ -331,10 +331,40 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     lane: &'static str,
     gpu_id: String,
     source_weight_bytes: u64,
+    phase_adapter_extra_bytes: u64,
     runtime: tokio::runtime::Handle,
 }
 
 impl CachedCandleBaseFloorAdmission {
+    /// The source floor already counts each adapter file once. Charge any additional resident
+    /// factors and phase workspace to this load, without turning the extra bound into eviction
+    /// credit for a future cache entry.
+    pub(super) fn with_phase_adapter_peak(
+        mut self,
+        spec: &LoadSpec,
+        peak: u64,
+    ) -> WorkerResult<Self> {
+        let mut adapter_sources = std::collections::BTreeMap::new();
+        for adapter in &spec.adapters {
+            let pin = spec
+                .prepared_file_pin_for(&adapter.path)
+                .map_err(|error| {
+                    crate::classify_engine_error("Krea adapter admission failed", error)
+                })?
+                .ok_or_else(|| {
+                    WorkerError::Engine(
+                        "Krea adapter admission requires a prepared source".to_owned(),
+                    )
+                })?;
+            adapter_sources.insert(pin.loader_path(), pin.target_fingerprint().size);
+        }
+        let source_bytes = adapter_sources
+            .into_values()
+            .fold(0_u64, u64::saturating_add);
+        self.phase_adapter_extra_bytes = peak.saturating_sub(source_bytes);
+        Ok(self)
+    }
+
     /// Exact conservative source-weight bytes to bind to the generator if this admission succeeds.
     /// The transient headroom added to the incoming floor is deliberately excluded: evicting a
     /// resident generator cannot promise to reclaim that allowance.
@@ -351,9 +381,12 @@ impl CachedCandleBaseFloorAdmission {
     /// `free + reclaimable_pool` must not stay blind to an evictable resident that arrived through
     /// this lane.
     pub(super) fn admit(self, resident_reclaimable_weight_bytes: u64) -> WorkerResult<()> {
-        let Some(floor_gb) = (self.source_weight_bytes > 0).then(|| {
-            self.source_weight_bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB
-        }) else {
+        let floor_bytes = self
+            .source_weight_bytes
+            .saturating_add(self.phase_adapter_extra_bytes);
+        let Some(floor_gb) = (floor_bytes > 0)
+            .then(|| floor_bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB)
+        else {
             tracing::warn!(
                 model = self.model,
                 lane = self.lane,
@@ -387,6 +420,7 @@ impl CachedCandleBaseFloorAdmission {
                     model = self.model,
                     lane = self.lane,
                     floor_gb,
+                    phase_adapter_extra_bytes = self.phase_adapter_extra_bytes,
                     replacing_resident = resident_reclaimable_weight_bytes > 0,
                     reclaimable_gb,
                     "candle cached-base admission: cold external checkpoint admitted on its on-disk \
@@ -425,6 +459,7 @@ pub(super) fn prepare_cached_candle_base_floor(
         lane,
         gpu_id: settings.gpu_id.clone(),
         source_weight_bytes: bytes,
+        phase_adapter_extra_bytes: 0,
         runtime: tokio::runtime::Handle::current(),
     })
 }
@@ -583,6 +618,31 @@ mod tests {
     }
 
     #[test]
+    fn phase_peak_reuses_the_pinned_adapter_floor_without_extending_cache_credit() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = directory.path().join("adapter.safetensors");
+        std::fs::write(&adapter, [0_u8; 13]).unwrap();
+        let duplicate = gen_core::AdapterSpec::new(adapter, 0.5, gen_core::AdapterKind::Lora);
+        let mut spec = LoadSpec::new(WeightsSource::Dir(directory.path().to_path_buf()))
+            .with_adapters(vec![duplicate.clone(), duplicate]);
+        spec.prepare_file_sources().unwrap();
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let floor = CachedCandleBaseFloorAdmission {
+            model: "krea_2_raw".into(),
+            lane: "Krea imported",
+            gpu_id: "unused".into(),
+            source_weight_bytes: 1_000,
+            phase_adapter_extra_bytes: 0,
+            runtime: runtime.handle().clone(),
+        }
+        .with_phase_adapter_peak(&spec, 100)
+        .unwrap();
+        assert_eq!(floor.phase_adapter_extra_bytes, 87);
+        assert_eq!(floor.reclaimable_weight_bytes(), 1_000);
+    }
+
+    #[test]
     fn cached_admission_notes_its_weights_into_the_reclaimable_pool() {
         // A fresh worker whose only load came through the cached imported/ComfyUI lane must still
         // leave a reclaimable high-water behind: the generic txt2img gate budgets
@@ -601,6 +661,7 @@ mod tests {
             lane: "Krea imported",
             gpu_id: gpu_id.to_owned(),
             source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
+            phase_adapter_extra_bytes: (1.0 * BYTES_PER_GIB) as u64,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("floor admission admits");
@@ -617,6 +678,7 @@ mod tests {
             lane: "Krea imported",
             gpu_id: empty_gpu.to_owned(),
             source_weight_bytes: 0,
+            phase_adapter_extra_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("un-gateable admission admits");

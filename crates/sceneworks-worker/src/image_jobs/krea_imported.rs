@@ -35,8 +35,14 @@ use super::krea_control::krea_control_steps;
 use super::krea_control::KREA_CONTROL_ENGINE_ID;
 #[cfg(not(target_os = "macos"))]
 use super::krea_control_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_multiphase::admit_warm_candle_phase_workspace;
 use super::krea_multiphase::build_generation_phases;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_multiphase::candle_phase_adapter_memory;
 use super::krea_multiphase::ensure_multiphase_job_shape;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::mlx_phase_adapter_workspace;
 use super::krea_multiphase::prepare_multiphase_work;
 use super::krea_multiphase::request_has_multiphase;
 use super::krea_multiphase::PreparedKreaMultiphase;
@@ -2314,6 +2320,21 @@ pub(super) async fn generate_krea_imported_stream(
         "Krea 2 imported source preparation failed",
     )?;
 
+    let mut sampling = super::sampling::explicit_sampling_request(request);
+    sampling.pag = resolved_pag;
+    let phase_request = phases.as_ref().map(|phases| GenerationRequest {
+        negative_prompt,
+        width,
+        height,
+        text_style_gain,
+        phases: Some(phases.clone()),
+        ..sampling.clone()
+    });
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let adapter_phase_bound = match phases.as_deref() {
+        Some(phases) => candle_phase_adapter_memory(&spec, phases).await?,
+        None => runtime_cuda::providers::krea::PhaseAdapterMemory::default(),
+    };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
         // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
@@ -2322,14 +2343,23 @@ pub(super) async fn generate_krea_imported_stream(
         // the plan-driven route so both are admitted on the identical floor (sc-20634).
         let companions = imported_base_snapshot_companions(&base_dir, spec.text_encoder.is_some());
         let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        prepare_cached_candle_base_floor(
+        let floor = prepare_cached_candle_base_floor(
             &request.model,
             "Krea imported",
             settings,
             &spec,
             &companion_refs,
-        )?
+        )?;
+        if phase_request.is_some() {
+            floor.with_phase_adapter_peak(&spec, adapter_phase_bound.device_bytes)?
+        } else {
+            floor
+        }
     };
+    #[cfg(target_os = "macos")]
+    let phase_adapter_workspace = phase_request
+        .as_ref()
+        .map_or(Ok(0), |request| mlx_phase_adapter_workspace(&spec, request))?;
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         engine_id,
@@ -2337,7 +2367,8 @@ pub(super) async fn generate_krea_imported_stream(
         &spec,
         Some(&request.model_manifest_entry),
         None,
-    )?;
+    )?
+    .with_phase_adapter_workspace(phase_adapter_workspace);
     #[cfg(target_os = "macos")]
     let memory_inputs = krea_imported_memory_inputs(
         request,
@@ -2347,25 +2378,11 @@ pub(super) async fn generate_krea_imported_stream(
         phases.as_ref().map(|_| steps),
     );
 
-    let mut sampling = super::sampling::explicit_sampling_request(request);
-    sampling.pag = resolved_pag;
-    let work = if let Some(phases) = phases {
-        prepare_multiphase_work(
-            engine_id,
-            &spec,
-            GenerationRequest {
-                negative_prompt,
-                width,
-                height,
-                text_style_gain,
-                phases: Some(phases),
-                ..sampling.clone()
-            },
-            work,
-        )?
-        .into_iter()
-        .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
-        .collect()
+    let work = if let Some(phase_request) = phase_request {
+        prepare_multiphase_work(engine_id, &spec, phase_request, work)?
+            .into_iter()
+            .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
+            .collect()
     } else {
         work.into_iter()
             .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
@@ -2411,6 +2428,10 @@ pub(super) async fn generate_krea_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let workspace_runtime = tokio::runtime::Handle::current();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let gpu_id = settings.gpu_id.clone();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission_with_placement(
         job.id.clone(),
         engine_id,
@@ -2423,7 +2444,13 @@ pub(super) async fn generate_krea_imported_stream(
                 cold_admission.admit(resident_reclaimable_weight_bytes)
             },
         ),
-        move |model, loaded_policy, tx, cancel| {
+        move |model, cache_state, loaded_policy, tx, cancel| {
+            if !cancel.is_cancelled() && cache_state == gen_core::MemoryCacheState::Warm {
+                workspace_runtime.block_on(admit_warm_candle_phase_workspace(
+                    &gpu_id,
+                    adapter_phase_bound.request_device_bytes,
+                ))?;
+            }
             let facts_tx = tx.clone();
             drive_gen_items(
                 tx,

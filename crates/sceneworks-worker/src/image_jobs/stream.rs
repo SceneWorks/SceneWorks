@@ -747,7 +747,7 @@ where
         spec,
         load_error_context,
         cold_admission,
-        move |generator, _, tx, cancel| drive(generator, tx, cancel),
+        move |generator, _, _, tx, cancel| drive(generator, tx, cancel),
     )
 }
 
@@ -771,6 +771,7 @@ where
     A: FnOnce(u64) -> WorkerResult<()> + Send + 'static,
     D: FnOnce(
             &dyn Generator,
+            gen_core::MemoryCacheState,
             crate::generator_cache::ExecutionPolicy,
             tokio::sync::mpsc::Sender<GenEvent>,
             CancelFlag,
@@ -799,7 +800,7 @@ where
             incoming_reclaimable_weight_bytes,
             cold_admission,
             move |generator,
-                  _cache_state,
+                  cache_state,
                   loaded_policy,
                   warm_policy: crate::execution_planner::WarmPolicyProposal,
                   _external_committed_bytes,
@@ -813,7 +814,7 @@ where
                     engine_id,
                     adapter_count,
                 );
-                drive(generator, loaded_policy, tx, blocking_cancel)
+                drive(generator, cache_state, loaded_policy, tx, blocking_cancel)
             },
         )
         .await
