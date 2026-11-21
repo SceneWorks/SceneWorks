@@ -629,7 +629,6 @@ fn context(
             frames: target.geometry.frames,
             reference_count: 0,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay,
         budget: MemoryBudget {

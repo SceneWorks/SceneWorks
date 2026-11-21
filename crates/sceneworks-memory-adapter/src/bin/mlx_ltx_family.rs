@@ -1252,7 +1252,6 @@ pub(super) fn ltx_context(
             frames: geometry.frames,
             reference_count: 0,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {

@@ -139,7 +139,6 @@ pub(super) fn sensenova_candle_context(
             frames: 1,
             reference_count: 0,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {

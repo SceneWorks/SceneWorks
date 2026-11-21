@@ -499,7 +499,6 @@ pub(super) fn flux2_dev_edit_memory_context(
         // Multi-reference is request geometry, not a distinct overlay identity. Encoding the count
         // here would violate the provider's opaque identity-axis contract; the provider reads the
         // exact count from `geometry.reference_count`.
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {

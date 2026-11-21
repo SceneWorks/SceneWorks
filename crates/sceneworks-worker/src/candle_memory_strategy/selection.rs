@@ -1401,7 +1401,6 @@ pub(super) fn evaluate_shared_image_inner_priced_with_resources(
             use_pid,
             has_phases: request_has_phases,
             geometry,
-            low_res_start: None,
             reference_resources: reference_resources.cloned(),
             overlay: provider_overlay.map(str::to_owned),
             budget: gen_core::MemoryBudget {

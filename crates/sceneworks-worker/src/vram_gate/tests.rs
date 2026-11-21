@@ -1010,7 +1010,6 @@ fn builtin_krea_turbo_resident_admission_passes_the_provider_handshake_at(tier: 
             frames: 1,
             reference_count: 0,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {

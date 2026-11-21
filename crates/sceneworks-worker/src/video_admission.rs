@@ -2550,7 +2550,6 @@ fn admit_video_generation_with_curves_and_profiles(
                 // Provider safety needs the ACTUAL request geometry even when the interior
                 // single-pass cap supplied the binding peak and selection.
                 geometry: request.scope_geometry(),
-                low_res_start: None,
                 reference_resources: None,
                 overlay: request.overlay.map(str::to_owned),
                 budget: runtime.budget,

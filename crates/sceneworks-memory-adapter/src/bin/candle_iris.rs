@@ -292,7 +292,6 @@ fn context(
         use_pid: false,
         has_phases: route.mode == "text_to_image",
         geometry,
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {

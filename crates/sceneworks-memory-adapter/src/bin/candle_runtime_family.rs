@@ -872,7 +872,6 @@ pub(super) fn missing_contract_reason(generator: &dyn Generator, request: &Value
             frames: 1,
             reference_count: 0,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
@@ -1089,7 +1088,6 @@ pub(super) fn pulid_flux_context(
             frames: 1,
             reference_count: 1,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: Some("identity".to_owned()),
         budget: MemoryBudget {
@@ -1760,7 +1758,6 @@ pub(super) fn run_sc22737_video_capture(
             frames: target.frames,
             reference_count: arm.reference_count,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {

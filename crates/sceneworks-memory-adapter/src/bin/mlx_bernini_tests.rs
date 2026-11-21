@@ -667,7 +667,6 @@ fn a_reference_carrying_bernini_request_would_build_a_context_the_engine_admits(
             frames: V2V_FRAMES,
             reference_count: V2V_REFERENCE_COUNT,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: overlay.map(str::to_owned),
         budget: MemoryBudget {

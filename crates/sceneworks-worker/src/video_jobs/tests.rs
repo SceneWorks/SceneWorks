@@ -1640,7 +1640,6 @@ fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::Memo
             frames: 121,
             reference_count: 0,
         },
-        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {

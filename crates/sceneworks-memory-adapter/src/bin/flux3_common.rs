@@ -495,7 +495,6 @@ pub(super) fn context(plan: &Plan, abi: u32, hardware_bytes: u64) -> MemoryRunCo
         load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
         has_reference: false,
-        low_res_start: None,
         reference_resources: None,
         use_pid: false,
         has_phases: true,
