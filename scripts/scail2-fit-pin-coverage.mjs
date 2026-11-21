@@ -26,6 +26,7 @@ const proofInputs = new Set([
   "scripts/tests/test_scail2_plural_fit.py",
   "scripts/tests/test_video_tier1_cuda_diagnostic.py",
   "scripts/tests/test_video_tier1_followup.py",
+  "scripts/tests/test_wan_tier1_comparison.py",
   "scripts/tests/test_wddm_process_memory.py",
   "scripts/ci/model-inference-proofs.json",
 ]);
