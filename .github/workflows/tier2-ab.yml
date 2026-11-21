@@ -8,7 +8,7 @@
 # same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
 # The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
 # comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
-# the end of the job. Optional Wan staging fetches pinned files before the read-only comparison.
+# the end of the job. Optional product staging fetches pinned files before the read-only comparison.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
 # selector's trusted-ref rule), and their builds and processes receive no credential. Both fresh
@@ -43,7 +43,7 @@ on:
         type: string
         default: ""
       download_missing:
-        description: "Stage missing public, manifest-pinned files only for explicitly selected Wan A14B routes"
+        description: "Stage missing public, manifest-pinned files only for explicitly selected Wan A14B or SCAIL-2 routes"
         required: false
         type: boolean
         default: false
@@ -116,7 +116,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Stage selected Wan snapshots from their manifest pins
+      - name: Stage selected product snapshots from their manifest pins
         if: ${{ inputs.download_missing && !inputs.preflight_only }}
         run: |
           if ! command -v hf >/dev/null && ! command -v huggingface-cli >/dev/null; then
@@ -234,7 +234,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Stage selected Wan snapshots from their manifest pins
+      - name: Stage selected product snapshots from their manifest pins
         if: ${{ inputs.download_missing && !inputs.preflight_only }}
         working-directory: tier2-ab-driver
         run: |
@@ -253,7 +253,7 @@ jobs:
             $env:Path = "$scripts;$env:Path"
           }
           node scripts/tier2-ab.mjs --stage-wan
-          if ($LASTEXITCODE -ne 0) { throw 'tier2-ab Wan staging failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'tier2-ab model staging failed' }
       - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
         run: |
           node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only

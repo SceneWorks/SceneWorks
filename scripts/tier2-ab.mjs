@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapGiB } from "./lib/tier2-scail.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
@@ -85,6 +86,7 @@ function wanA14bRoute(backend, mode, sampler) {
   };
 }
 export const ROUTES = Object.freeze(Object.fromEntries([
+  ...scailRoutes,
   ...["t2v", "i2v"].flatMap((mode) => [
     wanA14bRoute("mlx", mode, "uni_pc"), wanA14bRoute("mlx", mode, "heun"),
     wanA14bRoute("cuda", mode, "uni_pc"),
@@ -151,7 +153,12 @@ export function selectRoutes(backend, value) {
     fact(Object.hasOwn(ROUTES, id), `unknown route ${id}; known: ${Object.keys(ROUTES).join(", ")}`);
     fact(ROUTES[id].backend === backend, `route ${id} belongs to the ${ROUTES[id].backend} backend, not ${backend}`);
   }
-  return ids.map((id) => ROUTES[id]);
+  const selected = ids.map((id) => ROUTES[id]);
+  for (const [i, route] of selected.entries()) if (route.refuse) {
+    fact(selected.slice(0, i).some((r) => r.scailCandidate && r.references === 6 && !r.refuse),
+      "a capped SCAIL refusal requires a preceding accepted six-character witness");
+  }
+  return selected;
 }
 export function resolveConfig(env, { platform = process.platform, home = os.homedir() } = {}) {
   const paths = pathsFor(platform);
@@ -205,7 +212,7 @@ export function dispatchOptions(inputs, dispatchedSha) {
   for (const key of ["routes", "hubs"]) fact(options[key] === undefined || (Array.isArray(options[key]) && options[key].every((item) => typeof item === "string" && item.trim())), `${key} must be an array of strings`);
   const routes = selectRoutes(backend, options.routes ? JSON.stringify(options.routes) : "").map((route) => route.id);
   if (inputs.download_missing) {
-    fact(options.routes && routes.every((id) => ROUTES[id].wanA14b), "download_missing requires explicit Wan A14B routes");
+    fact(options.routes && routes.every((id) => ROUTES[id].wanA14b || ROUTES[id].scailCandidate), "download_missing requires explicit Wan A14B or SCAIL-2 routes");
     fact(options.preflight_only === false, "metadata-only preflight cannot stage weights");
   }
   if (options.hubs) fact(options.hubs.length > 0 && options.hubs.every((hub) => absoluteFor(backend === "mlx" ? "darwin" : "win32", hub)), "hubs must be absolute paths for the selected backend's OS");
@@ -344,6 +351,10 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     const entry = { id: route.id, model: route.model, kind: route.kind, mode: route.mode, group: route.group, request: requestTemplate(route) };
     const baseModel = baseCatalog.find((model) => model.id === route.model), headModel = headCatalog.find((model) => model.id === route.model);
     if (!baseModel || !headModel) { planned.push({ ...entry, status: "skipped", skipReason: `model ${route.model} is not in the ${!baseModel ? "base" : "head"} catalog` }); continue; }
+    if (route.scailCandidate) {
+      fact(platform === (route.backend === "mlx" ? "darwin" : "win32") && headModel.ui?.scail2MultiReference === true,
+        `${route.id}: candidate must expose the production plural character descriptor`);
+    }
     if (route.wanA14b) {
       fact(platform === (route.backend === "mlx" ? "darwin" : "win32"), `${route.id}: unsupported platform ${platform}`);
       for (const model of [baseModel, headModel]) {
@@ -366,6 +377,16 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
             const primary = rowsForSide.required.filter((row) => !row.coRequisite);
             fact(primary.length === 1 && primary[0].variant === "q4" && primary[0].files.includes("q4/*"),
               `${route.id}: missing platform q4 snapshot`);
+          }
+        }
+        if (route.scailCandidate) {
+          for (const [set, catalog] of [[baseRows, baseCatalog], [rows, headCatalog]]) {
+            fact(set.required.length === 1 && set.required[0].repo === "SceneWorks/scail2-mlx" && set.required[0].revision === SCAIL_REVISION
+              && set.required[0].variant === "q4" && JSON.stringify(set.required[0].files) === '["q4/*"]', "SCAIL q4 source changed");
+            const segmenter = routeDownloadRows(catalog.find((m) => m.id === "sam3_person_segment"), { platform }).required;
+            fact(segmenter.length === 1 && segmenter[0].repo === SAM3.repo && segmenter[0].revision === SAM3.revision
+              && JSON.stringify(segmenter[0].files) === JSON.stringify(Object.keys(SAM3.files)), "SAM3 source changed");
+            set.required.push(...segmenter);
           }
         }
         if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { refusal = { skipReason: `pinned download rows for ${route.model} (${rows.tier ?? "untiered"}) differ between base and head catalogs`, rows: { base: baseRows, head: rows } }; break; }
@@ -399,6 +420,7 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
   return planned;
 }
 function referenceBinding(route, assetId) {
+  if (route.scailCandidate) return scailBinding(route, assetId);
   if (route.referenceImage) return { sourceAssetId: assetId };
   if (route.referenceAudio) return { referenceAudioAssetId: assetId };
   return {};
@@ -410,11 +432,11 @@ function wanReferenceImage(route) {
   return syntheticPng(false, route.body.width, route.body.height);
 }
 function normalizedRequestHash(route, body, referenceSha256) {
-  const normalized = { ...body, projectId: "<project>", ...referenceBinding(route, route.referenceImage ? "<source-image>" : "<reference-audio>") };
+  const normalized = { ...body, projectId: "<project>", ...referenceBinding(route, route.scailCandidate ? null : route.referenceImage ? "<source-image>" : "<reference-audio>") };
   return sha256(JSON.stringify(route.referenceImage ? { body: normalized, sourceImageSha256: referenceSha256 } : normalized));
 }
 export function requestTemplate(route) {
-  const body = requestBody(route, "<project>", route.referenceImage ? "<source-image>" : "<reference-audio>");
+  const body = requestBody(route, "<project>", route.scailCandidate ? null : route.referenceImage ? "<source-image>" : "<reference-audio>");
   const source = route.referenceImage ? { sourceImageSha256: sha256(wanReferenceImage(route)) } : {};
   return { endpoint: route.endpoint, body, ...source, sha256: normalizedRequestHash(route, body, source.sourceImageSha256) };
 }
@@ -456,6 +478,7 @@ export function wanClaimSource(route, plan, selected) {
     && source.identity.revision === expected.revision && source.identity.variant === "q4", "Wan selected snapshot differs from the pinned q4 source");
   fact(primary[0].files?.length && primary[0].files.every((file) => /^q4[/\\]/.test(file.relativePath)
     && /^sha256:[0-9a-f]{64}$/.test(file.sha256) && file.sizeBytes > 0), "Wan q4 file closure missing");
+  if (route.scailCandidate) verifyScailClaim(primary[0].files);
   const members = model.members.map(({ role, source, tier, files }) => ({
     role, source, tier, files: [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
   }));
@@ -691,6 +714,7 @@ export const HUB_MUTATION_LISTING_LIMIT = 20_000;
 export function exitCodeFor(report) {
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
   if (report.routes.some((route) => ROUTES[route.id]?.wanA14b && route.verdict !== "equal")) return 1;
+  if (report.routes.some((route) => ROUTES[route.id]?.scailCandidate && route.verdict !== "verified")) return 1;
   const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || (route.hubMutation?.changed && hubMutationAttribution(route) !== "base_only"));
   return bad || report.summary.ran === 0 || report.fatal ? 1 : 0;
 }
@@ -865,6 +889,8 @@ export function summarize(routes) {
     if (route.status === "skipped") summary.skipped++;
     else if (route.verdict && route.verdict !== "skipped" && Object.hasOwn(summary, route.verdict)) summary[route.verdict]++;
   }
+  const verified = routes.filter((r) => r.verdict === "verified").length;
+  if (verified) summary.verified = verified;
   return summary;
 }
 // CUDA memory is the peak above the pre-request baseline, shown with that baseline; MLX is the
@@ -899,6 +925,10 @@ export function renderMarkdown(report) {
     for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}${runRecord.output?.content?.decoderError ? ` (${String(runRecord.output.content.decoderError).slice(0, 160)})` : ""}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, observed generating-stage interval ${secs(runRecord.timing?.generatingStagePollIntervalSeconds ?? runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.processes?.worker ? `; worker ${runRecord.diagnostics.processes.worker.alive ? "alive" : `exited code ${runRecord.diagnostics.processes.worker.exitCode} signal ${runRecord.diagnostics.processes.worker.signal}`} (stdin ${runRecord.diagnostics.processes.worker.stdin})` : ""}${Array.isArray(runRecord.diagnostics?.workersResponse) ? `; /workers: ${runRecord.diagnostics.workersResponse.map((row) => `${row.id}=${row.status}`).join(", ").slice(0, 300)}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
     for (const run of route.runs ?? []) {
       if (run.workerObservations) lines.push(`- ${run.label} worker total ${run.workerObservations.workerTotalMs} ms, step-progress interval ${run.workerObservations.progressSampleIntervalMs} ms, worker peak ${run.workerObservations.workerPeakMemoryBytes ?? "unavailable"} bytes`);
+    }
+    if (ROUTES[route.id]?.scailCandidate) {
+      lines.push(`- Candidate witness: ${route.verdictReason ?? route.skipReason ?? route.status}`);
+      continue;
     }
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
@@ -966,9 +996,14 @@ async function preflight(env, cfg, report) {
   const evidence = headEvidence.size ? headEvidence : await readPatternEvidence(cfg.baseDir);
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
-  if (cfg.routes.some((route) => route.wanA14b)) {
+  if (cfg.routes.some((route) => route.scailCandidate)) {
+    const pool = JSON.parse(await readFile(path.join(cfg.headDir, "config", "scail2-plural-memory.json"), "utf8"));
+    const evidence = scailFitEvidence(pool, cfg.backend);
+    for (const item of report.routes.filter((r) => ROUTES[r.id].scailCandidate)) item.nativeFitEvidence = evidence;
+  }
+  if (cfg.routes.some((route) => route.wanA14b || route.scailCandidate)) {
     report.sourceMetadata = "Each fresh API data directory builds its trusted source ledger from the public Hugging Face tree at `https://huggingface.co/api/models/{repo}/tree/{revision}` for the exact selected revision. The worker verifies cached files against the ledger. These metadata requests require HTTPS access and use no credentials.";
-    fact(report.tools.ffmpeg.available && report.tools.ffprobe.available, "Wan A/B requires ffmpeg and ffprobe for decoded output evidence");
+    fact(report.tools.ffmpeg.available && report.tools.ffprobe.available, "the selected product witness requires ffmpeg and ffprobe for decoded output evidence");
   }
   for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
     if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
@@ -979,15 +1014,21 @@ async function preflight(env, cfg, report) {
 // Both CUDA q4 revisions contain q4/.gitattributes. Product admission binds it along with
 // the weights. The catalog walk deliberately excludes dotfiles, so use the CLI's literal
 // filenames for this exact checked-in closure, retaining its normal cache/resume semantics.
-async function wanCudaDownloadArgs(row, hub, evidence, fs) {
-  fact(row.variant === "q4" && row.files.length === 1 && row.files[0] === "q4/*", "CUDA Wan staging requires the q4/* manifest row");
+async function literalDownloadArgs(row, hub, evidence, fs) {
+  const segmenter = row.repo === SAM3.repo;
+  fact(segmenter ? row.revision === SAM3.revision && JSON.stringify(row.files) === JSON.stringify(Object.keys(SAM3.files))
+    : row.variant === "q4" && row.files.length === 1 && row.files[0] === "q4/*", "staging requires the exact selected manifest row");
   const key = `${row.repo}@${row.revision}`;
-  const [base, head] = evidence.map((listing) => expandSelector("q4/*", listing.get(key) ?? []).sort());
+  const [base, head] = evidence.map((listing) => row.files.flatMap((selector) => expandSelector(selector, listing.get(key) ?? [])).sort());
   fact(head.length && JSON.stringify(base) === JSON.stringify(head), `missing or divergent pinned q4 file listings for ${key}`);
+  if (segmenter || row.repo === "SceneWorks/scail2-mlx") {
+    const expected = segmenter ? Object.keys(SAM3.files).sort() : scailMembers;
+    fact(JSON.stringify(head) === JSON.stringify(expected), `incomplete or unrecognized product file listing for ${key}`);
+  }
   fact(head.every((file) => file.split("/").every((part) => /^[A-Za-z0-9_.-]+$/.test(part) && part !== "." && part !== "..")),
     `invalid q4 snapshot member in ${key}`);
   const snapshot = snapshotDir(hub, row.repo, row.revision);
-  const missing = await selectorProblems(snapshot, "q4/*", { fs, evidenceFiles: head });
+  const missing = (await Promise.all(row.files.map((selector) => selectorProblems(snapshot, selector, { fs, evidenceFiles: head })))).flat();
   for (const file of missing) {
     // A partial or dangling destination is evidence of a damaged cache. Never overwrite it.
     try { await fs.lstat(path.join(snapshot, ...file.split("/"))); }
@@ -1002,19 +1043,19 @@ async function wanCudaDownloadArgs(row, hub, evidence, fs) {
 // Production admission separately fetches the pinned repository file metadata over HTTPS
 // into each fresh API data directory, using its empty credentials directory.
 export async function stageWanSnapshots(env, cfg, report, signal, runDownload = null, fs = { stat, lstat }) {
-  fact(cfg.routes.length && cfg.routes.every((route) => route.wanA14b && route.backend === cfg.backend), "staging requires explicit Wan A14B routes");
+  fact(cfg.routes.length && cfg.routes.every((route) => (route.wanA14b || route.scailCandidate) && route.backend === cfg.backend), "staging requires explicit Wan A14B or SCAIL-2 routes");
   const { firstAvailableHfCli, hfDownloadArgvs } = await import("./measure-memory-catalog.mjs");
   const downloadEnv = { ...scrubSecrets(env), HF_ENDPOINT: "https://huggingface.co", HF_HUB_OFFLINE: "0", HF_HUB_DISABLE_IMPLICIT_TOKEN: "1" };
   const needed = new Map();
-  const evidence = cfg.backend === "cuda"
+  const evidence = cfg.backend === "cuda" || cfg.routes.some((r) => r.scailCandidate)
     ? await Promise.all([readPatternEvidence(cfg.baseDir), readPatternEvidence(cfg.headDir)]) : null;
   for (const route of report.routes) {
-    if (route.status === "ready" && !evidence) continue;
+    if (route.status === "ready" && cfg.backend === "mlx" && !ROUTES[route.id].scailCandidate) continue;
     fact(route.presence?.length && route.rows?.required, `cannot stage ${route.id}: ${route.skipReason}`);
     for (const row of route.rows.required) {
       fact(SHA.test(row.revision) && row.files.length > 0, "staging requires pinned files");
       const hub = route.hub ?? cfg.hubs[0];
-      const commands = evidence ? await wanCudaDownloadArgs(row, hub, evidence, fs)
+      const commands = cfg.backend === "cuda" || ROUTES[route.id].scailCandidate ? await literalDownloadArgs(row, hub, evidence, fs)
         : hfDownloadArgvs({ repo: row.repo, revision: row.revision, include: row.files }, hub);
       for (const args of commands) {
         needed.set(JSON.stringify(args), args);
@@ -1041,6 +1082,9 @@ async function runLogged(command, args, { cwd, env, log }) {
   } finally { await handle.close(); }
 }
 async function tail(file, bytes = 8000) { try { const text = await readFile(file, "utf8"); return text.slice(-bytes); } catch { return ""; } }
+function runSides(cfg) {
+  return cfg.routes.every((route) => route.scailCandidate) ? ["head"] : ["base", "head"];
+}
 async function build(env, cfg, report) {
   const scratch = path.join(cfg.work, "scratch"), target = path.join(scratch, "target"), evidence = path.join(cfg.work, "evidence");
   await mkdir(target, { recursive: true }); await mkdir(evidence, { recursive: true });
@@ -1048,7 +1092,8 @@ async function build(env, cfg, report) {
   const built = {};
   // Base first, then head: both share one target, so the second build reuses every unchanged
   // dependency unit. Each binary (plus loose native libraries) is copied out before the next build.
-  for (const [label, dir, sha] of [["base", cfg.baseDir, cfg.baseSha], ["head", cfg.headDir, cfg.headSha]]) {
+  for (const label of runSides(cfg)) {
+    const [dir, sha] = label === "head" ? [cfg.headDir, cfg.headSha] : [cfg.baseDir, cfg.baseSha];
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
@@ -1140,7 +1185,7 @@ export function childEnvironments(env, { backend, state, hub, xet, workerId, met
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
 const decodedBuffers = new WeakMap();
-async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal }) {
+async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, capGiB }) {
   const sideCfg = side === "base" ? { dir: cfg.baseDir, sha: cfg.baseSha } : { dir: cfg.headDir, sha: cfg.headSha };
   const slug = `${route.id}-${label.replace("#", "")}`;
   const runRoot = path.join(cfg.work, "scratch", "runs", slug), evidence = path.join(evidenceRoot, "runs", route.id, label.replace("#", ""));
@@ -1186,7 +1231,18 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     apiUrl = url;
     endpoint = ownedApiController({ url, state, api, controller });
     record.identity.health = await wait(async () => { try { return await endpoint.verify(); } catch (error) { if (controller.signal.aborted) throw error; return false; } }, 180, "API readiness");
-    const worker = await endpoint.startWorker(() => launch("worker", built[side].binary, [], { ...envs.worker(url), SCENEWORKS_PARENT_PID: String(sentinel.pid) }));
+    const scailEnv = {};
+    if (route.scailCandidate) {
+      scailEnv.SCENEWORKS_LOG_FORMAT = "json";
+      scailEnv.RUST_LOG = "info";
+      scailEnv.SCENEWORKS_SAM3_WEIGHTS = snapshotDir(plan.hub, SAM3.repo, SAM3.revision);
+      if (route.refuse) {
+        fact(Number.isFinite(capGiB) && capGiB > 0, "no prior accepted six-character accelerator budget");
+        scailEnv[cfg.backend === "mlx" ? "SCENEWORKS_MLX_MEMORY_CAP_GB" : "SCENEWORKS_CUDA_VRAM_CAP_GB"] = String(capGiB);
+        record.capGiB = capGiB;
+      }
+    }
+    const worker = await endpoint.startWorker(() => launch("worker", built[side].binary, [], { ...envs.worker(url), ...scailEnv, SCENEWORKS_PARENT_PID: String(sentinel.pid) }));
     // Registration fails fast, with a cause, when the worker exits or reports offline.
     let offlineSince = null;
     const registration = await wait(async () => {
@@ -1206,24 +1262,32 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const reference = route.referenceImage || route.referenceAudio
       ? await uploadReference(route, endpoint, project.id, evidence) : null;
     if (route.referenceImage) record.sourceImage = reference;
-    const body = requestBody(route, project.id, reference?.id);
+    if (route.scailCandidate) {
+      const media = await scailMedia(route, evidence, env.SCENEWORKS_FFMPEG || "ffmpeg");
+      record.sources = await uploadScailMedia(route, endpoint, project.id, media, decodePng);
+    }
+    const body = requestBody(route, project.id, route.scailCandidate ? record.sources : reference?.id);
     record.requestSha256 = normalizedRequestHash(route, body, reference?.sha256);
+    if (record.sources) record.requestWithMediaSha256 = sha256(JSON.stringify({
+      template: record.requestSha256, references: record.sources.references.map((s) => s.sha256), clip: record.sources.clip.sha256 }));
     fact(record.requestSha256 === plan.request.sha256, "request body diverged from the route template");
     // Memory baselines and samplers start before the POST and stop at completion.
     const memory = { samples: 0, errors: 0, peakBytes: null };
     sampling = true;
     if (cfg.backend === "mlx") {
-      const cap = Math.min(100 * GIB, Math.floor(os.totalmem() * 0.8)); record.watchdog.capBytes = cap;
+      const cap = Math.min((route.scailCandidate ? 96 : 100) * GIB, Math.floor(os.totalmem() * 0.8)); record.watchdog.capBytes = cap;
       memory.method = "macOS top MEM (phys_footprint, includes Metal allocations) + ps RSS, summed over the worker process tree, sampled about every 2 s";
       samplers.push((async () => { while (sampling) { try { const s = await sampleMacTree(worker.pid); memory.samples++; memory.peakBytes = Math.max(memory.peakBytes ?? 0, s.footprintBytes); memory.peakRssBytes = Math.max(memory.peakRssBytes ?? 0, s.rssBytes); if (Math.max(s.footprintBytes, s.rssBytes) > cap) watchdog(`worker footprint ${gib(s.footprintBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(1000); } })());
     } else {
-      const cap = Math.floor(os.totalmem() * 0.75); record.watchdog.capBytes = cap;
+      const cap = Math.min(route.scailCandidate ? 64 * GIB : Infinity, Math.floor(os.totalmem() * 0.75)); record.watchdog.capBytes = cap;
+      if (route.scailCandidate) record.watchdog.gpuCapBytes = 84 * GIB;
       const smi = nvidiaSmiPath(env);
       const baseline = []; for (let i = 0; i < 5; i++) { baseline.push((await sampleGpu(smi)).usedBytes); await delay(200); }
       memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
       memory.gpuBaselineBytes = Math.max(...baseline);
       if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
+      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
+        if (route.scailCandidate && s.usedBytes > record.watchdog.gpuCapBytes) watchdog("physical GPU1 exceeded the 84 GiB SCAIL device memory cap"); } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     const posted = Date.now();
@@ -1231,6 +1295,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.acceptedStatus = response.status;
     fact(response.status < 300 && response.body?.id, `API refused the request (${response.status}): ${JSON.stringify(response.body).slice(0, 1500)}`);
     accepted = response.body; record.jobId = accepted.id;
+    if (route.scailCandidate) {
+      const binding = scailBinding(route, record.sources);
+      fact(JSON.stringify(accepted.payload?.referenceAssetIds) === JSON.stringify(binding.referenceAssetIds)
+        && accepted.payload?.sourceClipAssetId === binding.sourceClipAssetId, "queued SCAIL assets differ from the uploaded order");
+      record.segmentationSource = SAM3;
+    }
     const roots = { hub: plan.hub, "hf-home": path.dirname(plan.hub), state: await realpath(state), checkout: sideCfg.dir, work: cfg.work, home: os.homedir() };
     // Recorded at submission so a run that never completes still carries its payload identity.
     record.identity.payload = redactPaths(identitySubset(accepted.payload ?? {}), roots);
@@ -1249,6 +1319,15 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         else await phase(`stage_${current.stage}`, { side, job: accepted.id, status: current.status, at_s: ((Date.now() - posted) / 1000).toFixed(1) });
       }
       const decision = jobProgressDecision({ job: current, postedMs: posted, claimedAtMs, nowMs: Date.now(), claimMinutes, timeoutMinutes: route.timeoutMinutes });
+      if (route.refuse && current.status === "failed" && current.workerId === workerId) {
+        record.fit = scailFitEvents(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route, current.id, false, record.sources, plan.nativeFitEvidence);
+        fact(record.fit.every((event) => event.availableAcceleratorBytes <= capGiB * GIB), "worker refusal did not use the selected accelerator ceiling");
+        fact(!current.result?.assets?.length && /SCAIL-2 plural fit requires \d+ accelerator bytes, only \d+ are available/.test(current.error ?? current.message ?? ""), "missing SCAIL budget refusal");
+        const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
+        const inputs = [record.sources.clip.id, ...record.sources.references.map((ref) => ref.id)];
+        fact(Array.isArray(library) && library.length === inputs.length && library.every((asset) => inputs.includes(asset.id)), "failed SCAIL job published an output");
+        record.refusal = current.error ?? current.message; record.status = "refused"; return record;
+      }
       if (decision.state === "stop") { record.stopReason = decision.reason; throw new Error(decision.reason); }
       if (decision.state === "completed") { job = current; break; }
       await delay(500);
@@ -1267,7 +1346,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const loadStart = at("loading_model") ?? record.timing.claimSeconds, generate = at("generating") ?? at("rendering"), finish = at("saving") ?? at("muxing") ?? record.timing.enqueueToCompleteSeconds;
     record.timing.loadSeconds = Number.isFinite(loadStart) && Number.isFinite(generate) ? generate - loadStart : null;
     const generatingInterval = Number.isFinite(generate) ? finish - generate : null;
-    if (route.wanA14b) record.timing.generatingStagePollIntervalSeconds = generatingInterval;
+    if (route.wanA14b || route.scailCandidate) record.timing.generatingStagePollIntervalSeconds = generatingInterval;
     else record.timing.denoiseSeconds = generatingInterval;
     record.timing.splitSource = "first poll (500 ms) observing job stage loading_model / generating / saving";
     // Terminal status can precede API persistence of the worker's asset writes.
@@ -1285,22 +1364,28 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
     record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
-    if (route.wanA14b) {
+    if (route.wanA14b || route.scailCandidate) {
       const receipt = await endpoint.call("GET", `/api/v1/jobs/${job.id}/execution-receipt`);
-      record.identity.execution = wanExecutionFacts(route, receipt, job.id, assets[0].id);
+      if (route.wanA14b) record.identity.execution = wanExecutionFacts(route, receipt, job.id, assets[0].id);
       const selected = await readWanClaim(envs.api.SCENEWORKS_JOBS_DB_PATH, job.id, workerId);
       record.identity.claimedSource = wanClaimSource(route, plan, selected);
       const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
       const asset = library.find((item) => item.id === assets[0].id);
-      verifyWanRecipe(route, asset?.generationSet?.recipe ?? asset?.recipe ?? assets[0].recipe, reference?.id, record.identity.claimedSource.repo);
+      const recipe = asset?.generationSet?.recipe ?? asset?.recipe ?? assets[0].recipe;
+      if (route.wanA14b) verifyWanRecipe(route, recipe, reference?.id, record.identity.claimedSource.repo);
       const metrics = await wait(async () => {
         const result = await endpoint.call("GET", `/api/v1/jobs/${job.id}/metrics`);
         return result?.model && result?.totalMs && result;
       }, 15, "worker generation metrics");
-      record.workerObservations = wanObservations(route, metrics, content);
-      fact(memory.samples > 0 && memory.peakBytes > 0, "Wan external peak memory observation missing");
+      if (route.scailCandidate) {
+        fact(!route.refuse, "capped insufficient SCAIL request unexpectedly rendered");
+        record.scailOutput = verifyScailOutput(route, content, receipt, job.id, assets[0].id, recipe, record.sources, metrics);
+        record.fit = scailFitEvents(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route, job.id, true, record.sources, plan.nativeFitEvidence);
+      } else record.workerObservations = wanObservations(route, metrics, content);
+      fact(memory.samples > 0 && memory.peakBytes > 0, "external peak memory observation missing");
+      if (route.scailCandidate && cfg.backend === "cuda") fact(memory.hostPeakWorkingSetBytes > 0, "Windows worker host peak observation missing");
     }
-    decodedBuffers.set(record, content.buffer);
+    if (!route.scailCandidate) decodedBuffers.set(record, content.buffer);
     record.identity.payload = redactPaths(identitySubset(job.payload), roots);
     record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
     fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
@@ -1310,7 +1395,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   } finally {
     clearTimeout(timer); signal.removeEventListener("abort", onAbort);
     sampling = false; await Promise.all(samplers);
-    if (record.status !== "completed" && apiUrl) {
+    if (record.status !== "completed" && record.status !== "refused" && apiUrl) {
       // What the API serves right now about this job and the owned worker (direct requests: the
       // owned-endpoint gate refuses everything once the run has been aborted).
       const direct = (route) => fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) }).then((response) => response.json(), () => null);
@@ -1321,7 +1406,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       record.diagnostics = { processes, workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: jobDiagnostics(lastJob), ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
     }
     // Direct request: the owned-endpoint gate refuses every call once the watchdog has aborted.
-    if (accepted?.id && record.status !== "completed" && apiUrl) {
+    if (accepted?.id && record.status !== "completed" && record.status !== "refused" && apiUrl) {
       record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
       // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
       for (let i = 0; i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
@@ -1332,10 +1417,10 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     for (const name of ["api", "worker"]) {
       const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
       if (text) await writeFile(path.join(evidence, `${name}.log`), redactSensitiveText(text, secrets));
-      if (record.status !== "completed") (record.diagnostics ??= {})[`${name}LogTail`] = lastLines(redactSensitiveText(text, secrets), 50);
+      if (record.status !== "completed" && record.status !== "refused") (record.diagnostics ??= {})[`${name}LogTail`] = lastLines(redactSensitiveText(text, secrets), 50);
     }
     record.finishedAt = new Date().toISOString();
-    await phase(record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
+    await phase(record.status === "refused" ? "fit_refused" : record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
   }
   return record;
 }
@@ -1378,21 +1463,26 @@ async function runComparison(env, cfg, report, signal) {
   const recorded = JSON.parse(await readFile(path.join(scratch, "build.json"), "utf8"));
   fact(recorded.baseSha === cfg.baseSha && recorded.headSha === cfg.headSha && recorded.backend === cfg.backend, "build.json belongs to a different base/head/backend");
   const built = recorded.built;
-  for (const side of ["base", "head"]) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
+  for (const side of runSides(cfg)) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
   for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
-  let firstRoute = true;
+  let firstRoute = true, scailCapGiB;
+  const verifiedSegmenters = new Set();
   for (const route of report.routes.filter((item) => item.status === "ready")) {
     if (route.status !== "ready") continue;
     const definition = ROUTES[route.id];
     const repos = [...route.rows.required, ...route.rows.optional];
+    if (definition.scailCandidate && !verifiedSegmenters.has(route.hub)) {
+      await verifySam3(snapshotDir(route.hub, SAM3.repo, SAM3.revision));
+      verifiedSegmenters.add(route.hub);
+    }
     const before = await hubFingerprint(route.hub, repos);
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
     const run = async (label) => {
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal, capGiB: scailCapGiB });
       const base = route.runs[0];
       if (definition.wanA14b && record.status === "completed" && base?.status === "completed") {
         if (record.identity.claimedSource.boundMembersSha256 !== base.identity.claimedSource.boundMembersSha256) {
@@ -1407,35 +1497,46 @@ async function runComparison(env, cfg, report, signal) {
       if (record.hubMutation.changed) progress({ route: route.id, run: label, phase: "hub_mutation", entries: record.hubMutation.diff.count });
       route.runs.push(record); await writeReport(cfg, report); return record;
     };
-    const base1 = await run("base#1");
-    // A worker that cannot register on the very first run will not register on the next five
-    // either (same host, same launch); stop the whole comparison with that verdict.
-    if (base1.failureClass === "worker_registration" && firstRoute) {
-      route.status = "ran"; route.verdict = "error"; route.verdictReason = `base#1 worker registration failed: ${base1.error}`;
-      for (const other of report.routes.filter((item) => item.status === "ready")) { other.status = "not_run"; other.skipReason = "stopped: the owned worker could not register on base#1 of the first route"; }
-      report.fatal = `owned worker registration failed on base#1 of the first route (${base1.error}); remaining runs not attempted`;
-      progress({ route: route.id, phase: "verdict", verdict: "error", reason: report.fatal });
-      await writeReport(cfg, report);
-      break;
+    if (definition.scailCandidate) {
+      const head = await run("head");
+      const ok = head.status === (definition.refuse ? "refused" : "completed");
+      route.status = "ran"; route.verdict = ok ? "verified" : "error";
+      route.verdictReason = ok ? (definition.refuse ? "observed insufficient accelerator budget" : "exported plural character animation") : head.error;
+      if (ok && !definition.refuse && definition.references === 6) {
+        scailCapGiB = scailRefusalCapGiB(head.fit, route.nativeFitEvidence);
+      }
+      if (!ok) report.fatal = `${route.id}: ${head.error ?? head.status}`;
+    } else {
+      const base1 = await run("base#1");
+      // A worker that cannot register on the very first run will not register on the next five
+      // either (same host, same launch); stop the whole comparison with that verdict.
+      if (base1.failureClass === "worker_registration" && firstRoute) {
+        route.status = "ran"; route.verdict = "error"; route.verdictReason = `base#1 worker registration failed: ${base1.error}`;
+        for (const other of report.routes.filter((item) => item.status === "ready")) { other.status = "not_run"; other.skipReason = "stopped: the owned worker could not register on base#1 of the first route"; }
+        report.fatal = `owned worker registration failed on base#1 of the first route (${base1.error}); remaining runs not attempted`;
+        progress({ route: route.id, phase: "verdict", verdict: "error", reason: report.fatal });
+        await writeReport(cfg, report);
+        break;
+      }
+      firstRoute = false;
+      const head = signal.aborted ? null : await run("head");
+      let decision = verdictFor({ base1, head });
+      let base2 = null;
+      if (decision.needBase2 && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
+      if (decision.verdict === null) decision = { verdict: "error", reason: "interrupted before base#2" };
+      route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
+      route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
+      if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
+      if (decision.verdict === "head_differs") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
     }
-    firstRoute = false;
-    const head = signal.aborted ? null : await run("head");
-    let decision = verdictFor({ base1, head });
-    let base2 = null;
-    if (decision.needBase2 && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
-    if (decision.verdict === null) decision = { verdict: "error", reason: "interrupted before base#2" };
-    route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
-    route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
-    if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
-    if (decision.verdict === "head_differs") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
     const after = await hubFingerprint(route.hub, repos);
     // Only the route's own repositories decide `changed`; the shared root listing can legitimately
     // change under another runner job, so it is recorded but never fails this one.
     route.hubMutation = { changed: JSON.stringify(before.repos) !== JSON.stringify(after.repos), rootChanged: JSON.stringify([before.root, before.hfHome]) !== JSON.stringify([after.root, after.hfHome]), diff: diffObjects(before, after, HUB_MUTATION_LISTING_LIMIT), method: "readdir/stat of the hub root, its parent, and each route repository's dir/refs/snapshots/blobs (metadata only)" };
-    progress({ route: route.id, phase: "verdict", verdict: decision.verdict, reason: decision.reason });
-    if (decision.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
+    progress({ route: route.id, phase: "verdict", verdict: route.verdict, reason: route.verdictReason });
+    if (route.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
     await writeReport(cfg, report);
-    if (signal.aborted) break;
+    if (signal.aborted || report.fatal) break;
   }
 }
 
@@ -1478,7 +1579,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       await stageWanSnapshots(env, cfg, report, controller.signal);
       await preflight(env, cfg, report);
     }
-    for (const route of report.routes.filter((item) => ROUTES[item.id].wanA14b)) {
+    for (const route of report.routes.filter((item) => (ROUTES[item.id].wanA14b || ROUTES[item.id].scailCandidate))) {
       fact(route.status === "ready", `${route.id} preflight failed: ${route.skipReason}`);
     }
     if (mode === "build") await build(env, cfg, report);

@@ -972,3 +972,159 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(cuda, /--stage-wan[\s\S]+--preflight-only[\s\S]+--build-only[\s\S]+--run\b/);
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
 });
+
+test("SCAIL requires an enabled candidate catalog and both pinned product components", async () => {
+  const catalog = await readCatalog(root);
+  const evidence = await readPatternEvidence(root);
+  const head = catalog.map((m) => m.id === "scail2_14b" ? { ...m, ui: { ...m.ui, scail2MultiReference: true } } : m);
+  const closed = catalog.map((m) => m.id === "scail2_14b" ? { ...m, ui: { ...m.ui, scail2MultiReference: false } } : m);
+  const fs = { stat: async () => ({ isFile: () => true, size: 99 }) };
+  for (const backend of ["mlx", "cuda"]) {
+    const routes = Object.values(ROUTES).filter((r) => r.scailCandidate && r.backend === backend);
+    assert.deepEqual(routes.map((r) => r.references), [2, 3, 4, 5, 6, 6]); assert.ok(routes.at(-1).refuse);
+    const options = { routes, platform: backend === "mlx" ? "darwin" : "win32", hubs: [backend === "mlx" ? "/hub" : "E:\\hub"], baseCatalog: closed, headCatalog: head, evidence, fs };
+    await assert.rejects(planRoutes({ ...options, headCatalog: closed }), /plural character descriptor/);
+    const plans = await planRoutes(options);
+    for (const [i, plan] of plans.entries()) {
+      assert.equal(plan.status, "ready");
+      assert.equal(plan.request.body.referenceAssetIds.length, routes[i].references);
+      assert.deepEqual(plan.rows.required.map((r) => r.repo), ["SceneWorks/scail2-mlx", "SceneWorks/sam3-mlx"]);
+      assert.deepEqual(plan.rows.required[1].files, ["model.safetensors", "tokenizer.json"]);
+      const report = { mode: "run", routes: [{ ...plan, status: "ran", verdict: "verified" }], summary: { ran: 1 } };
+      assert.equal(exitCodeFor(report), 0);
+      report.routes[0].verdict = "skipped"; assert.equal(exitCodeFor(report), 1);
+    }
+    assert.throws(() => selectRoutes(backend, routes.at(-1).id), /preceding accepted/);
+    assert.equal(selectRoutes(backend, [routes[4].id, routes[5].id].join(",")).length, 2);
+    assert.ok(!DEFAULT_ROUTE_IDS[backend].some((id) => ROUTES[id].scailCandidate));
+  }
+});
+
+test("SCAIL workers must observe the exact file seal, ordered RGB inputs and live cold and execution budgets", async () => {
+  const { scailFitEvents, scailArtifactSha256 } = await import("./lib/tier2-scail.mjs");
+  for (const backend of ["mlx", "cuda"]) {
+    for (const n of [2, 3, 4, 5, 6]) {
+      const route = ROUTES[`${backend}-scail2-q4-animate-${n}`];
+      const sources = { references: Array.from({ length: n }, (_, i) => ({ rgbSha256: sha256(String(i)) })) };
+      const lane = backend === "mlx" ? backend : "candle";
+      const pairs = sources.references.map((_, i) => `reference-${i}-1:0:832x480:reference-mask-${i}-1:0:832x480`).join(":");
+      const frames = Array.from({ length: 45 }, (_, i) => `${i}:832x480`).join(",");
+      const carrier = `scail2-carrier-v2:backend-${lane}:task-animation:composite-832x480:characters-${n}:${pairs}:driving-frames-45:${frames}:driving-mask-45:${frames}:strength-3f800000:mode-FaceOnly:frame-0+scail2-carrier-request-seal-v2-${sha256("carrier")}`;
+      const cold = { event: "scail2_plural_fit", evidenceSha256: sha256("native"), jobId: "owned", stage: "cold_load", backend: lane, tier: "q4", artifactTier: "q4",
+        width: 832, height: 480, frames: 45, referenceCount: n, artifactSha256: scailArtifactSha256, carrierReceipt: carrier,
+        referenceRgbSha256: sources.references.map((r) => r.rgbSha256).join(","), requiredAcceleratorBytes: 100,
+        availableAcceleratorBytes: 100, requiredPhysicalHostBytes: 100, availablePhysicalHostBytes: 100, providerCreditBytes: 0, admitted: true };
+      const execution = { ...cold, stage: "execution" };
+      const verify = (entries, admitted = true) => scailFitEvents(entries.map((e) => JSON.stringify(e)).join("\n"), route, "owned", admitted, sources, [{ sha256: sha256("native") }]);
+      assert.equal(verify([cold, execution]).length, 2);
+      for (const change of [{ referenceRgbSha256: cold.referenceRgbSha256.split(",").reverse().join(",") },
+        { stage: "cold_load" }, { artifactSha256: sha256("wrong") }, { evidenceSha256: sha256("other") }, { carrierReceipt: carrier.replace("reference-mask-1", "reference-mask-0") },
+        { jobId: "another" }, { carrierReceipt: carrier.replace(sha256("carrier"), sha256("another")) },
+        { availablePhysicalHostBytes: null }, { availableAcceleratorBytes: 99 }, { tier: "bf16" }]) {
+        assert.throws(() => verify([cold, { ...execution, ...change }]));
+      }
+      const denied = { ...cold, admitted: false, availableAcceleratorBytes: 99 };
+      assert.equal(verify([denied], false).length, 1);
+      assert.throws(() => verify([denied, execution], false));
+      assert.throws(() => verify([{ ...denied, availableAcceleratorBytes: 150, availablePhysicalHostBytes: 99 }], false));
+    }
+  }
+});
+
+test("SCAIL rendered outputs require the backend decoder length, changing pixels, actual seed and exported source IDs", async () => {
+  const { verifyScailOutput } = await import("./lib/tier2-scail.mjs");
+  const sources = { references: [{ id: "first" }, { id: "second" }], clip: { id: "drive" } };
+  for (const backend of ["mlx", "cuda"]) {
+    const route = ROUTES[`${backend}-scail2-q4-animate-2`], lane = backend === "mlx" ? "mlx" : "candle";
+    const buffer = Buffer.alloc(832 * 480 * 4 * route.savedFrames);
+    buffer[4] = 7;
+    const video = { width: 832, height: 480, avgFrameRate: "16/1", decodedFrames: route.savedFrames };
+    const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video, audio: null }, buffer };
+    const metrics = { model: route.model, backend, steps: 4, guidanceScale: 5, width: 832, height: 480, seed: 33402, totalMs: 75 };
+    const recipe = { adapter: lane + "_scail2", loras: [], prompt: route.body.prompt, model: route.model, mode: route.mode, seed: 33402,
+      rawAdapterSettings: { realModelInference: true, frameCount: route.savedFrames }, normalizedSettings: { sourceClipAssetId: "drive", referenceAssetIds: ["first", "second"] } };
+    const identity = { provider_id: route.model, backend: lane, randomness: { kind: "draws", draws: [{ seed: 33402 }] },
+      schedule: { state: "resolved", value: [{ digest: { count: 5, sha256: sha256("schedule") } }] },
+      sampling: { state: "resolved", value: [backend === "mlx" ? { solver: "UniPC" } : "wan_flow_unipc_bh2_order2_v1"] } };
+    const receipt = { version: 1, acceptedBackend: lane, jobId: "owned", outputs: [{ artifactIds: ["export"], execution: { state: "resolved", identity } }] };
+    const verify = () => verifyScailOutput(route, content, receipt, "owned", "export", recipe, sources, metrics);
+    assert.equal(verify().decodedFrameSha256.length, route.savedFrames);
+    video.decodedFrames = backend === "mlx" ? 45 : 48; assert.throws(verify); video.decodedFrames = route.savedFrames;
+    recipe.normalizedSettings.referenceAssetIds.reverse(); assert.throws(verify); recipe.normalizedSettings.referenceAssetIds.reverse();
+    identity.randomness.draws[0].seed++; assert.throws(verify); identity.randomness.draws[0].seed--;
+    buffer.fill(0); assert.throws(verify, /single color/);
+  }
+});
+
+test("SCAIL imports ordered files through project multipart and verifies the served bytes", async (t) => {
+  const { uploadScailMedia } = await import("./lib/tier2-scail.mjs");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "scail-import-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const refs = ["A.png", "B.png"].map((name) => path.join(dir, name));
+  const rgb = refs.map((_, i) => Buffer.alloc(832 * 480 * 3, i + 17));
+  for (const [i, ref] of refs.entries()) await writeFile(ref, png(rgb[i], 832, 480, 3));
+  const clip = path.join(dir, "driving.mp4");
+  await writeFile(clip, Buffer.from("video fixture"));
+  const uploads = new Map();
+  const endpoint = {
+    async exchange(method, route, form, options) {
+      assert.deepEqual([method, route, options], ["POST", "/api/v1/projects/p/assets", { multipart: true }]);
+      assert.deepEqual([...form.keys()], ["file"]);
+      const file = form.get("file"), rel = "assets/" + file.name;
+      uploads.set(rel, Buffer.from(await file.arrayBuffer()));
+      return { status: 201, body: { id: file.name, projectId: "p", type: file.type.split("/")[0], file: { path: rel } } };
+    },
+    async served(url) { return { bytes: uploads.get(url.replace("/api/v1/projects/p/files/", "")) }; },
+  };
+  const route = ROUTES["mlx-scail2-q4-animate-2"];
+  const uploaded = await uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng);
+  assert.deepEqual(uploaded.references.map((r) => r.rgbSha256), rgb.map(sha256));
+  const request = requestBody(route, "p", uploaded);
+  assert.deepEqual(request.referenceAssetIds, ["A.png", "B.png"]);
+  assert.equal(request.sourceClipAssetId, "driving.mp4");
+  endpoint.served = async () => ({ bytes: Buffer.from("altered") });
+  await assert.rejects(uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng), /served input differs/);
+});
+
+test("SCAIL product preflight requires the calibrated count rows from the candidate package", async () => {
+  const { scailFitEvidence, scailArtifactSha256 } = await import("./lib/tier2-scail.mjs");
+  for (const backend of ["mlx", "cuda"]) {
+    const counts = backend === "mlx" ? [2, 6] : [2, 3, 4, 5, 6];
+    const pool = counts.map((references) => ({ platform: backend === "mlx" ? "macos" : "windows",
+      device: "fixture-device", runtime: "fixture-runtime", evidence_sha256: sha256(String(references)), witness: { gross_device_bytes: 700, gross_unified_bytes: 800, axes: {
+        backend, artifact_sha256: scailArtifactSha256, artifact_tier: "q4", effective_tier: "q4", width: 832, height: 480, references } } }));
+    assert.deepEqual(scailFitEvidence(pool, backend).map((r) => r.references), counts);
+    assert.throws(() => scailFitEvidence(pool.slice(1), backend), /no packaged native/);
+    pool[0].evidence_sha256 = "undefined";
+    assert.throws(() => scailFitEvidence(pool, backend), /no packaged native/);
+  }
+});
+
+test("SCAIL staging downloads only exact absent q4 and SAM3 filenames on both hosts", async () => {
+  const { SAM3, SCAIL_REVISION } = await import("./lib/tier2-scail.mjs");
+  const baseCatalog = await readCatalog(root), evidence = await readPatternEvidence(root);
+  const headCatalog = baseCatalog.map((m) => m.id === "scail2_14b" ? { ...m, ui: { ...m.ui, scail2MultiReference: true } } : m);
+  for (const backend of ["mlx", "cuda"]) {
+    const routes = [ROUTES[`${backend}-scail2-q4-animate-6`]], hubs = [backend === "mlx" ? "/local models/hub" : "E:\\local models\\hub"];
+    const cfg = { routes, hubs, backend, baseDir: root, headDir: root };
+    const absent = new Set(["q4/dit.safetensors", "model.safetensors"]);
+    const fs = { stat: async (file) => {
+      const member = file.replaceAll("\\", "/").split(/\/snapshots\/[a-f0-9]{40}\//)[1];
+      if (absent.has(member)) throw Object.assign(Error("missing"), { code: "ENOENT" });
+      return { isFile: () => true, size: 29 };
+    } };
+    fs.lstat = fs.stat;
+    const plan = () => planRoutes({ routes, hubs, baseCatalog, headCatalog, platform: backend === "mlx" ? "darwin" : "win32", fs, evidence });
+    const before = await plan(); assert.equal(before[0].status, "skipped");
+    const calls = [];
+    await stageWanSnapshots({}, cfg, { routes: before }, null, (args) => {
+      calls.push(args); absent.delete(args[2]);
+    }, fs);
+    assert.deepEqual(calls, [
+      ["download", "SceneWorks/scail2-mlx", "q4/dit.safetensors", "--revision", SCAIL_REVISION, "--cache-dir", hubs[0]],
+      ["download", SAM3.repo, "model.safetensors", "--revision", SAM3.revision, "--cache-dir", hubs[0]],
+    ]);
+    const after = await plan(); assert.equal(after[0].status, "ready");
+    await stageWanSnapshots({}, cfg, { routes: after }, null, () => assert.fail("complete rows"), fs);
+  }
+});
