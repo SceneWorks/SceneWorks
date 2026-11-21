@@ -97,36 +97,19 @@ pub(crate) fn start_app_managed_challenges(
         let mut guard = attempts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Instant::now();
-        guard.retain(|_, until| *until > now);
-        if guard.contains_key(&source_id) {
-            drop(guard);
-            // A running attempt answers every challenge for its source when it finishes. One that
-            // just finished already published whatever it proved, so answer this one now.
-            let running = running_challenges().contains(&source_id);
-            if !running {
-                let ids = group.into_iter().map(|entry| entry.id).collect();
-                let (api, settings, capability) =
-                    (api.clone(), settings.clone(), capability.clone());
-                tokio::spawn(async move {
-                    post_challenge_answers(
-                        &api,
-                        &settings,
-                        &capability,
-                        ids,
-                        UNPROVED_CHALLENGE_ANSWER,
-                    )
-                    .await;
-                });
-            }
+        if !challenge_attempt_allowed(&mut guard, &source_id, Instant::now()) {
+            // Running, or cooling down after an attempt: leave the challenge pending, never
+            // answered "unproved". A running attempt answers it when it finishes; after the
+            // cooldown the next poll proves it — cheaply, from the verdict the last attempt
+            // recorded — with a real ledger, which a utility admission needs on this challenge.
             continue;
         }
+        let now = Instant::now();
         let Ok(permit) = slots.clone().try_acquire_owned() else {
             continue;
         };
         guard.insert(source_id.clone(), now + Duration::from_secs(2 * 60 + 10));
         drop(guard);
-        running_challenges().insert(source_id.clone());
         let challenge = group.remove(0);
         let mut ids = group
             .into_iter()
@@ -170,7 +153,6 @@ pub(crate) fn start_app_managed_challenges(
                 );
             }
             post_challenge_answers(&api, &settings, &capability, ids, &answer).await;
-            running_challenges().remove(&source_id);
             if let Some(attempts) = CHALLENGE_ATTEMPTS.get() {
                 attempts
                     .lock()
@@ -192,12 +174,15 @@ fn answered_challenges() -> std::sync::MutexGuard<'static, BTreeMap<String, Inst
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn running_challenges() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
-    static RUNNING: OnceLock<Mutex<std::collections::BTreeSet<String>>> = OnceLock::new();
-    RUNNING
-        .get_or_init(|| Mutex::new(std::collections::BTreeSet::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Whether a new attempt at `source_id` may start now: not while one is running (its entry
+/// covers the whole attempt) nor during the short cooldown after one finished.
+fn challenge_attempt_allowed(
+    attempts: &mut BTreeMap<String, Instant>,
+    source_id: &str,
+    now: Instant,
+) -> bool {
+    attempts.retain(|_, until| *until > now);
+    !attempts.contains_key(source_id)
 }
 
 /// Post `answer` (the exact ledger when proved) for each challenge id, remembering it as answered.
@@ -255,18 +240,22 @@ fn prove_registered_challenge(
 }
 
 /// One complete verification pass on demand: every registered source is captured, hashing what
-/// the verdict store cannot vouch for, and published as proved until the worker restarts.
+/// the verdict store cannot vouch for, and each claim is published as proved the moment it is
+/// verified, so the next heartbeat carries it even while the pass goes on hashing unrelated
+/// sources. A cold pass can outlast the admission deadline; a source it proved early must not.
 fn full_inventory_pass(settings: &Settings) {
-    let mut claims = Vec::new();
-    with_hash_permission(HashPermission::Any, || {
-        collect_source_claims(settings, |claim| claims.push(claim));
+    full_inventory_pass_with(settings, |claim| {
+        pending_inventory()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publish_probe(claim);
     });
-    let mut inventory = pending_inventory()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for claim in claims {
-        inventory.publish_probe(claim);
-    }
+}
+
+fn full_inventory_pass_with(settings: &Settings, publish: impl FnMut(PortableSourceClaim)) {
+    with_hash_permission(HashPermission::Any, || {
+        collect_source_claims(settings, publish);
+    });
 }
 
 /// Resolve a path-free, API-authored probe. A full-inventory request runs one verification pass;
@@ -2325,6 +2314,76 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A challenge for a source whose last attempt is running or cooling down is left pending —
+    /// never answered "unproved", which would mark a utility challenge done without its proof —
+    /// and becomes attemptable again once the cooldown passes.
+    #[test]
+    fn a_challenge_during_an_attempt_cooldown_waits_instead_of_being_answered() {
+        let mut attempts = BTreeMap::new();
+        let now = Instant::now();
+        attempts.insert("installed-source".to_owned(), now + Duration::from_secs(10));
+        assert!(!challenge_attempt_allowed(
+            &mut attempts,
+            "installed-source",
+            now
+        ));
+        assert!(challenge_attempt_allowed(
+            &mut attempts,
+            "another-source",
+            now
+        ));
+        assert!(challenge_attempt_allowed(
+            &mut attempts,
+            "installed-source",
+            now + Duration::from_secs(11)
+        ));
+    }
+
+    /// A full verification pass publishes each claim as it is verified, into the same inventory
+    /// heartbeats read, rather than buffering the whole pass: a source proved early reaches the
+    /// API even while the pass goes on hashing unrelated checkpoints.
+    #[test]
+    fn a_full_inventory_pass_publishes_each_verified_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let install = data.join("models/imports/full_pass_model");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join("model.safetensors"), b"full pass weights").unwrap();
+        let mut settings = Settings::for_test(data);
+        settings.config_dir = temp.path().join("config");
+        std::fs::create_dir_all(settings.config_dir.join("manifests")).unwrap();
+        std::fs::write(
+            settings.config_dir.join("manifests/user.models.jsonc"),
+            json!({"schemaVersion":1, "models":[{"id":"full_pass_model", "type":"image",
+                "paths":{"model":install}}]})
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut published = Vec::new();
+        full_inventory_pass_with(&settings, |claim| published.push(claim.source_id));
+        let model_claims = published
+            .iter()
+            .filter(|id| id.starts_with("registered_digest:model:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !model_claims.is_empty(),
+            "the pass verified the model: {published:?}"
+        );
+
+        full_inventory_pass(&settings);
+        let inventory = pending_inventory()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            model_claims
+                .iter()
+                .all(|id| inventory.claims.iter().any(|claim| &claim.source_id == id)),
+            "every verified claim is published to the heartbeat inventory"
+        );
+    }
 
     /// The inventory never reads model bytes: under `RecordedOnly` a file without a verdict is not
     /// advertised and is not read. An on-demand proof (`Sizes`) reads only the files of the sizes

@@ -7291,14 +7291,80 @@ async fn imported_krea_keeps_candle_routes_despite_inherited_mlx_only_decoder() 
     }
 }
 
+/// A keyed worker that answers the next source challenge it is asked: proving it (the exact
+/// ledger, then the claim on a later heartbeat) or not. Between the answer and the claim it sends a
+/// heartbeat whose claims were snapshotted BEFORE the proof finished, which must not be taken as
+/// the proof's publication.
+fn spawn_verifying_worker(
+    app: axum::Router,
+    key: String,
+    claim: sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim,
+    proves: bool,
+) -> tokio::task::JoinHandle<()> {
+    use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
+    tokio::spawn(async move {
+        let heartbeat = |claims: Value| {
+            let app = app.clone();
+            let key = key.clone();
+            async move {
+                let (status, body) = request(
+                    app,
+                    "POST",
+                    "/api/v1/workers/verify-worker/heartbeat",
+                    json!({"status":"idle","currentJobId":null,"loadedModels":[],
+                        "portableProofKey":key,"portableSourceClaims":claims}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+        };
+        loop {
+            let (_, challenges) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/workers/verify-worker/portable-source-challenges",
+                json!({"capability":key}),
+            )
+            .await;
+            let Some(challenge) = challenges.as_array().and_then(|list| list.first()).cloned()
+            else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            };
+            // The challenge names exactly the source the job needs.
+            assert_eq!(challenge["sourceId"], json!(claim.source_id));
+            assert_eq!(challenge["files"], json!(claim.files));
+            let answer = if proves {
+                portable_file_ledger_sha256(&claim.files).expect("ledger")
+            } else {
+                "unproved".to_owned()
+            };
+            let (status, _) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/workers/verify-worker/portable-source-proof",
+                json!({"id":challenge["id"],"capability":key,"ledgerSha256":answer}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            heartbeat(json!([])).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let claims = if proves { json!([claim]) } else { json!([]) };
+            heartbeat(claims).await;
+            return;
+        }
+    })
+}
+
 /// Workers no longer hash their sources at startup; a source with no recorded verdict is verified
 /// when a job needs it. Enqueue finds no live claim for the import, challenges the eligible keyed
 /// worker with the exact files, and binds as soon as that worker proves them. A worker that cannot
 /// prove them answers so, and the refusal returns promptly instead of after the challenge timeout.
+/// A duplicate of the admitted job, after the worker's verdicts are gone again (identical bytes, a
+/// cold store), recovers the same way against its frozen route.
 #[tokio::test]
 async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
-    use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
-
     for proves in [true, false] {
         let temp = tempfile::tempdir().expect("temp dir creates");
         let model_path = temp.path().join("data/imported/user-krea.safetensors");
@@ -7345,67 +7411,7 @@ async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
         assert_eq!(status, StatusCode::OK, "{body}");
 
         let claim = imported_fixture_claim("user_krea", &model_path);
-        let worker = {
-            let (app, key, claim) = (app.clone(), key.clone(), claim.clone());
-            tokio::spawn(async move {
-                let heartbeat = |claims: Value| {
-                    let app = app.clone();
-                    let key = key.clone();
-                    async move {
-                        let (status, body) = request(
-                            app,
-                            "POST",
-                            "/api/v1/workers/verify-worker/heartbeat",
-                            json!({"status":"idle","currentJobId":null,"loadedModels":[],
-                                "portableProofKey":key,"portableSourceClaims":claims}),
-                        )
-                        .await;
-                        assert_eq!(status, StatusCode::OK, "{body}");
-                    }
-                };
-                loop {
-                    let (_, challenges) = request(
-                        app.clone(),
-                        "POST",
-                        "/api/v1/workers/verify-worker/portable-source-challenges",
-                        json!({"capability":key}),
-                    )
-                    .await;
-                    let Some(challenge) =
-                        challenges.as_array().and_then(|list| list.first()).cloned()
-                    else {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        continue;
-                    };
-                    // The challenge names exactly the source the job needs.
-                    assert_eq!(challenge["sourceId"], json!(claim.source_id));
-                    assert_eq!(challenge["files"], json!(claim.files));
-                    let answer = if proves {
-                        portable_file_ledger_sha256(&claim.files).expect("ledger")
-                    } else {
-                        "unproved".to_owned()
-                    };
-                    let (status, _) = request(
-                        app.clone(),
-                        "POST",
-                        "/api/v1/workers/verify-worker/portable-source-proof",
-                        json!({"id":challenge["id"],"capability":key,"ledgerSha256":answer}),
-                    )
-                    .await;
-                    assert_eq!(status, StatusCode::OK);
-                    // A heartbeat whose claims were snapshotted BEFORE the proof finished, arriving
-                    // only after the answer: it must not be taken as the proof's publication.
-                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                    heartbeat(json!([])).await;
-                    // The next heartbeat carries what the proof published.
-                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                    let claims = if proves { json!([claim]) } else { json!([]) };
-                    heartbeat(claims).await;
-                    return;
-                }
-            })
-        };
-
+        let worker = spawn_verifying_worker(app.clone(), key.clone(), claim.clone(), proves);
         let started = std::time::Instant::now();
         let (status, job) = request(
             app.clone(),
@@ -7421,13 +7427,7 @@ async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
             matches!(answered, Ok(Ok(()))),
             "enqueue must challenge the worker for the unadvertised source ({status}: {job})"
         );
-        if proves {
-            assert_eq!(
-                status,
-                StatusCode::CREATED,
-                "a source proved on demand must admit the job: {job}"
-            );
-        } else {
+        if !proves {
             assert_eq!(status, StatusCode::CONFLICT, "{job}");
             assert_eq!(job["code"], "model_artifact_incomplete", "{job}");
             assert!(
@@ -7435,7 +7435,43 @@ async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
                 "an answered, unproved challenge must not wait out its timeout ({:?})",
                 started.elapsed()
             );
+            continue;
         }
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a source proved on demand must admit the job: {job}"
+        );
+
+        // The worker's verdicts are gone again (same bytes, cold store): it advertises nothing.
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/verify-worker/heartbeat",
+            json!({"status":"idle","currentJobId":null,"loadedModels":[],
+                "portableProofKey":key,"portableSourceClaims":[]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let job_id = job["id"].as_str().expect("job id").to_owned();
+        let worker = spawn_verifying_worker(app.clone(), key.clone(), claim, true);
+        let (status, replayed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/duplicate"),
+            json!({ "payloadChanges": { "prompt": "fog over hills" } }),
+        )
+        .await;
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), worker).await;
+        assert!(
+            matches!(answered, Ok(Ok(()))),
+            "a frozen replay must challenge the worker too ({status}: {replayed})"
+        );
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a duplicate recovers through on-demand proof: {replayed}"
+        );
     }
 }
 

@@ -424,7 +424,11 @@ async fn record_source_proof_request(
     Ok(())
 }
 
-/// The Digest members of `route` that no claim set advertises with their exact files.
+/// The Digest members of `route` that some worker's claim set lacks with their exact files.
+///
+/// Per worker, not across workers: a route binds only when ONE worker advertises its whole
+/// closure, so two workers with complementary partial advertisements must still be challenged
+/// for what each is missing. Every eligible worker receives the union.
 fn unclaimed_digest_members(
     route: &PortableRouteBinding,
     payload: &JsonObject,
@@ -440,12 +444,16 @@ fn unclaimed_digest_members(
             let Ok(source_id) = registered_digest_member_claim_id(model, member, &value) else {
                 continue;
             };
-            let advertised = claim_sets.iter().flatten().any(|claim| {
-                claim.source_id == source_id
-                    && claim.provenance == PortableSourceProvenance::OperatorOverride
-                    && claim.files == member.files
-            });
-            if !advertised {
+            let advertised_by = |claims: &Vec<PortableSourceClaim>| {
+                claims.iter().any(|claim| {
+                    claim.source_id == source_id
+                        && claim.provenance == PortableSourceProvenance::OperatorOverride
+                        && claim.files == member.files
+                })
+            };
+            let some_worker_lacks_it =
+                claim_sets.is_empty() || !claim_sets.iter().all(advertised_by);
+            if some_worker_lacks_it && !missing.iter().any(|(id, _)| *id == source_id) {
                 missing.push((source_id, member.files.clone()));
             }
         }
@@ -1185,20 +1193,38 @@ pub(crate) async fn capture_portable_model_binding(
         Some(&requests),
     )
     .await;
+    finish_with_on_demand_source_proof(state, &requests, first, || {
+        capture_portable_model_binding_inner(state, job_type, payload, requested_gpu, None, None)
+    })
+    .await
+}
+
+/// Verify on use. When `first` was refused only because no live worker advertises a source the
+/// request needs, ask the eligible workers to prove what `requests` recorded, then `retry` until
+/// their claims bind, the refusal is no longer about missing sources, or every asked worker has
+/// answered and delivered the heartbeats that carry what it proved. Admission and frozen replay
+/// share this, so a retry or duplicate recovers exactly as a fresh submission does.
+async fn finish_with_on_demand_source_proof<T, F, Fut>(
+    state: &AppState,
+    requests: &SourceProofRequests,
+    first: Result<T, ApiError>,
+    mut retry: F,
+) -> Result<T, ApiError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ApiError>>,
+{
     match &first {
         Err(error) if is_incomplete_source_refusal(error) && !requests.is_empty() => {}
         _ => return first,
     }
-    // Verify on use: ask the eligible workers to prove what this request needs, then retry until
-    // their claims bind a route, the refusal is no longer about missing sources, or every asked
-    // worker has answered and its proof had a heartbeat to arrive.
     let _capacity = state
         .portable_source_probe_slots
         .clone()
         .acquire_owned()
         .await
         .map_err(|_| incomplete("local source proof capacity is closed"))?;
-    let (challenges, workers) = issue_source_proof_challenges(state, &requests);
+    let (challenges, workers) = issue_source_proof_challenges(state, requests);
     let deadline = Instant::now() + SOURCE_CHALLENGE_TIMEOUT;
     let mut answered_at: Option<Instant> = None;
     // Each asked worker's heartbeat count when the last answer arrived.
@@ -1206,15 +1232,7 @@ pub(crate) async fn capture_portable_model_binding(
     let mut settled = false;
     let outcome = loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let attempt = capture_portable_model_binding_inner(
-            state,
-            job_type,
-            payload,
-            requested_gpu,
-            None,
-            None,
-        )
-        .await;
+        let attempt = retry().await;
         if !matches!(&attempt, Err(error) if is_incomplete_source_refusal(error)) {
             break attempt;
         }
@@ -1248,6 +1266,30 @@ pub(crate) async fn validate_frozen_replay_binding(
     frozen: &PortableJobBinding,
 ) -> Result<PortableJobBinding, ApiError> {
     crate::models::ensure_payload_run_licenses_acknowledged(state, job_type, payload).await?;
+    let requests = SourceProofRequests::default();
+    let first = validate_frozen_replay_binding_inner(
+        state,
+        job_type,
+        payload,
+        requested_gpu,
+        frozen,
+        Some(&requests),
+    )
+    .await;
+    finish_with_on_demand_source_proof(state, &requests, first, || {
+        validate_frozen_replay_binding_inner(state, job_type, payload, requested_gpu, frozen, None)
+    })
+    .await
+}
+
+async fn validate_frozen_replay_binding_inner(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    frozen: &PortableJobBinding,
+    proof_requests: Option<&SourceProofRequests>,
+) -> Result<PortableJobBinding, ApiError> {
     frozen
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
@@ -1268,8 +1310,15 @@ pub(crate) async fn validate_frozen_replay_binding(
             )));
         }
     }
-    filter_replay_routes_by_registered_claims(state, job_type, payload, requested_gpu, candidate)
-        .await
+    filter_replay_routes_by_registered_claims(
+        state,
+        job_type,
+        payload,
+        requested_gpu,
+        candidate,
+        proof_requests,
+    )
+    .await
 }
 
 fn replay_from_frozen_policy(
@@ -1360,6 +1409,7 @@ async fn filter_replay_routes_by_registered_claims(
     payload: &JsonObject,
     requested_gpu: &str,
     candidate: PortableJobBinding,
+    proof_requests: Option<&SourceProofRequests>,
 ) -> Result<PortableJobBinding, ApiError> {
     let mut available = BTreeMap::new();
     for (key, route) in &candidate.routes {
@@ -1395,6 +1445,26 @@ async fn filter_replay_routes_by_registered_claims(
         };
         if matched {
             available.insert(key.clone(), route.clone());
+        } else if !route_has_local_utility_primary(job_type, route) {
+            // Verify on use, against the frozen route: its exact Digest files, or a full pass
+            // when a frozen worker claim is what no worker advertises right now.
+            let needs_worker_claim = route
+                .models
+                .iter()
+                .flat_map(|model| &model.members)
+                .any(|member| matches!(member.source, PortableSourceIdentity::WorkerClaim { .. }));
+            record_source_proof_request(
+                state,
+                job_type,
+                payload,
+                requested_gpu,
+                &route.backend,
+                &route.platform,
+                proof_requests,
+                unclaimed_digest_members(route, payload, &sets),
+                needs_worker_claim,
+            )
+            .await?;
         }
     }
     if available.is_empty() {
@@ -5481,6 +5551,75 @@ mod tests {
         let mut changed = claim;
         changed.files[0].size_bytes += 1;
         assert!(replay_route_claims_match(&route, &JsonObject::new(), &[changed]).is_err());
+    }
+
+    /// Two workers with complementary partial advertisements: neither binds the route, so both
+    /// sources must be challenged. Flattening the claim sets across workers found both members
+    /// "advertised", challenged nobody, and left the request refused for good.
+    #[test]
+    fn complementary_partial_advertisements_still_challenge_every_missing_source() {
+        let member_and_claim = |slot: &str, model_id: &str, byte: &str| {
+            let file = PortableArtifactFile {
+                relative_path: PathBuf::from(format!("{model_id}.safetensors")),
+                size_bytes: 4,
+                sha256: format!("sha256:{}", byte.repeat(64)),
+            };
+            let model = PortableModelBinding::new(
+                slot,
+                model_id,
+                "candle",
+                "local",
+                None,
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![PortableArtifactMember {
+                    role: ArtifactMemberRole::Primary,
+                    component_id: None,
+                    source: PortableSourceIdentity::Digest {
+                        sha256: portable_closure_sha256(std::slice::from_ref(&file)).unwrap(),
+                    },
+                    tier: None,
+                    files: vec![file.clone()],
+                }],
+            )
+            .unwrap();
+            let claim = PortableSourceClaim::new(
+                sceneworks_core::portable_sources::registered_digest_claim_id(
+                    "model",
+                    model_id,
+                    None,
+                    &portable_file_ledger_sha256(std::slice::from_ref(&file)).unwrap(),
+                )
+                .unwrap(),
+                PortableSourceProvenance::OperatorOverride,
+                vec![file],
+            )
+            .unwrap();
+            (model, claim)
+        };
+        let (base, base_claim) = member_and_claim("modelManifestEntry", "imported_base", "a");
+        let (adapter, adapter_claim) =
+            member_and_claim("modelManifestEntries/0", "local_adapter", "b");
+        let route = PortableRouteBinding::new("candle", "windows", vec![base, adapter]).unwrap();
+        let worker_a = vec![base_claim.clone()];
+        let worker_b = vec![adapter_claim.clone()];
+        let sets = vec![worker_a.clone(), worker_b.clone()];
+        assert!(sets.iter().all(|claims| replay_route_claims_match(
+            &route,
+            &JsonObject::new(),
+            claims
+        )
+        .is_err()));
+
+        let missing = unclaimed_digest_members(&route, &JsonObject::new(), &sets);
+        let missing_ids = missing.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        assert!(
+            missing_ids.contains(&base_claim.source_id)
+                && missing_ids.contains(&adapter_claim.source_id),
+            "each worker's missing source is challenged: {missing_ids:?}"
+        );
+        // A worker advertising the whole closure leaves nothing to challenge.
+        let complete = vec![vec![base_claim, adapter_claim]];
+        assert!(unclaimed_digest_members(&route, &JsonObject::new(), &complete).is_empty());
     }
 
     #[test]
