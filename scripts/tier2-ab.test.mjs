@@ -1048,6 +1048,8 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
       if (backend === "mlx" && n < 6) {
         assert.equal(verify(usingCapture(6)).length, 2);
         assert.throws(() => verify([cold, { ...execution, evidenceReferences: 6 }]), /changed its admitted physical evidence/);
+      } else if (backend === "cuda" && n < 6) {
+        assert.throws(() => verify(usingCapture(6)), /covering the requested reference count/);
       }
       for (const change of [{ referenceRgbSha256: cold.referenceRgbSha256.split(",").reverse().join(",") },
         { stage: "cold_load" }, { artifactSha256: sha256("wrong") }, { evidenceSha256: sha256("other") }, { evidenceArtifactId: 17 }, { grossHostBytes: 95 }, { requiredAcceleratorBytes: 99 }, { carrierReceipt: carrier.replace("reference-mask-1", "reference-mask-0") },
@@ -1132,10 +1134,14 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
       hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
     for (const n of counts) {
-      const tokens = (15 + n) * 1560;
-      const window = {latent_frames:12, history_frames:0, decoded_frames:mlx?48:45, tokens, mlx_unsplit_ffn:mlx,
-        mlx_ffn_chunks:Math.ceil(tokens/8192), mlx_ffn_tail:tokens%8192, self_attention_query_rows:mlx?0:64,
-        self_attention_score_elements:mlx?0:64*tokens};
+      // Pinned SCAIL window values by count: packed tokens, final FFN rows, CUDA query rows and scores.
+      const [tokens, tail, rows, scores] = [
+        [26520, 1944, 942, 999273600], [28080, 3504, 890, 999648000], [29640, 5064, 843, 999460800],
+        [31200, 6624, 801, 999648000], [32760, 8184, 763, 999835200],
+      ][n - 2];
+      const window = { latent_frames: 12, history_frames: 0, decoded_frames: mlx ? 48 : 45, tokens,
+        mlx_unsplit_ffn: mlx, mlx_ffn_chunks: 4, mlx_ffn_tail: tail,
+        self_attention_query_rows: mlx ? 0 : rows, self_attention_score_elements: mlx ? 0 : scores };
       const axes = { backend, artifact_sha256: scailArtifactSha256, artifact_tier:"q4", effective_tier:"q4", width:832, height:480,
         references:n, history_order:4, classifier_free_guidance:true, mlx_dpmpp:false, windows:[window],
         source_bytes:(2*n+90)*832*480*3, driving_stack_bytes:45*832*480*24, schedule_bytes:320, source_resize_bytes:0,
@@ -1165,6 +1171,18 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       : {grossHostBytes:158,grossDeviceBytes:175,grossUnifiedBytes:0});
     assert.throws(() => read(projected.slice(1)), /no packaged native/);
     const wrong = (mutate) => { const copy = structuredClone(projected); mutate(copy[0]); assert.throws(() => read(copy)); };
+    const short = structuredClone(projected);
+    for (const r of short.filter((r) => r.axes.references < 6)) {
+      Object.assign(r.axes.windows[0], { latent_frames: 1, decoded_frames: 1 });
+    }
+    assert.throws(() => read(short), /different native SCAIL window/);
+    for (const key of Object.keys(projected[0].axes.windows[0])) {
+      wrong((r) => {
+        const window = r.axes.windows[0];
+        if (typeof window[key] === "boolean") window[key] = !window[key];
+        else window[key]++;
+      });
+    }
     wrong((r) => { r.guard_policy_sha256 = sha256("different policy"); });
     wrong((r) => { r.post_execution_verified = false; });
     wrong((r) => { if (mlx) r.bounds.mlx_decode_budget_bytes=154; else r.axes.load_policy="unpriced policy"; });

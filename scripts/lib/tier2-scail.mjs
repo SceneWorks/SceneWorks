@@ -64,6 +64,22 @@ function physicalPrice(envelope, floor) {
   return price;
 }
 
+// One native single-window request. Scail2FitProfile::from_plan packs the 12 latent planes,
+// the quarter-resolution pose and the ordered references on the 16px patch grid.
+function verifyProductWindow(axes, mlx) {
+  const patches = (832 / 16) * (480 / 16);
+  const tokens = patches * (12 + axes.references) + (patches / 4) * 12;
+  const chunks = Math.ceil(tokens / 8192);
+  const scoreStride = 40 * tokens;
+  // Candle's native AttentionBudget gives each query block at most 1e9 score elements.
+  const rows = mlx ? 0 : Math.floor(1_000_000_000 / scoreStride);
+  assert.deepEqual(axes.windows, [{
+    latent_frames: 12, history_frames: 0, decoded_frames: mlx ? 48 : 45, tokens,
+    mlx_unsplit_ffn: mlx, mlx_ffn_chunks: chunks, mlx_ffn_tail: tokens - (chunks - 1) * 8192,
+    self_attention_query_rows: rows, self_attention_score_elements: rows * scoreStride,
+  }], "capture has a different native SCAIL window");
+}
+
 export function scailFitEvidence(pool, backend, { compiledPin, coverage, closures }) {
   const mlx = backend === "mlx", platform = mlx ? "macos" : "windows";
   const counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
@@ -86,8 +102,9 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
       && digestPattern.test(row.guard_policy_sha256) && /^[a-f0-9]{40}$/.test(row.inference_revision)
       && row.device?.trim() && row.runtime?.trim(), "invalid projected physical capture");
     assert.deepEqual(row.prompt_tokens, [512, 512]);
+    verifyProductWindow(a, mlx);
     assert.ok(a.classifier_free_guidance === true && a.history_order === 4 && a.mlx_dpmpp === false
-      && a.windows?.length === 1 && a.source_bytes === (2 * a.references + 90) * 832 * 480 * 3
+      && a.source_bytes === (2 * a.references + 90) * 832 * 480 * 3
       && a.driving_stack_bytes === 45 * 832 * 480 * 24 && a.source_resize_bytes === 0 && a.schedule_bytes === 5 * 64
       && a.load_policy === (mlx ? "None" : "Some(Q4)") + "/Bf16/Resident/EagerMaterialization"
       && Array.isArray(a.execution_policy), "capture does not cover the fixed product inputs");
@@ -114,8 +131,11 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
 }
 
 function donor(event, evidence, references) {
-  const matched = evidence.filter((row) => row.artifactId === event.evidenceArtifactId && row.sha256 === event.evidenceSha256
-    && row.references === event.evidenceReferences && row.references >= references);
+  // For these verified windows a larger MLX tail dominates the smaller one in the same four
+  // unsplit FFN chunks. On CUDA a larger token count has fewer query rows and cannot dominate.
+  const covers = event.backend === "mlx" ? event.evidenceReferences >= references : event.evidenceReferences === references;
+  const matched = evidence.filter((row) => covers && row.artifactId === event.evidenceArtifactId
+    && row.sha256 === event.evidenceSha256 && row.references === event.evidenceReferences);
   assert.equal(matched.length, 1, "worker must identify one physical capture covering the requested reference count");
   const [row] = matched;
   for (const [key, price] of Object.entries(row.price)) assert.equal(event[key], price, `worker ${key} differs from the projected price`);
