@@ -97,6 +97,11 @@ fn legacy_source_shape_backfill_uses_the_exact_loader_structure() {
     let mut krea = legacy_user_entry("krea_2", &krea_dir);
     stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
     assert_eq!(krea["importSourceShape"], json!("transformer_file"));
+    for old_label in ["fp8_e4m3", "scaled_fp8_companion", "comfy_quant_packed"] {
+        krea.insert("importQuantFormat".into(), json!(old_label));
+        stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
+        assert_eq!(krea["importQuantFormat"], "bf16");
+    }
 
     let sdxl_file = models.join("imports/sdxl.safetensors");
     write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());

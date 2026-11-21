@@ -81,16 +81,20 @@ pub fn validate(payload: &JsonObject, entry: &JsonObject) -> Result<(), Validati
 pub fn clear_precision_selectors(payload: &mut JsonObject) {
     payload.remove("variant");
     if let Some(advanced) = payload.get_mut("advanced").and_then(Value::as_object_mut) {
-        for key in [
-            "quantTier",
-            "quant",
-            "mlxQuantize",
-            "mlxQuantizeExplicit",
-            "convRot",
-            "precision",
-            "quantization",
-        ] {
-            advanced.remove(key);
-        }
+        clear_advanced_precision_selectors(advanced);
+    }
+}
+
+pub fn clear_advanced_precision_selectors(advanced: &mut JsonObject) {
+    for key in [
+        "quantTier",
+        "quant",
+        "mlxQuantize",
+        "mlxQuantizeExplicit",
+        "convRot",
+        "precision",
+        "quantization",
+    ] {
+        advanced.remove(key);
     }
 }

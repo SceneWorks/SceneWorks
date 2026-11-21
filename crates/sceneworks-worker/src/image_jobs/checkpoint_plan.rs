@@ -2098,11 +2098,12 @@ pub(super) async fn generate_checkpoint_plan_stream(
         .collect();
     let total = work.len();
 
-    let checkpoint_path_for_facts = match &sources.primary {
-        WeightsSource::File(path) => Some(path.clone()),
-        _ => None,
-    };
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
+    // Primary selection pins the verified backbone before its sidecars and companions.
+    let primary_pin = sources.pins.first().ok_or_else(|| {
+        WorkerError::InvalidPayload("checkpoint plan has no prepared primary backbone".into())
+    })?;
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, primary_pin);
     let spec = checkpoint_plan_load_spec(&sources, quant)?;
     let engine_id = sources.descriptor.id;
 
@@ -2272,12 +2273,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
                             facts: pag_facts,
                         });
                     }
-                    super::stream::publish_checkpoint_weight_facts(
-                        &facts_tx,
-                        &manifest_entry_for_facts,
-                        checkpoint_path_for_facts.as_deref(),
-                        model.checkpoint_weight_facts(),
-                    );
+                    checkpoint.publish(&facts_tx, model);
                     Ok(Some(generated))
                 },
             )
@@ -2332,12 +2328,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
                     // bespoke imported-Krea route, so publish the handle's post-load receipt through
                     // the same event seam. The consumer applies this measured fact set to the image
                     // event that follows, replacing the honest pre-load `no-runtime-receipt` fallback.
-                    super::stream::publish_checkpoint_weight_facts(
-                        &facts_tx,
-                        &manifest_entry_for_facts,
-                        checkpoint_path_for_facts.as_deref(),
-                        model.checkpoint_weight_facts(),
-                    );
+                    checkpoint.publish(&facts_tx, model);
                     Ok(Some(generated))
                 },
             )

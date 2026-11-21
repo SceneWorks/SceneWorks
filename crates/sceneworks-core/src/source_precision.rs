@@ -54,6 +54,7 @@ impl SourcePrecision {
     }
 }
 
+pub use sceneworks_options::source_precision::clear_advanced_precision_selectors;
 pub use sceneworks_options::source_precision::clear_precision_selectors;
 
 pub fn applies_to_job(job_type: &crate::contracts::JobType) -> bool {

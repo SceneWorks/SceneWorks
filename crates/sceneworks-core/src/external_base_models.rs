@@ -29,7 +29,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::base_weights::{
-    detect_base_weight_file, BaseWeightDetection, ComponentRole, QuantFormat,
+    detect_base_weight_file_for, BaseWeightDetection, ComponentRole, QuantFormat,
 };
 use crate::external_roots::comfyui_base_dirs;
 use crate::external_roots::{walk_confined, ExternalScanCache};
@@ -185,7 +185,15 @@ fn classify(path: &Path, cache: &mut ExternalBaseModelCache) -> Option<BaseWeigh
     if let Some(detection) = cache.get(path, modified, size) {
         return Some(detection);
     }
-    let detection = detect_base_weight_file(path).ok()?;
+    let detection = detect_base_weight_file_for(path, |verdict, header| {
+        // The tree route constructs FLUX.2 Dev. Klein uses a different backbone/encoder
+        // pair and has a separate registered transformer-file import.
+        (verdict.family.as_deref() == Some(crate::model_family::FLUX2)
+            && verdict.component == ComponentRole::Transformer
+            && !["guidance_in.in_layer.weight", "model.diffusion_model.guidance_in.in_layer.weight"]
+                .iter().any(|key| header.get(*key).is_some()))
+            .then(|| "The FLUX.2 ComfyUI route requires the Dev guidance embedder. Import a Klein transformer through its single-file route.".to_owned())
+    }).ok()?;
     cache.insert(path.to_path_buf(), modified, size, detection.clone());
     Some(detection)
 }
@@ -354,14 +362,26 @@ fn assemble_wan_experts(
                     components.push(only_vae.component_json());
                 }
                 let id = unique_id(&anchor.name, used_ids);
-                rows.push(finish_row(
+                let mut row = finish_row(
                     id,
                     anchor,
                     Some("wan-video".to_owned()),
                     "complete",
                     LOADER_PENDING_REASON.to_owned(),
                     components,
-                ));
+                );
+                if anchor.verdict().map(|(_, _, format)| format)
+                    != detected[low].verdict().map(|(_, _, format)| format)
+                {
+                    row["usable"] = Value::Bool(false);
+                    row["unusableReason"] =
+                        json!("The high- and low-noise experts declare different source formats.");
+                    row["quant"] = json!(QuantFormat::MixedQuantFormats.as_str());
+                    let entry = row.as_object_mut().unwrap();
+                    entry.remove("importQuantFormat");
+                    crate::source_precision::SourcePrecision::project(entry);
+                }
+                rows.push(row);
             }
             // A lone expert (missing its high/low sibling) can't run — surfaced incomplete.
             _ => {
@@ -419,21 +439,28 @@ fn is_snapshot_backed(family: &str) -> bool {
     matches!(family, "qwen-image" | "flux2")
 }
 
-/// Whether a fully-assembled external model has a worker loader for its family+quant,
-/// i.e. is offerable as a generation target (the picker offers only `usable !== false`).
-/// Each `(family, quant)` here corresponds to a landed load-in-place slice:
-/// z-image bf16 (sc-10668) · qwen-image plain fp8_e4m3 (sc-10670) · wan-video
-/// scaled_fp8_companion (sc-10671) · flux2 inline-scale fp8 (sc-10680). Everything else
-/// stays fail-closed until its slice lands. Only ever true for a `complete` assembly.
+/// A complete ComfyUI assembly can use a registered family's shared encoded projection
+/// loader. Preserve historical family-specific marker labels for older catalog rows.
 pub fn family_quant_runnable(family: Option<&str>, quant: Option<&str>, assembly: &str) -> bool {
-    assembly == "complete"
-        && matches!(
-            (family, quant),
-            (Some("z-image"), Some("bf16"))
-                | (Some("qwen-image"), Some("fp8_e4m3"))
-                | (Some("wan-video"), Some("scaled_fp8_companion"))
-                | (Some("flux2"), Some("fp8_inline_scale"))
-        )
+    if assembly != "complete" {
+        return false;
+    }
+    if matches!(
+        family,
+        Some("z-image" | "qwen-image" | "wan-video" | "flux2")
+    ) && quant
+        .and_then(QuantFormat::from_label)
+        .is_some_and(QuantFormat::shared_projection_format)
+    {
+        return true;
+    }
+    matches!(
+        (family, quant),
+        (Some("z-image"), Some("bf16"))
+            | (Some("qwen-image"), Some("fp8_e4m3"))
+            | (Some("wan-video"), Some("scaled_fp8_companion"))
+            | (Some("flux2"), Some("fp8_inline_scale"))
+    )
 }
 
 fn required_text_encoders(family: &str) -> Option<&'static [&'static str]> {
@@ -618,6 +645,15 @@ pub fn finish_row(
     }
     if let Some(quant) = quant {
         row["quant"] = Value::String(quant.to_owned());
+        // These rows come directly from the scanner's file verdict. A legacy marker can
+        // retain its loader route without claiming an unverified source codec.
+        if anchor
+            .verdict()
+            .is_some_and(|(_, _, format)| format.source_codec_id().is_some())
+        {
+            row["importQuantFormat"] = Value::String(quant.to_owned());
+            crate::source_precision::SourcePrecision::project(row.as_object_mut().unwrap());
+        }
     }
     row
 }

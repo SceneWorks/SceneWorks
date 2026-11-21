@@ -779,6 +779,8 @@ pub(super) async fn generate_sdxl_imported_stream(
         checkpoint: file_pin,
         adapters: prepared_adapters,
     } = sources;
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &file_pin);
     let file = file_pin.loader_path().to_path_buf();
     let adapter_count = prepared_adapters.specs.len();
     let steps =
@@ -900,7 +902,6 @@ pub(super) async fn generate_sdxl_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     admit_candle_load_spec_floor(&request.model, "SDXL imported", settings, &spec).await?;
 
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         descriptor.id,
@@ -918,12 +919,7 @@ pub(super) async fn generate_sdxl_imported_stream(
                     let publish_facts = |facts| {
                         let _ =
                             tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
-                        super::stream::publish_checkpoint_weight_facts(
-                            &tx,
-                            &manifest_entry_for_facts,
-                            Some(file.as_path()),
-                            model.checkpoint_weight_facts(),
-                        );
+                        checkpoint.publish(&tx, model);
                     };
                     if let Some(hires_fix) = hires_fix {
                         let execution_report = std::cell::RefCell::new(None);

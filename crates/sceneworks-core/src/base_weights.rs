@@ -166,6 +166,19 @@ pub enum QuantFormat {
 }
 
 impl QuantFormat {
+    /// Source formats handled by the shared checkpoint projection loader on both image backends.
+    pub(crate) fn shared_projection_format(self) -> bool {
+        matches!(
+            self,
+            Self::Int8TensorwisePerRow
+                | Self::ConvRotInt8
+                | Self::Fp8E4M3Scalar
+                | Self::Fp8E4M3Rowwise
+                | Self::Fp8E5M2Scalar
+                | Self::Mxfp8
+        )
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Bf16 => "bf16",
@@ -379,15 +392,8 @@ fn image_import_encoding_supported(
     );
     topology_supported
         && match quant {
-            QuantFormat::Bf16
-            | QuantFormat::F16
-            | QuantFormat::F32
-            | QuantFormat::Int8TensorwisePerRow
-            | QuantFormat::ConvRotInt8
-            | QuantFormat::Fp8E4M3Scalar
-            | QuantFormat::Fp8E4M3Rowwise
-            | QuantFormat::Fp8E5M2Scalar
-            | QuantFormat::Mxfp8 => true,
+            QuantFormat::Bf16 | QuantFormat::F16 | QuantFormat::F32 => true,
+            format if format.shared_projection_format() => true,
             // NVFP4's existing imported source routes require the Candle implementation. Mage is
             // MLX-only; this does not advertise an NVFP4 Metal operator that the backend lacks.
             QuantFormat::Nvfp4 => family != crate::model_family::MAGE_FLOW,
@@ -924,6 +930,13 @@ pub fn is_gguf_file(path: &Path) -> bool {
 /// no safetensors header); safetensors are classified by header and, for signed INT8,
 /// the shared codec plan that distinguishes row-scaled weights from rotated weights.
 pub fn detect_base_weight_file(path: &Path) -> Result<BaseWeightDetection, SafetensorsHeaderError> {
+    detect_base_weight_file_for(path, |_, _| None)
+}
+
+pub(crate) fn detect_base_weight_file_for(
+    path: &Path,
+    layout_refusal: impl FnOnce(&BaseWeightVerdict, &Value) -> Option<String>,
+) -> Result<BaseWeightDetection, SafetensorsHeaderError> {
     if is_gguf_file(path) {
         return Ok(BaseWeightDetection::Recognized(BaseWeightVerdict {
             family: None,
@@ -934,6 +947,9 @@ pub fn detect_base_weight_file(path: &Path) -> Result<BaseWeightDetection, Safet
     let header = read_safetensors_header(path)?;
     let mut detection = classify_base_header(&header);
     if let BaseWeightDetection::Recognized(verdict) = &mut detection {
+        if let Some(reason) = layout_refusal(verdict, &header) {
+            return Ok(BaseWeightDetection::Unrecognized { reason });
+        }
         // The coarse header marker is not a codec identity. The engine's source planner
         // validates real descriptors, scale topology and ambiguous sidecars before we persist one.
         // H3 has its own complete assembly inventory (including W4A8), which stamps its encoding.

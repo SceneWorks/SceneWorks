@@ -113,23 +113,41 @@ pub(super) enum GenEvent {
     },
 }
 
-/// Publish the loaded backend's correlated receipt before its image is consumed, on either native
-/// backend. A missing runtime receipt remains explicitly unmeasured; source metadata never fills it.
+/// Correlate directory and sharded loaders with the prepared backbone. Their generators also
+/// report text encoders and other companions, which may use the same source codec.
 #[cfg(native_lane)]
-pub(super) fn publish_checkpoint_weight_facts(
-    tx: &tokio::sync::mpsc::Sender<GenEvent>,
-    entry: &JsonObject,
-    checkpoint_path: Option<&std::path::Path>,
-    runtime: Option<gen_core::CheckpointWeightFacts>,
-) {
-    if let Some(facts) = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-        entry,
-        checkpoint_path,
-        runtime,
+pub(super) struct ImportedCheckpointPublisher {
+    entry: JsonObject,
+    primary: gen_core::PinnedWeightsFile,
+}
+
+#[cfg(native_lane)]
+impl ImportedCheckpointPublisher {
+    pub(super) fn new(entry: &JsonObject, primary: &gen_core::PinnedWeightsFile) -> Self {
+        Self {
+            entry: entry.clone(),
+            primary: primary.clone(),
+        }
+    }
+
+    pub(super) fn publish(&self, tx: &tokio::sync::mpsc::Sender<GenEvent>, model: &dyn Generator) {
+        self.publish_from(tx, || model.checkpoint_weight_facts_by_source());
+    }
+
+    pub(super) fn publish_from<I: IntoIterator<Item = gen_core::CheckpointWeightFacts>>(
+        &self,
+        tx: &tokio::sync::mpsc::Sender<GenEvent>,
+        available: impl FnOnce() -> I,
     ) {
-        let _ = tx.blocking_send(GenEvent::CheckpointWeightFacts {
-            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(&facts),
-        });
+        if let Some(facts) = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts_for_pin(
+            &self.entry,
+            &self.primary,
+            available,
+        ) {
+            let _ = tx.blocking_send(GenEvent::CheckpointWeightFacts {
+                facts: crate::checkpoint_weight_facts_host::facts_receipt_object(&facts),
+            });
+        }
     }
 }
 

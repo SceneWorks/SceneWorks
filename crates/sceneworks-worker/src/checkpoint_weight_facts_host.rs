@@ -122,6 +122,33 @@ pub(crate) fn materialization_from_runtime(
     }
 }
 
+/// Select the receipts from the actual prepared backbone even when text encoders or
+/// other components use the same codec in different files.
+#[cfg(any(test, native_lane))]
+pub(crate) fn runtime_checkpoint_facts_for_pin<
+    I: IntoIterator<Item = gen_core::CheckpointWeightFacts>,
+>(
+    entry: &Map<String, Value>,
+    primary: &gen_core::PinnedWeightsFile,
+    available: impl FnOnce() -> I,
+) -> Option<CheckpointWeightFactsV1> {
+    let codec = sceneworks_core::jobs_store::imported_entry_source_codec(entry)?;
+    let facts = available().into_iter().find(|facts| {
+        facts.source().declares(codec)
+            && facts.source_bindings().iter().any(|source| {
+                source.canonical_path() == primary.canonical_target_path()
+                    && source.target_fingerprint() == primary.target_fingerprint()
+            })
+    });
+    // A sharded measurement describes the entire bound group. The V1 wire token
+    // represents a single file and must therefore be omitted for the group.
+    let path = match &facts {
+        Some(facts) if facts.source_bindings().len() > 1 => None,
+        _ => Some(primary.loader_path()),
+    };
+    runtime_checkpoint_facts(entry, path, facts)
+}
+
 /// The whole fact set for one imported checkpoint request **with the runtime handle in hand** —
 /// the post-load sibling of [`imported_checkpoint_facts`] (sc-11045).
 ///
@@ -820,6 +847,40 @@ mod tests {
         }
         // And an entry with no verified classification still produces nothing at all.
         assert!(runtime_checkpoint_facts(&entry(None), None, Some(engine_mixed_facts())).is_none());
+    }
+
+    #[test]
+    fn grouped_primary_receipt_keeps_companions_and_unbound_facts_out_of_the_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let pin = |name| {
+            let file = temp.path().join(name);
+            std::fs::write(&file, b"same").unwrap();
+            gen_core::PinnedWeightsFile::pin(&file).unwrap()
+        };
+        let primary = pin("backbone");
+        let shard = pin("shard");
+        let encoder = pin("encoder");
+        let manifest = entry(Some("nvfp4"));
+        let irrelevant = || engine_mixed_facts().with_verified_source(&encoder).unwrap();
+        let measured = runtime_checkpoint_facts_for_pin(&manifest, &primary, || {
+            [
+                irrelevant(),
+                engine_mixed_facts()
+                    .with_verified_sources([&primary, &shard])
+                    .unwrap(),
+            ]
+        })
+        .unwrap();
+        assert_eq!(measured.executes_natively(NVFP4_CODEC_ID), Some(true));
+        assert!(measured.source_binding().is_none());
+        let absent = runtime_checkpoint_facts_for_pin(&manifest, &primary, || {
+            [irrelevant(), engine_mixed_facts()]
+        })
+        .unwrap();
+        assert!(matches!(
+            absent.materialization(),
+            MaterializationFact::Unavailable { .. }
+        ));
     }
 
     #[test]

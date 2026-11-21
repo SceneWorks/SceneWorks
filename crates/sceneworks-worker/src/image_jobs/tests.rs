@@ -5699,7 +5699,7 @@ fn flux2_comfyui_rejects_unexecutable_tiers_instead_of_relabeling_them() {
         assert!(
             !matches!(
                 flux2_comfyui_quant(&req(advanced.clone())),
-                Ok(Quant::Nvfp4)
+                Ok(Some(Quant::Nvfp4))
             ),
             "the comfyui lane cannot serve NVFP4 — the GGUF fold rejects it, so selecting it \
              hard-fails the job (advanced={advanced})"
@@ -5707,17 +5707,25 @@ fn flux2_comfyui_rejects_unexecutable_tiers_instead_of_relabeling_them() {
     }
     assert!(matches!(
         flux2_comfyui_quant(&req(json!({}))),
-        Ok(FLUX2_COMFYUI_DEFAULT_QUANT)
+        Ok(Some(FLUX2_COMFYUI_DEFAULT_QUANT))
     ));
     assert!(matches!(
         flux2_comfyui_quant(&req(json!({ "quant": "q4" }))),
-        Ok(Quant::Q4)
+        Ok(Some(Quant::Q4))
     ));
     assert!(matches!(
         flux2_comfyui_quant(&req(json!({ "quant": "q8" }))),
-        Ok(Quant::Q8)
+        Ok(Some(Quant::Q8))
     ));
     assert!(flux2_comfyui_quant(&req(json!({ "quant": "bf16" }))).is_err());
+    let fixed = request(json!({
+        "projectId": "p", "model": "external_base_flux2", "prompt": "p",
+        "modelManifestEntry": {
+            "catalogScope": "external", "importSourceShape": "comfy_ui_tree",
+            "importQuantFormat": "fp8_e4m3_scalar",
+        }
+    }));
+    assert_eq!(flux2_comfyui_quant(&fixed).unwrap(), None);
 }
 
 /// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
@@ -14923,7 +14931,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     assert!(
         flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
             *sources,
-            flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+            Some(flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT),
             &request_flux,
             &settings,
             flux2_descriptor.id,
@@ -27945,7 +27953,7 @@ fn a_linked_flux2_tree_loads_the_plans_dit_and_refuses_a_layer_the_lane_would_ig
         .expect("the bespoke FLUX.2 lane claims a plan-backed tree");
     let (spec, _snapshot) = flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
         paths,
-        flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+        Some(flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT),
         &req,
         &fx.settings,
         flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,

@@ -1065,8 +1065,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     // The actual imported assembly is the fit/cache/provider source of truth: primary File DiT, base
     // snapshot companion, control overlay, and adapters. The provider reports the File's own bytes;
     // it does not relabel a directory-tier rung-4 measurement as imported evidence.
-    let dit_for_facts = dit.clone();
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &dit_pin);
     let mut spec = LoadSpec::new(WeightsSource::File(dit))
         .with_component(
             gen_core::BASE_SNAPSHOT_COMPONENT,
@@ -1195,12 +1195,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                     })
                     .transpose()?
                     .flatten();
-                super::stream::publish_checkpoint_weight_facts(
-                    &facts_tx,
-                    &manifest_entry_for_facts,
-                    Some(dit_for_facts.as_path()),
-                    model.checkpoint_weight_facts(),
-                );
+                checkpoint.publish(&facts_tx, model);
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
@@ -1358,6 +1353,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
 
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &dit_pin);
     let spec =
         imported_candle_control_load_spec(request, &dit, &base_dir, &control_weights, adapters)?;
     let spec = prepare_manifest_text_encoder_with_file_pins(
@@ -1371,8 +1368,6 @@ pub(super) async fn generate_krea_imported_control_stream(
         "Krea 2 imported pose source preparation failed",
     )?;
 
-    let dit_for_facts = dit.clone();
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         KREA_IMPORTED_ENGINE,
@@ -1484,12 +1479,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                     })
                     .transpose()?
                     .flatten();
-                super::stream::publish_checkpoint_weight_facts(
-                    &facts_tx,
-                    &manifest_entry_for_facts,
-                    Some(dit_for_facts.as_path()),
-                    model.checkpoint_weight_facts(),
-                );
+                checkpoint.publish_from(&facts_tx, || model.checkpoint_weight_facts());
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
@@ -2119,7 +2109,7 @@ pub(super) fn drive_krea_imported_mlx_items<E>(
     hires_fix: Option<HiresFixPlan>,
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     cancel: CancelFlag,
-    source_context: Option<(&JsonObject, &Path)>,
+    source_context: Option<&super::stream::ImportedCheckpointPublisher>,
     mut evaluate_request: E,
 ) -> WorkerResult<()>
 where
@@ -2204,13 +2194,8 @@ where
             if !facts.is_empty() {
                 let _ = facts_tx.blocking_send(GenEvent::ImageFacts { index, facts });
             }
-            if let Some((entry, path)) = source_context {
-                super::stream::publish_checkpoint_weight_facts(
-                    &facts_tx,
-                    entry,
-                    Some(path),
-                    generator.checkpoint_weight_facts(),
-                );
+            if let Some(checkpoint) = source_context {
+                checkpoint.publish(&facts_tx, generator);
             }
             Ok(Some((seed, out_width, out_height, pixels)))
         },
@@ -2349,8 +2334,8 @@ pub(super) async fn generate_krea_imported_stream(
     // the load materializes, on the blocking thread, so the drive closure re-assembles the three
     // facts there and streams the finished receipt object back over the event channel. `dit` is
     // about to move into the LoadSpec.
-    let dit_for_facts = dit.clone();
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &dit_pin);
     let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
         WeightsSource::Dir(base_dir.clone()),
@@ -2438,7 +2423,7 @@ pub(super) async fn generate_krea_imported_stream(
                 hires_fix,
                 tx,
                 cancel,
-                Some((&manifest_entry_for_facts, dit_for_facts.as_path())),
+                Some(&checkpoint),
                 crate::mlx_fit_gate::evaluate_request,
             )
         },
@@ -2523,12 +2508,7 @@ pub(super) async fn generate_krea_imported_stream(
                     // of the pre-load `no-runtime-receipt` version (sc-11045). Sent after every image
                     // on purpose: publication is last-write-wins engine-side, so the latest event
                     // always describes the most recent materialization.
-                    super::stream::publish_checkpoint_weight_facts(
-                        &facts_tx,
-                        &manifest_entry_for_facts,
-                        Some(dit_for_facts.as_path()),
-                        model.checkpoint_weight_facts(),
-                    );
+                    checkpoint.publish(&facts_tx, model);
                     Ok(Some((seed, out_width, out_height, pixels)))
                 },
             )

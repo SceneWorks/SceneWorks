@@ -2047,6 +2047,11 @@ pub(super) fn stamp_legacy_import_source_shape(
             "importSourceShape".to_owned(),
             Value::String("transformer_directory".to_owned()),
         );
+        if let Some(file) = confined_primary_weight_file(&path) {
+            if let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&file) {
+                object.insert("importQuantFormat".into(), json!(verdict.quant.as_str()));
+            }
+        }
         return;
     }
     let Some(weight_file) = confined_primary_weight_file(&path) else {
@@ -2073,10 +2078,22 @@ pub(super) fn stamp_legacy_import_source_shape(
 
 fn needs_legacy_import_inspection(object: &JsonObject) -> bool {
     !object.contains_key("importSourceShape")
-        || matches!(
+        || (matches!(
+            object.get("importSourceShape").and_then(Value::as_str),
+            Some(
+                "transformer_file" | "transformer_directory" | "fused_checkpoint" | "comfy_ui_tree"
+            )
+        ) && matches!(
             object.get("importQuantFormat").and_then(Value::as_str),
-            Some("int8_tensorwise_per_row" | "fp8_inline_scale"),
-        )
+            Some(
+                "int8_tensorwise_per_row"
+                    | "fp8_inline_scale"
+                    | "fp8_e4m3"
+                    | "scaled_fp8_companion"
+                    | "comfy_quant_packed"
+                    | "unrecognized_scaling"
+            ) | None,
+        ))
 }
 
 fn legacy_import_primary_weight_file(object: &JsonObject, data_dir: &FsPath) -> Option<PathBuf> {

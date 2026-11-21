@@ -31,18 +31,30 @@ mod tests {
             std::fs::create_dir_all(parent).expect("parent dir");
         }
         let mut header = Map::new();
-        for (index, (key, dtype)) in entries.iter().enumerate() {
-            let start = index * 4;
+        let mut payload = Vec::new();
+        for (key, dtype) in entries {
+            let start = payload.len();
+            match *dtype {
+                "F8_E4M3" | "F8_E5M2" | "U8" => payload.push(1),
+                "F16" | "BF16" => payload.extend([0; 2]),
+                "F32" => payload.extend(1.0_f32.to_le_bytes()),
+                other => panic!("unknown fixture dtype {other}"),
+            }
+            let shape = if key.ends_with(".weight") {
+                vec![1, 1]
+            } else {
+                vec![1]
+            };
             header.insert(
                 (*key).to_owned(),
-                json!({ "dtype": dtype, "shape": [1], "data_offsets": [start, start + 4] }),
+                json!({ "dtype": dtype, "shape": shape, "data_offsets": [start, payload.len()] }),
             );
         }
         let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("header json");
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&header_bytes);
-        bytes.extend(std::iter::repeat_n(0_u8, entries.len() * 4));
+        bytes.extend(payload);
         std::fs::write(path, bytes).expect("write safetensors");
     }
 
@@ -205,7 +217,17 @@ mod tests {
         assert_eq!(row["catalogScope"], EXTERNAL_SCOPE);
         assert_eq!(row["importSourceShape"], "comfy_ui_tree");
         assert_eq!(row["type"], "image");
-        assert_eq!(row["quant"], "fp8_e4m3");
+        assert_eq!(row["quant"], "fp8_e4m3_scalar");
+        assert_eq!(row["importQuantFormat"], row["quant"]);
+        assert_eq!(row["sourcePrecision"]["codecId"], "fp8-e4m3-scalar-v1");
+        let refusal = sceneworks_core::request_validation::validate(
+            "image",
+            json!({"projectId":"p", "model": row["id"], "prompt":"snow", "advanced": {"quantTier":"q4"}})
+                .as_object()
+                .unwrap(),
+            row.as_object().unwrap(),
+        ).unwrap_err();
+        assert_eq!(refusal.field, "advanced.quantTier");
         assert_eq!(row["assembly"], "complete");
         // sc-10670: plain-fp8 qwen DiT has a loader → usable, no reason. No tree VAE here, so
         // components is the DiT alone (the TE is always snapshot-sourced, sc-10671).
@@ -219,6 +241,7 @@ mod tests {
     /// and BF16 attention/modulation → detector `(flux2, transformer, fp8_inline_scale)` (sc-10662).
     fn flux2_dev_dit_inline_scale_keys() -> Vec<(&'static str, &'static str)> {
         vec![
+            ("guidance_in.in_layer.weight", "BF16"),
             ("double_stream_modulation_img.lin.weight", "BF16"),
             ("single_stream_modulation.lin.weight", "BF16"),
             ("double_blocks.0.img_attn.qkv.weight", "BF16"),
@@ -229,6 +252,22 @@ mod tests {
             ("single_blocks.0.linear1.weight_scale", "F32"),
             ("single_blocks.0.linear1.input_scale", "F32"),
         ]
+    }
+
+    #[test]
+    fn a_flux2_backbone_without_dev_guidance_does_not_claim_the_dev_tree_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = models_root(temp.path());
+        let mut keys = flux2_dev_dit_inline_scale_keys();
+        keys.retain(|(name, _)| !name.starts_with("guidance_in."));
+        write_safetensors(&root.join("diffusion_models/klein.safetensors"), &keys);
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["usable"], false);
+        assert!(rows[0]["unusableReason"]
+            .as_str()
+            .unwrap()
+            .contains("Dev guidance"));
     }
 
     #[test]
@@ -250,7 +289,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row["family"], "flux2");
         assert_eq!(row["type"], "image");
-        assert_eq!(row["quant"], "fp8_inline_scale");
+        assert_eq!(row["quant"], "fp8_e4m3_scalar");
         assert_eq!(row["assembly"], "complete");
         // sc-10680: inline-scale-fp8 flux2 DiT has a loader → usable, no reason. No tree VAE here, so
         // components is the DiT alone (the TE / VAE are snapshot-sourced).
@@ -295,7 +334,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row["family"], "wan-video");
         assert_eq!(row["type"], "video");
-        assert_eq!(row["quant"], "scaled_fp8_companion");
+        assert_eq!(row["quant"], "fp8_e4m3_scalar");
         assert_eq!(row["assembly"], "complete");
         assert_eq!(row["usable"], true);
         assert_eq!(row["unusableReason"], Value::Null);
