@@ -47,6 +47,8 @@ crates/contracts/gen-core-tokenizer
 crates/contracts/gen-core-train
 crates/contracts/load-progress
 crates/kernels/candle-quant-kernels
+crates/layers/candle-checkpoint
+crates/layers/mlx-layers
 crates/llm/candle-llm
 crates/llm/mlx-llm
 crates/llm/mlx-llm/server
@@ -95,6 +97,7 @@ crates/media/candle-gen/vendor/candle-core
 crates/media/candle-gen/vendor/candle-flash-attn
 crates/media/candle-gen/vendor/candle-kernels
 crates/media/candle-gen/vendor/candle-metal-kernels
+crates/media/candle-gen/vendor/candle-nn
 crates/media/gen-cv
 crates/media/mlx-gen
 crates/media/mlx-gen/mlx-gen-anima

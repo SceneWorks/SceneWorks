@@ -26,7 +26,7 @@ export function makeScenario(fixture, output, sourcePath, inputs, seeds) {
   assertLicenseAuthority(binding); // Retain the actual prior operator scope; never fabricate consent.
   const runDir = path.join(output, 'services', c.id);
   const scenario = buildScenario(c, {
-    projectId: { $capture: 'project/id' }, seed: fixture.geometry.seed, requestedGpu: '1',
+    projectId: { $capture: 'project/id' }, seed: fixture.geometry.seed, requestedGpu: '0',
     timeoutSeconds: 7200, baseUrl: 'http://127.0.0.1:0',
     setupSteps: [{ id: 'project', method: 'POST', path: '/api/v1/projects',
       body: { name: 'Shared ConvRot H3 acceptance' }, expectedStatus: 201 }],
@@ -48,8 +48,8 @@ export function makeScenario(fixture, output, sourcePath, inputs, seeds) {
   c.declaredSourceBindings = [binding];
   c.evidence = 'evidence.json'; c.timeoutSeconds = 7200;
   c.loadHostBudgetBytes = 64 * 2 ** 30; c.loadDeviceBudgetBytes = 96 * 2 ** 30;
-  c.runtime = { port: 0, gpuId: '1', deviceId: 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',
-    physicalGpuIndex: 1, physicalGpuUuid: 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe', seedFiles: seeds };
+  c.runtime = { port: 0, gpuId: '0', deviceId: 'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',
+    physicalGpuIndex: 0, physicalGpuUuid: 'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0', seedFiles: seeds };
   return { c, scenario };
 }
 
@@ -69,7 +69,10 @@ export function validateNativeH3Receipts(log, bundle) {
   assert(receipts.length > 0, 'actual measured source receipts required');
   let nativeTensors = 0;
   for (const receipt of receipts) {
-    assert(sources.has(canonical(receipt.sourcePath)), 'receipt source is outside this request sealed load closure');
+    const paths = receipt.sourcePaths ?? [receipt.sourcePath];
+    assert(paths.length > 0, 'real file bindings are required; a directory is not a single-file source');
+    for (const file of paths) assert(typeof file === 'string' && sources.has(canonical(file)),
+      'receipt source is outside this request sealed load closure');
     const materialization = receipt.checkpointWeightFacts?.materialization;
     assert.equal(materialization?.status, 'reported');
     nativeTensors += materialization.rows.filter(row => row.codecId === 'convrot-int8-native'
@@ -81,7 +84,7 @@ export function validateNativeH3Receipts(log, bundle) {
 
 async function main() {
   assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
-  assert.equal(process.env.SCENEWORKS_GPU_ID, '1');
+  assert.equal(process.env.SCENEWORKS_GPU_ID, '0');
   assert(/^[1-9][0-9]*$/.test(process.env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ''), 'physical guard must own this proof');
   const swRoot = process.cwd(), inferenceRoot = path.resolve(process.env.SHARED_FORMAT_INFERENCE_ROOT);
   const output = path.resolve(`${process.env.MODEL_PROOF_OUTPUT_DIR}-h3`);

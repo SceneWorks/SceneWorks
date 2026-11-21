@@ -22,8 +22,8 @@ jobs:
         working-directory: sceneworks
     env:
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
-      SCENEWORKS_GPU_ID: "1"
+      CUDA_VISIBLE_DEVICES: "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+      SCENEWORKS_GPU_ID: "0"
       CUDA_COMPUTE_CAP: "120"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       HF_HUB_CACHE: 'E:\huggingface\hub'
@@ -54,6 +54,8 @@ jobs:
           node scripts/prepare-windows-flash-prebuilt.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Add-Content -Path $env:GITHUB_ENV -Value "TEMP=$env:RUNNER_TEMP"
+          Add-Content -Path $env:GITHUB_ENV -Value "TMP=$env:RUNNER_TEMP"
           Add-Content -Path $env:GITHUB_ENV -Value "MODEL_PROOF_OUTPUT_DIR=$env:RUNNER_TEMP\shared-format-proof-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_IMPORTED_FP8_CHECKPOINT=$env:SCENEWORKS_SCALAR_FP8_CHECKPOINT"
           Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_IMPORTED_CONVROT_CHECKPOINT=$env:SCENEWORKS_CONVROT_CHECKPOINT"
@@ -95,16 +97,16 @@ jobs:
             if (@($listing | Where-Object { $_ -eq "imported_comfy_quant_gpu_smoke::${test}: test" }).Count -ne 1) { throw "missing exact compiled case $test" }
           }
           Add-Content -Path $env:GITHUB_ENV -Value "SHARED_FORMAT_TEST_BINARY=$($artifacts.executable)"
-      - name: Execute completed native requests under the existing physical GPU1 guard
+      - name: Execute completed native requests under the existing physical GPU0 guard
         shell: powershell
-        run: python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format --budget-minutes 120 --physical-indices 1 --require-physical-index 1 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-proof.mjs
+        run: python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format --budget-minutes 120 --physical-indices 0 --require-physical-index 0 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-proof.mjs
       - name: Execute the second ConvRot architecture through normal import and completed AV
         if: ${{ inputs.format == 'convrot' || inputs.format == 'all' }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format-h3 --budget-minutes 150 --physical-indices 1 --require-physical-index 1 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-h3-proof.mjs
+          python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format-h3 --budget-minutes 150 --physical-indices 0 --require-physical-index 0 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-h3-proof.mjs
       - name: Retain bounded generated outputs, receipts and physical resource evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

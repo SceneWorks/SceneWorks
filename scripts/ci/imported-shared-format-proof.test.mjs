@@ -11,11 +11,11 @@ function fixture(spec) {
       + 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n'
       + (spec.count === 2 ? '{"fields":{"event":"generator_cache_miss"}}\n' : ''),
     packets: Array.from({ length: spec.count }, (_, iteration) => ({
-      schemaVersion: 1, modelId: spec.model, iteration, sourceCodec: spec.codec, physicalGpu: '1',
+      schemaVersion: 1, modelId: spec.model, iteration, sourceCodec: spec.codec, physicalGpu: '0',
       checkpointId: 'linked/root-1234567890abcdef/model.safetensors',
       importPlan: { checkpointId: 'linked/root-1234567890abcdef/model.safetensors',
         planId: `checkpoint-plan-${'a'.repeat(64)}`, semanticDigest: `sha256:${'b'.repeat(64)}` },
-      adapterCount: spec.adapters, width: spec.width, height: spec.height, output: `${spec.model}-${iteration}.png`,
+      adapterCount: spec.adapters, width: spec.width, height: spec.height, steps: spec.steps, seed: 42, output: `${spec.model}-${iteration}.png`,
       runtimeFacts: { materialization: { status: 'reported', rows: [{ codecId: spec.codec, representation: 'native-packed', tensorCount: 3 }] } },
       metrics: [{ loadMs: 1234 }], hardwareMetrics: { peakMemoryBytes: 1234567 },
     })),
@@ -43,10 +43,11 @@ test('receipt identity, adapter, physical device and metrics stay bound', () => 
   const spec = CASES[0];
   for (const change of [
     f => { f.packets[0].modelId = CASES[1].model; },
-    f => { f.packets[0].physicalGpu = '0'; },
+    f => { f.packets[0].physicalGpu = '1'; },
     f => { f.packets[0].adapterCount = 0; },
     f => { f.packets[0].metrics = []; },
     f => { f.packets[0].hardwareMetrics = {}; },
+    f => { f.packets[0].hardwareMetrics.peakMemoryBytes = 0; },
     f => { f.packets[0].importPlan.checkpointId = 'another-source'; },
     f => { f.packets[0].importPlan.planId = 'not-a-compiled-plan'; },
   ]) { const f = fixture(spec); change(f); assert.throws(() => validateResult(spec, f.log, 0, f.packets)); }

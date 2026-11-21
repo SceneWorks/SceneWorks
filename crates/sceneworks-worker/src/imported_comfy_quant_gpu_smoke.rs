@@ -119,7 +119,7 @@ fn stub_job_snapshot(job_id: &str) -> Value {
         "payload": {},
         "result": {},
         "requestedGpu": "auto",
-        "assignedGpu": "1",
+        "assignedGpu": "0",
         "workerId": "comfy-quant-smoke-worker",
         "progress": 0.1,
         "stage": "running",
@@ -143,7 +143,7 @@ fn stub_job_snapshot(job_id: &str) -> Value {
 fn stub_worker_snapshot(worker_id: &str) -> Value {
     json!({
         "id": worker_id,
-        "gpuId": "1",
+        "gpuId": "0",
         "gpuName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
         "status": "busy",
         "currentJobId": null,
@@ -307,7 +307,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
     settings.api_url = api_url;
     settings.config_dir = temp.path().join("config");
     settings.worker_id = "comfy-quant-smoke-worker".to_owned();
-    settings.gpu_id = "1".to_owned();
+    settings.gpu_id = "0".to_owned();
     settings.backend_candle_enabled = true;
     settings.heartbeat_seconds = 30;
 
@@ -420,8 +420,10 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
     // are fixed here for repeatability; the historical timing is a load baseline, not a pixel oracle.
     let (width, height, steps) = if with_adapter_and_reuse {
         (1408, 2048, 8)
+    } else if family == "sdxl" {
+        (512, 512, 20)
     } else {
-        (256, 256, 1)
+        (512, 512, 8)
     };
     let mut advanced = json!({"steps":steps});
     if with_adapter_and_reuse {
@@ -555,7 +557,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
         .to_owned();
     eprintln!("MODEL_INFERENCE_BODY_COMPLETED {fqn}");
     // A successful request's measured NativePacked row comes from the source-aware CUDA loader;
-    // its public constructor refuses CPU. The separately dispatched controller binds physical GPU1.
+    // its public constructor refuses CPU. The separately dispatched controller binds physical GPU0.
     eprintln!("MODEL_INFERENCE_DEVICE {fqn} candle-cuda");
 }
 

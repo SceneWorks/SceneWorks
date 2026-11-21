@@ -11,6 +11,10 @@ test('one existing H3 source uses fixed DiT precision and retains the inherited 
       'snapshots', component.revision, component.file), sha256: component.sha256 }));
   const { c, scenario } = makeScenario(fixture, 'D:/owned', 'D:/owned/model.safetensors', inputs, []);
   assert.equal(c.kind, 'full-av');
+  assert.equal(c.runtime.gpuId, '0');
+  assert.equal(c.runtime.physicalGpuIndex, 0);
+  assert.equal(c.runtime.deviceId, 'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0');
+  assert.equal(c.runtime.physicalGpuUuid, c.runtime.deviceId);
   const imports = scenario.steps.filter(step => step.path === '/api/v1/models/import');
   const generations = scenario.steps.filter(step => step.path === '/api/v1/video/jobs');
   assert.equal(imports.length, 1); assert.equal(generations.length, 1);
@@ -30,6 +34,16 @@ test('H3 native receipt requires the actual completed job and its sealed source 
       rows: [{ codecId: 'convrot-int8-native', representation: 'native-packed', tensorCount: 4 }] } } },
   ]) };
   assert.equal(validateNativeH3Receipts(JSON.stringify(row), bundle).nativeTensors, 4);
+  const grouped = structuredClone(row), groupBundle = structuredClone(bundle);
+  groupBundle.bindings[0].event.prepared_sources = JSON.stringify([
+    { path: 'D:/owned/dit.safetensors' }, { path: 'D:/owned/shard-2.safetensors' },
+  ]);
+  const groupedReceipts = JSON.parse(grouped.receipts);
+  delete groupedReceipts[0].sourcePath;
+  groupedReceipts[0].sourcePaths = ['D:/owned/dit.safetensors', 'D:/owned/shard-2.safetensors'];
+  grouped.receipts = JSON.stringify(groupedReceipts);
+  assert.equal(validateNativeH3Receipts(JSON.stringify(grouped), groupBundle).nativeTensors, 4);
+  assert.throws(() => validateNativeH3Receipts(JSON.stringify(grouped), bundle));
   for (const mutate of [
     value => { value.jobId = 'another-job'; },
     value => { const r = JSON.parse(value.receipts); r[0].sourcePath = 'D:/foreign/dit.safetensors'; value.receipts = JSON.stringify(r); },

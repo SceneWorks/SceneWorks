@@ -9,10 +9,10 @@ import { lockedInferenceRevision } from '../select-windows-cargo-cache.mjs';
 import { redact } from './imported-nvfp4-proof.mjs';
 
 export const CASES = Object.freeze([
-  { group: 'fp8', test: 'imported_scalar_fp8_worker_gpu_smoke', model: 'linked_krea2_scalar_fp8', codec: 'fp8-e4m3-scalar-v1', count: 2, width: 1408, height: 2048, adapters: 1 },
-  { group: 'fp8', test: 'imported_sdxl_fp8_worker_gpu_smoke', model: 'linked_sdxl_fp8', codec: 'fp8-e5m2-scalar-v1', count: 1, width: 256, height: 256, adapters: 0 },
-  { group: 'convrot', test: 'imported_convrot_worker_gpu_smoke', model: 'linked_krea2_convrot', codec: 'convrot-int8-native', count: 1, width: 256, height: 256, adapters: 0 },
-  { group: 'nvfp4', test: 'imported_native_nvfp4_worker_gpu_smoke', model: 'linked_krea2_native_nvfp4', codec: 'nvfp4-v1', count: 1, width: 256, height: 256, adapters: 0 },
+  { group: 'fp8', test: 'imported_scalar_fp8_worker_gpu_smoke', model: 'linked_krea2_scalar_fp8', codec: 'fp8-e4m3-scalar-v1', count: 2, width: 1408, height: 2048, steps: 8, adapters: 1 },
+  { group: 'fp8', test: 'imported_sdxl_fp8_worker_gpu_smoke', model: 'linked_sdxl_fp8', codec: 'fp8-e5m2-scalar-v1', count: 1, width: 512, height: 512, steps: 20, adapters: 0 },
+  { group: 'convrot', test: 'imported_convrot_worker_gpu_smoke', model: 'linked_krea2_convrot', codec: 'convrot-int8-native', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
+  { group: 'nvfp4', test: 'imported_native_nvfp4_worker_gpu_smoke', model: 'linked_krea2_native_nvfp4', codec: 'nvfp4-v1', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
 ]);
 
 export function validateResult(spec, log, code, packets) {
@@ -32,16 +32,19 @@ export function validateResult(spec, log, code, packets) {
     assert.equal(packet.importPlan?.checkpointId, packet.checkpointId);
     assert(/^checkpoint-plan-[a-f0-9]{64}$/.test(packet.importPlan?.planId), 'actual compiled plan required');
     assert(/^sha256:[a-f0-9]{64}$/.test(packet.importPlan?.semanticDigest), 'actual semantic commitment required');
-    assert.equal(packet.physicalGpu, '1');
+    assert.equal(packet.physicalGpu, '0');
     assert.equal(packet.adapterCount, spec.adapters);
     assert.equal(packet.width, spec.width);
     assert.equal(packet.height, spec.height);
+    assert.equal(packet.steps, spec.steps);
+    assert.equal(packet.seed, 42);
     assert.equal(packet.output, `${spec.model}-${iteration}.png`);
     assert.equal(packet.runtimeFacts?.materialization?.status, 'reported');
     assert(packet.runtimeFacts.materialization.rows.some(row => row.codecId === spec.codec
       && row.representation === 'native-packed' && row.tensorCount > 0), 'measured native materialization required');
     assert(packet.metrics.some(row => Number.isFinite(row.loadMs)), 'request load timing required');
-    assert(Number.isFinite(packet.hardwareMetrics?.peakMemoryBytes), 'sampled physical memory required');
+    assert(Number.isFinite(packet.hardwareMetrics?.peakMemoryBytes) && packet.hardwareMetrics.peakMemoryBytes > 0,
+      'positive sampled physical memory required');
   }
   if (spec.count === 2) {
     assert.equal((log.match(/"event":"generator_cache_miss"/g) ?? []).length, 1,
@@ -92,7 +95,7 @@ async function execute(binary, spec, output) {
 
 async function main() {
   assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
-  assert.equal(process.env.SCENEWORKS_GPU_ID, '1');
+  assert.equal(process.env.SCENEWORKS_GPU_ID, '0');
   assert(/^[1-9][0-9]*$/.test(process.env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ''), 'physical guard must own the child');
   const profile = process.env.SHARED_FORMAT_PROFILE;
   assert(['all', 'fp8', 'convrot', 'nvfp4'].includes(profile));
