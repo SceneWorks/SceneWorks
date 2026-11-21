@@ -198,7 +198,8 @@ on:
           Fetch the pinned snapshots of anchors that would otherwise plan as weights_missing
           (--download-missing). They land in the FIRST hub root above through the Hugging Face CLI
           at the manifest's pinned revision, one at a time; a gated repo needs $HF_TOKEN on the
-          runner. Off by default: leave it off when the box already holds its weights.
+          runner. Tier 2 A/B accepts this only for explicit MLX Wan A14B routes, staging into
+          the first moss_options_json.hubs entry (or the default hub) before the comparison.
         required: false
         type: boolean
         default: false
@@ -557,6 +558,7 @@ jobs:
     # Passes no credentials: the compared builds come from operator-chosen commits and need none.
     uses: ./.github/workflows/tier2-ab.yml
     with:
+      download_missing: ${{ inputs.download_missing }}
       base_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).base_sha }}
       head_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).head_sha }}
       backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).backend }}

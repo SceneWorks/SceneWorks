@@ -13,7 +13,7 @@ import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
   childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
-  summarize, verdictFor,
+  summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe,
 } from "./tier2-ab.mjs";
 
 const BASE = "d3f7b05bf22826e44fd43da19cff0985fb17d68b", HEAD = "d2b0c76c9b9b9e00b5174aceec61c11a186dac68";
@@ -55,6 +55,124 @@ test("dispatch selector maps catalog inputs, defaults to preflight, refuses mism
   for (const bad of [{ ref: "b".repeat(40) }, { backend: "cpu" }, { download_missing: true }, { moss_options_json: "[]" }, { moss_options_json: "{" }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, case: "x" }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: BASE }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes: ["mlx-moss-image-t2i"] }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, hubs: ["/posix/hub"] }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, preflight_only: "no" }) }, { inference_sha: "x" }]) {
     assert.throws(() => dispatchOptions({ ...inputs, ...bad }, inputs.ref), undefined, JSON.stringify(bad));
   }
+});
+
+test("Wan A14B routes freeze the supported product matrix and the I2V input through multipart", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-wan-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const models = await readCatalog(root);
+  const routes = Object.values(ROUTES).filter((route) => route.wanA14b);
+  assert.equal(routes.length, 6);
+  for (const route of routes) {
+    const { body } = route;
+    assert.equal(DEFAULT_ROUTE_IDS[route.backend].includes(route.id), false);
+    const mode = route.referenceImage ? "i2v" : "t2v";
+    assert.equal(body.model, `wan_2_2_${mode}_14b`);
+    assert.deepEqual([body.width, body.height, body.duration, body.fps, body.seed], [832, 480, 1, 16, 33401]);
+    assert.deepEqual(body.advanced, { mlxQuantize: 4, steps: 6, guidanceScale: 3.5,
+      sampler: route.id.endsWith("heun") ? "heun" : "uni_pc", lightning: false });
+    assert.deepEqual(body.loras, []);
+    const platform = route.backend === "mlx" ? "darwin" : "win32";
+    const fs = { stat: async () => ({ isFile: () => true, size: 1 }) };
+    const [plan] = await planRoutes({ routes: [route], hubs: [dir], baseCatalog: models, headCatalog: models,
+      evidence: await readPatternEvidence(root), platform, fs });
+    assert.equal(plan.status, "ready", plan.skipReason);
+    assert.match(plan.rows.required.find((r) => r.variant)?.repo, new RegExp(`wan2.2-${mode}-a14b-${platform === "darwin" ? "mlx" : "candle"}$`));
+    if (!route.referenceImage) { assert.equal(Object.hasOwn(plan.request.body, "sourceAssetId"), false); continue; }
+    const endpoint = { async exchange(method, url, form, options) {
+      assert.equal(method, "POST"); assert.equal(url, "/api/v1/projects/proj1/assets");
+      assert.deepEqual(options, { multipart: true });
+      const upload = await new Response(form).formData();
+      assert.deepEqual([...upload.keys()], ["file"]);
+      const file = upload.get("file");
+      assert.equal(file.type, "image/png"); assert.equal(file.name, "source.png");
+      const bytes = Buffer.from(await file.arrayBuffer());
+      assert.deepEqual(bytes, await readFile(path.join(dir, "source.png")));
+      const { width, height } = decodePng(bytes);
+      assert.deepEqual([width, height], [832, 480]);
+      assert.equal(sha256(bytes), plan.request.sourceImageSha256);
+      return { status: 201, body: { id: "the-uploaded-asset", projectId: "proj1", type: "image", file: { path: "assets/images/source image.png" } } };
+    }, async served(url) {
+      assert.equal(url, "/api/v1/projects/proj1/files/assets/images/source%20image.png");
+      return { bytes: await readFile(path.join(dir, "source.png")) };
+    } };
+    const ref = await uploadReference(route, endpoint, "proj1", dir);
+    const bound = requestBody(route, "proj1", ref.id);
+    assert.equal(bound.sourceAssetId, "the-uploaded-asset");
+    const normalized = { ...bound, projectId: "<project>", sourceAssetId: "<source-image>" };
+    assert.equal(sha256(JSON.stringify({ body: normalized, sourceImageSha256: ref.sha256 })), plan.request.sha256);
+  }
+  assert.throws(() => selectRoutes("cuda", "cuda-wan22-a14b-t2v-heun"), /unknown route/);
+});
+
+test("Wan compares the accepted q4 source and worker settings, including a valid decoded stream", async (t) => {
+  const route = ROUTES["mlx-wan22-a14b-i2v-heun"];
+  const [row] = routeDownloadRows((await readCatalog(root)).find((m) => m.id === route.model),
+    { platform: "darwin", tier: "q4" }).required.filter((r) => r.variant);
+  const plan = { rows: { required: [row] } };
+  const file = { relativePath: "q4/transformer.safetensors", sizeBytes: 123, sha256: `sha256:${"a".repeat(64)}` };
+  const selected = { backend: "mlx", platform: "macos", models: [{ modelId: route.model, backend: "mlx", slot: "modelManifestEntry",
+    tier: "q4", variant: "q4", members: [{ role: "primary", tier: "q4", files: [file], source: {
+      kind: "revision", identity: { repository: row.repo, revision: row.revision, variant: "q4" } } }] }] };
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-claim-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, "jobs.db");
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("CREATE TABLE jobs (id TEXT, status TEXT, worker_id TEXT, execution_claim_source_route_json TEXT)");
+    db.prepare("INSERT INTO jobs VALUES (?, ?, ?, ?)").run("job", "completed", "owned", JSON.stringify(selected));
+  } finally { db.close(); }
+  assert.deepEqual(await readWanClaim(dbPath, "job", "owned"), selected);
+  await assert.rejects(readWanClaim(dbPath, "job", "other"), /owned completed job/);
+  const source = wanClaimSource(route, plan, selected);
+  assert.equal(source.revision, row.revision);
+  assert.throws(() => wanClaimSource(route, plan, { ...selected, backend: "candle" }), /backend/);
+  const member = selected.models[0].members[0];
+  member.source.identity.revision = "b".repeat(40);
+  assert.throws(() => wanClaimSource(route, plan, selected), /snapshot/);
+  member.source.identity.revision = row.revision;
+  file.relativePath = "q8/transformer.safetensors";
+  assert.throws(() => wanClaimSource(route, plan, selected), /file closure/);
+  file.relativePath = "q4/transformer.safetensors";
+  file.sha256 = `sha256:${"b".repeat(64)}`;
+  assert.notEqual(wanClaimSource(route, plan, selected).boundMembersSha256, source.boundMembersSha256);
+  const recipe = { mode: route.mode, model: route.model, adapter: "mlx_wan", prompt: route.body.prompt, seed: route.body.seed, rawAdapterSettings: { realModelInference: true, lightning: false },
+    normalizedSettings: { sourceAssetId: "uploaded" }, loras: [] };
+  verifyWanRecipe(route, recipe, "uploaded", row.repo);
+  for (const changed of [{ adapter: "procedural_video" }, { loras: [{ id: "extra" }] }, { normalizedSettings: {} }])
+    assert.throws(() => verifyWanRecipe(route, { ...recipe, ...changed }, "uploaded", row.repo));
+  const metrics = { model: route.model, backend: "mlx", sampler: "heun", steps: 6, guidanceScale: 3.5, seed: 33401,
+    width: 832, height: 480, quantLabel: "bf16", sampleMs: 999, totalMs: 5999, peakMemoryBytes: 10999 };
+  const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video: { width: 832, height: 480, decodedFrames: 13, avgFrameRate: "16/1" } } };
+  assert.equal(wanObservations(route, metrics, content).progressSampleIntervalMs, 999);
+  for (const bad of [{ backend: "cuda" }, { sampler: "default" }, { steps: 4 }, { sampleMs: null }])
+    assert.throws(() => wanObservations(route, { ...metrics, ...bad }, content), /Wan worker/);
+  assert.throws(() => wanObservations(route, metrics, { ...content, method: "file_bytes_no_probe" }), /decode/);
+});
+
+test("only explicit MLX Wan stages pinned rows before comparison and refuses mismatched sources", async () => {
+  const route = ROUTES["mlx-wan22-a14b-t2v-uni_pc"];
+  const cfg = { backend: "mlx", routes: [route], hubs: ["/owned/hub"] };
+  const input = { profile: "tier2-ab", backend: "mlx", ref: BASE, download_missing: true };
+  const options = { base_sha: BASE, head_sha: HEAD, routes: [route.id], preflight_only: false };
+  assert.equal(dispatchOptions({ ...input, moss_options_json: JSON.stringify(options) }, BASE).backend, "mlx");
+  for (const bad of [{ preflight_only: true }, { routes: DEFAULT_ROUTE_IDS.mlx }])
+    assert.throws(() => dispatchOptions({ ...input, moss_options_json: JSON.stringify({ ...options, ...bad }) }, BASE));
+  const models = await readCatalog(root);
+  const paths = { routes: [route], hubs: cfg.hubs, baseCatalog: models, headCatalog: models, platform: "darwin" };
+  const fs = { stat: async () => { throw Error("missing"); }, readdir: async () => [] };
+  const missing = await planRoutes({ ...paths, fs }); const calls = [];
+  await stageWanSnapshots({}, cfg, { routes: [...missing, ...missing] }, null, (args) => calls.push(args));
+  assert.equal(calls.length, 3); // q4 and the two required macOS catalog co-requisite files
+  for (const args of calls) {
+    assert.equal(args[0], "download"); assert.match(args[3], /^[a-f0-9]{40}$/);
+    assert.equal(args[4], "--include"); assert.equal(args.at(-1), cfg.hubs[0]);
+  }
+  const model = models.find((m) => m.id === route.model);
+  const drifted = { ...model, downloads: model.downloads.map((d) => ({ ...d, revision: "b".repeat(40) })) };
+  const incompatible = await planRoutes({ ...paths, baseCatalog: [drifted], fs });
+  await assert.rejects(stageWanSnapshots({}, cfg, { routes: incompatible }, null, () => assert.fail()), /differ between base and head/);
 });
 
 const run = (sha, status = "completed") => ({ status, output: { content: { sha256: sha } }, error: status === "completed" ? undefined : "boom" });
@@ -752,6 +870,8 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   for (const name of ["windows-candle.yml", "memory-catalog-campaign.yml", "load-progress-acceptance.yml"]) assert.doesNotMatch(await workflowText(name), /shared-display/);
   assert.match(cuda, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   assert.match(cuda, /vcvars64\.bat/);
-  assert.doesNotMatch(reusable, /download_missing|--download-missing|hf download|huggingface-cli/);
+  assert.match(mlx, /if: \$\{\{ inputs\.download_missing && !inputs\.preflight_only \}\}/);
+  assert.match(mlx, /--stage-wan/);
+  assert.doesNotMatch(cuda, /download_missing|--stage-wan|huggingface-cli/);
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
 });
