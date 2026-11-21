@@ -328,6 +328,46 @@ mod tests {
     }
 
     #[test]
+    fn wan_experts_keep_independently_verified_precisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = models_root(temp.path());
+        let high = wan_expert_scaled_fp8_keys();
+        let low: Vec<_> = high
+            .iter()
+            .map(|&(key, dtype)| {
+                (
+                    key,
+                    if key.ends_with(".weight") && dtype == "F8_E4M3" {
+                        "F8_E5M2"
+                    } else {
+                        dtype
+                    },
+                )
+            })
+            .collect();
+        write_safetensors(&root.join("unet/wan_high_noise.safetensors"), &high);
+        write_safetensors(&root.join("unet/wan_low_noise.safetensors"), &low);
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["usable"], true);
+        assert_eq!(row["sourcePrecision"]["format"], "fp8_e4m3_scalar");
+        let components = row["components"].as_array().unwrap();
+        for (role, format) in [
+            ("transformer_high", "fp8_e4m3_scalar"),
+            ("transformer_low", "fp8_e5m2_scalar"),
+        ] {
+            assert_eq!(
+                components
+                    .iter()
+                    .find(|component| component["role"] == role)
+                    .unwrap()["quant"],
+                format
+            );
+        }
+    }
+
+    #[test]
     fn wan_moe_folds_in_tree_umt5_te_and_vae() {
         // sc-10909: a complete MoE pair + the tree's UMT5 TE (t5, scaled-fp8) + one VAE → both are
         // folded in as in-place `text_encoder` / `vae` components (worker reads them in place). Still

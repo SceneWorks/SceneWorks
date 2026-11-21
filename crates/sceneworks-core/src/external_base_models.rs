@@ -370,16 +370,15 @@ fn assemble_wan_experts(
                     LOADER_PENDING_REASON.to_owned(),
                     components,
                 );
-                if anchor.verdict().map(|(_, _, format)| format)
-                    != detected[low].verdict().map(|(_, _, format)| format)
-                {
+                // The experts are independent checkpoints. Retain the high expert's source
+                // identity on the model and validate the low expert's own declared format.
+                let low_format = detected[low]
+                    .verdict()
+                    .map(|(_, _, format)| format.as_str());
+                if !family_quant_runnable(Some("wan-video"), low_format, "complete") {
                     row["usable"] = Value::Bool(false);
                     row["unusableReason"] =
-                        json!("The high- and low-noise experts declare different source formats.");
-                    row["quant"] = json!(QuantFormat::MixedQuantFormats.as_str());
-                    let entry = row.as_object_mut().unwrap();
-                    entry.remove("importQuantFormat");
-                    crate::source_precision::SourcePrecision::project(entry);
+                        json!("The low-noise expert has no supported in-place projection format.");
                 }
                 rows.push(row);
             }
