@@ -101,6 +101,17 @@ def render_scope_guard(guard):
     }
     observation["cuda_render_end"] = {
         "pool_ticks": 1,
+        "pool_growth": [
+            {
+                "card_index": 1,
+                "read_ns": 185,
+                "at_ns": 200,
+                "cuda_uuid": identity["cuda_uuid"],
+                "free_bytes": 95,
+                "global_used_upper_bytes": 120,
+                "child_growth_bytes": 103,
+            }
+        ],
         "pool": dict(
             identity,
             basis="verified-output-pool",
@@ -344,6 +355,13 @@ def test_new_gapless_capture_binds_supervisor_charge_even_when_old_card_baseline
         (("end", "zero", "before"), "exited_empty"),
         (("end", "pool", "pool_reserved_high_bytes"), 79),
         (("end", "pool_ticks"), 2),
+        (("end", "pool_growth"), []),
+        (("end", "pool_growth", 0, "read_ns"), 100),
+        (("end", "pool_growth", 0, "read_ns"), 201),
+        (("end", "pool_growth", 0, "cuda_uuid"), "another GPU"),
+        (("end", "pool_growth", 0, "free_bytes"), 94),
+        (("end", "pool_growth", 0, "child_growth_bytes"), 99),
+        (("end", "pool_growth", 0, "global_used_upper_bytes"), 119),
         (("guard", "fit_observation", "wddm_shared", "error"), "stat failure"),
         (("guard", "samples", 0, "cudaDeviceUuid"), "different card"),
         (("guard", "samples", 0, "childGlobalUsedGrowthBytes"), 89),
@@ -381,3 +399,30 @@ def test_raw_teardown_gaps_without_verified_summary_still_refuse():
             adapter,
             110,
         )
+
+
+def test_original_system_read_can_dominate_pool_returned_by_the_same_poll():
+    # Same physical byte values as the inference producer's CUDA render-end fixture.
+    adapter, guard = windows_guard()
+    scope = render_scope_guard(guard)
+    native = {"allocator_peak": 60, "axes": {"floor_device_bytes": 10}}
+    guard["admission"].update(gpuGlobalUsedBaselineBytes=50, childGpuCapBytes=78)
+    guard["samples"][0].update(globalUsedUpperBoundBytes=125, childGlobalUsedGrowthBytes=75)
+    guard["cuda_attribution"].update(
+        global_upper_bytes=125, pid_peak_bytes=0, pool_fallback_peak_bytes=60
+    )
+    guard["peak_gpu_bytes"] = 60
+    guard["cuda_attribution"]["wddm_dedicated"]["samples"] = [[901, 50], [902, 12]]
+    raw = guard["fit_observation"]
+    raw["wddm_retry"]["dedicated"]["events"][0]["previous"] = [902, 12]
+    raw["card_samples_monotonic_ns_free_owned_or_fallback_bytes"][1][2] = 60
+    end = raw["cuda_render_end"]
+    end["pool"]["pool_reserved_high_bytes"] = 60
+    end["pool_growth"][0].update(global_used_upper_bytes=125, child_growth_bytes=78)
+    peak = tool["windows_device_peak"]
+    assert peak(guard, native, adapter, 78, scope) == 78
+    with pytest.raises(ValueError, match="differs from verified native quote"):
+        peak(guard, native, adapter, 75, scope)
+    guard["admission"]["childGpuCapBytes"] = 77
+    with pytest.raises(ValueError, match="exceeds guard"):
+        peak(guard, native, adapter, 78, scope)

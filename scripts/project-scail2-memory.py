@@ -84,7 +84,7 @@ def sample_values(samples, width, label):
     return values
 
 
-def tenant_growth(guard, uuid, absolute, unknown, baseline):
+def tenant_growth(guard, uuid, absolute, unknown, baseline, card, pool):
     """Read the child charge from the same supervisor sample as its whole-card upper bound."""
     samples = guard.get("samples")
     require(isinstance(samples, list), "missing supervisor CUDA samples")
@@ -92,20 +92,69 @@ def tenant_growth(guard, uuid, absolute, unknown, baseline):
         event for event in samples if event.get("phase") == "cuda-global-used-upper-bound-sample"
     ]
     require(len(events) <= unknown, "unexpected supervisor CUDA sample count")
-    peak = last = 0
+
+    def charge_values(charge, upper):
+        charge, upper = byte_count(charge), byte_count(upper)
+        require(
+            max(0, upper - baseline) <= charge <= upper <= absolute,
+            "inconsistent supervisor CUDA charge",
+        )
+        return charge, upper
+
+    peak = absolute_peak = last = 0
     for event in events:
-        upper = byte_count(event.get("globalUsedUpperBoundBytes"))
-        charge = byte_count(event.get("childGlobalUsedGrowthBytes"))
+        charge, upper = charge_values(
+            event.get("childGlobalUsedGrowthBytes"), event.get("globalUsedUpperBoundBytes")
+        )
         require(
             event.get("cudaDeviceUuid") == uuid
-            and max(0, upper - baseline) <= charge <= upper <= absolute
             and type(event.get("at_ns")) is int
             and event["at_ns"] > last,
             "inconsistent supervisor CUDA charge or device",
         )
         byte_count(event.get("gpuFreeBytes"))
         peak = max(peak, charge)
+        absolute_peak = max(absolute_peak, upper)
         last = event["at_ns"]
+
+    observation = guard["fit_observation"]
+    if "cuda_render_end" in observation:
+        end = observation["cuda_render_end"]
+        require(isinstance(end, dict), "missing CUDA render-end measurements")
+        entries = end.get("pool_growth")
+        require(
+            isinstance(entries, list) and len(entries) == byte_count(end.get("pool_ticks")),
+            "missing original charge at CUDA pool substitution",
+        )
+        previous = -1
+        for entry in entries:
+            index = byte_count(entry["card_index"])
+            require(
+                previous < index < len(card)
+                and entry["cuda_uuid"] == uuid
+                and (card[index - 1][0] if index else 0)
+                < byte_count(entry["read_ns"])
+                <= byte_count(entry["at_ns"])
+                == card[index][0]
+                and byte_count(entry["free_bytes"]) == card[index][1]
+                and card[index][2] == pool,
+                "crossed original CUDA charge or pool sample",
+            )
+            charge, upper = charge_values(
+                entry["child_growth_bytes"], entry["global_used_upper_bytes"]
+            )
+            peak = max(peak, charge)
+            absolute_peak = max(absolute_peak, upper)
+            previous = index
+        require(absolute_peak == absolute, "original CUDA charges omit the card high-water mark")
+        if entries:
+            mark = end.get("pool")
+            require(
+                isinstance(mark, dict)
+                and entries[0]["card_index"] == byte_count(mark.get("card_index"))
+                and pool == byte_count(mark.get("pool_reserved_high_bytes")),
+                "CUDA pool substitutions differ from the output marker",
+            )
     return peak, len(events)
 
 
@@ -215,7 +264,9 @@ def windows_device_peak(guard, native, adapter, raw_gross, scope=None):
     owned_or_floor = max(pool, pid, max(wddm), byte_count(native["axes"]["floor_device_bytes"]))
     card = observation["card_samples_monotonic_ns_free_owned_or_fallback_bytes"]
     free = sample_values(card, 3, "free-card")
-    growth, growth_count = tenant_growth(guard, adapter["cuda_uuid"], absolute, unknown, baseline)
+    growth, growth_count = tenant_growth(
+        guard, adapter["cuda_uuid"], absolute, unknown, baseline, card, pool
+    )
     if "cuda_render_end" in observation:
         end = observation["cuda_render_end"]
         require(
