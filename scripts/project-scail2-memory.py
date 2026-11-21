@@ -146,6 +146,23 @@ def tenant_growth(guard, uuid, absolute, unknown, baseline, card, pool):
             peak = max(peak, charge)
             absolute_peak = max(absolute_peak, upper)
             previous = index
+        if "rejected_growth" in end:
+            reserve = byte_count(guard["admission"]["gpuFreeReserveBytes"])
+            cap = byte_count(guard["admission"]["childGpuCapBytes"])
+            require(
+                all(free >= reserve and used <= cap for _, free, used in card)
+                and all(event["gpuFreeBytes"] >= reserve for event in events),
+                "completed CUDA reading breached the capture guard",
+            )
+        rejected = end.get("rejected_growth", [])
+        require(isinstance(rejected, list), "invalid rejected CUDA readings")
+        for entry in rejected:
+            require(entry["cuda_uuid"] == uuid, "rejected CUDA reading belongs to another device")
+            charge, upper = charge_values(
+                entry["child_growth_bytes"], entry["global_used_upper_bytes"]
+            )
+            peak = max(peak, charge)
+            absolute_peak = max(absolute_peak, upper)
         require(absolute_peak == absolute, "original CUDA charges omit the card high-water mark")
         if entries:
             mark = end.get("pool")
@@ -160,10 +177,12 @@ def tenant_growth(guard, uuid, absolute, unknown, baseline, card, pool):
 
 def validate_render_scope(scope, end, dedicated, misses, pool, card):
     """Bind the capture verifier's post-output exception to its unchanged raw Job/card records."""
-    require(
-        isinstance(scope, dict),
-        "incomplete WDDM measurement without verified render scope",
-    )
+    if any(misses):
+        require(
+            isinstance(scope, dict), "incomplete WDDM measurement without verified render scope"
+        )
+    else:
+        require(scope is None, "unexpected WDDM render-scope exception")
     identity = {
         "pid": dedicated["pid"],
         "created_filetime": dedicated["created_filetime"],
@@ -196,6 +215,8 @@ def validate_render_scope(scope, end, dedicated, misses, pool, card):
         },
         "invalid WDDM output or release marker",
     )
+    if not any(misses):
+        return
     expected = dict(
         identity,
         pool_card_index=pool_mark["card_index"],
@@ -209,7 +230,105 @@ def validate_render_scope(scope, end, dedicated, misses, pool, card):
     )
 
 
-def windows_device_peak(guard, native, adapter, raw_gross, scope=None):
+def validate_rejected_growth(guard, end, native_pool, card, pool_high):
+    """A failed read is chargeable only when this Job's verified output pool has retired."""
+    mark, zero = end["pool"], end["zero"]
+    require(
+        isinstance(native_pool, dict)
+        and set(native_pool)
+        == {
+            "pid",
+            "cudaDeviceUuid",
+            "poolUsedBytes",
+            "poolUsedHighBytes",
+            "poolReservedBytes",
+            "poolReservedHighBytes",
+        },
+        "missing original native CUDA pool",
+    )
+    used = byte_count(native_pool["poolUsedBytes"])
+    reserved = byte_count(native_pool["poolReservedBytes"])
+    require(
+        byte_count(native_pool["pid"]) == mark["pid"]
+        and native_pool["cudaDeviceUuid"] == mark["cuda_uuid"]
+        and 0 < used <= reserved <= pool_high == byte_count(native_pool["poolReservedHighBytes"])
+        and used <= byte_count(native_pool["poolUsedHighBytes"]) <= pool_high,
+        "rejected observation differs from native CUDA pool or process",
+    )
+    previous = 0
+    last_positive_read = 0
+    exited_at = None
+    reserve = byte_count(guard["admission"]["gpuFreeReserveBytes"])
+    for event in end["rejected_growth"]:
+        index = byte_count(event["next_card_index"])
+        read, finished = byte_count(event["read_ns"]), byte_count(event["at_ns"])
+        original = event["pool"]
+        require(
+            mark["card_index"] < index <= zero["card_index"]
+            and max(previous, card[index - 1][0]) < read <= finished <= card[index][0]
+            and byte_count(event["pid"]) == mark["pid"]
+            and byte_count(event["created_filetime"]) == mark["created_filetime"]
+            and event["before"] == "live"
+            and event["after"] in ("live", "exited_empty")
+            and exited_at is None
+            and event["reason"] == "probe-failure"
+            and original == native_pool
+            and all(type(original[k]) is type(v) for k, v in native_pool.items())
+            and byte_count(event["free_bytes"]) >= reserve
+            and byte_count(event["child_growth_bytes"])
+            <= byte_count(guard["admission"]["childGpuCapBytes"]),
+            "unverified rejected CUDA reading or physical guard violation",
+        )
+        retired = (
+            event["detail"] == "CUDA pool proof exceeds concurrent global use"
+            and event["child_growth_bytes"] < reserved
+        )
+        exited = (
+            event["detail"] == "CUDA pool proof has no valid owned PID/UUID allocation"
+            and event["after"] == "exited_empty"
+        )
+        require(retired or exited, "unverified CUDA pool rejection reason")
+        if event["after"] == "exited_empty":
+            exited_at = index
+        previous = finished
+        if event["child_growth_bytes"]:
+            last_positive_read = read
+
+    if exited_at is not None:
+        require(
+            zero["before"] == "exited_empty" and not any(value for _, _, value in card[exited_at:]),
+            "original CUDA Job resumed after exit",
+        )
+
+    # A rejected sample may extend live GPU usage beyond a previously plausible terminal PDH gap.
+    observation = guard["fit_observation"]
+    last_used = max(last_positive_read, max(t for t, _, value in card if value > 0))
+    for name, series in (
+        ("dedicated", guard["cuda_attribution"]["wddm_dedicated"]),
+        ("shared", observation["wddm_shared"]),
+    ):
+        missed = [
+            item for item in observation["wddm_retry"][name]["events"] if item["recovered"] is False
+        ]
+        require(
+            len(missed) == series["missing_active_polls"],
+            "unlocated WDDM gap during CUDA pool retry",
+        )
+        for item in missed:
+            require(
+                max(mark["at_ns"], last_used)
+                < byte_count(item["start_ns"])
+                <= byte_count(item["end_ns"])
+                <= zero["at_ns"]
+                and item["retried"] is True
+                and item["retry_sample"] is None
+                and item["previous"] == series["samples"][-1]
+                and byte_count(item["local_filetime_before"]) >= series["samples"][-1][0],
+                "WDDM gap overlaps a rejected CUDA reading",
+            )
+
+
+def windows_device_peak(guard, native, adapter, raw_gross, scope=None, native_pool=None):
     admission = guard["admission"]
     baseline = byte_count(admission.get("gpuGlobalUsedBaselineBytes"))
     attribution = guard["cuda_attribution"]
@@ -269,13 +388,16 @@ def windows_device_peak(guard, native, adapter, raw_gross, scope=None):
     )
     if "cuda_render_end" in observation:
         end = observation["cuda_render_end"]
+        rejected = end.get("rejected_growth", [])
         require(
-            isinstance(end, dict) and byte_count(end.get("pool_ticks")) + growth_count == unknown,
+            byte_count(end.get("pool_ticks")) + growth_count + len(rejected) == unknown,
             "unaccounted supervisor CUDA fallback tick",
         )
-        if any(misses):
+        if any(misses) or rejected:
             require(fallback == pool, "output marker differs from native pool fallback")
             validate_render_scope(scope, end, dedicated, misses, pool, card)
+            if rejected:
+                validate_rejected_growth(guard, end, native_pool, card, pool)
         else:
             require(scope is None, "unexpected WDDM render-scope exception")
         classified = max(owned_or_floor, growth)
@@ -388,6 +510,30 @@ def project(receipt_path, review_path):
             and native["axes"]["backend"] == "cuda",
             "crossed CUDA identity",
         )
+        native_pool = None
+        end = guard["fit_observation"].get("cuda_render_end", {})
+        if "rejected_growth" in end:
+            policy = receipt["contract"]["request"]["policy"]
+            policy_bytes = (
+                json.dumps(policy, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+            ).encode()
+            require(
+                receipt["request"]["policy"] == policy
+                and admission["policySha256"] == sha256(policy_bytes)
+                and all(
+                    admission[k] == policy[k] and type(admission[k]) is type(policy[k])
+                    for k in ("cudaDeviceUuid", "childGpuCapBytes", "gpuFreeReserveBytes")
+                ),
+                "CUDA rejection guard differs from approved capture policy",
+            )
+        if end.get("rejected_growth"):
+            pool_name = f"count-{count}.cuda-pool.json"
+            pool_bytes = (receipt_path.parent / pool_name).read_bytes()
+            require(
+                sha256(pool_bytes) == receipt["logs"][pool_name]["sha256"],
+                "native CUDA pool record changed",
+            )
+            native_pool = json.loads(pool_bytes)
         pools = {
             "host": (
                 guard["peak_host_bytes"],
@@ -402,6 +548,7 @@ def project(receipt_path, review_path):
                     receipt["adapter"],
                     witness["gross_device_bytes"],
                     row.get("cuda_render_scope"),
+                    native_pool,
                 ),
                 admission["childGpuCapBytes"],
             ),

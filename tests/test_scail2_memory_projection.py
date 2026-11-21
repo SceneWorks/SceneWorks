@@ -137,11 +137,58 @@ def render_scope_guard(guard):
     )
 
 
-@pytest.mark.parametrize("case", ["mlx", "cuda", "cuda_render_scope"])
+def with_rejected_reads(guard):
+    scope = render_scope_guard(guard)
+    end = guard["fit_observation"]["cuda_render_end"]
+    uuid = guard["admission"]["cudaDeviceUuid"]
+    guard["admission"]["gpuFreeReserveBytes"] = 50
+    guard["cuda_attribution"]["unknown_pid_polls"] += 2
+    pool = {
+        "pid": guard["pid"],
+        "cudaDeviceUuid": uuid,
+        "poolUsedBytes": 50,
+        "poolReservedBytes": 70,
+        "poolUsedHighBytes": 75,
+        "poolReservedHighBytes": 80,
+    }
+    retired = {
+        "next_card_index": 2,
+        "read_ns": 210,
+        "at_ns": 220,
+        "pid": scope["pid"],
+        "created_filetime": scope["created_filetime"],
+        "cuda_uuid": uuid,
+        "before": "live",
+        "after": "live",
+        "reason": "probe-failure",
+        "detail": "CUDA pool proof exceeds concurrent global use",
+        "pool": pool.copy(),
+        "free_bytes": 80,
+        "global_used_upper_bytes": 60,
+        "child_growth_bytes": 40,
+    }
+    end["rejected_growth"] = [
+        retired,
+        dict(
+            retired,
+            read_ns=230,
+            at_ns=245,
+            after="exited_empty",
+            detail="CUDA pool proof has no valid owned PID/UUID allocation",
+            pool=pool.copy(),
+            global_used_upper_bytes=120,
+            child_growth_bytes=117,
+        ),
+    ]
+    end["zero"]["before"] = "exited_empty"
+    return scope, pool
+
+
+@pytest.mark.parametrize("case", ["mlx", "cuda", "cuda_render_scope", "cuda_rejected"])
 def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path, case):
     mlx = case == "mlx"
     backend = "mlx" if mlx else "cuda"
-    scope = None
+    scope = native_pool = None
     os_name = "macos" if mlx else "windows"
     axes = {"backend": backend, "references": 4, "classifier_free_guidance": True}
     revision = "a" * 40
@@ -163,6 +210,15 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         axes["floor_device_bytes"] = 70
         if case == "cuda_render_scope":
             scope = render_scope_guard(guard)
+        elif case == "cuda_rejected":
+            scope, native_pool = with_rejected_reads(guard)
+            policy = {
+                k: guard["admission"][k]
+                for k in ("cudaDeviceUuid", "childGpuCapBytes", "gpuFreeReserveBytes")
+            }
+            guard["admission"]["policySha256"] = tool["sha256"](
+                (json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            )
     guard_name = "count-4.supervisor.json"
     guard_file = tmp_path / guard_name
     guard_file.write_text(json.dumps(guard))
@@ -171,7 +227,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         "text_tokens": 512,
         "gross_host_bytes": 145,
         "gross_unified_bytes": 140,
-        "gross_device_bytes": 110 if scope else 120,
+        "gross_device_bytes": 117 if native_pool else 110 if scope else 120,
         "mlx_decode_budget_bytes": 16 if mlx else None,
     }
     native = {
@@ -210,6 +266,12 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         },
         "logs": {guard_name: {"sha256": tool["sha256"](guard_file.read_bytes())}},
     }
+    if native_pool:
+        receipt["request"] = {"policy": policy}
+        receipt["contract"]["request"] = {"policy": policy}
+        pool_file = tmp_path / "count-4.cuda-pool.json"
+        pool_file.write_text(json.dumps(native_pool))
+        receipt["logs"][pool_file.name] = {"sha256": tool["sha256"](pool_file.read_bytes())}
     receipt_file = tmp_path / "receipt.json"
     receipt_file.write_text(json.dumps(receipt))
     empirical = {
@@ -253,8 +315,28 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         review_file.write_text(json.dumps(review))
         measured = project()
         assert measured["bounds"]["device"]["observed_peak_bytes"] == 80
-        assert measured["bounds"]["device"]["classified_peak_bytes"] == (110 if scope else 100)
+        assert measured["bounds"]["device"]["classified_peak_bytes"] == (
+            117 if native_pool else 110 if scope else 100
+        )
         assert measured["bounds"]["host"]["classified_peak_bytes"] == 145
+    if native_pool:
+        original = guard_file.read_bytes()
+        guard["admission"]["gpuFreeReserveBytes"] -= 1
+        guard_file.write_text(json.dumps(guard))
+        receipt["logs"][guard_name]["sha256"] = tool["sha256"](guard_file.read_bytes())
+        receipt_file.write_text(json.dumps(receipt))
+        review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
+        review_file.write_text(json.dumps(review))
+        with pytest.raises(ValueError, match="differs from approved capture policy"):
+            project()
+        guard_file.write_bytes(original)
+        receipt["logs"][guard_name]["sha256"] = tool["sha256"](original)
+        receipt_file.write_text(json.dumps(receipt))
+        review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
+        review_file.write_text(json.dumps(review))
+        pool_file.write_text("{}")
+        with pytest.raises(ValueError, match="native CUDA pool record changed"):
+            project()
     guard_file.write_text("{}")
     with pytest.raises(ValueError, match="guard record changed"):
         project()
@@ -426,3 +508,78 @@ def test_original_system_read_can_dominate_pool_returned_by_the_same_poll():
     guard["admission"]["childGpuCapBytes"] = 77
     with pytest.raises(ValueError, match="exceeds guard"):
         peak(guard, native, adapter, 78, scope)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("events", 1, "next_card_index"), 1),
+        (("events", 1, "read_ns"), 219),
+        (("events", 1, "at_ns"), 301),
+        (("events", 1, "pid"), 42),
+        (("events", 1, "created_filetime"), 901),
+        (("events", 1, "cuda_uuid"), "foreign"),
+        (("events", 0, "detail"), "CUDA pool proof is unreadable"),
+        (("events", 0, "free_bytes"), 49),
+        (("events", 0, "child_growth_bytes"), 70),
+        (("events", 0, "reason"), "device-memory"),
+        (("events", 1, "pool", "poolUsedBytes"), 51),
+        (("events", 1, "after"), "live"),
+        (("end", "zero", "before"), "live"),
+        (("end", "rejected_growth"), []),
+        (("admission", "childGpuCapBytes"), 116),
+        (("card", 0, 1), 49),
+        (("samples", 0, "gpuFreeBytes"), 49),
+        (("attr", "unknown_pid_polls"), 5),
+        (("retry", "dedicated", "events", 0, "start_ns"), 228),
+    ],
+)
+def test_refuses_unverified_rejected_pool_attempt(path, value):
+    adapter, guard = windows_guard()
+    scope, pool = with_rejected_reads(guard)
+    obs = guard["fit_observation"]
+    end = obs["cuda_render_end"]
+    root = {
+        "events": end["rejected_growth"],
+        "end": end,
+        "attr": guard["cuda_attribution"],
+        "admission": guard["admission"],
+        "retry": obs["wddm_retry"],
+        "card": obs["card_samples_monotonic_ns_free_owned_or_fallback_bytes"],
+        "samples": guard["samples"],
+    }
+    parent = root
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = value
+    with pytest.raises(ValueError):
+        tool["windows_device_peak"](
+            guard,
+            {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}},
+            adapter,
+            117,
+            scope,
+            pool,
+        )
+
+
+def test_gapless_pdh_still_requires_the_native_pool_and_output_markers_for_failed_attempts():
+    adapter, guard = windows_guard()
+    _, pool = with_rejected_reads(guard)
+    obs = guard["fit_observation"]
+    for name, series in (
+        ("dedicated", guard["cuda_attribution"]["wddm_dedicated"]),
+        ("shared", obs["wddm_shared"]),
+    ):
+        series["missing_active_polls"] = 0
+        obs["wddm_retry"][name] = {"attempts": 0, "events": []}
+    quote = tool["windows_device_peak"]
+    args = (guard, {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}}, adapter)
+    assert quote(*args, 117, None, pool) == 117
+    with pytest.raises(ValueError):
+        quote(*args, 110, None, pool)
+    with pytest.raises(ValueError):
+        quote(*args, 117, None, None)
+    obs["cuda_render_end"]["zero"] = None
+    with pytest.raises(ValueError):
+        quote(*args, 117, None, pool)
