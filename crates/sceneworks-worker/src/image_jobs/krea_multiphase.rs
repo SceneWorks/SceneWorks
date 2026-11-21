@@ -464,10 +464,11 @@ fn check_candle_phase_host_memory(needed_bytes: u64, available: Option<u64>) -> 
 }
 
 /// An imported generator may be a warm hit, where its resident factors are already paid for but
-/// its next phase workspace has never been allocated. Check the incremental device bytes against
+/// its next request workspace has never been allocated. Check the incremental device bytes against
 /// current free VRAM without granting reclaim credit for the generator we are about to use.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) async fn admit_warm_candle_phase_workspace(
+pub(super) async fn admit_warm_candle_krea_workspace(
+    label: &str,
     gpu_id: &str,
     needed_bytes: u64,
 ) -> WorkerResult<()> {
@@ -475,11 +476,12 @@ pub(super) async fn admit_warm_candle_phase_workspace(
         return Ok(());
     }
     let budget = crate::vram_gate::live_capped_budget(gpu_id).await;
-    check_warm_candle_phase_budget(gpu_id, needed_bytes, budget)
+    check_warm_candle_krea_budget(label, gpu_id, needed_bytes, budget)
 }
 
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-fn check_warm_candle_phase_budget(
+fn check_warm_candle_krea_budget(
+    label: &str,
     gpu_id: &str,
     needed_bytes: u64,
     budget: Option<crate::fit_gate::VramBudget>,
@@ -487,7 +489,7 @@ fn check_warm_candle_phase_budget(
     let needed_gib = needed_bytes as f64 / crate::fit_gate::BYTES_PER_GIB;
     if budget.is_some_and(|budget| crate::fit_gate::exceeds_budget(needed_gib, budget.free_gb)) {
         return Err(WorkerError::InvalidPayload(format!(
-            "Krea multi-phase workspace needs {needed_bytes} additional device bytes on GPU {gpu_id}"
+            "{label} workspace needs {needed_bytes} additional device bytes on GPU {gpu_id}"
         )));
     }
     Ok(())
@@ -508,9 +510,9 @@ fn phased_candle_host_and_warm_device_allowances_use_available_bytes() {
         free_gb: 2.0,
     });
     let available = 2_u64 << 30;
-    assert!(check_warm_candle_phase_budget("gpu", available, budget).is_ok());
+    assert!(check_warm_candle_krea_budget("Krea multi-phase", "gpu", available, budget).is_ok());
     assert!(matches!(
-        check_warm_candle_phase_budget("gpu", available + 1, budget),
+        check_warm_candle_krea_budget("Krea multi-phase", "gpu", available + 1, budget),
         Err(WorkerError::InvalidPayload(message)) if message.contains("device bytes")
     ));
 }
@@ -586,7 +588,7 @@ pub(super) fn multiphase_pag_workspace(
 /// Reflect the placement selected by the cold loader or observed on a warm hit. These fields
 /// change where the same model is held; the request and every source remain those compiled before
 /// loading. A proposed request policy cannot change the plan's load binding.
-fn loaded_multiphase_spec(
+pub(super) fn loaded_krea_spec(
     spec: &gen_core::LoadSpec,
     placement: crate::generator_cache::ExecutionPolicy,
 ) -> Option<gen_core::LoadSpec> {
@@ -618,20 +620,20 @@ fn multiphase_load_binding_preserves_sources_when_cache_placement_changes() {
             AdapterKind::Lora,
         )]);
     let requested_placement = crate::generator_cache::ExecutionPolicy::from_load_spec(&requested);
-    assert!(loaded_multiphase_spec(&requested, requested_placement).is_none());
+    assert!(loaded_krea_spec(&requested, requested_placement).is_none());
 
     let loaded_placement = crate::generator_cache::ExecutionPolicy {
         offload_policy: OffloadPolicy::Sequential,
         load_shape: LoadShape::DeferredMaterialization,
         load_shape_declaration_result: LoadShapeDeclarationResult::Eligible,
     };
-    let actual = loaded_multiphase_spec(&requested, loaded_placement).unwrap();
+    let actual = loaded_krea_spec(&requested, loaded_placement).unwrap();
     assert_eq!(
         crate::generator_cache::ExecutionPolicy::from_load_spec(&actual),
         loaded_placement
     );
 
-    let restored = loaded_multiphase_spec(&actual, requested_placement).unwrap();
+    let restored = loaded_krea_spec(&actual, requested_placement).unwrap();
     assert_eq!(
         RenderLoadBinding::from_spec(&restored),
         RenderLoadBinding::from_spec(&requested)
@@ -643,7 +645,7 @@ impl PreparedKreaMultiphase {
         mut self,
         placement: crate::generator_cache::ExecutionPolicy,
     ) -> WorkerResult<Self> {
-        if let Some(spec) = loaded_multiphase_spec(&self.spec, placement) {
+        if let Some(spec) = loaded_krea_spec(&self.spec, placement) {
             self.plan = self.plan.rebind_load_placement(&spec).map_err(|error| {
                 crate::generation_error(
                     "Krea multi-phase load placement did not match the plan",
@@ -940,7 +942,7 @@ pub(super) async fn generate_krea_multiphase_stream(
         Some(&request.model_manifest_entry),
         None,
     )
-    .with_phase_adapter_workspace(phase_adapter_workspace)
+    .with_request_workspace(phase_adapter_workspace)
     .with_resolved_artifact_tier(resolved_mlx_artifact_tier(&weights_dir, quant_bits))?;
     #[cfg(target_os = "macos")]
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {

@@ -1490,6 +1490,24 @@ pub(crate) fn low_res_start_workspace_bytes_with_source(
     Ok(transition_delta.saturating_add(init_codec_bytes))
 }
 
+/// Host peak of the RGB Lanczos stretch used by the Krea Hires.fix handoff.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+pub(crate) fn krea_hires_pixel_workspace_bytes(
+    (base_width, base_height): (u32, u32),
+    (target_width, target_height): (u32, u32),
+) -> u64 {
+    let rgb = (u64::from(base_width) * u64::from(base_height))
+        .saturating_add(u64::from(target_width) * u64::from(target_height))
+        .saturating_mul(3);
+    if (base_width, base_height) == (target_width, target_height) {
+        return rgb;
+    }
+    // image::imageops::resize retains its vertical RGBA32F image during the horizontal pass.
+    let vertical = (u64::from(base_width) * u64::from(target_height)).saturating_mul(16);
+    let coefficients = u64::from(base_width.max(base_height)).saturating_mul(4);
+    rgb.saturating_add(vertical).saturating_add(coefficients)
+}
+
 /// Complete pass-scoped [`gen_core::RequestLiveSetPlan`] pricing result for an `ENG-2` two-pass
 /// Hires.fix request (`ADM-3`, `§6.6`, `§6.13`, `§6.14`, `SW-6948`).
 #[cfg_attr(not(native_lane), allow(dead_code))]
@@ -1608,7 +1626,18 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
     };
 
     let batch = batch.max(1);
-    let params =
+    let krea_turbo = route_id == "krea_2_turbo";
+    let params = if krea_turbo {
+        Eng2LowResArchitectureParams {
+            latent_channels: 16,
+            vae_spatial_scale: 8,
+            patch_size: 2,
+            requires_multiple: 16,
+            min_dim: 256,
+            max_text_tokens: 1024,
+            head_dim: 128,
+        }
+    } else {
         eng2_low_res_architecture_params(route_id).unwrap_or(Eng2LowResArchitectureParams {
             latent_channels: FLUX1_LATENT_CHANNELS,
             vae_spatial_scale: FLUX1_VAE_SPATIAL_SCALE,
@@ -1617,7 +1646,8 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
             min_dim: 256,
             max_text_tokens: 512,
             head_dim: FLUX1_HEAD_DIM,
-        });
+        })
+    };
 
     let resolved_low_res = match low_res_start {
         Some(spec) => Some(
@@ -1893,6 +1923,23 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
     pass1_geom.reference_count = 1;
     pass1_geom.reference_canvases = vec![(hires_width, hires_height)];
 
+    // Krea moves the decoded RGB image through the host before uploading the refinement
+    // reference. Price that host allocation once on unified memory and separately on CUDA.
+    let krea_discrete_device = krea_turbo && domain == gen_core::MemoryBudgetDomain::DeviceVram;
+    let pixel_resize_bytes = if krea_discrete_device {
+        0
+    } else if krea_turbo {
+        krea_hires_pixel_workspace_bytes((base_width, base_height), (hires_width, hires_height))
+            .saturating_mul(u64::from(batch))
+            .saturating_sub(hires_rgb_bytes)
+    } else {
+        base_rgb_bytes.saturating_add(hires_rgb_bytes)
+    };
+    let pixel_handoff_bytes = if krea_discrete_device {
+        0
+    } else {
+        hires_rgb_bytes
+    };
     // Pass 0 -> Pass 1 transition: LearnedComponentTransition (intermediate RGB decode + pixel stretch to hires).
     transitions.push(TransitionOperationLiveSet {
         transition_id: "pass0_to_pass1_pixel_round_trip".into(),
@@ -1913,16 +1960,12 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
                 domain,
                 base_decode_workspace_bytes.max(1),
             ),
-            PricedAllocation::new(
-                "pixel_resize_stretch_workspace",
-                domain,
-                base_rgb_bytes.saturating_add(hires_rgb_bytes),
-            ),
+            PricedAllocation::new("pixel_resize_stretch_workspace", domain, pixel_resize_bytes),
         ],
         live_handoff_buffers: vec![PricedAllocation::new(
             "stretched_hires_reference_rgb8",
             domain,
-            hires_rgb_bytes,
+            pixel_handoff_bytes,
         )],
     });
 

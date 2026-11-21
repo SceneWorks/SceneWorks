@@ -333,6 +333,7 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     source_weight_bytes: u64,
     phase_adapter_extra_bytes: u64,
     pag_workspace_bytes: u64,
+    hires_workspace_bytes: u64,
     runtime: tokio::runtime::Handle,
 }
 
@@ -342,10 +343,16 @@ impl CachedCandleBaseFloorAdmission {
         self
     }
 
+    pub(super) fn with_hires_workspace(mut self, bytes: u64) -> Self {
+        self.hires_workspace_bytes = bytes;
+        self
+    }
+
     fn request_peak_floor_bytes(&self) -> u64 {
         self.source_weight_bytes
             .saturating_add(self.phase_adapter_extra_bytes)
             .saturating_add(self.pag_workspace_bytes)
+            .saturating_add(self.hires_workspace_bytes)
     }
 
     /// The source floor already counts each adapter file once. Charge any additional resident
@@ -432,6 +439,7 @@ impl CachedCandleBaseFloorAdmission {
                     floor_gb,
                     phase_adapter_extra_bytes = self.phase_adapter_extra_bytes,
                     pag_workspace_bytes = self.pag_workspace_bytes,
+                    hires_workspace_bytes = self.hires_workspace_bytes,
                     replacing_resident = resident_reclaimable_weight_bytes > 0,
                     reclaimable_gb,
                     "candle cached-base admission: cold external checkpoint admitted on its on-disk \
@@ -472,6 +480,7 @@ pub(super) fn prepare_cached_candle_base_floor(
         source_weight_bytes: bytes,
         phase_adapter_extra_bytes: 0,
         pag_workspace_bytes: 0,
+        hires_workspace_bytes: 0,
         runtime: tokio::runtime::Handle::current(),
     })
 }
@@ -647,13 +656,15 @@ mod tests {
             source_weight_bytes: 1_000,
             phase_adapter_extra_bytes: 0,
             pag_workspace_bytes: 0,
+            hires_workspace_bytes: 0,
             runtime: runtime.handle().clone(),
         }
         .with_phase_adapter_peak(&spec, 100)
         .unwrap()
-        .with_pag_workspace(25);
+        .with_pag_workspace(25)
+        .with_hires_workspace(15);
         assert_eq!(floor.phase_adapter_extra_bytes, 87);
-        assert_eq!(floor.request_peak_floor_bytes(), 1_112);
+        assert_eq!(floor.request_peak_floor_bytes(), 1_127);
         assert_eq!(floor.reclaimable_weight_bytes(), 1_000);
     }
 
@@ -678,6 +689,7 @@ mod tests {
             source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
             phase_adapter_extra_bytes: (1.0 * BYTES_PER_GIB) as u64,
             pag_workspace_bytes: 0,
+            hires_workspace_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("floor admission admits");
@@ -696,6 +708,7 @@ mod tests {
             source_weight_bytes: 0,
             phase_adapter_extra_bytes: 0,
             pag_workspace_bytes: 0,
+            hires_workspace_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("un-gateable admission admits");

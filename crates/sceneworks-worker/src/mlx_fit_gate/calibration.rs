@@ -341,8 +341,8 @@ pub(crate) fn attach_decode_quality_binding(
 
 impl MlxRequestPlan {
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub(crate) fn with_phase_adapter_workspace(mut self, bytes: u64) -> Self {
-        self.phase_adapter_workspace_bytes = bytes;
+    pub(crate) fn with_request_workspace(mut self, bytes: u64) -> Self {
+        self.request_workspace_bytes = bytes;
         self
     }
 
@@ -554,7 +554,7 @@ impl MlxRequestPlan {
             asset_bytes,
             folded_control_bytes,
             folded_adapter_bytes,
-            phase_adapter_workspace_bytes: 0,
+            request_workspace_bytes: 0,
             // This field remains the combined request allowance so the generic formula can hold the
             // fixed slice out before scaling: fixed reserve + provider activation anchor.
             activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),

@@ -709,7 +709,7 @@ pub(super) fn select_request_with_budget_using_bundle(
     };
     let request_workspace_bytes = reference_workspace_bytes
         .saturating_add(inputs.pag_workspace_bytes)
-        .saturating_add(plan.phase_adapter_workspace_bytes);
+        .saturating_add(plan.request_workspace_bytes);
 
     // Component precision floors are a provider property, not a manifest guess. Bind them only
     // from the exact registry descriptor or loaded generator, then use that tier for every evidence/cache identity

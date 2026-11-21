@@ -36,11 +36,12 @@ use super::krea_control::KREA_CONTROL_ENGINE_ID;
 #[cfg(not(target_os = "macos"))]
 use super::krea_control_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::krea_multiphase::admit_warm_candle_phase_workspace;
+use super::krea_multiphase::admit_warm_candle_krea_workspace;
 use super::krea_multiphase::build_generation_phases;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::krea_multiphase::candle_phase_adapter_memory;
 use super::krea_multiphase::ensure_multiphase_job_shape;
+use super::krea_multiphase::loaded_krea_spec;
 #[cfg(target_os = "macos")]
 use super::krea_multiphase::mlx_phase_adapter_workspace;
 use super::krea_multiphase::multiphase_pag_workspace;
@@ -53,9 +54,8 @@ use super::load_spec::selected_decoder_component_pin;
 use super::mlx_model;
 #[cfg(not(target_os = "macos"))]
 use super::prepare_cached_candle_base_floor;
+use super::render::drive_hires_passes;
 use super::render::hires_first_pass_context;
-#[cfg(target_os = "macos")]
-use super::render::hires_fix_reference_count;
 use super::render::resolve_hires_fix_plan;
 use super::render::HiresFixPlan;
 use super::resolve_seed;
@@ -1802,20 +1802,17 @@ fn krea_imported_reference_count(conditioning: &[Conditioning]) -> u32 {
 pub(super) fn krea_imported_memory_inputs(
     request: &ImageRequest,
     conditioning: &[Conditioning],
-    hires_fix: Option<HiresFixPlan>,
+    hires: Option<&KreaHiresMemory>,
     adapter_count: usize,
     phase_pag_workspace: Option<u64>,
 ) -> crate::mlx_fit_gate::MlxRequestInputs {
     let request_reference_count = krea_imported_reference_count(conditioning);
-    let reference_count =
-        hires_fix.map_or_else(|| request_reference_count, |_| hires_fix_reference_count());
-    let (width, height) = hires_fix.map_or((request.width, request.height), |hires| {
-        (hires.width, hires.height)
-    });
+    let reference_count = hires.map_or(request_reference_count, |hires| hires.reference_count);
+    let (width, height) = hires.map_or((request.width, request.height), |hires| hires.output_size);
     let mut overlays = Vec::new();
     // Match the generic MLX lane: geometry describes the heaviest provider pass, while overlays
     // describe only caller-supplied request resources. A t2i hires refinement therefore has one
-    // geometry reference but no external-reference overlay; edit hires retains its source count.
+    // geometry reference and no caller-supplied reference overlay.
     if request_reference_count > 0 {
         overlays.push(format!("references:{request_reference_count}"));
     }
@@ -1838,29 +1835,30 @@ pub(super) fn krea_imported_memory_inputs(
         negative_branch: false,
         prefix_kv_cache_eligible: false,
         reference_resources: None,
-        pag_workspace_bytes: phase_pag_workspace.unwrap_or_else(|| {
-            let base_steps = resolved_option_or_manifest_u32(
-                request,
-                "steps",
-                KREA_IMPORTED_DEFAULT_STEPS,
-                1..=100,
-            );
-            crate::execution_planner::request_hires_pag_workspace_bytes(
-                request,
-                request.width,
-                request.height,
-                base_steps,
-                hires_fix.map(|hires| (hires.width, hires.height, hires.steps)),
-                1,
-                None,
-            )
-        }),
+        pag_workspace_bytes: hires
+            .map(|hires| hires.pag_workspace_bytes)
+            .or(phase_pag_workspace)
+            .unwrap_or_else(|| {
+                let base_steps = resolved_option_or_manifest_u32(
+                    request,
+                    "steps",
+                    KREA_IMPORTED_DEFAULT_STEPS,
+                    1..=100,
+                );
+                crate::execution_planner::request_pag_workspace_bytes(
+                    request,
+                    request.width,
+                    request.height,
+                    1,
+                    base_steps,
+                    None,
+                )
+            }),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn krea_imported_generate_pass(
-    generator: &dyn Generator,
+fn krea_imported_pass_request(
     prompt: &str,
     width: u32,
     height: u32,
@@ -1869,13 +1867,8 @@ fn krea_imported_generate_pass(
     sampling: &GenerationRequest,
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
-    memory: Option<gen_core::GenerationMemory>,
-    memory_context: Option<&gen_core::MemoryRunContext>,
-    preview: gen_core::PreviewSink,
-    cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
-    let mut request = GenerationRequest {
+) -> GenerationRequest {
+    GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -1893,23 +1886,46 @@ fn krea_imported_generate_pass(
         pag: sampling.pag.clone(),
         conditioning,
         text_style_gain,
-        memory,
-        preview,
-        cancel: cancel.clone(),
         ..Default::default()
-    };
-    let report = crate::memory_strategy::generate_with_scope_report(
-        generator,
-        &mut request,
-        memory_context,
-        on_progress,
-    )
+    }
+}
+
+type KreaImportedOutput = (u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>);
+
+fn render_krea_imported_pass(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    plan: Option<&gen_core::RenderPlan>,
+    memory_context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<KreaImportedOutput> {
+    let report = match plan {
+        Some(plan) => crate::memory_strategy::generate_with_scope_report_planned(
+            generator,
+            &mut request,
+            plan,
+            memory_context,
+            on_progress,
+        ),
+        None => crate::memory_strategy::generate_with_scope_report(
+            generator,
+            &mut request,
+            memory_context,
+            on_progress,
+        ),
+    }
     .map_err(|error| {
         crate::generation_error("Krea 2 imported checkpoint generation failed", error)
     })?;
     let pag = report.pag;
     match report.output {
         Some(GenerationOutput::Images(mut images)) => {
+            if plan.is_some() && images.len() != 1 {
+                return Err(WorkerError::Engine(format!(
+                    "Krea Hires.fix pass returned {} images, expected one",
+                    images.len()
+                )));
+            }
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("Krea 2 imported checkpoint produced no image".to_owned())
             })?;
@@ -1921,8 +1937,216 @@ fn krea_imported_generate_pass(
     }
 }
 
+pub(super) struct KreaHiresMemory {
+    #[cfg(target_os = "macos")]
+    output_size: (u32, u32),
+    #[cfg(target_os = "macos")]
+    reference_count: u32,
+    pag_workspace_bytes: u64,
+    workspace_bytes: u64,
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    host_bytes: u64,
+}
+
+pub(super) struct PreparedKreaHires {
+    requests: [GenerationRequest; 2],
+    plan: gen_core::MultiPassRenderPlan,
+    spec: std::sync::Arc<LoadSpec>,
+    hires: HiresFixPlan,
+}
+
+impl PreparedKreaHires {
+    pub(super) fn prepare(
+        registry: &gen_core::ProviderRegistry,
+        spec: std::sync::Arc<LoadSpec>,
+        first: GenerationRequest,
+        hires: HiresFixPlan,
+    ) -> WorkerResult<Self> {
+        let engine_id = "krea_2_turbo";
+        let refine = GenerationRequest {
+            width: hires.width,
+            height: hires.height,
+            steps: Some(hires.steps),
+            ..first.clone()
+        };
+        let plan = super::render::compile_hires_multi_pass_plan(
+            registry, engine_id, &spec, &first, &refine, &hires,
+        )?
+        .ok_or_else(|| {
+            WorkerError::Engine(format!(
+                "{engine_id}: Hires.fix route has no registered pre-load render planner"
+            ))
+        })?;
+        Ok(Self {
+            requests: [first, refine],
+            plan,
+            spec,
+            hires,
+        })
+    }
+
+    fn passes(&self) -> (&gen_core::RenderPlan, &gen_core::RenderPlan) {
+        (&self.plan.passes()[0], &self.plan.passes()[1])
+    }
+
+    pub(super) fn memory(
+        &self,
+        pag_capability: Option<&gen_core::PagCapability>,
+    ) -> WorkerResult<KreaHiresMemory> {
+        let (first, refine) = self.passes();
+        let base = first.output_size();
+        let target = refine.output_size();
+        let pag_workspace_bytes = [first, refine]
+            .into_iter()
+            .zip(&self.requests)
+            .map(|(pass, request)| {
+                let (width, height) = pass.output_size();
+                crate::execution_planner::pag_workspace_bytes(
+                    width,
+                    height,
+                    1,
+                    pass.executed_steps() as u32,
+                    pag_capability,
+                    request.pag.as_ref(),
+                )
+            })
+            .max()
+            .unwrap_or(0);
+        let domain = if cfg!(target_os = "macos") {
+            gen_core::MemoryBudgetDomain::UnifiedMemory
+        } else {
+            gen_core::MemoryBudgetDomain::DeviceVram
+        };
+        let pricing = crate::execution_planner::price_eng2_hires_fix_request_live_set_plan(
+            "krea_2_turbo",
+            domain,
+            base.0,
+            base.1,
+            first.executed_steps() as u32,
+            target.0,
+            target.1,
+            refine.executed_steps() as u32,
+            1,
+            &[],
+            None,
+            false,
+            false,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )?;
+        Ok(KreaHiresMemory {
+            #[cfg(target_os = "macos")]
+            output_size: target,
+            #[cfg(target_os = "macos")]
+            reference_count: refine.reference_count(),
+            pag_workspace_bytes,
+            // MLX already prices the final single-reference render at target geometry. The
+            // discrete imported route starts with a pinned source-only floor.
+            workspace_bytes: if domain == gen_core::MemoryBudgetDomain::UnifiedMemory {
+                pricing.incremental_workspace_bytes_over_pass1_baseline(0, 0)
+            } else {
+                pricing.priced_domain_peak.request_peak_bytes
+            },
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            host_bytes: crate::execution_planner::krea_hires_pixel_workspace_bytes(base, target),
+        })
+    }
+
+    fn generate(
+        self,
+        generator: &dyn Generator,
+        loaded_policy: crate::generator_cache::ExecutionPolicy,
+        memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+        preview: gen_core::PreviewSink,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<KreaImportedOutput> {
+        let Self {
+            requests,
+            plan,
+            spec,
+            hires,
+        } = self;
+        let plan = if let Some(loaded_spec) = loaded_krea_spec(&spec, loaded_policy) {
+            plan.rebind_load_placement(&loaded_spec).map_err(|error| {
+                crate::generation_error("Krea Hires.fix placement changed", error)
+            })?
+        } else {
+            plan
+        };
+        let first_plan = &plan.passes()[0];
+        let refine_plan = &plan.passes()[1];
+        let mut requests = requests;
+        for request in &mut requests {
+            request.memory = memory_evaluation.map(|evaluation| evaluation.memory);
+            request.preview = preview.clone();
+            request.cancel = cancel.clone();
+        }
+        let [first, mut refine] = requests;
+        let steps = first.steps.unwrap_or(0);
+        let (width, height) = first_plan.output_size();
+        let first_context = memory_evaluation.map(|evaluation| {
+            hires_first_pass_context(
+                &evaluation.context,
+                width,
+                height,
+                first_plan.reference_count(),
+            )
+        });
+        let (_, output) = drive_hires_passes(
+            steps,
+            &hires,
+            Some(refine_plan),
+            cancel,
+            on_progress,
+            |progress| {
+                let (width, height, pixels, _) = render_krea_imported_pass(
+                    generator,
+                    first,
+                    Some(first_plan),
+                    first_context.as_ref(),
+                    progress,
+                )?;
+                Ok((
+                    Image {
+                        width,
+                        height,
+                        pixels,
+                    },
+                    (),
+                ))
+            },
+            |reference, progress| {
+                let strength = refine_plan
+                    .produced_reference()
+                    .and_then(|reference| reference.strength);
+                refine.conditioning = vec![Conditioning::Reference {
+                    image: reference,
+                    strength,
+                }];
+                render_krea_imported_pass(
+                    generator,
+                    refine,
+                    Some(refine_plan),
+                    memory_evaluation.map(|evaluation| &evaluation.context),
+                    progress,
+                )
+            },
+        )?;
+        Ok(output)
+    }
+}
+
 pub(super) enum KreaImportedItem {
     Ordinary(String),
+    Hires(Box<PreparedKreaHires>),
     Multiphase(Box<PreparedKreaMultiphase>),
 }
 
@@ -1937,57 +2161,12 @@ fn krea_imported_generate_one(
     sampling: &GenerationRequest,
     conditioning: &[Conditioning],
     text_style_gain: Option<f32>,
-    hires_fix: Option<HiresFixPlan>,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
-    let Some(hires) = hires_fix else {
-        return krea_imported_generate_pass(
-            generator,
-            prompt,
-            width,
-            height,
-            seed,
-            steps,
-            sampling,
-            conditioning.to_vec(),
-            text_style_gain,
-            memory_evaluation.map(|evaluation| evaluation.memory),
-            memory_evaluation.map(|evaluation| &evaluation.context),
-            preview,
-            cancel,
-            on_progress,
-        );
-    };
-
-    let first_pass_context = memory_evaluation.map(|evaluation| {
-        hires_first_pass_context(
-            &evaluation.context,
-            width,
-            height,
-            krea_imported_reference_count(conditioning),
-        )
-    });
-    let combined_steps = steps.saturating_add(hires.steps);
-    let mut first_progress = |progress| match progress {
-        Progress::Step { current, .. } => on_progress(Progress::Step {
-            current,
-            total: combined_steps,
-        }),
-        Progress::Decoding => {}
-        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        Progress::PostProcessing => on_progress(Progress::PostProcessing),
-        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
-        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
-        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => {
-            on_progress(Progress::Upsampling { tokens, max_tokens })
-        }
-    };
-    let (base_width, base_height, base_pixels, _) = krea_imported_generate_pass(
-        generator,
+) -> WorkerResult<KreaImportedOutput> {
+    let mut request = krea_imported_pass_request(
         prompt,
         width,
         height,
@@ -1996,59 +2175,16 @@ fn krea_imported_generate_one(
         sampling,
         conditioning.to_vec(),
         text_style_gain,
-        memory_evaluation.map(|evaluation| evaluation.memory),
-        first_pass_context.as_ref(),
-        preview.clone(),
-        cancel,
-        &mut first_progress,
-    )?;
-    if cancel.is_cancelled() {
-        return Err(WorkerError::Engine("generation cancelled".to_owned()));
-    }
-    let high_res_reference = fit_engine_image(
-        Image {
-            width: base_width,
-            height: base_height,
-            pixels: base_pixels,
-        },
-        hires.width,
-        hires.height,
-        "stretch",
-    )?;
-    let final_conditioning = vec![Conditioning::Reference {
-        image: high_res_reference,
-        strength: Some(hires.provider_reference_strength),
-    }];
-    let mut second_progress = |progress| match progress {
-        Progress::Step { current, .. } => on_progress(Progress::Step {
-            current: steps.saturating_add(current),
-            total: combined_steps,
-        }),
-        Progress::Decoding => on_progress(Progress::Decoding),
-        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        Progress::PostProcessing => on_progress(Progress::PostProcessing),
-        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
-        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
-        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => {
-            on_progress(Progress::Upsampling { tokens, max_tokens })
-        }
-    };
-    krea_imported_generate_pass(
+    );
+    request.memory = memory_evaluation.map(|evaluation| evaluation.memory);
+    request.preview = preview;
+    request.cancel = cancel.clone();
+    render_krea_imported_pass(
         generator,
-        prompt,
-        hires.width,
-        hires.height,
-        seed,
-        hires.steps,
-        sampling,
-        final_conditioning,
-        text_style_gain,
-        memory_evaluation.map(|evaluation| evaluation.memory),
+        request,
+        None,
         memory_evaluation.map(|evaluation| &evaluation.context),
-        preview,
-        cancel,
-        &mut second_progress,
+        on_progress,
     )
 }
 
@@ -2057,8 +2193,7 @@ fn krea_imported_generate_one(
 /// Keeping the evaluator injectable makes the cache/admission handoff testable without loading a
 /// multi-gigabyte checkpoint, while production passes [`crate::mlx_fit_gate::evaluate_request`]
 /// directly. One evaluation is performed for every sequential image item. Hires remains one
-/// admitted request with two provider passes, and [`krea_imported_generate_one`] opens the
-/// appropriate request scope for each pass.
+/// admitted request with two planned provider passes, each with its own geometry and scope.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drive_krea_imported_mlx_items<E>(
@@ -2076,7 +2211,6 @@ pub(super) fn drive_krea_imported_mlx_items<E>(
     sampling: GenerationRequest,
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
-    hires_fix: Option<HiresFixPlan>,
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     cancel: CancelFlag,
     mut evaluate_request: E,
@@ -2128,6 +2262,14 @@ where
                         on_progress,
                     )
                 }
+                KreaImportedItem::Hires(render) => render.generate(
+                    generator,
+                    loaded_policy,
+                    Some(&memory_evaluation),
+                    preview,
+                    &cancel,
+                    on_progress,
+                ),
                 KreaImportedItem::Ordinary(prompt) => krea_imported_generate_one(
                     generator,
                     &prompt,
@@ -2138,7 +2280,6 @@ where
                     &sampling,
                     &conditioning,
                     text_style_gain,
-                    hires_fix,
                     Some(&memory_evaluation),
                     preview,
                     &cancel,
@@ -2353,12 +2494,66 @@ pub(super) async fn generate_krea_imported_stream(
             .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
             .collect();
         (work, Some(workspace))
+    } else if let Some(hires) = hires_fix {
+        if engine_id != "krea_2_turbo" || !conditioning.is_empty() {
+            return Err(WorkerError::InvalidPayload(
+                "Imported Krea Hires.fix requires a prompt-only Turbo base pass.".to_owned(),
+            ));
+        }
+        let shared_spec = std::sync::Arc::new(spec.clone());
+        let work = work
+            .into_iter()
+            .map(|(seed, prompt)| {
+                let first = krea_imported_pass_request(
+                    &prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    &sampling,
+                    Vec::new(),
+                    text_style_gain,
+                );
+                let render = PreparedKreaHires::prepare(
+                    crate::inference_runtime::media(),
+                    shared_spec.clone(),
+                    first,
+                    hires,
+                )?;
+                Ok((seed, KreaImportedItem::Hires(Box::new(render))))
+            })
+            .collect::<WorkerResult<_>>()?;
+        (work, None)
     } else {
         let work = work
             .into_iter()
             .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
             .collect();
         (work, None)
+    };
+    let hires_memory = work
+        .iter()
+        .find_map(|(_, item)| match item {
+            KreaImportedItem::Hires(render) => {
+                Some(render.memory(descriptor.capabilities.pag.as_ref()))
+            }
+            _ => None,
+        })
+        .transpose()?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let hires_workspace_bytes = if let Some(hires) = &hires_memory {
+        if let Some(available) = crate::yue2_admission::host_available_bytes()
+            .await
+            .filter(|&available| available < hires.host_bytes)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Krea Hires.fix needs {} host bytes to resize its reference, but only {available} are available",
+                hires.host_bytes
+            )));
+        }
+        hires.workspace_bytes
+    } else {
+        0
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
@@ -2375,13 +2570,18 @@ pub(super) async fn generate_krea_imported_stream(
             &spec,
             &companion_refs,
         )?;
-        if let Some(pag_workspace) = phase_pag_workspace {
-            floor
-                .with_phase_adapter_peak(&spec, adapter_phase_bound.device_bytes)?
-                .with_pag_workspace(pag_workspace)
+        let floor = if phase_pag_workspace.is_some() {
+            floor.with_phase_adapter_peak(&spec, adapter_phase_bound.device_bytes)?
         } else {
             floor
-        }
+        };
+        floor
+            .with_pag_workspace(
+                phase_pag_workspace
+                    .or_else(|| hires_memory.as_ref().map(|hires| hires.pag_workspace_bytes))
+                    .unwrap_or(0),
+            )
+            .with_hires_workspace(hires_workspace_bytes)
     };
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
@@ -2391,12 +2591,18 @@ pub(super) async fn generate_krea_imported_stream(
         Some(&request.model_manifest_entry),
         None,
     )?
-    .with_phase_adapter_workspace(phase_adapter_workspace);
+    .with_request_workspace(
+        phase_adapter_workspace.saturating_add(
+            hires_memory
+                .as_ref()
+                .map_or(0, |hires| hires.workspace_bytes),
+        ),
+    );
     #[cfg(target_os = "macos")]
     let memory_inputs = krea_imported_memory_inputs(
         request,
         &conditioning,
-        hires_fix,
+        hires_memory.as_ref(),
         adapter_count,
         phase_pag_workspace,
     );
@@ -2429,7 +2635,6 @@ pub(super) async fn generate_krea_imported_stream(
                 sampling.clone(),
                 conditioning,
                 text_style_gain,
-                hires_fix,
                 tx,
                 cancel,
                 crate::mlx_fit_gate::evaluate_request,
@@ -2458,11 +2663,22 @@ pub(super) async fn generate_krea_imported_stream(
         ),
         move |model, cache_state, loaded_policy, tx, cancel| {
             if !cancel.is_cancelled() && cache_state == gen_core::MemoryCacheState::Warm {
-                workspace_runtime.block_on(admit_warm_candle_phase_workspace(
+                workspace_runtime.block_on(admit_warm_candle_krea_workspace(
+                    if hires_memory.is_some() {
+                        "Krea Hires.fix"
+                    } else {
+                        "Krea multi-phase"
+                    },
                     &gpu_id,
-                    adapter_phase_bound
-                        .request_device_bytes
-                        .saturating_add(phase_pag_workspace.unwrap_or(0)),
+                    if let Some(hires) = &hires_memory {
+                        hires
+                            .workspace_bytes
+                            .saturating_add(hires.pag_workspace_bytes)
+                    } else {
+                        adapter_phase_bound
+                            .request_device_bytes
+                            .saturating_add(phase_pag_workspace.unwrap_or(0))
+                    },
                 ))?;
             }
             let facts_tx = tx.clone();
@@ -2477,6 +2693,14 @@ pub(super) async fn generate_krea_imported_stream(
                         KreaImportedItem::Multiphase(render) => render
                             .with_loaded_placement(loaded_policy)?
                             .generate(model, None, None, preview, &cancel, on_progress),
+                        KreaImportedItem::Hires(render) => render.generate(
+                            model,
+                            loaded_policy,
+                            None,
+                            preview,
+                            &cancel,
+                            on_progress,
+                        ),
                         KreaImportedItem::Ordinary(prompt) => krea_imported_generate_one(
                             model,
                             &prompt,
@@ -2487,7 +2711,6 @@ pub(super) async fn generate_krea_imported_stream(
                             &sampling,
                             &conditioning,
                             text_style_gain,
-                            hires_fix,
                             None,
                             preview,
                             &cancel,
