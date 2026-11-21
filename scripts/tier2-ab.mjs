@@ -352,8 +352,12 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     const baseModel = baseCatalog.find((model) => model.id === route.model), headModel = headCatalog.find((model) => model.id === route.model);
     if (!baseModel || !headModel) { planned.push({ ...entry, status: "skipped", skipReason: `model ${route.model} is not in the ${!baseModel ? "base" : "head"} catalog` }); continue; }
     if (route.scailCandidate) {
+      const baseSupport = baseModel.ui?.scail2MultiReference;
+      fact(baseSupport === undefined || baseSupport === false,
+        `${route.id}: candidate-only witness requires a base without the plural character descriptor`);
       fact(platform === (route.backend === "mlx" ? "darwin" : "win32") && headModel.ui?.scail2MultiReference === true,
         `${route.id}: candidate must expose the production plural character descriptor`);
+      entry.pluralCharacterSupport = { base: false, head: true };
     }
     if (route.wanA14b) {
       fact(platform === (route.backend === "mlx" ? "darwin" : "win32"), `${route.id}: unsupported platform ${platform}`);

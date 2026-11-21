@@ -148,7 +148,8 @@ export function scailFitEvents(text, route, jobId, admitted, sources, evidence) 
     assert.equal(fields.tier, "q4");
     assert.equal(fields.artifactTier, "q4");
     assert.equal(fields.artifactSha256, scailArtifactSha256);
-    assert.ok(evidence.some((row) => row.sha256 === fields.evidenceSha256), "worker fit is unbound to the packaged physical capture");
+    assert.ok(evidence.some((row) => row.sha256 === fields.evidenceSha256 && row.references >= route.references),
+      "worker fit has no packaged physical capture covering the requested reference count");
     for (const [key, expected] of Object.entries({ width: 832, height: 480, frames: 45, referenceCount: route.references }))
       assert.equal(Number(fields[key]), expected, key);
     const receipt = fields.carrierReceipt;

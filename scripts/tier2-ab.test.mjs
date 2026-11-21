@@ -973,19 +973,32 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
 });
 
+function scailCatalog(catalog, enabled) {
+  return catalog.map((model) => {
+    if (model.id !== "scail2_14b") return model;
+    const ui = { ...model.ui };
+    if (enabled === undefined) delete ui.scail2MultiReference;
+    else ui.scail2MultiReference = enabled;
+    return { ...model, ui };
+  });
+}
+
 test("SCAIL requires an enabled candidate catalog and both pinned product components", async () => {
   const catalog = await readCatalog(root);
   const evidence = await readPatternEvidence(root);
-  const head = catalog.map((m) => m.id === "scail2_14b" ? { ...m, ui: { ...m.ui, scail2MultiReference: true } } : m);
-  const closed = catalog.map((m) => m.id === "scail2_14b" ? { ...m, ui: { ...m.ui, scail2MultiReference: false } } : m);
+  const head = scailCatalog(catalog, true), closed = scailCatalog(catalog, false);
   const fs = { stat: async () => ({ isFile: () => true, size: 99 }) };
   for (const backend of ["mlx", "cuda"]) {
     const routes = Object.values(ROUTES).filter((r) => r.scailCandidate && r.backend === backend);
     assert.deepEqual(routes.map((r) => r.references), [2, 3, 4, 5, 6, 6]); assert.ok(routes.at(-1).refuse);
     const options = { routes, platform: backend === "mlx" ? "darwin" : "win32", hubs: [backend === "mlx" ? "/hub" : "E:\\hub"], baseCatalog: closed, headCatalog: head, evidence, fs };
     await assert.rejects(planRoutes({ ...options, headCatalog: closed }), /plural character descriptor/);
+    await assert.rejects(planRoutes({ ...options, baseCatalog: head }), /requires a base without/);
+    const absentFlag = await planRoutes({ ...options, baseCatalog: scailCatalog(catalog, undefined) });
     const plans = await planRoutes(options);
+    assert.deepEqual(absentFlag, plans);
     for (const [i, plan] of plans.entries()) {
+      assert.deepEqual(plan.pluralCharacterSupport, { base: false, head: true });
       assert.equal(plan.status, "ready");
       assert.equal(plan.request.body.referenceAssetIds.length, routes[i].references);
       assert.deepEqual(plan.rows.required.map((r) => r.repo), ["SceneWorks/scail2-mlx", "SceneWorks/sam3-mlx"]);
@@ -1015,8 +1028,14 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
         referenceRgbSha256: sources.references.map((r) => r.rgbSha256).join(","), requiredAcceleratorBytes: 100,
         availableAcceleratorBytes: 100, requiredPhysicalHostBytes: 100, availablePhysicalHostBytes: 100, providerCreditBytes: 0, admitted: true };
       const execution = { ...cold, stage: "execution" };
-      const verify = (entries, admitted = true) => scailFitEvents(entries.map((e) => JSON.stringify(e)).join("\n"), route, "owned", admitted, sources, [{ sha256: sha256("native") }]);
+      const pool = [
+        { sha256: sha256("native"), references: n }, { sha256: sha256("two"), references: 2 }, { sha256: sha256("six"), references: 6 },
+      ];
+      const verify = (entries, admitted = true) => scailFitEvents(entries.map((e) => JSON.stringify(e)).join("\n"), route, "owned", admitted, sources, pool);
       assert.equal(verify([cold, execution]).length, 2);
+      const usingCapture = (digest) => [cold, execution].map((event) => ({ ...event, evidenceSha256: digest }));
+      if (n === 6) assert.throws(() => verify(usingCapture(sha256("two"))), /covering the requested reference count/);
+      if (backend === "mlx" && n < 6) assert.equal(verify(usingCapture(sha256("six"))).length, 2);
       for (const change of [{ referenceRgbSha256: cold.referenceRgbSha256.split(",").reverse().join(",") },
         { stage: "cold_load" }, { artifactSha256: sha256("wrong") }, { evidenceSha256: sha256("other") }, { carrierReceipt: carrier.replace("reference-mask-1", "reference-mask-0") },
         { jobId: "another" }, { carrierReceipt: carrier.replace(sha256("carrier"), sha256("another")) },
@@ -1102,8 +1121,8 @@ test("SCAIL product preflight requires the calibrated count rows from the candid
 
 test("SCAIL staging downloads only exact absent q4 and SAM3 filenames on both hosts", async () => {
   const { SAM3, SCAIL_REVISION } = await import("./lib/tier2-scail.mjs");
-  const baseCatalog = await readCatalog(root), evidence = await readPatternEvidence(root);
-  const headCatalog = baseCatalog.map((m) => m.id === "scail2_14b" ? { ...m, ui: { ...m.ui, scail2MultiReference: true } } : m);
+  const catalog = await readCatalog(root), evidence = await readPatternEvidence(root);
+  const baseCatalog = scailCatalog(catalog, false), headCatalog = scailCatalog(catalog, true);
   for (const backend of ["mlx", "cuda"]) {
     const routes = [ROUTES[`${backend}-scail2-q4-animate-6`]], hubs = [backend === "mlx" ? "/local models/hub" : "E:\\local models\\hub"];
     const cfg = { routes, hubs, backend, baseDir: root, headDir: root };
