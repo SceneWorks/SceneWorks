@@ -2993,6 +2993,17 @@ pub(super) async fn generate_video_using(
                     &prepare_model,
                     &prepare_mode,
                 )?;
+                if let Some(geometry) = plan.as_ref().map(|p| p.plan.geometry()).filter(|g| {
+                    engine_id == "scail2_14b" && g.reference_count > 1
+                }) {
+                    // Neither native provider has a verified full-render accelerator and
+                    // host fit for the extra packed character tokens.
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "SCAIL-2 has no verified accelerator and host memory fit for {} ordered character references at {}x{} across {} frames on {}",
+                        geometry.reference_count, geometry.width, geometry.height, geometry.frames,
+                        crate::video_admission::LANE.as_key(),
+                    )));
+                }
                 Ok::<_, WorkerError>((input, request, plan, spec))
             })
             .await

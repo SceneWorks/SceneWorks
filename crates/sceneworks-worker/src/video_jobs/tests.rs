@@ -184,8 +184,7 @@ fn svd_reservation_preserves_geometry_and_the_unpriced_encoder_refusal() {
 }
 
 #[cfg(native_lane)]
-#[test]
-fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding() {
+fn scail_plural_reservation_input() -> VideoGenInput {
     let image = |pixel| gen_core::Image {
         width: 32,
         height: 32,
@@ -219,6 +218,44 @@ fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding(
         start_frame: 0,
         mode: gen_core::ReplacementMode::default(),
     });
+    input
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_reservation_refuses_unverified_fit_before_cache_or_factory() {
+    let settings = offline_settings();
+    let mut job = mochi_job_snapshot();
+    job.payload.insert("model".into(), json!("scail2_14b"));
+    job.payload
+        .insert("mode".into(), json!("animate_character"));
+    let probe = ArmProbe::default();
+    let result = generate_video_using(
+        &ApiClient::new(&settings),
+        &settings,
+        &job,
+        crate::video_admission::LANE.as_key(),
+        (&Default::default(), &Default::default()),
+        scail_plural_reservation_input(),
+        probe.loader(),
+    )
+    .await;
+    let Err(WorkerError::InvalidPayload(reason)) = result else {
+        panic!("unproven plural fit must return a typed refusal before load");
+    };
+    assert!(
+        reason.contains(
+            "no verified accelerator and host memory fit for 6 ordered character references"
+        ),
+        "{reason}"
+    );
+    assert!(!probe.loaded());
+}
+
+#[cfg(native_lane)]
+#[test]
+fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding() {
+    let mut input = scail_plural_reservation_input();
     let spec = video_load_spec(&input);
     let mut request = take_video_request(&mut input, &CancelFlag::new());
     let reserve = |request: &GenerationRequest| {
@@ -281,8 +318,8 @@ fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding(
     else {
         panic!("missing driving clip")
     };
-    frames.resize(161, image(7));
-    mask.resize(161, image(8));
+    frames.resize(161, frames[0].clone());
+    mask.resize(161, mask[0].clone());
     let long = reserve(&long_request).unwrap().unwrap();
     assert!(long.plan.layout().phases.len() > 1);
     assert!(long.plan.layout().phases[1].history_frames > 0);
