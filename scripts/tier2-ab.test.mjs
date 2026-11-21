@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  cudaLeaseMinFreeMiB, scailCudaMemoryViolation, childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe, wanExecutionFacts,
 } from "./tier2-ab.mjs";
@@ -57,6 +57,21 @@ test("physical GPU0 requires explicit SCAIL or CUDA Wan A14B routes at dispatch 
     backend: "cuda", physicalGpu:"0", state:"/s", hub:"/h", xet:"/x", workerId:"w" });
   for (const child of [envs.api, envs.worker("http://127.0.0.1")])
     for (const key of ["SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"]) assert.equal(child[key], "0");
+});
+
+test("CUDA SCAIL leases and requests preserve the child cap and physical free reserve", () => {
+  const gib = 1024 ** 3;
+  assert.equal(cudaLeaseMinFreeMiB(""), 75776);
+  for (const route of Object.values(ROUTES).filter((r) => r.backend === "cuda")) {
+    assert.equal(cudaLeaseMinFreeMiB(JSON.stringify([route.id])), route.scailCandidate ? 92160 : 75776);
+  }
+  assert.equal(cudaLeaseMinFreeMiB("cuda-wan22-a14b-t2v-uni_pc,cuda-scail2-q4-animate-2"), 92160);
+  assert.equal(scailCudaMemoryViolation({ usedBytes: 5 * gib, freeBytes: 90 * gib }, true), null);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 5 * gib, freeBytes: 90 * gib - 1 }, true), /90 GiB/);
+  assert.equal(scailCudaMemoryViolation({ usedBytes: 84 * gib, freeBytes: 6 * gib }), null);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 84 * gib + 1, freeBytes: 7 * gib }), /84 GiB/);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 50 * gib, freeBytes: 6 * gib - 1 }), /6 GiB/);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 50 * gib, freeBytes: null }), /measure free/);
 });
 
 test("default routes send one fixed request per route and the same JSON to both sides", () => {
@@ -982,7 +997,8 @@ test("tier2-ab jobs bind the selected physical index through lease and worker ma
   assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu_lease/);
   for (const [key, value] of [["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
   for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID", "TIER2_AB_PHYSICAL_GPU"]) assert.ok(cuda.includes(`${key}: \${{ inputs.cuda_physical_index }}`));
-  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index \$env:TIER2_AB_PHYSICAL_GPU -- node scripts\/tier2-ab\.mjs --run/);
+  assert.match(cuda, /\$minFreeMiB = node .*cudaLeaseMinFreeMiB\(process\.env\.TIER2_AB_ROUTES\)/);
+  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib \$minFreeMiB --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index \$env:TIER2_AB_PHYSICAL_GPU -- node scripts\/tier2-ab\.mjs --run/);
   assert.match(cuda, /TIER2_AB_GPU_POLICY: .*inputs\.cuda_physical_index == '0' && 'shared-compute' \|\| 'shared-display'/);
   // The TIER2_AB_GPU_POLICY label is this profile's alone (its report wording); admission itself is the
   // wrapper's one rule for every actor.

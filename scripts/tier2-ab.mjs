@@ -45,6 +45,8 @@ import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 const execFile = promisify(execFileCallback);
 const fact = (value, message) => assert.ok(value, message);
 const GIB = 1024 ** 3;
+const SCAIL_CUDA_CAP = 84 * GIB;
+const SCAIL_CUDA_RESERVE = 6 * GIB;
 export const SHA = /^[0-9a-f]{40}$/;
 export const BACKENDS = Object.freeze(["mlx", "cuda"]);
 export const RUN_LABELS = Object.freeze(["base#1", "head", "base#2"]);
@@ -165,6 +167,11 @@ export function selectRoutes(backend, value) {
   }
   return selected;
 }
+export function cudaLeaseMinFreeMiB(selection) {
+  return selectRoutes("cuda", selection).some((route) => route.scailCandidate)
+    ? (SCAIL_CUDA_CAP + SCAIL_CUDA_RESERVE) / 1024 ** 2 : 75776;
+}
+
 export function resolveConfig(env, { platform = process.platform, home = os.homedir() } = {}) {
   const paths = pathsFor(platform);
   const backend = env.TIER2_AB_BACKEND;
@@ -870,9 +877,18 @@ export function nvidiaSmiPath(env = process.env, platform = process.platform) {
   return platform === "win32" ? path.win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe") : "nvidia-smi";
 }
 async function sampleGpu(smi, index) {
-  const out = (await execFile(smi, ["-i", index === "0" ? FEATURE_GPU0_UUID : index, "--query-gpu=index,uuid,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { timeout: 10_000, windowsHide: true })).stdout.trim().split(",").map((v) => v.trim());
-  fact(out.length === 4 && out[0] === index && (index === "0" ? out[1] === FEATURE_GPU0_UUID : /^GPU-/.test(out[1])) && /^\d+$/.test(out[2]), `physical GPU${index} telemetry unavailable`);
-  return { uuid: out[1], usedBytes: Number(out[2]) * 1024 ** 2, utilization: Number(out[3]) };
+  const out = (await execFile(smi, ["-i", index === "0" ? FEATURE_GPU0_UUID : index, "--query-gpu=index,uuid,memory.used,utilization.gpu,memory.free", "--format=csv,noheader,nounits"], { timeout: 10_000, windowsHide: true })).stdout.trim().split(",").map((v) => v.trim());
+  fact(out.length === 5 && out[0] === index && (index === "0" ? out[1] === FEATURE_GPU0_UUID : /^GPU-/.test(out[1])) && /^\d+$/.test(out[2]), `physical GPU${index} telemetry unavailable`);
+  return { uuid: out[1], usedBytes: Number(out[2]) * 1024 ** 2, utilization: Number(out[3]),
+    freeBytes: /^\d+$/.test(out[4]) ? Number(out[4]) * 1024 ** 2 : null };
+}
+
+export function scailCudaMemoryViolation(sample, beforeRequest = false) {
+  if (sample.usedBytes > SCAIL_CUDA_CAP) return "exceeded the 84 GiB SCAIL device memory cap";
+  if (!Number.isSafeInteger(sample.freeBytes)) return "could not measure free GPU memory for SCAIL";
+  if (sample.freeBytes < SCAIL_CUDA_RESERVE) return "fell below the 6 GiB SCAIL free memory reserve";
+  if (beforeRequest && sample.freeBytes < SCAIL_CUDA_CAP + SCAIL_CUDA_RESERVE) return "has less than 90 GiB free before the SCAIL request";
+  return null;
 }
 
 // Every GPU's identity from nvidia-smi CSV (index, bus id) joined with the driver XML (display,
@@ -1328,9 +1344,26 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       samplers.push((async () => { while (sampling) { try { const s = await sampleMacTree(worker.pid); memory.samples++; memory.peakBytes = Math.max(memory.peakBytes ?? 0, s.footprintBytes); memory.peakRssBytes = Math.max(memory.peakRssBytes ?? 0, s.rssBytes); if (Math.max(s.footprintBytes, s.rssBytes) > cap) watchdog(`worker footprint ${gib(s.footprintBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(1000); } })());
     } else {
       const cap = Math.min(route.scailCandidate ? 64 * GIB : Infinity, Math.floor(os.totalmem() * 0.75)); record.watchdog.capBytes = cap;
-      if (route.scailCandidate) record.watchdog.gpuCapBytes = 84 * GIB;
+      if (route.scailCandidate) {
+        record.memory = memory;
+        record.watchdog.gpuCapBytes = SCAIL_CUDA_CAP;
+        record.watchdog.gpuFreeReserveBytes = SCAIL_CUDA_RESERVE;
+      }
       const smi = nvidiaSmiPath(env);
-      const baseline = []; for (let i = 0; i < 5; i++) { baseline.push((await sampleGpu(smi, cfg.physicalGpu)).usedBytes); await delay(200); }
+      const baseline = [];
+      for (let i = 0; i < 5; i++) {
+        const sample = await sampleGpu(smi, cfg.physicalGpu);
+        baseline.push(sample.usedBytes);
+        if (route.scailCandidate) {
+          const violation = scailCudaMemoryViolation(sample, i === 4);
+          memory.preRequestGpuFreeBytes = sample.freeBytes;
+          if (violation) {
+            watchdog(`physical GPU${cfg.physicalGpu} ${violation}`);
+            alive();
+          }
+        }
+        if (i < 4 || !route.scailCandidate) await delay(200);
+      }
       memory.method = `nvidia-smi memory.used on physical GPU${cfg.physicalGpu} sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s`;
       memory.gpuBaselineBytes = Math.max(...baseline);
       if (["shared-display", "shared-compute"].includes(env.TIER2_AB_GPU_POLICY)) {
@@ -1339,7 +1372,15 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
           ? "times taken on the host's display GPU, alongside display work" : "times taken on the shared compute GPU";
       }
       samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi, cfg.physicalGpu); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
-        if (route.scailCandidate && s.usedBytes > record.watchdog.gpuCapBytes) watchdog(`physical GPU${cfg.physicalGpu} exceeded the 84 GiB SCAIL device memory cap`); } catch { memory.errors++; } await delay(500); } })());
+        if (route.scailCandidate) {
+          const violation = scailCudaMemoryViolation(s);
+          if (Number.isSafeInteger(s.freeBytes)) memory.minGpuFreeBytes = Math.min(memory.minGpuFreeBytes ?? s.freeBytes, s.freeBytes);
+          if (violation) watchdog(`physical GPU${cfg.physicalGpu} ${violation}`);
+        }
+      } catch (error) {
+        memory.errors++;
+        if (route.scailCandidate) watchdog(`physical GPU${cfg.physicalGpu} SCAIL telemetry unavailable: ${error.message}`);
+      } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     const posted = Date.now();
