@@ -2055,7 +2055,7 @@ impl PreparedKreaHires {
                 pricing.priced_domain_peak.request_peak_bytes
             },
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            host_bytes: crate::execution_planner::krea_hires_pixel_workspace_bytes(base, target),
+            host_bytes: crate::execution_planner::krea_hires_host_workspace_bytes(base, target),
         })
     }
 
@@ -2486,51 +2486,52 @@ pub(super) async fn generate_krea_imported_stream(
     let phase_adapter_workspace = phase_request
         .as_ref()
         .map_or(Ok(0), |request| mlx_phase_adapter_workspace(&spec, request))?;
-    let (work, phase_pag_workspace) = if let Some(phase_request) = phase_request {
-        let work = prepare_multiphase_work(engine_id, &spec, phase_request, work)?;
-        let workspace = multiphase_pag_workspace(&work, descriptor.capabilities.pag.as_ref());
-        let work = work
-            .into_iter()
-            .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
-            .collect();
-        (work, Some(workspace))
-    } else if let Some(hires) = hires_fix {
-        if engine_id != "krea_2_turbo" || !conditioning.is_empty() {
-            return Err(WorkerError::InvalidPayload(
-                "Imported Krea Hires.fix requires a prompt-only Turbo base pass.".to_owned(),
-            ));
-        }
-        let shared_spec = std::sync::Arc::new(spec.clone());
-        let work = work
-            .into_iter()
-            .map(|(seed, prompt)| {
-                let first = krea_imported_pass_request(
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    &sampling,
-                    Vec::new(),
-                    text_style_gain,
-                );
-                let render = PreparedKreaHires::prepare(
-                    crate::inference_runtime::media(),
-                    shared_spec.clone(),
-                    first,
-                    hires,
-                )?;
-                Ok((seed, KreaImportedItem::Hires(Box::new(render))))
-            })
-            .collect::<WorkerResult<_>>()?;
-        (work, None)
-    } else {
-        let work = work
-            .into_iter()
-            .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
-            .collect();
-        (work, None)
-    };
+    let (work, phase_pag_workspace): (Vec<(i64, KreaImportedItem)>, Option<u64>) =
+        if let Some(phase_request) = phase_request {
+            let work = prepare_multiphase_work(engine_id, &spec, phase_request, work)?;
+            let workspace = multiphase_pag_workspace(&work, descriptor.capabilities.pag.as_ref());
+            let work = work
+                .into_iter()
+                .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
+                .collect();
+            (work, Some(workspace))
+        } else if let Some(hires) = hires_fix {
+            if engine_id != "krea_2_turbo" || !conditioning.is_empty() {
+                return Err(WorkerError::InvalidPayload(
+                    "Imported Krea Hires.fix requires a prompt-only Turbo base pass.".to_owned(),
+                ));
+            }
+            let shared_spec = std::sync::Arc::new(spec.clone());
+            let work = work
+                .into_iter()
+                .map(|(seed, prompt)| {
+                    let first = krea_imported_pass_request(
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        &sampling,
+                        Vec::new(),
+                        text_style_gain,
+                    );
+                    let render = PreparedKreaHires::prepare(
+                        crate::inference_runtime::media(),
+                        shared_spec.clone(),
+                        first,
+                        hires,
+                    )?;
+                    Ok((seed, KreaImportedItem::Hires(Box::new(render))))
+                })
+                .collect::<WorkerResult<_>>()?;
+            (work, None)
+        } else {
+            let work = work
+                .into_iter()
+                .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
+                .collect();
+            (work, None)
+        };
     let hires_memory = work
         .iter()
         .find_map(|(_, item)| match item {

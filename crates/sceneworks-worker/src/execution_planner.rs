@@ -1492,7 +1492,7 @@ pub(crate) fn low_res_start_workspace_bytes_with_source(
 
 /// Host peak of the RGB Lanczos stretch used by the Krea Hires.fix handoff.
 #[cfg_attr(not(native_lane), allow(dead_code))]
-pub(crate) fn krea_hires_pixel_workspace_bytes(
+fn krea_hires_pixel_workspace_bytes(
     (base_width, base_height): (u32, u32),
     (target_width, target_height): (u32, u32),
 ) -> u64 {
@@ -1506,6 +1506,14 @@ pub(crate) fn krea_hires_pixel_workspace_bytes(
     let vertical = (u64::from(base_width) * u64::from(target_height)).saturating_mul(16);
     let coefficients = u64::from(base_width.max(base_height)).saturating_mul(4);
     rgb.saturating_add(vertical).saturating_add(coefficients)
+}
+
+/// CUDA builds the normalized reference on the host before creating its tensor on device.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn krea_hires_host_workspace_bytes(base: (u32, u32), target: (u32, u32)) -> u64 {
+    let target_rgb = (u64::from(target.0) * u64::from(target.1)).saturating_mul(3);
+    // The fitted RGB8 source, HWC float staging and normalized CHW float staging are live here.
+    krea_hires_pixel_workspace_bytes(base, target).max(target_rgb.saturating_mul(1 + 4 + 4))
 }
 
 /// Complete pass-scoped [`gen_core::RequestLiveSetPlan`] pricing result for an `ENG-2` two-pass
@@ -1969,6 +1977,16 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
         )],
     });
 
+    // Krea stages a fitted reference through float HWC and CHW buffers before its VAE encode.
+    // On discrete CUDA only the uploaded FP32 tensor is a device allocation. MLX shares both
+    // host float vectors and the copied array with the accelerator's memory pool.
+    let per_reference_encode_workspace_bytes =
+        per_reference_encode_workspace_bytes.saturating_add(if krea_turbo {
+            let copies = if krea_discrete_device { 1 } else { 3 };
+            hires_rgb_bytes.saturating_mul(4 * copies)
+        } else {
+            0
+        });
     // Pass 1 conditioning & replacement reference encode (final-pass prompt enhancement runs here only).
     let mut pass1_cond_activations = vec![
         PricedAllocation::new("pass1_prompt_encode_workspace", domain, 1_048_576),
@@ -3698,6 +3716,56 @@ mod corpus_replay_tests {
                 (MemoryPhase::Decode, 0, 0, 1024, 1024),
             ]
         );
+    }
+
+    #[test]
+    fn krea_hires_prices_the_fitted_reference_in_its_memory_domain() {
+        use gen_core::MemoryBudgetDomain::{DeviceVram, UnifiedMemory};
+        let base = (512, 768);
+        let refine = (1024, 1536);
+        let price = |domain| {
+            price_eng2_hires_fix_request_live_set_plan(
+                "krea_2_turbo",
+                domain,
+                base.0,
+                base.1,
+                2,
+                refine.0,
+                refine.1,
+                0,
+                1,
+                &[],
+                None,
+                false,
+                false,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+            .unwrap()
+        };
+        let device = price(DeviceVram);
+        let unified = price(UnifiedMemory);
+        let reference_pixels = u64::from(refine.0) * u64::from(refine.1);
+        assert_eq!(
+            krea_hires_host_workspace_bytes(base, refine),
+            reference_pixels * 27
+        );
+        assert_eq!(
+            (device.pass0_reference_count, device.pass1_reference_count),
+            (0, 1)
+        );
+        assert_eq!((device.pass1_width, device.pass1_height), refine);
+        assert!(device.pass1_peak_bytes > reference_pixels * 12);
+        assert!(unified.pass1_peak_bytes >= device.pass1_peak_bytes + reference_pixels * 24);
+        assert!(unified.transition_peak_bytes >= krea_hires_pixel_workspace_bytes(base, refine));
+        assert!(device.transition_peak_bytes < unified.transition_peak_bytes);
     }
 
     #[test]
