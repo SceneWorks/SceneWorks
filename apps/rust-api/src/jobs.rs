@@ -1567,7 +1567,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     ApiError,
 > {
     let job_id = job_id.to_owned();
-    let (job, download_binding, frozen_portable_binding) =
+    let (job, download_binding, mut frozen_portable_binding) =
         store_call(state.clone(), move |store, _timeout| {
             Ok((
                 store.get_job(&job_id)?,
@@ -1622,7 +1622,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
-    merged.extend(changes);
+    merged.extend(changes.clone());
     if !retry {
         sceneworks_core::options::upgrade::strip_machine_decisions(&mut merged);
     }
@@ -1741,8 +1741,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
             advanced.remove("promptBatch");
         }
     }
-    let canonical_model_entry =
-        canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    let canonical_model_entry = canonicalize_image_model_payload_with_replay_changes(
+        state,
+        &job_type,
+        &mut merged,
+        Some(&changes),
+    )
+    .await?;
     // Local control-flow evidence, never a serialized/caller-supplied trust marker.
     let mut canonical_selection = canonical_model_entry.is_some() || canonical_audio_selection;
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
@@ -1819,13 +1824,19 @@ async fn validate_and_canonicalize_merged_generation_payload(
         let model_id = merged
             .get("model")
             .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::bad_request("model must be a string"))?;
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+            .to_owned();
         // A retry/duplicate can replace `model`, so re-resolve the authoritative entry instead of
         // trusting the original job's modelManifestEntry. This is the replay counterpart to the
         // typed `/video/jobs` pre-enqueue platform gate.
-        let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        let model_manifest_entry = resolve_model_manifest_entry(state, &model_id).await?;
         ensure_expected_imported_model_reference(state, &merged, &model_manifest_entry)?;
         if let Some(entry) = model_manifest_entry.as_object() {
+            sceneworks_core::source_precision::canonicalize_for_entry(
+                &mut merged,
+                entry,
+                Some(&changes),
+            )?;
             sceneworks_core::request_validation::validate("video", &merged, entry)
                 .map_err(ApiError::from)?;
         }
@@ -1837,7 +1848,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // The portable video validator above checks Veda against the selected recipe and
         // authoritative entry before this replay is stamped and queued.
         crate::generation::ensure_video_model_available_on_platform(
-            model_id,
+            &model_id,
             &model_manifest_entry,
             crate::generation::video_job_platform(state),
         )?;
@@ -2032,6 +2043,40 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
+    let mut persisted_source_options = std::borrow::Cow::Borrowed(&persisted);
+    let fixed_model_id = merged
+        .get("modelManifestEntry")
+        .filter(|_| sceneworks_core::source_precision::applies_to_job(&job_type))
+        .and_then(Value::as_object)
+        .filter(|entry| {
+            sceneworks_core::source_precision::SourcePrecision::for_entry(entry).is_some()
+        })
+        .and_then(|entry| entry.get("id").and_then(Value::as_str))
+        .map(str::to_owned);
+    if let Some(model_id) = fixed_model_id {
+        if persisted.contains_key("variant") {
+            // The storage boundary shallow-merges this canonical payload over the old one.
+            merged.insert("variant".to_owned(), Value::Null);
+        }
+        if merged.get("model") == persisted.get("model") {
+            sceneworks_core::source_precision::clear_precision_selectors(
+                persisted_source_options.to_mut(),
+            );
+            if let Some(binding) = &mut frozen_portable_binding {
+                use sceneworks_core::model_artifacts::portable_binding::PortableJobBinding;
+                let frozen: PortableJobBinding =
+                    serde_json::from_value(binding.clone()).map_err(|error| {
+                        ApiError::bad_request(format!("Invalid saved source binding: {error}"))
+                    })?;
+                *binding = serde_json::to_value(
+                    frozen
+                        .with_fixed_source_precision(&model_id)
+                        .map_err(|error| ApiError::bad_request(error.to_string()))?,
+                )
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+            }
+        }
+    }
     // A duplicate with an explicitly changed source selection is a new admission. Only a
     // server-canonicalized carrier can take this path; retries and prompt-only duplicates keep
     // the original frozen source even if the catalog has changed since their first admission.
@@ -2039,7 +2084,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         && canonical_selection
         && frozen_portable_binding.is_some()
         && crate::portable_admission::portable_authored_options(&merged)
-            != crate::portable_admission::portable_authored_options(&persisted);
+            != crate::portable_admission::portable_authored_options(&persisted_source_options);
     let historical_new_selection = !retry
         && frozen_portable_binding.is_none()
         && merged.get("model") != persisted.get("model");
@@ -2047,7 +2092,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         && !historical_new_selection
         && !sceneworks_core::model_artifacts::portable_binding::model_free_job(&job_type, &merged)
         && crate::portable_admission::portable_authored_options(&merged)
-            == crate::portable_admission::portable_authored_options(&persisted);
+            == crate::portable_admission::portable_authored_options(&persisted_source_options);
     if historical_same_selection {
         crate::portable_admission::validate_historical_source_carrier(state, &persisted, &merged)
             .await?;
@@ -2304,6 +2349,15 @@ pub(crate) async fn canonicalize_image_model_payload(
     job_type: &JobType,
     payload: &mut JsonObject,
 ) -> Result<Option<Value>, ApiError> {
+    canonicalize_image_model_payload_with_replay_changes(state, job_type, payload, None).await
+}
+
+async fn canonicalize_image_model_payload_with_replay_changes(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+    replay_changes: Option<&JsonObject>,
+) -> Result<Option<Value>, ApiError> {
     if !matches!(
         job_type,
         JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
@@ -2410,6 +2464,9 @@ pub(crate) async fn canonicalize_image_model_payload(
         )));
     }
 
+    if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::source_precision::canonicalize_for_entry(payload, entry, replay_changes)?;
+    }
     // Tier capability does not certify an installable artifact. This check is shared by create,
     // retry and duplicate after resolving the authoritative catalog (never caller metadata).
     let empty = JsonObject::new();
@@ -2570,7 +2627,12 @@ pub(crate) async fn canonicalize_image_model_payload(
         "modelManifestEntry".to_owned(),
         model_manifest_entry.clone(),
     );
-    if matches!(job_type, JobType::ImageDetail) {
+    if matches!(job_type, JobType::ImageDetail)
+        && model_manifest_entry
+            .as_object()
+            .and_then(sceneworks_core::source_precision::SourcePrecision::for_entry)
+            .is_none()
+    {
         canonicalize_image_detail_dense_tier(payload)?;
     }
     Ok(Some(model_manifest_entry))

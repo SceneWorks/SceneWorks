@@ -742,7 +742,11 @@ impl ImageRequest {
         // only `resolved_advanced` and other typed fields from the effective request.
         request.advanced = object_or_empty(authored, "advanced");
         // Admission reads the authored job payload's `variant`, so the loader must see that one.
-        request.variant = optional_id(authored, "variant");
+        if crate::source_precision::SourcePrecision::for_entry(&request.model_manifest_entry)
+            .is_none()
+        {
+            request.variant = optional_id(authored, "variant");
+        }
         request.bind_admitted_tier();
         Ok(request)
     }
@@ -1149,6 +1153,10 @@ impl ImageRequest {
     /// Precision for native execution, including the verified portable tier only when the
     /// caller left `mlxQuantize` absent. Authored null deliberately suppresses that fallback.
     pub fn resolved_quant_bits(&self) -> Option<i64> {
+        if crate::source_precision::SourcePrecision::for_entry(&self.model_manifest_entry).is_some()
+        {
+            return None;
+        }
         let options = self
             .resolved_advanced
             .as_ref()

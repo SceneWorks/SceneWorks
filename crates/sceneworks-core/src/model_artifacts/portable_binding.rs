@@ -1303,6 +1303,39 @@ impl PortableRouteBinding {
 }
 
 impl PortableJobBinding {
+    /// Upgrade a saved fixed-source render without changing any bound artifact bytes or routes.
+    /// Historical load-time selectors could label a local primary with an unrelated tier.
+    pub fn with_fixed_source_precision(
+        mut self,
+        model_id: &str,
+    ) -> Result<Self, ArtifactContractError> {
+        self.validate()?;
+        crate::source_precision::clear_precision_selectors(
+            self.authored_options
+                .as_object_mut()
+                .ok_or_else(|| error("missing authored options"))?,
+        );
+        let authored_hash = canonical_authored_options_sha256(&self.authored_options)?;
+        for model in self.routes.values_mut().flat_map(|route| &mut route.models) {
+            model.authored_options_sha256.clone_from(&authored_hash);
+            if model.slot == "modelManifestEntry"
+                && model.model_id == model_id
+                && model.tier.is_none()
+                && model.members.iter().any(|member| {
+                    member.role == ArtifactMemberRole::Primary
+                        && matches!(
+                            member.source,
+                            PortableSourceIdentity::Digest { .. }
+                                | PortableSourceIdentity::WorkerClaim { .. }
+                        )
+                })
+            {
+                model.variant = "local".to_owned();
+            }
+        }
+        Self::new(self.authored_options, self.routes)
+    }
+
     pub fn new(
         authored_options: Value,
         routes: BTreeMap<String, PortableRouteBinding>,

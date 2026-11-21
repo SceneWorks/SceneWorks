@@ -190,3 +190,4 @@ pub mod generation_contracts;
 #[cfg(test)]
 mod option_carrier_upgrade_tests;
 pub mod request_validation;
+pub mod source_precision;

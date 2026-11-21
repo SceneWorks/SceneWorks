@@ -7475,6 +7475,71 @@ async fn an_unadvertised_imported_source_is_verified_on_demand_at_enqueue() {
     }
 }
 
+#[tokio::test]
+async fn imported_fixed_precision_refuses_rest_overrides_before_worker_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    write_empty_sibling_manifests(&manifests);
+    std::fs::write(
+        manifests.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .unwrap();
+    let model_path = temp.path().join("data/imported/checkpoint.safetensors");
+    std::fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+    std::fs::write(&model_path, b"fixture weights").unwrap();
+    let rows = ["fp8_e4m3_scalar", "convrot_int8", "nvfp4"].map(|format| json!({
+        "id": format!("community_{format}"), "name": format, "type": "image", "family": "krea_2",
+        "importSourceShape": "transformer_file", "importQuantFormat": format,
+        "paths": {"model": model_path},
+    }));
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        json!({"schemaVersion":1,"models":rows}).to_string(),
+    )
+    .unwrap();
+    let (app, _) = pinned_jobs_fixture_app_with_state(test_settings(&temp)).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Fixed precision").await;
+    for (row, label) in rows
+        .iter()
+        .zip(["Scaled FP8 (E4M3)", "INT8-ConvRot", "NVFP4"])
+    {
+        for (variant, advanced, field) in [
+            (json!("q4"), json!({}), "variant"),
+            (
+                Value::Null,
+                json!({"mlxQuantize": 8}),
+                "advanced.mlxQuantize",
+            ),
+            (
+                Value::Null,
+                json!({"quantTier": "bf16"}),
+                "advanced.quantTier",
+            ),
+        ] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/image/jobs",
+                json!({
+                    "projectId": project["id"], "model": row["id"], "prompt": "a lake",
+                    "count": 1, "variant": variant, "advanced": advanced,
+                    "modelManifestEntry": {"id": row["id"], "importQuantFormat": "bf16"},
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label) && detail.contains(field)),
+                "{body}"
+            );
+        }
+    }
+}
+
 /// Run once per worker host shape whatever OS runs the test: imported Krea pose is served by the
 /// MLX/macOS worker and by the Candle worker on Linux and Windows (a Candle-required API).
 #[tokio::test]

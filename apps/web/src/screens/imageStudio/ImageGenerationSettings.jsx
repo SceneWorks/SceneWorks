@@ -3,7 +3,7 @@ import { StudioLoraImportPanel } from "../../components/StudioLoraImportPanel.js
 import { ModelAttribution } from "../../components/ModelAttribution.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../components/StudioUpdateNotice.jsx";
 import { noPresetId } from "../../presetUtils.js";
-import { LoraPickerSection, SavePresetPanel, StyleAxisRow, TierPickerField } from "../../components/generationStudio.jsx";
+import { LoraPickerSection, SavePresetPanel, SourcePrecisionField, StyleAxisRow, TierPickerField } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { mossAccelerationAvailable, mossAccelerationMode } from "../../mossImage.js";
 import { STYLE_GROUPS } from "../../data/styleCatalog.js";
@@ -134,6 +134,7 @@ export function ImageGenerationSettings({
               </label>
               {/* Quant tier belongs with the everyday model knobs, not buried in Advanced
                   (studio-cleanup sc-15374): it names the build that will actually load. */}
+              <SourcePrecisionField model={selectedModel} className="settings-field settings-field-tier" />
               {showTierPicker ? (
                 <TierPickerField
                   className="settings-field settings-field-tier"

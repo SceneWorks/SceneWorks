@@ -1,3 +1,4 @@
+import { sourcePrecisionLabel } from "../../quantTier.js";
 import { GpuSelect } from "../../components/StudioFields.jsx";
 import { CharacterLookFields } from "../../components/StudioFields.jsx";
 import { humanizedNumberMenu, ltxVideoModelId, ltx25VideoModelId, LTX25_AUTO_DURATION_MIN_SECONDS, LTX25_AUTO_DURATION_MAX_SECONDS, clampLtx25AutoDurationSeconds, clampLtx25TemporalUpsampleRounds } from "./videoTierHelpers.js";
@@ -195,13 +196,15 @@ export function VideoAdvancedPanel({
                       <option value="1.0">1.0 (original)</option>
                     </select>
                   </label>
-                  <label>
-                    Precision
-                    <select onChange={(event) => setPrecision(event.target.value)} value={precision}>
-                      <option value="fp8">FP8 (lower VRAM)</option>
-                      <option value="bf16">BF16 (higher quality, CPU offload)</option>
-                    </select>
-                  </label>
+                  {sourcePrecisionLabel(selectedModel) ? null : (
+                    <label>
+                      Precision
+                      <select onChange={(event) => setPrecision(event.target.value)} value={precision}>
+                        <option value="fp8">FP8 (lower VRAM)</option>
+                        <option value="bf16">BF16 (higher quality, CPU offload)</option>
+                      </select>
+                    </label>
+                  )}
                 </>
               ) : null}
               {model === ltx25VideoModelId ? (

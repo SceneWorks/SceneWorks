@@ -1,3 +1,4 @@
+import { SourcePrecisionField } from "../components/generationStudio.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
@@ -764,6 +765,7 @@ export function SimpleImageStudio() {
               field Video Studio renders; Simple users must see it too. */}
           <ModelAttribution model={selectedModel} />
           <ModelDescription model={selectedModel} />
+          <SourcePrecisionField model={selectedModel} className="su-field" labelClassName="su-field-label" />
           <SheetSelect
             kind="grid"
             label="Resolution"

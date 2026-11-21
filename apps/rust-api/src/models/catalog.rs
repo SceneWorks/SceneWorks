@@ -914,6 +914,7 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) {
+    sceneworks_core::source_precision::SourcePrecision::project(object);
     if object.get("catalogScope").and_then(Value::as_str) != Some("builtin")
         && object.get("type").and_then(Value::as_str) == Some("video")
         && sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(object)
@@ -1246,22 +1247,10 @@ pub(super) fn project_imported_operation_surface(
 
     object.remove("runtimeQuantTiers");
 
-    // A checkpoint STORED as NVFP4 has exactly one runtime tier: its own (sc-11043, epic 11037).
-    // The q4/q8/bf16 sweep below describes what a route can quantize a dense import TO, which is a
-    // question that does not arise here — these bytes are already packed E2M1 and nothing
-    // re-quantizes them. Offering the sweep for such an entry advertised `q4` for an NVFP4
-    // checkpoint, which is precisely the alias E2 forbids, and the admission gate then refused
-    // every job the offer produced: the picker showed tiers the router would not accept.
-    //
-    // Keyed on the SOURCE codec — what the weights are stored in — never on what a load would
-    // materialize them as, which is a per-run receipt this catalog projection cannot know.
-    if sceneworks_core::jobs_store::imported_entry_source_codec(object)
-        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID)
-    {
-        object.insert(
-            "runtimeQuantTiers".to_owned(),
-            Value::Array(vec![Value::String("nvfp4".to_owned())]),
-        );
+    // Load-time provider tiers apply to convertible inputs. The packed source keeps its own
+    // precision even where the runtime has to dequantize particular operations to execute them.
+    if let Some(precision) = sceneworks_core::source_precision::SourcePrecision::for_entry(object) {
+        object.insert("runtimeQuantTiers".to_owned(), json!([precision.format()]));
         return;
     }
 
@@ -2030,33 +2019,26 @@ pub(super) fn stamp_legacy_import_source_shape(
     data_dir: &FsPath,
     user_managed: bool,
 ) {
-    if !user_managed || object.contains_key("importSourceShape") {
+    if !user_managed {
         return;
     }
-    let Some(raw) = object
-        .get("modelPath")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            object
-                .get("paths")
-                .and_then(Value::as_object)
-                .and_then(|paths| paths.get("model"))
-                .and_then(Value::as_str)
-        })
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-    else {
-        return;
-    };
-    let Ok(path) = std::fs::canonicalize(raw) else {
-        return;
-    };
-    let Ok(model_root) = std::fs::canonicalize(data_dir.join("models")) else {
-        return;
-    };
-    if !path.starts_with(model_root) {
+    if object.contains_key("importSourceShape") {
+        if needs_legacy_import_inspection(object) {
+            if let Some(file) = legacy_import_primary_weight_file(object, data_dir) {
+                if let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&file)
+                {
+                    object.insert(
+                        "importQuantFormat".to_owned(),
+                        json!(verdict.quant.as_str()),
+                    );
+                }
+            }
+        }
         return;
     }
+    let Some(path) = legacy_import_installed_path(object, data_dir) else {
+        return;
+    };
     if object.get("family").and_then(Value::as_str) == Some("mage-flow")
         && path.is_dir()
         && sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path)
@@ -2067,7 +2049,7 @@ pub(super) fn stamp_legacy_import_source_shape(
         );
         return;
     }
-    let Some(weight_file) = imported_model_primary_weight_file(&path) else {
+    let Some(weight_file) = confined_primary_weight_file(&path) else {
         return;
     };
     let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&weight_file) else {
@@ -2083,6 +2065,55 @@ pub(super) fn stamp_legacy_import_source_shape(
         "importSourceShape".to_owned(),
         Value::String(source.to_owned()),
     );
+    object.insert(
+        "importQuantFormat".to_owned(),
+        json!(verdict.quant.as_str()),
+    );
+}
+
+fn needs_legacy_import_inspection(object: &JsonObject) -> bool {
+    !object.contains_key("importSourceShape")
+        || matches!(
+            object.get("importQuantFormat").and_then(Value::as_str),
+            Some("int8_tensorwise_per_row" | "fp8_inline_scale"),
+        )
+}
+
+fn legacy_import_primary_weight_file(object: &JsonObject, data_dir: &FsPath) -> Option<PathBuf> {
+    if let Some(id) = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(object) {
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir);
+        // A trusted source stamp can authorize a bounded descriptor read. Rescans and admission
+        // own full-file hashing when it expires.
+        let resolved = store.resolve_hashing_only(id, &|_| false).ok()?;
+        let role = if object.get("importSourceShape").and_then(Value::as_str)
+            == Some("fused_checkpoint")
+        {
+            "checkpoint"
+        } else {
+            "transformer"
+        };
+        let mut layers = resolved.layers_with_role(role);
+        let primary = layers.next()?;
+        return (layers.next().is_none()
+            && primary.layer.container
+                == sceneworks_core::checkpoint_import::CheckpointContainerV1::Safetensors)
+            .then(|| primary.path.clone());
+    }
+    confined_primary_weight_file(&legacy_import_installed_path(object, data_dir)?)
+}
+
+fn confined_primary_weight_file(path: &FsPath) -> Option<PathBuf> {
+    let file = imported_model_primary_weight_file(path)?
+        .canonicalize()
+        .ok()?;
+    file.starts_with(path).then_some(file)
+}
+
+fn legacy_import_installed_path(object: &JsonObject, data_dir: &FsPath) -> Option<PathBuf> {
+    let raw = sceneworks_core::jobs_store::imported_entry_loadable_path(object)?;
+    let path = std::fs::canonicalize(raw).ok()?;
+    let root = std::fs::canonicalize(data_dir.join("models")).ok()?;
+    path.starts_with(root).then_some(path)
 }
 
 pub(super) type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
@@ -2466,7 +2497,21 @@ pub(crate) async fn resolve_model_manifest_entry(
         // A user manifest may override builtin presentation/defaults without turning the protected
         // builtin identity into an imported checkpoint. Genuine user-only ids remain user-scoped.
         object.insert("catalogScope".to_owned(), Value::String(scope.to_owned()));
-        stamp_legacy_import_source_shape(object, &state.settings.data_dir, scope == "user");
+        if scope == "user" && needs_legacy_import_inspection(object) {
+            let data_dir = state.settings.data_dir.clone();
+            entry = tokio::task::spawn_blocking(move || {
+                stamp_legacy_import_source_shape(
+                    entry.as_object_mut().expect("catalog entry"),
+                    &data_dir,
+                    true,
+                );
+                entry
+            })
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("Cannot inspect imported model: {error}"))
+            })?;
+        }
     }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
     if let Some(object) = entry.as_object_mut() {

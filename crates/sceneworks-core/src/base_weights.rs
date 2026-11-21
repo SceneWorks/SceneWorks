@@ -128,6 +128,8 @@ pub enum QuantFormat {
     /// (`~/models/kreamania_variant4.safetensors`) is not mislabelled as the
     /// unloadable fp4 bucket.
     Int8TensorwisePerRow,
+    /// Signed INT8 row scales with a verified rotated-basis descriptor.
+    ConvRotInt8,
     /// ComfyUI `comfy_quant` **scalar-scaled fp8** (E4M3FN): each quantized Linear's weight is a
     /// plain `F8_E4M3` tensor with an `F32` **scalar** `.weight_scale` sibling — one scale for the
     /// whole tensor — and a `.comfy_quant` descriptor reading `{"format":"float8_e4m3fn"}` (or the
@@ -196,6 +198,7 @@ impl QuantFormat {
             Self::Fp8InlineScale => "fp8_inline_scale",
             Self::ComfyQuantPacked => "comfy_quant_packed",
             Self::Int8TensorwisePerRow => "int8_tensorwise_per_row",
+            Self::ConvRotInt8 => "convrot_int8",
             Self::Fp8E4M3Scalar => "fp8_e4m3_scalar",
             Self::Fp8E5M2Scalar => "fp8_e5m2_scalar",
             Self::Mxfp8 => "mxfp8",
@@ -223,6 +226,7 @@ impl QuantFormat {
             "fp8_inline_scale" => Some(Self::Fp8InlineScale),
             "comfy_quant_packed" => Some(Self::ComfyQuantPacked),
             "int8_tensorwise_per_row" => Some(Self::Int8TensorwisePerRow),
+            "convrot_int8" => Some(Self::ConvRotInt8),
             "fp8_e4m3_scalar" => Some(Self::Fp8E4M3Scalar),
             "fp8_e5m2_scalar" => Some(Self::Fp8E5M2Scalar),
             "mxfp8" => Some(Self::Mxfp8),
@@ -261,6 +265,7 @@ impl QuantFormat {
             Self::F16 => Some(facts::DENSE_F16_CODEC_ID),
             Self::F32 => Some(facts::DENSE_F32_CODEC_ID),
             Self::Int8TensorwisePerRow => Some(facts::INT8_PER_ROW_CODEC_ID),
+            Self::ConvRotInt8 => Some(facts::CONVROT_INT8_CODEC_ID),
             // The descriptor-gated scalar-fp8 and MXFP8 conventions ARE the engine's registered
             // codecs: `fp8-e4m3-scalar-v1` claims the described `float8_e4m3fn` form, and
             // `mxfp8-v1` the `mxfp8` form. Naming them here is what makes the source-codec fact
@@ -366,6 +371,7 @@ fn image_loader_accepts_family(family: &str) -> bool {
                 QuantFormat::F16,
                 QuantFormat::F32,
                 QuantFormat::Int8TensorwisePerRow,
+                QuantFormat::ConvRotInt8,
                 QuantFormat::Fp8E4M3Scalar,
                 QuantFormat::Fp8E5M2Scalar,
                 QuantFormat::Mxfp8,
@@ -388,6 +394,7 @@ fn image_import_encoding_supported(
             ComponentRole::Transformer,
             QuantFormat::Bf16
                 | QuantFormat::Int8TensorwisePerRow
+                | QuantFormat::ConvRotInt8
                 | QuantFormat::Fp8E4M3Scalar
                 | QuantFormat::Fp8E5M2Scalar
                 | QuantFormat::Mxfp8
@@ -911,8 +918,8 @@ pub fn is_gguf_file(path: &Path) -> bool {
 }
 
 /// Classify a base-weight file at `path`. GGUF is detected by magic first (it has
-/// no safetensors header); everything else is classified from its safetensors
-/// header alone via [`classify_base_header`].
+/// no safetensors header); safetensors are classified by header and, for signed INT8,
+/// the shared codec plan that distinguishes row-scaled weights from rotated weights.
 pub fn detect_base_weight_file(path: &Path) -> Result<BaseWeightDetection, SafetensorsHeaderError> {
     if is_gguf_file(path) {
         return Ok(BaseWeightDetection::Recognized(BaseWeightVerdict {
@@ -922,7 +929,62 @@ pub fn detect_base_weight_file(path: &Path) -> Result<BaseWeightDetection, Safet
         }));
     }
     let header = read_safetensors_header(path)?;
-    Ok(classify_base_header(&header))
+    let mut detection = classify_base_header(&header);
+    if let BaseWeightDetection::Recognized(verdict) = &mut detection {
+        // H3's assembly inventory already validates its native source formats, including
+        // W4A8 INT8, which has no standalone file codec in the generic registry.
+        if verdict.family.as_deref() != Some(crate::model_family::MINIMAX_H3)
+            && matches!(
+                verdict.quant,
+                QuantFormat::Int8TensorwisePerRow | QuantFormat::Fp8InlineScale
+            )
+            && header.as_object().is_some_and(|entries| {
+                entries.iter().any(|(key, tensor)| {
+                    key.ends_with(".weight")
+                        && tensor.get("dtype").and_then(Value::as_str) == Some("I8")
+                })
+            })
+        {
+            verdict.quant = match verified_int8_encoding(path) {
+                Ok(encoding) => encoding,
+                Err(reason) => return Ok(BaseWeightDetection::Unrecognized { reason }),
+            };
+        }
+    }
+    Ok(detection)
+}
+
+fn verified_int8_encoding(path: &Path) -> Result<QuantFormat, String> {
+    use gen_core::checkpoint_codec::{
+        plan_safetensors, CheckpointCodecRegistry, IdentityKeyMapping, SourceCodecResidency,
+        BASELINE_CHECKPOINT_CODECS,
+    };
+
+    let codecs = CheckpointCodecRegistry::new(BASELINE_CHECKPOINT_CODECS.iter().copied())
+        .map_err(|error| error.to_string())?;
+    let plan = plan_safetensors(path, &IdentityKeyMapping, &codecs, &SourceCodecResidency)
+        .map_err(|error| error.to_string())?;
+    let mut formats = plan
+        .tensors
+        .iter()
+        .filter_map(|tensor| match tensor.codec_id {
+            crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID => Some(QuantFormat::ConvRotInt8),
+            crate::checkpoint_weight_facts::INT8_PER_ROW_CODEC_ID => {
+                Some(QuantFormat::Int8TensorwisePerRow)
+            }
+            crate::checkpoint_weight_facts::DENSE_BF16_CODEC_ID
+            | crate::checkpoint_weight_facts::DENSE_F16_CODEC_ID
+            | crate::checkpoint_weight_facts::DENSE_F32_CODEC_ID => None,
+            _ => Some(QuantFormat::MixedQuantFormats),
+        });
+    let format = formats.next().ok_or_else(|| {
+        "Checkpoint has signed INT8 weights but no supported INT8 codec.".to_owned()
+    })?;
+    Ok(if formats.all(|other| other == format) {
+        format
+    } else {
+        QuantFormat::MixedQuantFormats
+    })
 }
 
 /// Classify a parsed safetensors header. Pure over the header `Value` (tensor
@@ -1920,6 +1982,44 @@ mod tests {
         assert_eq!(verdict.quant, QuantFormat::Int8TensorwisePerRow);
     }
 
+    #[test]
+    fn signed_checkpoint_classifies_convrot_only_with_matching_descriptors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("numeric-format.safetensors");
+        let numeric_fixture = |descriptor: Value| {
+            let descriptor = serde_json::to_vec(&descriptor).unwrap();
+            let end = 262 + descriptor.len();
+            let header = json!({
+                "model.diffusion_model.blocks.0.mod.lin": {"dtype": "BF16", "shape": [1], "data_offsets": [0, 2]},
+                "model.diffusion_model.txtfusion.projector.weight": {"dtype": "F32", "shape": [1, 1], "data_offsets": [2, 6]},
+                "model.diffusion_model.blocks.0.attn.wq.weight": {"dtype": "I8", "shape": [1, 256], "data_offsets": [6, 262]},
+                "model.diffusion_model.blocks.0.attn.wq.comfy_quant": {"dtype": "U8", "shape": [descriptor.len()], "data_offsets": [262, end]},
+                "model.diffusion_model.blocks.0.attn.wq.weight_scale": {"dtype": "F32", "shape": [1, 1], "data_offsets": [end, end + 4]},
+            });
+            let header = serde_json::to_vec(&header).unwrap();
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend(header);
+            bytes.extend([0; 262]);
+            bytes.extend(descriptor);
+            bytes.extend(1_f32.to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            detect_base_weight_file(&path).unwrap()
+        };
+        let convrot = numeric_fixture(
+            json!({"format":"int8_tensorwise", "convrot":true, "convrot_groupsize":64, "per_row":true}),
+        );
+        assert_eq!(recognized(convrot).quant, QuantFormat::ConvRotInt8);
+        let row_scaled = numeric_fixture(json!({"format":"int8_tensorwise", "per_row":true}));
+        assert_eq!(
+            recognized(row_scaled).quant,
+            QuantFormat::Int8TensorwisePerRow
+        );
+        let invalid = numeric_fixture(
+            json!({"format":"int8_tensorwise", "convrot":true, "convrot_groupsize":32}),
+        );
+        assert!(matches!(invalid, BaseWeightDetection::Unrecognized { .. }));
+    }
+
     /// sc-27092: a ComfyUI **scalar-scaled fp8** Krea 2 export — `F8_E4M3` weights with an `F32`
     /// per-tensor `.weight_scale` and a `.comfy_quant` descriptor per projection.
     ///
@@ -2123,6 +2223,53 @@ mod tests {
         }
     }
 
+    /// Reads the real source declarations through the import classifier and codec planner.
+    /// Set the three checkpoint paths before explicitly running this metadata-only test.
+    #[test]
+    #[ignore]
+    fn real_fixed_source_precision_headers() {
+        use gen_core::checkpoint_codec::{
+            plan_safetensors, CheckpointCodecRegistry, IdentityKeyMapping, SourceCodecResidency,
+            BASELINE_CHECKPOINT_CODECS,
+        };
+        let codecs =
+            CheckpointCodecRegistry::new(BASELINE_CHECKPOINT_CODECS.iter().copied()).unwrap();
+        for (variable, expected, label) in [
+            (
+                "SCENEWORKS_SCALAR_FP8_CHECKPOINT",
+                QuantFormat::Fp8E4M3Scalar,
+                "Scaled FP8 (E4M3)",
+            ),
+            (
+                "SCENEWORKS_CONVROT_CHECKPOINT",
+                QuantFormat::ConvRotInt8,
+                "INT8-ConvRot",
+            ),
+            ("SCENEWORKS_NVFP4_CHECKPOINT", QuantFormat::Nvfp4, "NVFP4"),
+        ] {
+            let path = std::env::var_os(variable)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("set {variable}"));
+            let verdict = recognized(detect_base_weight_file(&path).unwrap());
+            assert_eq!(verdict.quant, expected, "{variable}");
+            import_supported(&verdict).unwrap();
+            let codec = verdict.quant.source_codec_id().unwrap();
+            let plan = plan_safetensors(&path, &IdentityKeyMapping, &codecs, &SourceCodecResidency)
+                .unwrap();
+            assert!(
+                plan.tensors.iter().any(|tensor| tensor.codec_id == codec),
+                "{variable}"
+            );
+            let mut entry = json!({
+                "type": "image", "catalogScope": "user", "family": verdict.family,
+                "importSourceShape": "transformer_file", "importQuantFormat": expected.as_str(),
+            });
+            crate::source_precision::SourcePrecision::project(entry.as_object_mut().unwrap());
+            assert_eq!(entry["sourcePrecision"]["label"], label, "{variable}");
+            assert_eq!(entry["sourcePrecision"]["codecId"], codec, "{variable}");
+        }
+    }
+
     /// The header classification → engine codec-id bridge (sc-21484). Pinned rather than left to
     /// the match arms because the whole point of the bridge is that `Nvfp4` reaches the codec
     /// vocabulary as `"nvfp4-v1"` and NEVER as the request tier `"nvfp4"` or as a `q4` alias.
@@ -2188,6 +2335,7 @@ mod tests {
             QuantFormat::Fp8InlineScale,
             QuantFormat::ComfyQuantPacked,
             QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::ConvRotInt8,
             QuantFormat::Fp8E4M3Scalar,
             QuantFormat::Fp8E5M2Scalar,
             QuantFormat::Mxfp8,

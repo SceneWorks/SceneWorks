@@ -1033,6 +1033,18 @@ pub(crate) fn portable_authored_options(payload: &JsonObject) -> Value {
         }
     }
     let mut options = project(&Value::Object(payload.clone()), None);
+    if payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .and_then(sceneworks_core::source_precision::SourcePrecision::for_entry)
+        .is_some()
+    {
+        sceneworks_core::source_precision::clear_precision_selectors(
+            options
+                .as_object_mut()
+                .expect("projection returns an object"),
+        );
+    }
     if let Some(target) = payload.get("plan").and_then(|plan| plan.get("target")) {
         let selected = options
             .as_object_mut()

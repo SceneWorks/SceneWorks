@@ -1881,6 +1881,36 @@ describe("ImageStudio model picker capability gating", () => {
     [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
   const clickGenerate = () => clickReadyGenerate(generateButton);
 
+  it.each(["Scaled FP8 (E4M3)", "INT8-ConvRot", "NVFP4"])("shows %s as read-only and restores builtin selection", async (label) => {
+    const createImageJob = vi.fn(async () => ({ id: "job-fixed-source" }));
+    const builtin = matrixModel(["q4", "q8"]);
+    const imported = {
+      ...Z_IMAGE,
+      id: "community_krea",
+      name: "Community Krea",
+      family: "krea_2",
+      catalogScope: "user",
+      runtimeQuantTiers: ["q4", "q8", "bf16"],
+      sourcePrecision: { label },
+      ui: { precisionToggle: true },
+    };
+    await render(baseContext({ createImageJob, imageModels: [builtin, imported], macCapabilities: MAC_CAPS }));
+    setSelect(field(container, "Model"), imported.id);
+    await openAdvanced(container);
+    expect(container.querySelector(".settings-field-tier strong").textContent).toBe(label);
+    expect(tierPicker(container)).toBeNull();
+    expect(precisionLabel(container)).toBeNull();
+    await clickGenerate();
+    const payload = createImageJob.mock.calls.at(-1)[0];
+    expect(payload.model).toBe(imported.id);
+    for (const key of ["quantTier", "mlxQuantize", "convRot", "mlxQuantizeExplicit"]) {
+      expect(payload.advanced).not.toHaveProperty(key);
+    }
+    setSelect(field(container, "Model"), builtin.id);
+    expect(tierPicker(container)).toBeTruthy();
+    expect(container.querySelector(".settings-field-tier strong")).toBeNull();
+  });
+
   it("shows ALL possible tiers, disabling the un-installed ones (sc-8515, availability guard)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4", "bf16"])], macCapabilities: MAC_CAPS }));
     await act(async () => {});

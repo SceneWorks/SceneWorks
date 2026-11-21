@@ -32,6 +32,19 @@ import candidate from "./testUtils/catalogBaseline/candidate-catalog.json";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 
+it.each(["Scaled FP8 (E4M3)", "INT8-ConvRot", "NVFP4"])("does not offer conversion tiers for %s", (label) => {
+  const model = { runtimeQuantTiers: ["q4", "q8", "bf16"], sourcePrecision: { label } };
+  expect(installedTiers(model)).toEqual([]);
+  expect(tierPickerOptions(model)).toEqual([]);
+  expect(defaultTierSelection(model, "q4", { defaultQuality: "bf16", autoTier: "q8" })).toBeNull();
+  expect(shouldShowTierPicker(model)).toBe(false);
+  const builtin = { hasVariantMatrix: true, variants: [
+    { variant: "q4", installState: "installed" }, { variant: "q8", installState: "installed" },
+  ] };
+  expect(shouldShowTierPicker(builtin)).toBe(true);
+  expect(defaultTierSelection(builtin, "q4", { defaultQuality: "bf16" })).toBe("q4");
+});
+
 // The shipped catalog projects product facts from the manifest and memory facts from the evidence
 // store. Use that same projection for the catalog-shaped fixtures below.
 const MANIFEST_PATH = resolve(
