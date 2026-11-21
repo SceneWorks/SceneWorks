@@ -80,7 +80,20 @@ function verifyProductWindow(axes, mlx) {
   }], "capture has a different native SCAIL window");
 }
 
-export function scailFitEvidence(pool, backend, { compiledPin, coverage, closures }) {
+// Use the same two immutable approvals compiled by the candidate worker before deriving a
+// standalone ceiling from its package. The worker independently checks these when it quotes.
+export function scailPackageDigests(index, coverage, source) {
+  function approved(bytes, constant) {
+    const declarations = [...source.matchAll(new RegExp(`\\bconst ${constant}: &str\\s*=\\s*"([a-f0-9]{64})"\\s*;`, "g"))];
+    assert.equal(declarations.length, 1, `missing or ambiguous SCAIL approval ${constant}`);
+    const digest = sha256(bytes);
+    assert.equal(digest, declarations[0][1], `candidate SCAIL package differs from ${constant}`);
+    return digest;
+  }
+  return { indexSha256: approved(index, "APPROVED_INDEX_SHA256"), coverageSha256: approved(coverage, "APPROVED") };
+}
+
+export function scailFitEvidence(pool, backend, { compiledPin, coverage, closures, host }) {
   const mlx = backend === "mlx", platform = mlx ? "macos" : "windows";
   const counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
   assert.match(compiledPin, /^[a-f0-9]{40}$/);
@@ -108,6 +121,8 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
       && a.driving_stack_bytes === 45 * 832 * 480 * 24 && a.source_resize_bytes === 0 && a.schedule_bytes === 5 * 64
       && a.load_policy === (mlx ? "None" : "Some(Q4)") + "/Bf16/Resident/EagerMaterialization"
       && Array.isArray(a.execution_policy), "capture does not cover the fixed product inputs");
+    if (host && (row.device !== host.device || row.runtime !== host.runtime ||
+      !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
     const b = row.bounds;
     assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
     if (mlx) assert.ok(byteCount(b.mlx_decode_budget_bytes) > 0, "missing decoder budget");
@@ -150,6 +165,23 @@ export function scailRefusalCapGiB(events, evidence) {
   const alternatives = evidence.filter((row) => row.nativePolicy === bound.nativePolicy && row.references === 6);
   return (Math.min(cold.requiredAcceleratorBytes, ...alternatives.map((row) => row.acceleratorBytes)) - 1) / (1024 ** 3);
 }
+// The caller restricted these authenticated rows to the actual device, runtime and worker
+// policy. Count six can only use a six-reference donor on either backend.
+export function scailPackagedRefusalCapBytes(evidence) {
+  const prices = evidence.filter((r) => r.references === 6).map((r) => byteCount(r.acceleratorBytes));
+  assert.ok(prices.length && Math.min(...prices) > 1, "no usable six-reference accelerator price on this host");
+  return Math.min(...prices) - 1;
+}
+
+export function verifyScailRefusal(fit, capBytes, message) {
+  assert.ok(fit.length && fit.every((e) => e.availableAcceleratorBytes <= capBytes), "worker refusal did not use the selected accelerator ceiling");
+  // The worker returns the last refused quotation when all candidate donors fail.
+  const last = fit.at(-1);
+  assert.ok(last.requiredAcceleratorBytes > last.availableAcceleratorBytes &&
+    message === `SCAIL-2 plural fit requires ${last.requiredAcceleratorBytes} accelerator bytes, only ${last.availableAcceleratorBytes} are available`,
+    "missing SCAIL budget refusal for the observed byte counts");
+}
+
 export async function verifySam3(dir) {
   for (const [file, digest] of Object.entries(SAM3.files)) assert.equal(await fileSha256(path.join(dir, file)), digest, `wrong pinned SAM3 ${file}`);
 }
@@ -259,10 +291,10 @@ export function scailFitEvents(text, route, jobId, admitted, sources, evidence) 
   if (admitted) {
     assert.ok(events.some((e) => e.stage === "cold_load" && e.admitted === true) && events.some((e) => e.stage === "execution" && e.admitted === true), "missing positive cold-load or execution budget evidence");
     assert.equal(new Set(events.filter((e) => e.admitted).map((e) => JSON.stringify([e.evidenceArtifactId, e.evidenceSha256, e.evidenceReferences]))).size, 1, "worker changed its admitted physical evidence");
-    assert.equal(new Set(events.map((e) => e.carrierReceipt)).size, 1, "admission and execution received different carriers");
   } else {
     assert.ok(events.length && events.every((e) => e.stage === "cold_load" && e.admitted === false) && events.some((e) => e.requiredAcceleratorBytes > e.availableAcceleratorBytes), "no observed accelerator-domain refusal");
   }
+  assert.equal(new Set(events.map((e) => e.carrierReceipt)).size, 1, "fit events received different carriers");
   return events;
 }
 

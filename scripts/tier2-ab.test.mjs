@@ -1007,14 +1007,16 @@ test("SCAIL requires an enabled candidate catalog and both pinned product compon
       assert.equal(exitCodeFor(report), 0);
       report.routes[0].verdict = "skipped"; assert.equal(exitCodeFor(report), 1);
     }
-    assert.throws(() => selectRoutes(backend, routes.at(-1).id), /preceding accepted/);
+    assert.deepEqual(selectRoutes(backend, routes[5].id), [routes[5]]);
+    assert.throws(() => selectRoutes(backend, [routes[0].id, routes[5].id].join(",")), /preceding accepted/);
+    assert.throws(() => selectRoutes(backend, [routes[5].id, routes[4].id].join(",")), /preceding accepted/);
     assert.equal(selectRoutes(backend, [routes[4].id, routes[5].id].join(",")).length, 2);
     assert.ok(!DEFAULT_ROUTE_IDS[backend].some((id) => ROUTES[id].scailCandidate));
   }
 });
 
 test("SCAIL workers must observe the exact file seal, ordered RGB inputs and live cold and execution budgets", async () => {
-  const { scailFitEvents, scailArtifactSha256, scailRefusalCapGiB } = await import("./lib/tier2-scail.mjs");
+  const { scailFitEvents, scailArtifactSha256, scailRefusalCapGiB, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
   for (const backend of ["mlx", "cuda"]) {
     for (const n of [2, 3, 4, 5, 6]) {
       const route = ROUTES[`${backend}-scail2-q4-animate-${n}`];
@@ -1063,7 +1065,14 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
         assert.throws(() => verify([cold, execution].map((e) => ({ ...e, carrierReceipt: malformed }))));
       }
       const denied = { ...cold, admitted: false, availableAcceleratorBytes: 99 };
-      assert.equal(verify([denied], false).length, 1);
+      const refused = verify([denied], false);
+      const message = "SCAIL-2 plural fit requires 100 accelerator bytes, only 99 are available";
+      verifyScailRefusal(refused, 99, message);
+      assert.throws(() => verifyScailRefusal([...refused, { ...denied, requiredAcceleratorBytes: 102 }], 99, message), /observed byte counts/);
+      assert.throws(() => verifyScailRefusal(refused, 98, message), /ceiling/);
+      for (const wrong of [undefined, "video load failed: " + message, message.replace("100", "101"), message.replace("99", "98"), "video load failed: prepared source or placement changed"]) {
+        assert.throws(() => verifyScailRefusal(refused, 99, wrong), /observed byte counts/);
+      }
       assert.throws(() => verify([denied, execution], false));
       assert.throws(() => verify([{ ...denied, availableAcceleratorBytes: 150, availablePhysicalHostBytes: 99 }], false));
     }
@@ -1125,8 +1134,37 @@ test("SCAIL imports ordered files through project multipart and verifies the ser
   await assert.rejects(uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng), /served input differs/);
 });
 
+test("standalone SCAIL refusal authenticates both compiled candidate digests and identifies the leased device", async () => {
+  const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
+  const { scailHostIdentity } = await import("./tier2-ab.mjs");
+  const [index, coverage, approvals] = await Promise.all([readFile(path.join(root, "config/scail2-plural-memory.json")),
+    readFile(path.join(root, "config/scail2-memory-pin-coverage.json")),
+    readFile(path.join(root, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8")]);
+  assert.deepEqual(scailPackageDigests(index, coverage, approvals), { indexSha256: sha256(index), coverageSha256: sha256(coverage) });
+  assert.throws(() => scailPackageDigests(index + " ", coverage, approvals), /APPROVED_INDEX_SHA256/);
+  assert.throws(() => scailPackageDigests(index, coverage + " ", approvals), /APPROVED/);
+  assert.throws(() => scailPackageDigests(index, coverage, ""), /missing or ambiguous/);
+  for (const backend of ["mlx", "cuda"]) {
+    const mlx = backend === "mlx";
+    const identity = await scailHostIdentity(backend, {}, async (cmd, args) => {
+      if (mlx) {
+        assert.equal(cmd, "/usr/sbin/sysctl");
+        assert.deepEqual(args, ["-n", "machdep.cpu.brand_string", "kern.osversion"]);
+      } else {
+        assert.equal(cmd, "C:\\Windows\\System32\\nvidia-smi.exe");
+        assert.deepEqual(args, ["--id=1", "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"]);
+      }
+      return { stdout: mlx ? "board\nruntime\n" : "board, runtime\r\n" };
+    });
+    assert.deepEqual(identity, { device: "board", runtime: "runtime" });
+    for (const stdout of ["", "board", "board,runtime\nother,driver"]) {
+      await assert.rejects(scailHostIdentity(backend, {}, async () => ({ stdout })), /identity unavailable/);
+    }
+  }
+});
+
 test("SCAIL product reads the actual projector output, including shared receipt IDs and reviewed prices", async (t) => {
-  const { scailFitEvidence, scailArtifactSha256 } = await import("./lib/tier2-scail.mjs");
+  const { scailFitEvidence, scailArtifactSha256, scailPackagedRefusalCapBytes } = await import("./lib/tier2-scail.mjs");
   const dir = await mkdtemp(path.join(os.tmpdir(), "scail-project-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const put = async (name, data) => {
@@ -1187,6 +1225,25 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
     const rows = read(projected);
     assert.deepEqual(rows.map((r) => r.references), counts);
+    const host = { device: "board", runtime: "runtime", env: {} };
+    const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
+    const competing = structuredClone(projected.at(-1));
+    competing.artifact_id = 782;
+    const envelope = mlx ? competing.bounds.unified : competing.bounds.device;
+    if (mlx) envelope.uncertainty_allowance_bytes -= 1;
+    else envelope.unsampled_overshoot_upper_bytes -= 1;
+    const price = rows.at(-1).acceleratorBytes;
+    assert.equal(scailPackagedRefusalCapBytes(scoped([...projected, competing])), price - 2);
+    for (const change of [r => { r.device = "other"; }, r => { r.runtime = "other"; },
+      r => { r.axes.execution_policy[0].value = "1"; }]) {
+      const other = structuredClone(competing); change(other);
+      assert.deepEqual(scoped([...projected, other]), rows);
+      assert.equal(scailPackagedRefusalCapBytes(scoped([...projected, other])), price - 1);
+    }
+    assert.throws(() => scoped(projected, { ...host, runtime: "wrong" }), /no packaged native/);
+    assert.throws(() => scoped(projected, { ...host, env: { [projected[0].axes.execution_policy[0].name]: "" } }), /no packaged native/);
+    assert.throws(() => scailPackagedRefusalCapBytes(rows.filter((r) => r.references !== 6)));
+    assert.throws(() => scailPackagedRefusalCapBytes([{ references: 6, acceleratorBytes: 1 }]));
     assert.ok(rows.every((r) => r.artifactId === 781 && r.sha256 === digest));
     assert.deepEqual(rows[0].price, mlx ? {grossHostBytes:0,grossDeviceBytes:0,grossUnifiedBytes:153}
       : {grossHostBytes:158,grossDeviceBytes:175,grossUnifiedBytes:0});

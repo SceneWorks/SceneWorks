@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapGiB } from "./lib/tier2-scail.mjs";
+import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapGiB, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal } from "./lib/tier2-scail.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
@@ -154,7 +154,7 @@ export function selectRoutes(backend, value) {
     fact(ROUTES[id].backend === backend, `route ${id} belongs to the ${ROUTES[id].backend} backend, not ${backend}`);
   }
   const selected = ids.map((id) => ROUTES[id]);
-  for (const [i, route] of selected.entries()) if (route.refuse) {
+  for (const [i, route] of selected.entries()) if (route.refuse && selected.length > 1) {
     fact(selected.slice(0, i).some((r) => r.scailCandidate && r.references === 6 && !r.refuse),
       "a capped SCAIL refusal requires a preceding accepted six-character witness");
   }
@@ -962,6 +962,17 @@ async function sideIdentity(label, dir, sha) {
 async function tool(command, args) { try { const { stdout, stderr } = await execFile(command, args, { timeout: 20_000, windowsHide: true }); return { available: true, version: `${stdout}${stderr}`.split(/\r?\n/)[0].slice(0, 200) }; } catch (error) { return { available: false, error: error.message.slice(0, 200) }; } }
 async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: true }); return Number(fs.bavail * fs.bsize); } catch { return null; } }
 
+// Match the worker's hardware identity in video_admission/scail2.rs on the leased device.
+export async function scailHostIdentity(backend, env, run = execFile) {
+  const mlx = backend === "mlx";
+  const [command, args] = mlx ? ["/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string", "kern.osversion"]]
+    : [nvidiaSmiPath(env, "win32"), [`--id=${CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"]];
+  const { stdout } = await run(command, args, { timeout: 3_000, windowsHide: true });
+  const fields = stdout.trim().split(mlx ? /\r?\n/ : ",").map((s) => s.trim());
+  fact(fields.length === 2 && fields.every((s) => s && !/[,\r\n]/.test(s)), "SCAIL device and runtime identity unavailable");
+  return { device: fields[0], runtime: fields[1] };
+}
+
 async function preflight(env, cfg, report) {
   const platform = process.platform;
   if (cfg.backend === "mlx") fact(platform === "darwin" && process.arch === "arm64", "the mlx backend needs a native Apple-silicon Mac");
@@ -1001,12 +1012,21 @@ async function preflight(env, cfg, report) {
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
   if (cfg.routes.some((route) => route.scailCandidate)) {
-    const config = (name) => readFile(path.join(cfg.headDir, "config", name), "utf8").then(JSON.parse);
-    const [pool, coverage, closures] = await Promise.all([config("scail2-plural-memory.json"),
-      config("scail2-memory-pin-coverage.json").catch((error) => { if (error.code === "ENOENT") return []; throw error; }),
+    const config = (name) => readFile(path.join(cfg.headDir, "config", name));
+    const standalone = cfg.routes.length === 1 && cfg.routes[0].refuse;
+    const [index, coverage, closures] = await Promise.all([config("scail2-plural-memory.json"),
+      config("scail2-memory-pin-coverage.json").catch((error) => { if (!standalone && error.code === "ENOENT") return "[]"; throw error; }),
       config("inference-provider-closures.json")]);
-    const evidence = scailFitEvidence(pool, cfg.backend, { compiledPin: report.head.inferencePin, coverage, closures });
+    let host, packageDigests;
+    if (standalone) {
+      const approvals = await readFile(path.join(cfg.headDir, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8");
+      packageDigests = scailPackageDigests(index, coverage, approvals);
+      host = await scailHostIdentity(cfg.backend, env);
+    }
+    const evidence = scailFitEvidence(JSON.parse(index), cfg.backend, { compiledPin: report.head.inferencePin,
+      coverage: JSON.parse(coverage), closures: JSON.parse(closures), host: host && { ...host, env } });
     for (const item of report.routes.filter((r) => ROUTES[r.id].scailCandidate)) item.nativeFitEvidence = evidence;
+    if (standalone) report.routes[0].packagedRefusal = { ...host, ...packageDigests, capBytes: scailPackagedRefusalCapBytes(evidence) };
   }
   if (cfg.routes.some((route) => route.wanA14b || route.scailCandidate)) {
     report.sourceMetadata = "Each fresh API data directory builds its trusted source ledger from the public Hugging Face tree at `https://huggingface.co/api/models/{repo}/tree/{revision}` for the exact selected revision. The worker verifies cached files against the ledger. These metadata requests require HTTPS access and use no credentials.";
@@ -1244,7 +1264,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       scailEnv.RUST_LOG = "info";
       scailEnv.SCENEWORKS_SAM3_WEIGHTS = snapshotDir(plan.hub, SAM3.repo, SAM3.revision);
       if (route.refuse) {
-        fact(Number.isFinite(capGiB) && capGiB > 0, "no prior accepted six-character accelerator budget");
+        fact(Number.isFinite(capGiB) && capGiB > 0, "no qualified six-character accelerator budget");
         scailEnv[cfg.backend === "mlx" ? "SCENEWORKS_MLX_MEMORY_CAP_GB" : "SCENEWORKS_CUDA_VRAM_CAP_GB"] = String(capGiB);
         record.capGiB = capGiB;
       }
@@ -1328,12 +1348,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const decision = jobProgressDecision({ job: current, postedMs: posted, claimedAtMs, nowMs: Date.now(), claimMinutes, timeoutMinutes: route.timeoutMinutes });
       if (route.refuse && current.status === "failed" && current.workerId === workerId) {
         record.fit = scailFitEvents(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route, current.id, false, record.sources, plan.nativeFitEvidence);
-        fact(record.fit.every((event) => event.availableAcceleratorBytes <= capGiB * GIB), "worker refusal did not use the selected accelerator ceiling");
-        fact(!current.result?.assets?.length && /SCAIL-2 plural fit requires \d+ accelerator bytes, only \d+ are available/.test(current.error ?? current.message ?? ""), "missing SCAIL budget refusal");
+        verifyScailRefusal(record.fit, capGiB * GIB, current.error);
+        fact(!current.result?.assets?.length, "failed SCAIL job returned an output");
         const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
         const inputs = [record.sources.clip.id, ...record.sources.references.map((ref) => ref.id)];
-        fact(Array.isArray(library) && library.length === inputs.length && library.every((asset) => inputs.includes(asset.id)), "failed SCAIL job published an output");
-        record.refusal = current.error ?? current.message; record.status = "refused"; return record;
+        fact(Array.isArray(library) && JSON.stringify(library.map((asset) => asset.id).sort()) === JSON.stringify(inputs.sort()), "failed SCAIL job published an output");
+        record.refusal = current.error; record.status = "refused"; return record;
       }
       if (decision.state === "stop") { record.stopReason = decision.reason; throw new Error(decision.reason); }
       if (decision.state === "completed") { job = current; break; }
@@ -1487,9 +1507,10 @@ async function runComparison(env, cfg, report, signal) {
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
+    const capGiB = route.packagedRefusal ? route.packagedRefusal.capBytes / GIB : scailCapGiB;
     const run = async (label) => {
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal, capGiB: scailCapGiB });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal, capGiB });
       const base = route.runs[0];
       if (definition.wanA14b && record.status === "completed" && base?.status === "completed") {
         if (record.identity.claimedSource.boundMembersSha256 !== base.identity.claimedSource.boundMembersSha256) {
