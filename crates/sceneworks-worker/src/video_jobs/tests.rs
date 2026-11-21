@@ -2238,9 +2238,7 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         .find("PreparedH3Load::prepare_authorized_with_check(")
         .expect("imported source authority must prepare the same native load spec");
     assert!(
-        spec_preparation < sealed_preparation
-            && funnel.contains("&mut spec,")
-            && funnel.contains("(spec, prepared_h3_context),"),
+        spec_preparation < sealed_preparation && funnel.contains("&mut spec,"),
         "the prepared source identity and native spec must reach the original request-aware \
          callback together, not an alternate cache route or an identity-free LoadSpec"
     );
@@ -2248,6 +2246,8 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
     assert!(
         funnel.contains("h3_preparation_checkpoint(")
             && funnel.contains("input.imported_h3_authority.clone()")
+            && normalized_funnel.contains("let prepared_h3_context = h3_receipt .as_ref() .map(|receipt| crate::generator_cache::PreparedH3CacheContext {")
+            && normalized_funnel.contains("receipt: receipt.clone(), });")
             && normalized_funnel.contains(
                 "sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure_with_staging( &preparation_data_dir, &assembly, receipt.files(), &receipt.component_staging(), )",
             ),
@@ -2255,10 +2255,25 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
          checkpoint, the imported source authority, and the staging-aware frozen component-closure \
          comparison over the acquired receipt files and staging authority"
     );
-    assert_eq!(
-        funnel.matches("(spec, prepared_h3_context),").count(),
-        2,
-        "both native-platform and Candle cached paths must forward the prepared context"
+    let (candle, mlx) = normalized_funnel
+        .split_once("#[cfg(target_os = \"macos\")] let result = {")
+        .expect("the native cache acquisition must include the MLX branch");
+    assert!(
+        candle.contains("with_cached_generator_for_request_using( engine_id, (spec, prepared_h3_context), \"video load failed\", load_generator, run,")
+            && mlx.contains("GeneratorRequestLoad::from((spec, prepared_h3_context))")
+            && mlx.contains("with_cached_generator_for_request_using( engine_id, load, \"video load failed\", load_generator, run,"),
+        "both platform routes must hand the prepared H3 source and its checked loader to the cache"
+    );
+    let (_, loader) = normalized_funnel
+        .split_once("let cold_h3_receipt = h3_receipt.clone(); let load_generator = move")
+        .expect("the checked loader must capture the original prepared receipt");
+    let (before_load, after_load) = loader
+        .split_once("let generator = load_generator(id, spec)?;")
+        .expect("the checked loader must invoke the native factory with the actual spec");
+    let check = "if let Some(receipt) = &cold_h3_receipt { receipt .validate(spec) .map_err(gen_core::Error::Unsupported)?; }";
+    assert!(
+        before_load.trim_end().ends_with(check) && after_load.trim_start().starts_with(check),
+        "the loader must validate the prepared H3 seal before and after the native factory"
     );
     const CACHE: &str = include_str!("../generator_cache.rs");
     let callback = CACHE
@@ -2270,13 +2285,28 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         callback.contains("with_cached_generator_for_request_using_cache(")
             && callback.contains("with_cached_generator_for_request_using_cache_prepared(")
             && callback.contains("engine_id, load, load_error_context,")
-            && callback.contains("let GeneratorRequestLoad { spec, prepared_h3 } = load.into();")
             && callback.contains(
                 "with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared("
             )
-            && callback.contains("engine_id, spec, prepared_h3, load_error_context,"),
+            && callback.contains("engine_id, load.into(), load_error_context,"),
         "the original callback must forward the sealed context, rather than silently substituting \
          None before the cold/warm, policy, external-baseline and provider-delta handoff"
+    );
+    let cache = CACHE.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (_, owner) = cache
+        .split_once("async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared<P, R>(")
+        .expect("the cache owner must receive the prepared request");
+    assert!(
+        cache.contains("fn from((spec, prepared_h3): (LoadSpec, Option<PreparedH3CacheContext>)) -> Self { Self { spec, prepared_h3,")
+            && owner.contains("let GeneratorRequestLoad { spec, prepared_h3,")
+            && owner.contains("} = load;")
+            && owner.contains("LoadIdentity::try_from_load_spec_with_h3(engine_id, &spec, prepared_h3.as_ref())?")
+            && owner.contains("let generator = load_generator(engine_id, &spec)"),
+        "the cache owner must build its key with the prepared context carried by GeneratorRequestLoad"
+    );
+    assert!(
+        cache.contains("context .receipt .validate(spec) .map_err(crate::WorkerError::InvalidPayload)?; key.imported_h3 = Some((context.identity.clone(), context.receipt.files().to_vec()));"),
+        "an imported H3 cache key must validate and retain the prepared identity and receipt files"
     );
     assert!(
         funnel.contains("with_uncached_generator("),
