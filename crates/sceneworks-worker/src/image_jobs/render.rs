@@ -1301,6 +1301,8 @@ pub(super) fn generate_one_with_hires_on_surface(
         render_plan: surface.hires_render_plan,
         hires_render_plan: None,
     };
+    let base_negative_prompt = negative_prompt.clone();
+    let base_preview = preview.clone();
     let (base_execution, final_image) = drive_hires_passes(
         steps,
         &hires,
@@ -1316,7 +1318,7 @@ pub(super) fn generate_one_with_hires_on_surface(
                 seed,
                 steps,
                 guidance,
-                negative_prompt.clone(),
+                base_negative_prompt,
                 reference,
                 multi_references,
                 edit_mask,
@@ -1331,7 +1333,7 @@ pub(super) fn generate_one_with_hires_on_surface(
                 first_pass_context.as_ref(),
                 &PromptEnhance::default(),
                 gen_core::PromptEnhancementSink::default(),
-                preview.clone(),
+                base_preview,
                 &base_surface,
                 cancel,
                 progress,

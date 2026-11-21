@@ -2436,7 +2436,10 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             "modelManifestEntry": { "family": "krea_2" }
         }));
         req.mode = case.mode.to_owned();
-        if case.phase_steps.is_some() || case.hires_fix.is_some() {
+        if case.phase_steps.is_some() {
+            req.width = 512;
+            req.height = 512;
+        } else if case.hires_fix.is_some() {
             req.width = 256;
             req.height = 256;
         }
