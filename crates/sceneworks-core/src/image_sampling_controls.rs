@@ -78,7 +78,11 @@ pub fn requested_h3_image_sampler(
                     "advanced.{key}.{field} applies only to the LCM sampler, not {label}"
                 ));
             }
-            H3ImageSampler::Euler
+            if name == "euler" {
+                H3ImageSampler::Euler
+            } else {
+                H3ImageSampler::EulerAncestral
+            }
         }
         "lcm" => {
             // With neither scale given, run the engine's 1.1 -> 0.9 ramp. A start scale given
@@ -124,18 +128,14 @@ pub fn requested_h3_image_sampler(
         };
         format!("advanced.{key}.{field} {value} {rule}")
     })?;
-    let expected_name = if name == "euler_ancestral" {
-        "euler_ancestral"
-    } else {
-        sampler.name()
-    };
     if let Some(named) =
         sceneworks_options::image_sampling_controls::authored_sampler_name(advanced)
             .map(str::trim)
-            .filter(|named| !named.is_empty() && *named != "default" && *named != expected_name)
+            .filter(|named| !named.is_empty() && *named != "default" && *named != sampler.name())
     {
         return Err(format!(
-            "advanced.sampler \"{named}\" disagrees with advanced.{key}.sampler \"{expected_name}\""
+            "advanced.sampler \"{named}\" disagrees with advanced.{key}.sampler \"{}\"",
+            sampler.name()
         ));
     }
     Ok(Some(sampler))
@@ -187,7 +187,7 @@ mod h3_tests {
         let ancestral = object(json!({"h3ImageSampler":{"sampler":"euler_ancestral"}}));
         assert_eq!(
             requested_h3_image_sampler(&ancestral).unwrap(),
-            Some(gen_core::h3_image::H3ImageSampler::Euler)
+            Some(gen_core::h3_image::H3ImageSampler::EulerAncestral)
         );
         let ancestral_noise =
             object(json!({"h3ImageSampler":{"sampler":"euler_ancestral","sNoise":1.2}}));

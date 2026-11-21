@@ -2596,8 +2596,15 @@ mod hires_report_tests {
         }
 
         // 2. Single-pass ENG-2 compilation with low_res_start across all ENG-2 base families.
+        type SinglePassRouteCase<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<f32>,
+            Option<f32>,
+        );
         let low_res_spec = gen_core::LowResStartSpec::new(2, Some(0.5));
-        let single_pass_routes: &[(&str, Option<&str>, Option<&str>, Option<f32>, Option<f32>)] = &[
+        let single_pass_routes: &[SinglePassRouteCase<'_>] = &[
             ("flux1_schnell", None, None, None, None),
             ("flux1_dev", None, None, Some(3.5), None),
             ("flux2_dev", None, None, Some(3.5), None),
@@ -2624,7 +2631,17 @@ mod hires_report_tests {
             ("sdxl", Some("euler"), Some("karras"), Some(7.0), None),
         ];
 
+        let spec_for_single_pass = |route: &str| -> gen_core::LoadSpec {
+            if route == "qwen_image_2_1_turbo" {
+                gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+                    root.path().join("qwen_image_2_1_turbo_synthetic"),
+                ))
+            } else {
+                base_spec.clone()
+            }
+        };
         for &(route, sampler, scheduler, guidance, true_cfg) in single_pass_routes {
+            let route_spec = spec_for_single_pass(route);
             let req = gen_core::GenerationRequest {
                 prompt: "a mountain lake at sunrise".to_owned(),
                 width: 1024,
@@ -2639,7 +2656,7 @@ mod hires_report_tests {
                 low_res_start: Some(low_res_spec),
                 ..Default::default()
             };
-            let prepared = compile_prepared_render(registry, route, &base_spec, &req, None)
+            let prepared = compile_prepared_render(registry, route, &route_spec, &req, None)
                 .unwrap_or_else(|error| {
                     panic!("{route}: single-pass low_res_start render plan failed: {error}")
                 });
@@ -2675,15 +2692,16 @@ mod hires_report_tests {
             true_cfg: None,
             provider_reference_strength: 0.45,
         };
+        type TwoPassRouteCase<'a> = (
+            &'a str,
+            &'a gen_core::LoadSpec,
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<f32>,
+            Option<f32>,
+        );
         #[cfg(target_os = "macos")]
-        let two_pass_routes: &[(
-            &str,
-            &gen_core::LoadSpec,
-            Option<&str>,
-            Option<&str>,
-            Option<f32>,
-            Option<f32>,
-        )] = &[
+        let two_pass_routes: &[TwoPassRouteCase<'_>] = &[
             ("flux1_dev", &ip_spec, None, None, Some(3.5), None),
             ("flux2_dev", &base_spec, None, None, Some(3.5), None),
             ("flux2_klein_9b", &base_spec, None, None, None, None),
@@ -2713,14 +2731,7 @@ mod hires_report_tests {
             ),
         ];
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        let two_pass_routes: &[(
-            &str,
-            &gen_core::LoadSpec,
-            Option<&str>,
-            Option<&str>,
-            Option<f32>,
-            Option<f32>,
-        )] = &[
+        let two_pass_routes: &[TwoPassRouteCase<'_>] = &[
             ("sd3_5_large", &base_spec, None, None, Some(4.5), None),
             ("sd3_5_large_turbo", &base_spec, None, None, None, None),
             ("sd3_5_medium", &base_spec, None, None, Some(4.5), None),

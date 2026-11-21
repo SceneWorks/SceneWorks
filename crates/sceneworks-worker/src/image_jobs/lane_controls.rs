@@ -112,15 +112,9 @@ pub(crate) fn record_effective_h3_image_sampler(
     let Some(sampler) = controls.h3_image_sampler else {
         return;
     };
-    let authored_ancestral = raw_settings
-        .get(controls::H3_IMAGE_SAMPLER_KEY)
-        .and_then(|v| v.get("sampler"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        == Some("euler_ancestral");
     let block = match sampler {
-        H3ImageSampler::Euler if authored_ancestral => json!({ "sampler": "euler_ancestral" }),
         H3ImageSampler::Euler => json!({ "sampler": "euler" }),
+        H3ImageSampler::EulerAncestral => json!({ "sampler": "euler_ancestral" }),
         H3ImageSampler::Lcm {
             s_noise,
             s_noise_end,
