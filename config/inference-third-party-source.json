@@ -258,7 +258,10 @@
       "pathPrefix": "crates/media/candle-gen/candle-gen/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+      "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/candle-gen/candle-gen/src/text_encoder.rs"
+      ]
     },
     {
       "id": "first-party:crates/media/candle-gen/candle-gen/build.rs",
@@ -332,7 +335,6 @@
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
       "excludePaths": [
-        "crates/media/candle-gen/candle-gen-flux/src/packed_te.rs",
         "crates/media/candle-gen/candle-gen-flux/src/vae/diffusers.rs",
         "crates/media/candle-gen/candle-gen-flux/src/vae/native.rs"
       ]
@@ -801,12 +803,12 @@
     {
       "id": "candle-transformers-source",
       "paths": [
-        "crates/media/candle-gen/candle-gen-flux/src/packed_te.rs",
         "crates/media/candle-gen/candle-gen-flux/src/vae/diffusers.rs",
         "crates/media/candle-gen/candle-gen-flux/src/vae/native.rs",
-        "crates/media/candle-gen/candle-gen-kolors/src/unet.rs"
+        "crates/media/candle-gen/candle-gen-kolors/src/unet.rs",
+        "crates/media/candle-gen/candle-gen/src/text_encoder.rs"
       ],
-      "provenance": "Verbatim or faithful source ports from Hugging Face Candle transformer implementations, including both FLUX VAE variants, packed CLIP/T5 forwards, and the Kolors UNet base.",
+      "provenance": "Verbatim or faithful source ports from Hugging Face Candle transformer implementations, including both FLUX VAE variants, the shared CLIP and T5 encoders, and the Kolors UNet base.",
       "disposition": "about-license",
       "component": "candle-transformers-source"
     },
