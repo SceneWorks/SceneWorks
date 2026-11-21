@@ -1,10 +1,10 @@
 [
   {
     "capture_revision": "54f288263184fa60f0b0a998caedb0309757468d",
-    "target_revision": "f971a8c5eabd55c02cc20efa1413fd37ddc0a498",
+    "target_revision": "7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
     "backend": "mlx",
     "provider_digest": "9e11f0cb3b5265a542cd555135274bf897c4b1b6068ad5e0ad4e19d5486b34a8",
     "shared_contract_digest": "3c8c94b1df3518a3f85a1524f13d00e37365da408150c7421f3783f860bce1b7",
-    "tree_diff_sha256": "0c5f465f3a6fb4810987f1fc11ea09ae3be85d84cf683b77ab94ada60d59514a"
+    "tree_diff_sha256": "1bb949e453b2d9bc125f50843f82f21c04fd8a2244575bca6bae859c94336fc1"
   }
 ]
