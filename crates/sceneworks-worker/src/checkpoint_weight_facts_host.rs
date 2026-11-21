@@ -10,23 +10,17 @@
 //! |---|---|---|
 //! | Source binding | the resolved checkpoint file's name + size | everywhere |
 //! | Source codec | the header classification persisted as `importQuantFormat` | everywhere |
-//! | Host capability | the `nvidia-smi` compute-cap probe `discover_gpu` runs at startup | candle lane; dense-only elsewhere |
+//! | Host capability | shared backend policy over an observed device | startup CUDA probe or actual loaded handle |
 //! | Materialization | the engine's load receipt | see [`materialization_from_runtime`] |
 //!
 //! # The capability is a probe rendering, not a second gate
 //!
-//! [`host_native_execution_capability`] does not invent a floor. It renders the *existing*
-//! [`crate::gpu::compute_cap_meets_nvfp4`] decision — the sm_120 marker capability sc-11042 already
-//! advertises to the api and the web tier picker — into the cross-repo
-//! [`NativeExecutionCapabilityFact`] vocabulary. There is one floor constant in this repository and
-//! this module reads it rather than restating it, so the fact a user reads and the tier the picker
-//! offers can never disagree about what this box can do.
+//! [`host_native_execution_capability`] renders the existing startup device observation through the
+//! backend's shared codec policy. It does not repeat format floors or infer capability from a model
+//! family. A measured receipt carries the actual loader's own capability, on either backend.
 //!
-//! That floor is `>= 12.0`, which **excludes datacenter Blackwell `sm_100`** (it probes `10.0`).
-//! sm_100 has FP4 tensor cores, but this leg's kernel is neither built for it
-//! (`CUDA_COMPUTE_CAP=120` emits sm_120 SASS + compute_120 PTX) nor validated on it, and the
-//! engine's own `CandleCodecResidency` applies the same exclusion. The two repositories agree by
-//! construction here and [`tests::the_sm_120_floor_excludes_sm_100`] pins it.
+//! The existing NVFP4 path retains its validated sm_120 floor. FP8 and ConvRot use their own shared
+//! backend constraints; the worker does not apply the NVFP4 floor to those different formats.
 //!
 //! # What this module refuses to do
 //!
@@ -38,7 +32,7 @@
 
 use std::path::Path;
 
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(test)]
 use sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use sceneworks_core::checkpoint_weight_facts::{
     CheckpointWeightFactsV1, ExecutionRepresentation, MaterializationFact,
@@ -49,16 +43,22 @@ use serde_json::{Map, Value};
 
 /// This host's native-execution declaration, rendered from the startup compute-cap probe.
 ///
-/// Dense-only on macOS/MLX, on a build without the candle lane, on a non-NVIDIA or CPU worker, and
-/// on any NVIDIA GPU below the sm_120 floor — including datacenter `sm_100`. An unprobed host is
-/// dense-only too: [`crate::gpu::cached_compute_cap`] answers `None`, which fails safe, so a host
-/// whose probe never ran cannot license a native label by omission.
+/// An unprobed backend makes no native claim. Once a load has measured its backend capability,
+/// `runtime_checkpoint_facts` uses that actual capability instead of this startup rendering.
 pub(crate) fn host_native_execution_capability() -> NativeExecutionCapabilityFact {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        if crate::gpu::compute_cap_meets_nvfp4(crate::gpu::cached_compute_cap()) {
-            return NativeExecutionCapabilityFact::new([NVFP4_CODEC_ID])
-                .expect("NVFP4_CODEC_ID is a codec id");
+        if let Some(cap) =
+            crate::gpu::cached_compute_cap().filter(|cap| cap.is_finite() && *cap >= 0.0)
+        {
+            let capability =
+                candle_gen::logical_weights::CandleCodecResidency::from_cuda_compute_cap((
+                    cap.trunc() as i32,
+                    (cap.fract() * 10.0).round() as i32,
+                ))
+                .native_execution_capability();
+            return NativeExecutionCapabilityFact::new(capability.native_codec_ids())
+                .expect("the backend produces canonical codec ids");
         }
     }
     NativeExecutionCapabilityFact::dense_only()
@@ -141,7 +141,7 @@ pub(crate) fn materialization_from_runtime(
 /// and falls back to the honest header-declared, `no-runtime-receipt` fact set rather than pairing
 /// facts about two different things. `None` engine facts (a lazy provider before its first read, a
 /// non-adopting provider) take the same fallback.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn runtime_checkpoint_facts(
     entry: &Map<String, Value>,
     checkpoint_path: Option<&Path>,
@@ -168,6 +168,12 @@ pub(crate) fn runtime_checkpoint_facts(
         }
         None => return no_receipt(),
     };
+    if let (Some(expected), Some(binding)) = (checkpoint_path, facts.source_binding()) {
+        if std::fs::canonicalize(expected).ok().as_deref() != Some(binding.canonical_path()) {
+            tracing::warn!(codec_id, "runtime receipt describes a different checkpoint source; keeping the no-receipt fact set");
+            return no_receipt();
+        }
+    }
     let binding = facts
         .source_binding()
         .map(|binding| {
@@ -188,8 +194,8 @@ pub(crate) fn runtime_checkpoint_facts(
         .collect();
     // The capability that rides a MEASURED fact set is the engine's own — the one that actually
     // licensed (or forbade) every native row in this receipt, validated against it at load time.
-    // The worker probe and the engine floor agree by construction (`the_sm_120_floor_excludes_
-    // sm_100`), but the probe is process-startup state; pairing the receipt with anything other
+    // The startup rendering uses the same backend policy, but is process-startup state;
+    // pairing the receipt with anything other
     // than the capability that judged it would let the two drift in exactly the tests and startup
     // windows where the probe has not run.
     let capability = if facts.capability().is_dense_only() {
@@ -814,6 +820,30 @@ mod tests {
         }
         // And an entry with no verified classification still produces nothing at all.
         assert!(runtime_checkpoint_facts(&entry(None), None, Some(engine_mixed_facts())).is_none());
+    }
+
+    #[test]
+    fn the_same_codec_filename_and_size_cannot_alias_a_different_pinned_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let left = temp.path().join("left");
+        let right = temp.path().join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        let left = left.join("model.safetensors");
+        let right = right.join("model.safetensors");
+        std::fs::write(&left, b"first-data").unwrap();
+        std::fs::write(&right, b"other-data").unwrap();
+        let pin = gen_core::PinnedWeightsFile::pin(&left).unwrap();
+        let receipt = || engine_mixed_facts().with_verified_source(&pin).unwrap();
+        let matched =
+            runtime_checkpoint_facts(&entry(Some("nvfp4")), Some(&left), Some(receipt())).unwrap();
+        assert_eq!(matched.executes_natively(NVFP4_CODEC_ID), Some(true));
+        let mismatched =
+            runtime_checkpoint_facts(&entry(Some("nvfp4")), Some(&right), Some(receipt())).unwrap();
+        assert!(matches!(
+            mismatched.materialization(),
+            MaterializationFact::Unavailable { .. }
+        ));
     }
 
     #[test]

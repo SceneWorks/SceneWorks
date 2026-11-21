@@ -1925,11 +1925,6 @@ pub(super) fn checkpoint_plan_load_spec(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        sources.descriptor.id,
-        &sources.pins,
-    )?;
     // Every File token the plan contributed — the primary's file(s) and each component sourced from
     // a plan layer — finalized in one atomic pass on the spec admission and load both use, so no
     // await between selection and load can retarget one of them (sc-18306).
@@ -2103,12 +2098,10 @@ pub(super) async fn generate_checkpoint_plan_stream(
         .collect();
     let total = work.len();
 
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let checkpoint_path_for_facts = match &sources.primary {
         WeightsSource::File(path) => Some(path.clone()),
         _ => None,
     };
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let spec = checkpoint_plan_load_spec(&sources, quant)?;
     let engine_id = sources.descriptor.id;
@@ -2279,6 +2272,12 @@ pub(super) async fn generate_checkpoint_plan_stream(
                             facts: pag_facts,
                         });
                     }
+                    super::stream::publish_checkpoint_weight_facts(
+                        &facts_tx,
+                        &manifest_entry_for_facts,
+                        checkpoint_path_for_facts.as_deref(),
+                        model.checkpoint_weight_facts(),
+                    );
                     Ok(Some(generated))
                 },
             )
@@ -2333,19 +2332,12 @@ pub(super) async fn generate_checkpoint_plan_stream(
                     // bespoke imported-Krea route, so publish the handle's post-load receipt through
                     // the same event seam. The consumer applies this measured fact set to the image
                     // event that follows, replacing the honest pre-load `no-runtime-receipt` fallback.
-                    if let Some(facts) =
-                        crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-                            &manifest_entry_for_facts,
-                            checkpoint_path_for_facts.as_deref(),
-                            model.checkpoint_weight_facts(),
-                        )
-                    {
-                        let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
-                            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
-                                &facts,
-                            ),
-                        });
-                    }
+                    super::stream::publish_checkpoint_weight_facts(
+                        &facts_tx,
+                        &manifest_entry_for_facts,
+                        checkpoint_path_for_facts.as_deref(),
+                        model.checkpoint_weight_facts(),
+                    );
                     Ok(Some(generated))
                 },
             )

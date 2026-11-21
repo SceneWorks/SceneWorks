@@ -53,6 +53,57 @@ fn required_env_path(key: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn linked_import_location(checkpoint: &Path, hub: &Path) -> (PathBuf, String) {
+    // Hub snapshot files link into their repository's sibling blobs directory. Approving only the
+    // snapshot parent would correctly fail the product's symlink confinement check. Approve this
+    // one model repository, retaining normal confinement and the original .safetensors filename.
+    let root = checkpoint
+        .strip_prefix(hub)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .filter(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.starts_with("models--"))
+        })
+        .map(|component| hub.join(component.as_os_str()))
+        .unwrap_or_else(|| {
+            checkpoint
+                .parent()
+                .expect("checkpoint parent")
+                .to_path_buf()
+        });
+    let relative = checkpoint
+        .strip_prefix(&root)
+        .unwrap()
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .expect("UTF-8 linked relative path")
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    (root, relative)
+}
+
+#[test]
+fn linked_import_approves_one_hub_repository_and_preserves_portable_relative_path() {
+    let hub = std::env::temp_dir().join("checkpoint-fixture-cache");
+    let checkpoint = hub.join("models--publisher--model/snapshots/rev/diffusion/model.safetensors");
+    let (root, relative) = linked_import_location(&checkpoint, &hub);
+    assert_eq!(root, hub.join("models--publisher--model"));
+    assert_eq!(relative, "snapshots/rev/diffusion/model.safetensors");
+    let local = hub
+        .with_file_name("local-source")
+        .join("community.safetensors");
+    let (root, relative) = linked_import_location(&local, &hub);
+    assert_eq!(root, local.parent().unwrap());
+    assert_eq!(relative, "community.safetensors");
+}
+
 fn stub_job_snapshot(job_id: &str) -> Value {
     let job_type = if job_id.contains("import") {
         "model_import"
@@ -68,7 +119,7 @@ fn stub_job_snapshot(job_id: &str) -> Value {
         "payload": {},
         "result": {},
         "requestedGpu": "auto",
-        "assignedGpu": "0",
+        "assignedGpu": "1",
         "workerId": "comfy-quant-smoke-worker",
         "progress": 0.1,
         "stage": "running",
@@ -92,7 +143,7 @@ fn stub_job_snapshot(job_id: &str) -> Value {
 fn stub_worker_snapshot(worker_id: &str) -> Value {
     json!({
         "id": worker_id,
-        "gpuId": "0",
+        "gpuId": "1",
         "gpuName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
         "status": "busy",
         "currentJobId": null,
@@ -212,11 +263,17 @@ struct SmokeCase {
     expected_codec_id: &'static str,
     family: &'static str,
     provider: &'static str,
-    companion_repo: &'static str,
+    companion_repo: Option<&'static str>,
     with_adapter_and_reuse: bool,
 }
 
-async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
+#[derive(Clone, Copy)]
+enum AcceptanceStage {
+    ImportOnly,
+    Generate,
+}
+
+async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage) {
     let SmokeCase {
         checkpoint_env,
         model_id,
@@ -250,19 +307,21 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
     settings.api_url = api_url;
     settings.config_dir = temp.path().join("config");
     settings.worker_id = "comfy-quant-smoke-worker".to_owned();
-    settings.gpu_id = "cuda".to_owned();
+    settings.gpu_id = "1".to_owned();
     settings.backend_candle_enabled = true;
     settings.heartbeat_seconds = 30;
 
-    let base = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, companion_repo)
-        .expect("HF_HUB_CACHE must contain the model's companion snapshot")
-        .join("bf16");
-    assert!(
-        base.join("transformer/config.json").is_file()
-            && base.join("tokenizer/tokenizer.json").is_file(),
-        "the cached bf16 companion snapshot is incomplete: {}",
-        base.display()
-    );
+    if let Some(companion_repo) = companion_repo {
+        let base = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, companion_repo)
+            .expect("HF_HUB_CACHE must contain the model's companion snapshot")
+            .join("bf16");
+        assert!(
+            base.join("transformer/config.json").is_file()
+                && base.join("tokenizer/tokenizer.json").is_file(),
+            "the cached bf16 companion snapshot is incomplete: {}",
+            base.display()
+        );
+    }
 
     let manifests = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&manifests).expect("manifest directory creates");
@@ -270,17 +329,11 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
     std::fs::write(&manifest_path, r#"{ "schemaVersion": 1, "models": [] }"#)
         .expect("empty user model manifest writes");
 
-    let checkpoint_parent = checkpoint
-        .parent()
-        .expect("checkpoint has a parent directory");
-    let checkpoint_name = checkpoint
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("checkpoint filename is UTF-8");
+    let (checkpoint_root, checkpoint_relative) = linked_import_location(&checkpoint, &hf_hub_cache);
     let plan_store =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
     let approved = plan_store
-        .approve_root(checkpoint_parent)
+        .approve_root(&checkpoint_root)
         .expect("checkpoint parent approves as a linked library root");
     let import_job = smoke_job(
         "comfy-quant-linked-import",
@@ -288,7 +341,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
         json!({
             "modelId": model_id,
             "linkedRootId": approved.root_id,
-            "linkedRelativePath": checkpoint_name,
+            "linkedRelativePath": checkpoint_relative,
             "manifestPath": manifest_path,
             "ownershipMode": "linked",
             "manifestEntry": {
@@ -299,7 +352,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
                 "source": {
                     "provider": "linked-library",
                     "rootId": approved.root_id,
-                    "relativePath": checkpoint_name
+                    "relativePath": checkpoint_relative
                 }
             }
         }),
@@ -317,7 +370,11 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
     );
     assert_eq!(
         imported.get("importSourceShape").and_then(Value::as_str),
-        Some("transformer_file")
+        Some(if family == "sdxl" {
+            "fused_checkpoint"
+        } else {
+            "transformer_file"
+        })
     );
     assert_eq!(
         imported.get("importQuantFormat").and_then(Value::as_str),
@@ -340,6 +397,11 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
         import_result.get("checkpointId").and_then(Value::as_str),
         Some(checkpoint_id.as_str())
     );
+
+    if matches!(stage, AcceptanceStage::ImportOnly) {
+        eprintln!("IMPORT_FORMAT_PREFLIGHT model={model_id} source_codec={expected_codec_id} checkpoint={checkpoint_id}");
+        return;
+    }
 
     let project = ProjectStore::new(settings.data_dir.clone(), "comfy-quant-smoke")
         .create_project("Imported ComfyUI-quantized worker smoke")
@@ -471,6 +533,8 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
                 .expect("retain generated image");
             let packet = json!({
                 "schemaVersion":1, "modelId":model_id, "provider":provider,
+                "checkpointId":checkpoint_id,
+                "importPlan":imported.get("importPlan"),
                 "iteration":iteration, "sourceCodec":expected_codec_id,
                 "runtimeFacts":facts, "adapterCount":adapters.len(),
                 "physicalGpu":physical_gpu,"hardwareMetrics":hardware,
@@ -485,68 +549,122 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
             .expect("retain native execution receipt");
         }
     }
+    let fqn = std::thread::current()
+        .name()
+        .expect("actual libtest FQN")
+        .to_owned();
+    eprintln!("MODEL_INFERENCE_BODY_COMPLETED {fqn}");
+    // A successful request's measured NativePacked row comes from the source-aware CUDA loader;
+    // its public constructor refuses CPU. The separately dispatched controller binds physical GPU1.
+    eprintln!("MODEL_INFERENCE_DEVICE {fqn} candle-cuda");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight worker GPU smoke; needs a ComfyUI scalar-fp8 Krea 2 checkpoint, the Krea bf16 companion snapshot, and a CUDA device"]
 async fn imported_scalar_fp8_worker_gpu_smoke() {
-    run_imported_comfy_quant_smoke(SmokeCase {
+    run_imported_comfy_quant_smoke(scalar_fp8_case(), AcceptanceStage::Generate).await;
+}
+
+fn scalar_fp8_case() -> SmokeCase {
+    SmokeCase {
         checkpoint_env: "SCENEWORKS_IMPORTED_FP8_CHECKPOINT",
         model_id: "linked_krea2_scalar_fp8",
         expected_quant_format: "fp8_e4m3_scalar",
         expected_codec_id: sceneworks_core::checkpoint_weight_facts::FP8_E4M3_SCALAR_CODEC_ID,
         family: "krea_2",
         provider: "krea_2_turbo",
-        companion_repo: "SceneWorks/krea-2-turbo-mlx",
+        companion_repo: Some("SceneWorks/krea-2-turbo-mlx"),
         with_adapter_and_reuse: true,
-    })
-    .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight worker GPU smoke; needs a ComfyUI Kitchen MXFP8 Krea 2 checkpoint, the Krea bf16 companion snapshot, and a CUDA device"]
 async fn imported_mxfp8_worker_gpu_smoke() {
-    run_imported_comfy_quant_smoke(SmokeCase {
+    run_imported_comfy_quant_smoke(mxfp8_case(), AcceptanceStage::Generate).await;
+}
+
+fn mxfp8_case() -> SmokeCase {
+    SmokeCase {
         checkpoint_env: "SCENEWORKS_IMPORTED_MXFP8_CHECKPOINT",
         model_id: "linked_krea2_mxfp8",
         expected_quant_format: "mxfp8",
         expected_codec_id: sceneworks_core::checkpoint_weight_facts::MXFP8_CODEC_ID,
         family: "krea_2",
         provider: "krea_2_turbo",
-        companion_repo: "SceneWorks/krea-2-turbo-mlx",
+        companion_repo: Some("SceneWorks/krea-2-turbo-mlx"),
         with_adapter_and_reuse: false,
-    })
-    .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "manual native ConvRot product validation; real Muse checkpoint and companion snapshot"]
 async fn imported_convrot_worker_gpu_smoke() {
-    run_imported_comfy_quant_smoke(SmokeCase {
+    run_imported_comfy_quant_smoke(convrot_case(), AcceptanceStage::Generate).await;
+}
+
+fn convrot_case() -> SmokeCase {
+    SmokeCase {
         checkpoint_env: "SCENEWORKS_IMPORTED_CONVROT_CHECKPOINT",
         model_id: "linked_krea2_convrot",
         expected_quant_format: "convrot_int8",
         expected_codec_id: "convrot-int8-native",
         family: "krea_2",
         provider: "krea_2_turbo",
-        companion_repo: "SceneWorks/krea-2-turbo-mlx",
+        companion_repo: Some("SceneWorks/krea-2-turbo-mlx"),
         with_adapter_and_reuse: false,
-    })
-    .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "manual second-architecture native FP8 product validation; real FLUX.2 Dev source and companions"]
-async fn imported_flux2_dev_fp8_worker_gpu_smoke() {
-    run_imported_comfy_quant_smoke(SmokeCase {
-        checkpoint_env: "SCENEWORKS_IMPORTED_FLUX2_FP8_CHECKPOINT",
-        model_id: "linked_flux2_dev_fp8",
-        expected_quant_format: "fp8_e4m3_scalar",
-        expected_codec_id: sceneworks_core::checkpoint_weight_facts::FP8_E4M3_SCALAR_CODEC_ID,
-        family: "flux2-dev",
-        provider: "flux2_dev",
-        companion_repo: "SceneWorks/flux2-dev-mlx",
+#[ignore = "manual second-architecture native FP8 product validation; real fused SDXL E5M2 source"]
+async fn imported_sdxl_fp8_worker_gpu_smoke() {
+    run_imported_comfy_quant_smoke(sdxl_fp8_case(), AcceptanceStage::Generate).await;
+}
+
+fn sdxl_fp8_case() -> SmokeCase {
+    SmokeCase {
+        checkpoint_env: "SCENEWORKS_IMPORTED_SDXL_FP8_CHECKPOINT",
+        model_id: "linked_sdxl_fp8",
+        expected_quant_format: "fp8_e5m2_scalar",
+        expected_codec_id: sceneworks_core::checkpoint_weight_facts::FP8_E5M2_SCALAR_CODEC_ID,
+        family: "sdxl",
+        provider: "sdxl",
+        companion_repo: None,
         with_adapter_and_reuse: false,
-    })
-    .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual native NVFP4 shared-loader regression; real Krea source and companions"]
+async fn imported_native_nvfp4_worker_gpu_smoke() {
+    run_imported_comfy_quant_smoke(native_nvfp4_case(), AcceptanceStage::Generate).await;
+}
+
+fn native_nvfp4_case() -> SmokeCase {
+    SmokeCase {
+        checkpoint_env: "SCENEWORKS_NVFP4_CHECKPOINT",
+        model_id: "linked_krea2_native_nvfp4",
+        expected_quant_format: "nvfp4",
+        expected_codec_id: sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID,
+        family: "krea_2",
+        provider: "krea_2_turbo",
+        companion_repo: Some("SceneWorks/krea-2-turbo-mlx"),
+        with_adapter_and_reuse: false,
+    }
+}
+
+/// Only normal import/classification and source pinning. This case never loads a model or emits
+/// the successful learned-execution protocol used by the separate native generation cases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "metadata-only real-source preflight; requires the four pinned local artifacts"]
+async fn imported_shared_formats_product_import_preflight() {
+    for case in [
+        scalar_fp8_case(),
+        sdxl_fp8_case(),
+        convrot_case(),
+        native_nvfp4_case(),
+    ] {
+        run_imported_comfy_quant_smoke(case, AcceptanceStage::ImportOnly).await;
+    }
 }

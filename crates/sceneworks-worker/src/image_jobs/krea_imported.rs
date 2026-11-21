@@ -122,8 +122,8 @@ use serde_json::json;
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
 // imported lanes get img2img). Both native backends also claim adapters, Kontext edit, and strict pose
 // conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
-// scale shapes are validated by the inference loader before dequantization; imported ConvRot files
-// select the existing Candle named-component loader arm. Native NVFP4 is deliberately narrower:
+// scale shapes and packed formats are validated by the shared inference checkpoint loader.
+// Native NVFP4 is deliberately narrower:
 // Candle/NVIDIA t2i + img2img, without adapters, edit, or multi-phase assembly. Pose uses the native
 // control provider.
 
@@ -1065,6 +1065,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     // The actual imported assembly is the fit/cache/provider source of truth: primary File DiT, base
     // snapshot companion, control overlay, and adapters. The provider reports the File's own bytes;
     // it does not relabel a directory-tier rung-4 measurement as imported evidence.
+    let dit_for_facts = dit.clone();
+    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let mut spec = LoadSpec::new(WeightsSource::File(dit))
         .with_component(
             gen_core::BASE_SNAPSHOT_COMPONENT,
@@ -1077,11 +1079,6 @@ pub(super) async fn generate_krea_imported_control_stream(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        KREA_IMPORTED_CONTROL_ENGINE_ID,
-        std::slice::from_ref(&dit_pin),
-    )?;
     spec = attach_selected_decoder_unprepared(
         spec,
         KREA_IMPORTED_CONTROL_ENGINE_ID,
@@ -1142,6 +1139,7 @@ pub(super) async fn generate_krea_imported_control_stream(
             // pose. Hand the reporting copy to the first evaluation and silenced copies to the rest,
             // so every pose is still floored by a granted switch while the event fires once.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let facts_tx = tx.clone();
             drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -1197,6 +1195,12 @@ pub(super) async fn generate_krea_imported_control_stream(
                     })
                     .transpose()?
                     .flatten();
+                super::stream::publish_checkpoint_weight_facts(
+                    &facts_tx,
+                    &manifest_entry_for_facts,
+                    Some(dit_for_facts.as_path()),
+                    model.checkpoint_weight_facts(),
+                );
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
@@ -1354,13 +1358,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
 
-    let mut spec =
+    let spec =
         imported_candle_control_load_spec(request, &dit, &base_dir, &control_weights, adapters)?;
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        KREA_IMPORTED_CONTROL_ENGINE_ID,
-        std::slice::from_ref(&dit_pin),
-    )?;
     let spec = prepare_manifest_text_encoder_with_file_pins(
         spec,
         KREA_IMPORTED_CONTROL_ENGINE_ID,
@@ -1372,6 +1371,8 @@ pub(super) async fn generate_krea_imported_control_stream(
         "Krea 2 imported pose source preparation failed",
     )?;
 
+    let dit_for_facts = dit.clone();
+    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         KREA_IMPORTED_ENGINE,
@@ -1384,16 +1385,8 @@ pub(super) async fn generate_krea_imported_control_stream(
             // only the DiT swapped.
             let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
                 root: base_dir,
-                native_dit: (!spec
-                    .components
-                    .contains_key(gen_core::KREA_CONVROT_DIT_COMPONENT))
-                .then_some(dit),
-                convrot_dit: spec
-                    .components
-                    .get(gen_core::KREA_CONVROT_DIT_COMPONENT)
-                    .map(|source| {
-                        crate::weights_source::WeightsSourceExt::path(source).to_path_buf()
-                    }),
+                native_dit: Some(dit),
+                convrot_dit: None,
                 control: control_weights,
                 adapters: spec.adapters.clone(),
                 branch_tier: gen_core::tier_integrity::control_branch_tier(spec.quantize),
@@ -1491,6 +1484,12 @@ pub(super) async fn generate_krea_imported_control_stream(
                     })
                     .transpose()?
                     .flatten();
+                super::stream::publish_checkpoint_weight_facts(
+                    &facts_tx,
+                    &manifest_entry_for_facts,
+                    Some(dit_for_facts.as_path()),
+                    model.checkpoint_weight_facts(),
+                );
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
@@ -2120,6 +2119,7 @@ pub(super) fn drive_krea_imported_mlx_items<E>(
     hires_fix: Option<HiresFixPlan>,
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     cancel: CancelFlag,
+    source_context: Option<(&JsonObject, &Path)>,
     mut evaluate_request: E,
 ) -> WorkerResult<()>
 where
@@ -2203,6 +2203,14 @@ where
             super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
             if !facts.is_empty() {
                 let _ = facts_tx.blocking_send(GenEvent::ImageFacts { index, facts });
+            }
+            if let Some((entry, path)) = source_context {
+                super::stream::publish_checkpoint_weight_facts(
+                    &facts_tx,
+                    entry,
+                    Some(path),
+                    generator.checkpoint_weight_facts(),
+                );
             }
             Ok(Some((seed, out_width, out_height, pixels)))
         },
@@ -2341,9 +2349,7 @@ pub(super) async fn generate_krea_imported_stream(
     // the load materializes, on the blocking thread, so the drive closure re-assembles the three
     // facts there and streams the finished receipt object back over the event channel. `dit` is
     // about to move into the LoadSpec.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let dit_for_facts = dit.clone();
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
         gen_core::BASE_SNAPSHOT_COMPONENT,
@@ -2355,11 +2361,6 @@ pub(super) async fn generate_krea_imported_stream(
     if !prepared_adapters.specs.is_empty() {
         spec = spec.with_adapters(prepared_adapters.specs);
     }
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        engine_id,
-        std::slice::from_ref(&dit_pin),
-    )?;
     spec = attach_selected_decoder_unprepared(spec, engine_id, request, settings)?;
     let decoder_pin = selected_decoder_component_pin(&spec, engine_id, request, settings)?;
     spec = prepare_manifest_text_encoder_with_file_pins(
@@ -2437,6 +2438,7 @@ pub(super) async fn generate_krea_imported_stream(
                 hires_fix,
                 tx,
                 cancel,
+                Some((&manifest_entry_for_facts, dit_for_facts.as_path())),
                 crate::mlx_fit_gate::evaluate_request,
             )
         },
@@ -2521,19 +2523,12 @@ pub(super) async fn generate_krea_imported_stream(
                     // of the pre-load `no-runtime-receipt` version (sc-11045). Sent after every image
                     // on purpose: publication is last-write-wins engine-side, so the latest event
                     // always describes the most recent materialization.
-                    if let Some(facts) =
-                        crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-                            &manifest_entry_for_facts,
-                            Some(dit_for_facts.as_path()),
-                            model.checkpoint_weight_facts(),
-                        )
-                    {
-                        let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
-                            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
-                                &facts,
-                            ),
-                        });
-                    }
+                    super::stream::publish_checkpoint_weight_facts(
+                        &facts_tx,
+                        &manifest_entry_for_facts,
+                        Some(dit_for_facts.as_path()),
+                        model.checkpoint_weight_facts(),
+                    );
                     Ok(Some((seed, out_width, out_height, pixels)))
                 },
             )

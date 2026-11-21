@@ -18,7 +18,7 @@ use crate::heartbeat_while_blocking;
 use crate::ApiClient;
 use crate::JsonObject;
 use crate::Settings;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(native_lane)]
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
@@ -86,10 +86,7 @@ pub(super) enum GenEvent {
     /// write, replacing the pre-load `no-runtime-receipt` stamp. Lanes that hold no handle simply
     /// never produce this variant.
     //
-    // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
-    // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
-    // lanes compile neither the variant nor its consumer arm. Candle tests retain both.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[cfg(native_lane)]
     CheckpointWeightFacts {
         facts: Value,
     },
@@ -114,6 +111,26 @@ pub(super) enum GenEvent {
         /// path that doesn't score (every non-angle-set path) is untouched.
         face_likeness: Option<JsonObject>,
     },
+}
+
+/// Publish the loaded backend's correlated receipt before its image is consumed, on either native
+/// backend. A missing runtime receipt remains explicitly unmeasured; source metadata never fills it.
+#[cfg(native_lane)]
+pub(super) fn publish_checkpoint_weight_facts(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    entry: &JsonObject,
+    checkpoint_path: Option<&std::path::Path>,
+    runtime: Option<gen_core::CheckpointWeightFacts>,
+) {
+    if let Some(facts) = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+        entry,
+        checkpoint_path,
+        runtime,
+    ) {
+        let _ = tx.blocking_send(GenEvent::CheckpointWeightFacts {
+            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(&facts),
+        });
+    }
 }
 
 pub(super) type GeneratedImage = (i64, u32, u32, Vec<u8>);

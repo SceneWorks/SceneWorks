@@ -293,9 +293,9 @@ pub(super) async fn consume_gen_events_with_disclosure(
     // The measured three-fact set of this job's load, once the producing lane sends one
     // (sc-11045). `None` for every lane that holds no runtime handle — those assets keep whatever
     // the route stamped pre-load (including the honest `no-runtime-receipt` materialization).
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[cfg(native_lane)]
     let mut measured_checkpoint_facts: Option<Value> = None;
-    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     let measured_checkpoint_facts: Option<Value> = None;
     // Per-image provenance facts (sc-25681), keyed by image index until that image is written.
     let mut pending_image_facts: std::collections::HashMap<usize, JsonObject> =
@@ -444,7 +444,7 @@ pub(super) async fn consume_gen_events_with_disclosure(
                     latest_preview = Some(slot);
                 }
             }
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            #[cfg(native_lane)]
             GenEvent::CheckpointWeightFacts { facts } => {
                 // Measured checkpoint facts from the loaded handle (sc-11045). Latest-wins on
                 // purpose: the engine's own sink is last-write-wins per materialization, so the

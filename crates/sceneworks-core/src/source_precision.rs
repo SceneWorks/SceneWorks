@@ -21,6 +21,7 @@ impl SourcePrecision {
         let codec_id = crate::jobs_store::imported_entry_source_codec(entry)?;
         let (format, label) = match codec_id {
             codecs::FP8_E4M3_SCALAR_CODEC_ID => ("fp8_e4m3_scalar", "Scaled FP8 (E4M3)"),
+            codecs::FP8_E4M3_ROWWISE_CODEC_ID => ("fp8_e4m3_rowwise", "Per-row FP8 (E4M3)"),
             codecs::FP8_E5M2_SCALAR_CODEC_ID => ("fp8_e5m2_scalar", "Scaled FP8 (E5M2)"),
             codecs::MXFP8_CODEC_ID => ("mxfp8", "MXFP8"),
             codecs::NVFP4_CODEC_ID => ("nvfp4", "NVFP4"),
@@ -94,6 +95,8 @@ mod tests {
     fn shared_validator_checks_every_new_selector_and_clears_matching_ones() {
         for (classification, format) in [
             ("fp8_e4m3_scalar", "fp8_e4m3_scalar"),
+            ("fp8_e4m3_rowwise", "fp8_e4m3_rowwise"),
+            ("fp8_e5m2_scalar", "fp8_e5m2_scalar"),
             ("convrot_int8", "int8-convrot"),
             ("nvfp4", "nvfp4"),
         ] {

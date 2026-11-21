@@ -3199,6 +3199,30 @@ pub(super) async fn generate_video_using(
                 }
                 let result =
                     run_loaded_video_generation(generator, input, &cancel, &mut on_progress);
+                if result.is_ok() {
+                    // Read this generator's receipts after lazy component loads and the actual
+                    // forward. Keep each physical source binding; one primary getter cannot
+                    // describe a normalized multi-shard checkpoint or its inherited components.
+                    if let Some(codec) = sceneworks_core::jobs_store::imported_entry_source_codec(
+                        &admission_manifest_entry,
+                    ) {
+                        let receipts: Vec<_> = generator.checkpoint_weight_facts_by_source()
+                            .into_iter()
+                            .filter(|facts| facts.source().declares(codec))
+                            .filter_map(|facts| {
+                                let source = facts.source_binding()?.canonical_path().to_path_buf();
+                                let measured = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                                    &admission_manifest_entry, Some(&source), Some(facts),
+                                )?;
+                                Some(serde_json::json!({"sourcePath":source,"checkpointWeightFacts":measured}))
+                            })
+                            .collect();
+                        tracing::info!(event = "checkpoint_weight_materialization",
+                            jobId = %receipt_job_id, provider = engine_id,
+                            receipts = %serde_json::Value::Array(receipts),
+                            "Completed video request source-bound weight materialization");
+                    }
+                }
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 if engine_id == "minimax_h3" {
                     // Scope cleanup has already run, including cancellation and failed forwards.

@@ -1,40 +1,18 @@
-//! Base-weight architecture detection for external ComfyUI files (sc-10662,
-//! epic 10451 Phase 2).
+//! Architecture, component and numeric-source classification for external base checkpoints.
 //!
-//! Phase 1 (sc-10452) scans a ComfyUI `loras/` subtree and classifies each
-//! adapter with [`crate::lora_family::detect_lora_family`]. Phase 2 must reuse the
-//! *base* weights in the sibling subtrees — `unet/`, `diffusion_models/`,
-//! `text_encoders/`, `vae/`, `checkpoints/` — and **nothing classifies a base
-//! file today**. `detect_model_family` only reads a diffusers `model_index.json`
-//! or falls through to the LoRA classifier; a single-file ComfyUI base weight is
-//! neither, so it returns `None` or misclassifies.
+//! Architecture signatures determine the existing loader and source topology (transformer,
+//! configured component directory or fused checkpoint). Numeric encodings are independent of
+//! that architecture: file inspection resolves encoded operands through gen-core's shared codec
+//! planner, including bounded descriptors, scale geometry and ambiguous sidecar validation.
 //!
-//! Before Phase 2 can pick a per-family remap table or a dequant path it must
-//! decide three things about a file, and **each one branches the downstream
-//! policy**:
+//! Header-only classification remains a scheduling hint. It cannot establish a ConvRot or FP8
+//! codec fact; persisted import labels come from the complete source validation. H3 additionally
+//! validates its complete task assembly and byte-preserving native-to-canonical copy schedule.
 //!
-//! 1. **Component role** — is this the diffusion transformer, a text encoder, a
-//!    VAE, or an all-in-one checkpoint? ComfyUI stores them as separate files, so
-//!    an assembled load needs all three roles located.
-//! 2. **Architecture family** — z-image vs qwen-image vs wan vs flux2 …; the
-//!    remap table is keyed on it.
-//! 3. **On-disk quant format** — bf16 · plain fp8 · one of *three* distinct
-//!    ComfyUI scaled/packed fp8/fp4 conventions · GGUF. The dequant math differs
-//!    per convention, and there is no silent-fallback slack: a file mis-detected
-//!    as plain-castable fp8 when it is actually scaled would decode to noise, not
-//!    an error — the worst violation of the no-silent-fallback rule available.
-//!
-//! The detector is **header-only** (key names + dtypes; a 7 GB file costs a few
-//! KB of I/O — the same posture as the Phase 1 LoRA scan) and **GPU-free**. It
-//! emits a typed [`BaseWeightDetection::Recognized`] `(family, component, quant)`
-//! or a [`BaseWeightDetection::Unrecognized`] carrying a reason — never a guess.
-//! Filenames are deliberately **not** consulted: users rename files, civitai
-//! downloads arrive with arbitrary names, and a file labelled `*_fp8_scaled` may
-//! actually be `comfy_quant`-packed (`ideogram4_fp8_scaled` is).
-//!
-//! Out of scope (these are the Phase 2 implementation slices, not this story): the
-//! `ComfyUI-keys → VarBuilder` remap seam, the per-family key tables, and the
-//! actual dequant kernels.
+//! No backend arrays, device capability claims or checkpoint-wide floating conversions belong
+//! here. The selected family loader owns architecture mapping; the shared backend reader owns
+//! native execution versus a truthful operation/hardware fallback. Filenames never determine
+//! architecture or precision.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -123,10 +101,8 @@ pub enum QuantFormat {
     /// carries none (it packs nibbles into `U8`). Both also carry bulk `U8`
     /// (int8 stores its `.comfy_quant` descriptors as small `U8` blobs), so `U8`
     /// alone cannot separate them — the `I8` weight dtype is the decisive signal.
-    /// Loaded by Krea's descriptor-gated single-file loader (sc-14023); split out
-    /// here (sc-14026) so the int8 Krea variant
-    /// (`~/models/kreamania_variant4.safetensors`) is not mislabelled as the
-    /// unloadable fp4 bucket.
+    /// The shared source planner distinguishes ordinary row-scaled INT8 from rotated codes
+    /// using the complete descriptor and companion geometry before persisting the format.
     Int8TensorwisePerRow,
     /// Signed INT8 row scales with a verified rotated-basis descriptor.
     ConvRotInt8,
@@ -142,9 +118,11 @@ pub enum QuantFormat {
     /// `kreamania_variant1_fp8` / `variant2_fp8` artifacts and of every ComfyUI `ModelSave` of an
     /// fp8-scaled Krea 2 DiT.
     Fp8E4M3Scalar,
+    /// Publisher E4M3 codes with one F32 scale per output row (FP8R).
+    Fp8E4M3Rowwise,
     /// ComfyUI `comfy_quant` **scalar-scaled fp8** (E5M2): the E5M2 sibling of
-    /// [`Self::Fp8E4M3Scalar`], told apart by the weight dtype. No backend has a native E5M2
-    /// matmul, so it always takes the dense fallback.
+    /// [`Self::Fp8E4M3Scalar`], told apart by the weight dtype. Native residency is selected by
+    /// the shared backend capability and actual operation, independently of this source fact.
     Fp8E5M2Scalar,
     /// ComfyUI/Kitchen **MXFP8**: an `F8_E4M3` weight on a 32-aligned grid with a `U8` block-scale
     /// `.weight_scale` companion — one E8M0 shared exponent per 32-element block, in the cuBLAS
@@ -170,8 +148,8 @@ pub enum QuantFormat {
     /// NVIDIA NVFP4 as serialized by the ComfyUI Kitchen converter: each quantized Linear is a
     /// U8 `[out,in/2]` E2M1 weight plus an F8_E4M3 blocked `.weight_scale` and scalar F32
     /// `.weight_scale_2`. The converter declares `quant_format=NVFP4` in safetensors metadata.
-    /// This is not the descriptor-gated generic [`Self::ComfyQuantPacked`] bucket: the Krea Candle
-    /// loader consumes this exact triplet directly and swaps Kitchen's nibble convention losslessly.
+    /// This is not the descriptor-gated generic [`Self::ComfyQuantPacked`] bucket: the shared
+    /// Candle codec consumes this exact triplet and handles Kitchen's nibble convention.
     Nvfp4,
     /// GGUF container (`Q8_0`, `Q4_K_S`, …) — detected by the `GGUF` magic, not the
     /// extension. Has no safetensors header; family/component are read from GGUF
@@ -200,6 +178,7 @@ impl QuantFormat {
             Self::Int8TensorwisePerRow => "int8_tensorwise_per_row",
             Self::ConvRotInt8 => "convrot_int8",
             Self::Fp8E4M3Scalar => "fp8_e4m3_scalar",
+            Self::Fp8E4M3Rowwise => "fp8_e4m3_rowwise",
             Self::Fp8E5M2Scalar => "fp8_e5m2_scalar",
             Self::Mxfp8 => "mxfp8",
             Self::MixedQuantFormats => "mixed_quant_formats",
@@ -228,6 +207,7 @@ impl QuantFormat {
             "int8_tensorwise_per_row" => Some(Self::Int8TensorwisePerRow),
             "convrot_int8" => Some(Self::ConvRotInt8),
             "fp8_e4m3_scalar" => Some(Self::Fp8E4M3Scalar),
+            "fp8_e4m3_rowwise" => Some(Self::Fp8E4M3Rowwise),
             "fp8_e5m2_scalar" => Some(Self::Fp8E5M2Scalar),
             "mxfp8" => Some(Self::Mxfp8),
             "mixed_quant_formats" => Some(Self::MixedQuantFormats),
@@ -272,6 +252,7 @@ impl QuantFormat {
             // (and with it the facts object, the asset receipt and the telemetry row) report what
             // the checkpoint is actually stored as (sc-27092).
             Self::Fp8E4M3Scalar => Some(facts::FP8_E4M3_SCALAR_CODEC_ID),
+            Self::Fp8E4M3Rowwise => Some(facts::FP8_E4M3_ROWWISE_CODEC_ID),
             Self::Fp8E5M2Scalar => Some(facts::FP8_E5M2_SCALAR_CODEC_ID),
             Self::Mxfp8 => Some(facts::MXFP8_CODEC_ID),
             Self::Nvfp4 => Some(facts::NVFP4_CODEC_ID),
@@ -332,11 +313,9 @@ pub enum BaseWeightDetection {
 /// ([`is_mage_flow_transformer_dir`]) — `config.json` plus its weight file — because the loader
 /// reads its architecture from that config rather than inferring it from a base tier. A bare
 /// `.safetensors` with no config sibling is therefore refused, which is what the arm below says.
-/// `flux2` (sc-11043, epic 11037) is the NVFP4-only member: the single-file FLUX.2 Klein BFL
-/// topology reaches a loader only through the shared `nvfp4-v1` codec and the Klein `bfl` dialect
-/// sc-21485 bound to `flux2_klein_9b`. A dense or fp8 FLUX.2 single file has no import loader and
-/// is still refused by [`import_supported`]'s `flux2` quant arm — this constant names the family,
-/// never the encodings.
+/// Source topology and provider registrations determine membership. Verified numeric encodings
+/// are admitted through the shared projection source plan; they do not introduce another family
+/// or change the Klein BFL architecture and companion requirements.
 pub static IMPORT_SUPPORTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| {
         let mut families = Vec::new();
@@ -387,32 +366,33 @@ fn image_import_encoding_supported(
     component: ComponentRole,
     quant: QuantFormat,
 ) -> bool {
-    matches!(
-        (family, component, quant),
+    // Family membership constrains source topology. Encoded projections share one format
+    // contract; adding an engine codec must not require a separate model-by-format allowlist.
+    let topology_supported = matches!(
+        (family, component),
         (
-            crate::model_family::KREA_2,
-            ComponentRole::Transformer,
+            crate::model_family::KREA_2
+                | crate::model_family::FLUX2
+                | crate::model_family::MAGE_FLOW,
+            ComponentRole::Transformer
+        ) | (crate::model_family::SDXL, ComponentRole::Checkpoint)
+    );
+    topology_supported
+        && match quant {
             QuantFormat::Bf16
-                | QuantFormat::Int8TensorwisePerRow
-                | QuantFormat::ConvRotInt8
-                | QuantFormat::Fp8E4M3Scalar
-                | QuantFormat::Fp8E5M2Scalar
-                | QuantFormat::Mxfp8
-                | QuantFormat::Nvfp4
-        ) | (
-            crate::model_family::FLUX2,
-            ComponentRole::Transformer,
-            QuantFormat::Nvfp4
-        ) | (
-            crate::model_family::SDXL,
-            ComponentRole::Checkpoint,
-            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32
-        ) | (
-            crate::model_family::MAGE_FLOW,
-            ComponentRole::Transformer,
-            QuantFormat::Bf16
-        )
-    )
+            | QuantFormat::F16
+            | QuantFormat::F32
+            | QuantFormat::Int8TensorwisePerRow
+            | QuantFormat::ConvRotInt8
+            | QuantFormat::Fp8E4M3Scalar
+            | QuantFormat::Fp8E4M3Rowwise
+            | QuantFormat::Fp8E5M2Scalar
+            | QuantFormat::Mxfp8 => true,
+            // NVFP4's existing imported source routes require the Candle implementation. Mage is
+            // MLX-only; this does not advertise an NVFP4 Metal operator that the backend lacks.
+            QuantFormat::Nvfp4 => family != crate::model_family::MAGE_FLOW,
+            _ => false,
+        }
 }
 
 /// The VIDEO families model import accepts (sc-26680, epic 26679). Separate from
@@ -807,19 +787,11 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// with no loader fails closed with a reason (the sc-10509 posture), never a best-effort load that
 /// would decode to noise.
 ///
-/// Written as a `match` with **one arm per supported loader** so a follow-on family / component /
-/// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
-/// rewrite. Today a Krea 2 transformer is loadable as dense `bf16`, descriptor-gated
-/// [`QuantFormat::Int8TensorwisePerRow`], descriptor-gated scalar fp8
-/// ([`QuantFormat::Fp8E4M3Scalar`] / [`QuantFormat::Fp8E5M2Scalar`]), Kitchen
-/// [`QuantFormat::Mxfp8`], or Kitchen [`QuantFormat::Nvfp4`]; all of them reuse the existing Krea
-/// engine via the family-routing path. A FLUX.2 transformer (sc-11043, epic 11037)
-/// is loadable as [`QuantFormat::Nvfp4`] and nothing else — the single-file Klein BFL export
-/// through the shared `nvfp4-v1` codec — an SDXL all-in-one checkpoint as `f16`/`bf16`/`f32`, and a
-/// Mage-Flow transformer DIRECTORY as dense `bf16`. Everything else — an unrecognized/absent family, a
-/// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
-/// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF, a file mixing conventions) — is refused
-/// with a specific reason.
+/// Architecture and component roles select an existing loader. The verified numeric encoding
+/// is validated by the shared projection source plan, independently of the model family. The
+/// H3 assembly additionally validates its complete task topology and all inherited components.
+/// Unknown scaling, containers without an importer and heterogeneous conventions without one
+/// truthful persisted codec identity remain explicit refusals.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
     if verdict.family.as_deref().is_some_and(|family| {
         image_import_encoding_supported(family, verdict.component, verdict.quant)
@@ -871,9 +843,8 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
              {component} file."
         )),
         (Some(crate::model_family::FLUX2), _, quant) => Err(format!(
-            "Model import for the 'flux2' family supports the NVFP4 single-file Klein export, not \
-             {quant}. Dense and fp8 FLUX.2 tiers are installed through the model catalog, not \
-             imported."
+            "Model import for the 'flux2' family requires a registered Klein source topology and \
+             a verified shared source encoding, not {quant}."
         )),
         (Some(crate::model_family::KREA_2), component, _) if component != ComponentRole::Transformer => Err(format!(
             "Model import for the 'krea_2' family requires a diffusion transformer, not a \
@@ -902,13 +873,13 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
              weights, not {quant}. Re-export the checkpoint in bf16."
         )),
         (Some(crate::model_family::SDXL), _, quant) => Err(format!(
-            "Model import for the 'sdxl' family supports dense f16, bf16, or f32 fused checkpoints, \
-             not {quant}."
+            "Model import for the 'sdxl' family requires a complete fused checkpoint with a \
+             verified shared source encoding, not {quant}."
         )),
         (Some(crate::model_family::MAGE_FLOW), _, quant) => Err(format!(
-            "Model import for the 'mage-flow' family supports a dense bf16 transformer, not \
-             {quant}. A pre-quantized q4/q8 Mage-Flow tier is installed through the model catalog, \
-             not imported."
+            "Model import for the 'mage-flow' family requires its transformer config and a \
+             verified shared source encoding, not {quant}. Affine q4/q8 tiers are installed \
+             through the model catalog."
         )),
         (Some(crate::model_family::MINIMAX_H3), _, quant) => Err(format!(
             "Model import for the 'minimax-h3' family supports dense f16, bf16, f32 or \
@@ -963,56 +934,76 @@ pub fn detect_base_weight_file(path: &Path) -> Result<BaseWeightDetection, Safet
     let header = read_safetensors_header(path)?;
     let mut detection = classify_base_header(&header);
     if let BaseWeightDetection::Recognized(verdict) = &mut detection {
-        // H3's assembly inventory already validates its native source formats, including
-        // W4A8 INT8, which has no standalone file codec in the generic registry.
+        // The coarse header marker is not a codec identity. The engine's source planner
+        // validates real descriptors, scale topology and ambiguous sidecars before we persist one.
+        // H3 has its own complete assembly inventory (including W4A8), which stamps its encoding.
         if verdict.family.as_deref() != Some(crate::model_family::MINIMAX_H3)
-            && matches!(
-                verdict.quant,
-                QuantFormat::Int8TensorwisePerRow | QuantFormat::Fp8InlineScale
-            )
             && header.as_object().is_some_and(|entries| {
                 entries.iter().any(|(key, tensor)| {
-                    key.ends_with(".weight")
-                        && tensor.get("dtype").and_then(Value::as_str) == Some("I8")
+                    key != "__metadata__"
+                        && matches!(
+                            tensor.get("dtype").and_then(Value::as_str),
+                            Some("F8_E4M3" | "F8_E5M2" | "I8")
+                        )
                 })
             })
         {
-            verdict.quant = match verified_int8_encoding(path) {
-                Ok(encoding) => encoding,
-                Err(reason) => return Ok(BaseWeightDetection::Unrecognized { reason }),
-            };
+            verdict.quant =
+                match verified_projection_encoding(&[path.to_path_buf()]) {
+                    Ok(Some(encoding)) => encoding,
+                    Ok(None) => return Ok(BaseWeightDetection::Unrecognized {
+                        reason:
+                            "Checkpoint contains encoded weights but no supported projection codec."
+                                .into(),
+                    }),
+                    Err(reason) => return Ok(BaseWeightDetection::Unrecognized { reason }),
+                };
         }
     }
     Ok(detection)
 }
 
-fn verified_int8_encoding(path: &Path) -> Result<QuantFormat, String> {
+/// Source identity only. Family loaders remain responsible for the complete architecture,
+/// namespace and operation contracts; this never promises native execution on a device.
+pub(crate) fn verified_projection_encoding(
+    paths: &[PathBuf],
+) -> Result<Option<QuantFormat>, String> {
     use gen_core::checkpoint_codec::{
-        plan_safetensors, CheckpointCodecRegistry, IdentityKeyMapping, SourceCodecResidency,
-        BASELINE_CHECKPOINT_CODECS,
+        classify_checkpoint_projection_sources, CheckpointCodecRegistry, BASELINE_CHECKPOINT_CODECS,
     };
 
     let codecs = CheckpointCodecRegistry::new(BASELINE_CHECKPOINT_CODECS.iter().copied())
         .map_err(|error| error.to_string())?;
-    let plan = plan_safetensors(path, &IdentityKeyMapping, &codecs, &SourceCodecResidency)
-        .map_err(|error| error.to_string())?;
+    let Some(plan) = classify_checkpoint_projection_sources(paths, &codecs)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    Ok(projection_plan_encoding(&plan))
+}
+
+pub(crate) fn projection_plan_encoding(
+    plan: &gen_core::checkpoint_codec::LogicalWeightPlan,
+) -> Option<QuantFormat> {
+    use crate::checkpoint_weight_facts as facts;
     let mut formats = plan
         .tensors
         .iter()
         .filter_map(|tensor| match tensor.codec_id {
-            crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID => Some(QuantFormat::ConvRotInt8),
-            crate::checkpoint_weight_facts::INT8_PER_ROW_CODEC_ID => {
-                Some(QuantFormat::Int8TensorwisePerRow)
+            facts::CONVROT_INT8_CODEC_ID => Some(QuantFormat::ConvRotInt8),
+            facts::INT8_PER_ROW_CODEC_ID => Some(QuantFormat::Int8TensorwisePerRow),
+            facts::FP8_E4M3_SCALAR_CODEC_ID => Some(QuantFormat::Fp8E4M3Scalar),
+            facts::FP8_E4M3_ROWWISE_CODEC_ID => Some(QuantFormat::Fp8E4M3Rowwise),
+            facts::FP8_E5M2_SCALAR_CODEC_ID => Some(QuantFormat::Fp8E5M2Scalar),
+            facts::MXFP8_CODEC_ID => Some(QuantFormat::Mxfp8),
+            facts::NVFP4_CODEC_ID => Some(QuantFormat::Nvfp4),
+            facts::DENSE_BF16_CODEC_ID | facts::DENSE_F16_CODEC_ID | facts::DENSE_F32_CODEC_ID => {
+                None
             }
-            crate::checkpoint_weight_facts::DENSE_BF16_CODEC_ID
-            | crate::checkpoint_weight_facts::DENSE_F16_CODEC_ID
-            | crate::checkpoint_weight_facts::DENSE_F32_CODEC_ID => None,
             _ => Some(QuantFormat::MixedQuantFormats),
         });
-    let format = formats.next().ok_or_else(|| {
-        "Checkpoint has signed INT8 weights but no supported INT8 codec.".to_owned()
-    })?;
-    Ok(if formats.all(|other| other == format) {
+    let format = formats.next()?;
+    Some(if formats.all(|other| other == format) {
         format
     } else {
         QuantFormat::MixedQuantFormats
@@ -2256,12 +2247,12 @@ mod tests {
     }
 
     /// Reads the real source declarations through the import classifier and codec planner.
-    /// Set the three checkpoint paths before explicitly running this metadata-only test.
+    /// Set the four checkpoint paths before explicitly running this metadata-only test.
     #[test]
     #[ignore]
     fn real_fixed_source_precision_headers() {
         use gen_core::checkpoint_codec::{
-            plan_safetensors, CheckpointCodecRegistry, IdentityKeyMapping, SourceCodecResidency,
+            classify_checkpoint_projection_sources, CheckpointCodecRegistry,
             BASELINE_CHECKPOINT_CODECS,
         };
         let codecs =
@@ -2278,6 +2269,11 @@ mod tests {
                 "INT8-ConvRot",
             ),
             ("SCENEWORKS_NVFP4_CHECKPOINT", QuantFormat::Nvfp4, "NVFP4"),
+            (
+                "SCENEWORKS_IMPORTED_SDXL_FP8_CHECKPOINT",
+                QuantFormat::Fp8E5M2Scalar,
+                "Scaled FP8 (E5M2)",
+            ),
         ] {
             let path = std::env::var_os(variable)
                 .map(PathBuf::from)
@@ -2286,7 +2282,8 @@ mod tests {
             assert_eq!(verdict.quant, expected, "{variable}");
             import_supported(&verdict).unwrap();
             let codec = verdict.quant.source_codec_id().unwrap();
-            let plan = plan_safetensors(&path, &IdentityKeyMapping, &codecs, &SourceCodecResidency)
+            let plan = classify_checkpoint_projection_sources(&[path], &codecs)
+                .unwrap()
                 .unwrap();
             assert!(
                 plan.tensors.iter().any(|tensor| tensor.codec_id == codec),
@@ -2294,7 +2291,7 @@ mod tests {
             );
             let mut entry = json!({
                 "type": "image", "catalogScope": "user", "family": verdict.family,
-                "importSourceShape": "transformer_file", "importQuantFormat": expected.as_str(),
+                "importSourceShape": if verdict.component == ComponentRole::Checkpoint { "fused_checkpoint" } else { "transformer_file" }, "importQuantFormat": expected.as_str(),
             });
             crate::source_precision::SourcePrecision::project(entry.as_object_mut().unwrap());
             assert_eq!(entry["sourcePrecision"]["label"], label, "{variable}");
@@ -3332,11 +3329,27 @@ mod tests {
     }
 
     #[test]
-    fn import_supported_accepts_dense_fused_sdxl_only() {
-        for quant in [QuantFormat::F16, QuantFormat::Bf16, QuantFormat::F32] {
-            assert!(
-                import_supported(&verdict(Some("sdxl"), ComponentRole::Checkpoint, quant)).is_ok()
-            );
+    fn import_supported_accepts_verified_formats_across_existing_source_topologies() {
+        for (family, component) in [
+            ("sdxl", ComponentRole::Checkpoint),
+            ("krea_2", ComponentRole::Transformer),
+            ("flux2", ComponentRole::Transformer),
+            ("mage-flow", ComponentRole::Transformer),
+        ] {
+            for quant in [
+                QuantFormat::F16,
+                QuantFormat::Bf16,
+                QuantFormat::F32,
+                QuantFormat::Fp8E4M3Scalar,
+                QuantFormat::Fp8E4M3Rowwise,
+                QuantFormat::Fp8E5M2Scalar,
+                QuantFormat::Mxfp8,
+                QuantFormat::ConvRotInt8,
+                QuantFormat::Int8TensorwisePerRow,
+            ] {
+                import_supported(&verdict(Some(family), component, quant))
+                    .unwrap_or_else(|e| panic!("{family} {quant}: {e}"));
+            }
         }
         assert!(import_supported(&verdict(
             Some("sdxl"),
@@ -3463,7 +3476,7 @@ mod tests {
 
         for quant in [
             QuantFormat::Fp8E4m3,
-            QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::ComfyQuantPacked,
             QuantFormat::Gguf,
         ] {
             let refused = import_supported(&verdict(
@@ -3471,7 +3484,7 @@ mod tests {
                 ComponentRole::Transformer,
                 quant,
             ))
-            .expect_err("only dense bf16 is loadable");
+            .expect_err("unverified source encodings must be refused");
             assert!(
                 refused.contains(quant.as_str()),
                 "the refusal must name the encoding it saw: {refused}"
@@ -3571,93 +3584,31 @@ mod tests {
     }
 
     #[test]
-    fn import_supported_families_are_a_subset_of_the_ok_arms() {
-        // Guardrail: every family the gate advertises must actually have an Ok triple, so the
-        // advertised set and the `match` arms can never drift (add the family here + its arm
-        // together).
-        //
-        // The probe sweeps the whole quant surface and asserts the accepted set BY VALUE, per
-        // family. A family does not have to be dense-loadable to be import-supported: `flux2`
-        // (sc-11043) reaches a loader ONLY as NVFP4, through the shared codec and the Klein
-        // dialect, so a bf16-shaped guardrail would have forced either a dense arm nothing serves
-        // or leaving the family unadvertised. But an existence check ("some arm accepts it") is
-        // too weak in the other direction: narrowing krea_2 to NVFP4 alone, or widening flux2 to
-        // dense, would both stay green under it. Naming the exact set makes each such change red,
-        // and makes adding a family an explicit row here rather than a silent pass.
-        //
-        // Failing mutations: drop `QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow` from the
-        // krea_2 arm; drop one of the scalar-fp8 / MXFP8 encodings from it; add a dense arm for
-        // flux2; add a family to IMPORT_SUPPORTED_FAMILIES without a row below.
-        let expected: &[(&str, ComponentRole, &[QuantFormat])] = &[
-            (
-                "krea_2",
-                ComponentRole::Transformer,
-                &[
-                    QuantFormat::Bf16,
-                    QuantFormat::Int8TensorwisePerRow,
-                    QuantFormat::Fp8E4M3Scalar,
-                    QuantFormat::Fp8E5M2Scalar,
-                    QuantFormat::Mxfp8,
-                    QuantFormat::Nvfp4,
-                ],
-            ),
-            (
-                "sdxl",
-                ComponentRole::Checkpoint,
-                &[QuantFormat::Bf16, QuantFormat::F16, QuantFormat::F32],
-            ),
-            (
-                "mage-flow",
-                ComponentRole::Transformer,
-                &[QuantFormat::Bf16],
-            ),
-            ("flux2", ComponentRole::Transformer, &[QuantFormat::Nvfp4]),
-            // H3 dense precisions plus descriptor-validated native ConvRot INT8.
-            (
-                "minimax-h3",
-                ComponentRole::Transformer,
-                &[
-                    QuantFormat::Bf16,
-                    QuantFormat::F16,
-                    QuantFormat::F32,
-                    QuantFormat::Int8TensorwisePerRow,
-                ],
-            ),
+    fn advertised_import_families_have_an_existing_source_topology() {
+        // Keep architecture/source ownership explicit without reintroducing a model-by-codec
+        // support matrix. The shared encoded formats are exercised across these image topologies
+        // above; H3's assembly owns its complete inventory and encoded companions separately.
+        let expected = [
+            ("krea_2", ComponentRole::Transformer),
+            ("sdxl", ComponentRole::Checkpoint),
+            ("mage-flow", ComponentRole::Transformer),
+            ("flux2", ComponentRole::Transformer),
+            ("minimax-h3", ComponentRole::Transformer),
         ];
-        let mut rows = expected
-            .iter()
-            .map(|(family, _, _)| *family)
-            .collect::<Vec<_>>();
+        let mut rows: Vec<_> = expected.iter().map(|(family, _)| *family).collect();
         rows.sort_unstable();
-        let mut advertised = IMPORT_SUPPORTED_FAMILIES
+        let mut advertised: Vec<_> = IMPORT_SUPPORTED_FAMILIES
             .iter()
             .chain(VIDEO_IMPORT_SUPPORTED_FAMILIES)
             .copied()
-            .collect::<Vec<_>>();
+            .collect();
         advertised.sort_unstable();
         assert_eq!(
             rows, advertised,
-            "every advertised family needs an explicit expected-encoding row here"
+            "every advertised family needs a source-topology contract"
         );
-
-        for (family, component, expected_quants) in expected {
-            let accepted = [
-                QuantFormat::Bf16,
-                QuantFormat::F16,
-                QuantFormat::F32,
-                QuantFormat::Int8TensorwisePerRow,
-                QuantFormat::Fp8E4M3Scalar,
-                QuantFormat::Fp8E5M2Scalar,
-                QuantFormat::Mxfp8,
-                QuantFormat::Nvfp4,
-            ]
-            .into_iter()
-            .filter(|quant| import_supported(&verdict(Some(family), *component, *quant)).is_ok())
-            .collect::<Vec<_>>();
-            assert_eq!(
-                accepted, *expected_quants,
-                "{family}: the Ok arms accept a different encoding set than this guardrail declares"
-            );
+        for (family, component) in expected {
+            import_supported(&verdict(Some(family), component, QuantFormat::Bf16)).unwrap();
         }
     }
 }

@@ -2426,6 +2426,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 case.hires_fix,
                 tx,
                 CancelFlag::new(),
+                None,
                 |_generator,
                  _plan,
                  inputs,
