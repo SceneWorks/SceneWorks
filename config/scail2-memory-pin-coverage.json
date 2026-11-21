@@ -1,10 +1,18 @@
 [
   {
     "capture_revision": "54f288263184fa60f0b0a998caedb0309757468d",
-    "target_revision": "7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
+    "target_revision": "362191417e38bc2805ba93ea92f5db80c1229c35",
     "backend": "mlx",
     "provider_digest": "9e11f0cb3b5265a542cd555135274bf897c4b1b6068ad5e0ad4e19d5486b34a8",
     "shared_contract_digest": "3c8c94b1df3518a3f85a1524f13d00e37365da408150c7421f3783f860bce1b7",
-    "tree_diff_sha256": "1bb949e453b2d9bc125f50843f82f21c04fd8a2244575bca6bae859c94336fc1"
+    "tree_diff_sha256": "f49838ad6398e2151f5426ae7d61306b2dd14f13d6d910b7e8af48744c274642"
+  },
+  {
+    "capture_revision": "7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
+    "target_revision": "362191417e38bc2805ba93ea92f5db80c1229c35",
+    "backend": "cuda",
+    "provider_digest": "42ecf12ce81b8eefed5d18d3ce9778395959f35fd90fbdb571352b5899993f05",
+    "shared_contract_digest": "3c8c94b1df3518a3f85a1524f13d00e37365da408150c7421f3783f860bce1b7",
+    "tree_diff_sha256": "b49cf92a7ddf60b8f318a593a9ff9d64d1506602679d828b4dc12a7559c565e5"
   }
 ]
