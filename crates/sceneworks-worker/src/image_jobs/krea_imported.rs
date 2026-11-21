@@ -1782,6 +1782,7 @@ pub(super) fn resolve_krea_imported_edit_conditioning(
     Ok(Some(krea_imported_edit_conditioning(sources)))
 }
 
+#[cfg(target_os = "macos")]
 fn krea_imported_reference_count(conditioning: &[Conditioning]) -> u32 {
     conditioning.iter().fold(0_u32, |count, item| {
         let increment = match item {
