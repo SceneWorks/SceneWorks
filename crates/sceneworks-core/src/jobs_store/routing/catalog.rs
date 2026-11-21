@@ -1314,8 +1314,8 @@ pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'stati
         .trim()
         .to_ascii_lowercase();
     if label == "asym_w4a8_int8"
-        || (label == "convrot_int8"
-            && entry.get("family").and_then(Value::as_str) == Some(crate::model_family::MINIMAX_H3))
+        || (entry.get("family").and_then(Value::as_str) == Some(crate::model_family::MINIMAX_H3)
+            && crate::minimax_h3_codec::source_codec_id(&label).is_some())
     {
         if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry)
             || !crate::minimax_h3_import::entry_assembly(entry).is_some_and(|assembly| {
@@ -1326,11 +1326,7 @@ pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'stati
         }
         // The strict compiled source inventory supplies this assembly stamp. Coarse header
         // classification or a family name alone never establishes a rotated operand format.
-        return Some(if label == "asym_w4a8_int8" {
-            crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
-        } else {
-            crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
-        });
+        return crate::minimax_h3_codec::source_codec_id(&label);
     }
     crate::base_weights::QuantFormat::from_label(&label)?.source_codec_id()
 }

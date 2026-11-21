@@ -1071,7 +1071,10 @@ fn inspect_discovered_pass(
     );
     if h3_context {
         if context.get("sourceEncoding").is_some_and(|encoding| {
-            !matches!(encoding.as_str(), Some("convrot_int8" | "asym_w4a8_int8"))
+            encoding
+                .as_str()
+                .and_then(crate::minimax_h3_codec::source_codec_id)
+                .is_none()
         }) {
             pass.diagnostics.push(CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::ContractViolation,

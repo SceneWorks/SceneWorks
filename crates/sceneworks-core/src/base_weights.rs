@@ -520,7 +520,7 @@ pub fn is_minimax_h3_single_file(source: &Path) -> bool {
         BaseWeightDetection::Recognized(BaseWeightVerdict {
             family: Some(family),
             component: ComponentRole::Transformer,
-            quant: QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32 | QuantFormat::Int8TensorwisePerRow,
+            ..
         }) if family == "minimax-h3"
     )
 }
@@ -682,7 +682,14 @@ pub fn detect_import_source_weights(
             .collect();
         return Ok(
             match crate::minimax_h3_codec::H3SourceInventory::from_files(&files) {
-                Ok(_) => {
+                Ok(inventory) => {
+                    if let Some(quant) = inventory.fp8_encoding() {
+                        return Ok(BaseWeightDetection::Recognized(BaseWeightVerdict {
+                            family: Some(crate::model_family::MINIMAX_H3.into()),
+                            component: ComponentRole::Transformer,
+                            quant,
+                        }));
+                    }
                     let mut aggregate = serde_json::Map::new();
                     for (_, path) in &files {
                         if path
@@ -705,7 +712,32 @@ pub fn detect_import_source_weights(
             },
         );
     }
-    detect_base_weight_file(primary)
+    let mut detection = detect_base_weight_file(primary)?;
+    if let BaseWeightDetection::Recognized(verdict) = &mut detection {
+        if verdict.family.as_deref() == Some(crate::model_family::MINIMAX_H3) {
+            let header = read_safetensors_header(primary)?;
+            let has_fp8 = header.as_object().is_some_and(|entries| {
+                entries.iter().any(|(key, entry)| {
+                    crate::minimax_h3_codec::is_fp8_parameter(key, entry["dtype"].as_str())
+                })
+            });
+            if has_fp8 {
+                // A weight-only import may bind its architecture from the selected base later.
+                // Identify its source codec here; assembly still validates the full tensor inventory.
+                match verified_projection_encoding(&[primary.to_owned()]) {
+                    Ok(Some(encoding)) => verdict.quant = encoding,
+                    Ok(None) => {
+                        return Ok(BaseWeightDetection::Unrecognized {
+                            reason: "MiniMax-H3 FP8 source has no supported projection codec"
+                                .into(),
+                        })
+                    }
+                    Err(reason) => return Ok(BaseWeightDetection::Unrecognized { reason }),
+                }
+            }
+        }
+    }
+    Ok(detection)
 }
 
 /// Resolve the one weight file carried by a user-import source without guessing across a model
@@ -795,13 +827,13 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         return Ok(());
     }
     match (verdict.family.as_deref(), verdict.component, verdict.quant) {
-        // Dense or native ConvRot INT8 H3 DiT. The header-only INT8 classification is not codec
-        // authority: H3SourceInventory validates every ConvRot descriptor and operand before the
-        // plan can become runnable. Plain int8-per-row, affine Q8, and W4A8 fail that boundary.
+        // The H3 assembly validates the complete model and its per-layer FP8 or INT8 operands.
+        // The coarse INT8 scheduling hint covers the existing ConvRot/W4A8 assembly route.
         (
             Some(crate::model_family::MINIMAX_H3),
             ComponentRole::Transformer,
-            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32 | QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32 | QuantFormat::Int8TensorwisePerRow
+                | QuantFormat::Fp8E4M3Scalar | QuantFormat::Fp8E5M2Scalar | QuantFormat::Fp8E4M3Rowwise | QuantFormat::Mxfp8,
         ) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
@@ -880,7 +912,7 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         )),
         (Some(crate::model_family::MINIMAX_H3), _, quant) => Err(format!(
             "Model import for the 'minimax-h3' family supports dense f16, bf16, f32 or \
-             descriptor-validated ConvRot INT8 transformer components, not {quant}."
+             validated FP8 or ConvRot/W4A8 INT8 transformer components, not {quant}."
         )),
         (Some(family), _, _) => Err(format!(
             "Model import has no compatible loader arm for the '{family}' family."
