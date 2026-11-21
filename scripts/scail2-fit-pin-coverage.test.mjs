@@ -14,7 +14,8 @@ test("scripts and separate image modules require review of the whole Git delta",
   for (const outside of [
     "crates/media/mlx-gen/mlx-gen-catalog/src/lib.rs", "crates/bundles/runtime-macos/src/lib.rs",
     "crates/kernels/candle-quant-kernels/kernels/quant.cu", "Cargo.lock", ".github/workflows/release.yml",
-    "crates/media/mlx-gen/mlx-gen-qwen-image/build.rs",
+    "crates/media/mlx-gen/mlx-gen-qwen-image/build.rs", "crates/media/mlx-gen/mlx-gen-qwen-image/src/new.rs",
+    "scripts/ci/flash_attn_prebuilt.py", "scripts/ci/wan_pair/other.rs.in", "scripts/tests/new_probe.py",
   ]) {
     assert.throws(() => verifyCoverage(source, source, [outside], "d", "d"), /Unclassified physical or build input/);
   }

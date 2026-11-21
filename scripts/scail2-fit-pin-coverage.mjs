@@ -11,12 +11,30 @@ import { providerClosureDigest } from "./inference-closure-digest.mjs";
 const ledger = JSON.parse(readFileSync(new URL("../config/inference-provider-closures.json", import.meta.url)));
 const revision = /^[0-9a-f]{40}$/u;
 
-// Restrict native exceptions to Rust source of a known sibling media crate outside
-// the SCAIL graph. Catalogs, runtime bundles, build scripts and kernel inputs are
-// separate owners and cannot be cleared by reviewing an unrelated model change.
-const knownCrates = new Set(Object.values(ledger.providers).flatMap((entry) => entry.closureCrates));
-const siblingMediaSource = /^(crates\/media\/(?:mlx-gen|candle-gen)\/(?:mlx-gen|candle-gen)-[^/]+)\/src\/.+\.rs$/u;
-const proofSource = /^scripts\/(?:ci\/|tests\/|media_campaign_windows\.py$)/u;
+// These files form the reviewed diagnostic/bounded-proof delta and the separate
+// image follow-up. Other files in scripts/ci include production artifact producers.
+const proofInputs = new Set([
+  "scripts/ci/scail2_plural_fit.py",
+  "scripts/ci/video_tier1_comparison.py",
+  "scripts/ci/video_tier1_cuda_diagnostic.py",
+  "scripts/ci/video_tier1_cuda_diagnostic_retained.json",
+  "scripts/ci/video_tier1_followup.py",
+  "scripts/ci/wan_pair/common.rs.in",
+  "scripts/ci/wddm_process_memory.py",
+  "scripts/media_campaign_windows.py",
+  "scripts/tests/test_flux1_cuda_probe.py",
+  "scripts/tests/test_scail2_plural_fit.py",
+  "scripts/tests/test_video_tier1_cuda_diagnostic.py",
+  "scripts/tests/test_video_tier1_followup.py",
+  "scripts/tests/test_wddm_process_memory.py",
+  "scripts/ci/model-inference-proofs.json",
+]);
+const imageInputs = new Set([
+  "crates/media/candle-gen/candle-gen-sdxl/src/pipeline.rs",
+  "crates/media/mlx-gen/mlx-gen-boogu/src/model.rs",
+  "crates/media/mlx-gen/mlx-gen-boogu/src/pipeline.rs",
+  "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs",
+]);
 
 function git(repo, ...args) {
   return execFileSync("git", ["-C", repo, ...args], { maxBuffer: 32 * 1024 * 1024 });
@@ -31,9 +49,8 @@ export function verifyCoverage(source, target, files, diffDigest, approvedDiff) 
   for (const file of files) {
     // A nested provider can be a sibling of the root mlx-gen crate. Match the
     // actual Cargo owner of these individually audited sibling module paths.
-    const owner = siblingMediaSource.exec(file)?.[1];
-    const independent = owner && knownCrates.has(owner) && !owner.endsWith("-catalog") && !crates.has(owner);
-    if (!proofSource.test(file) && !independent) {
+    const owner = file.split("/src/")[0];
+    if (!proofInputs.has(file) && !(imageInputs.has(file) && !crates.has(owner))) {
       throw new Error(`Unclassified physical or build input: ${file}`);
     }
   }
