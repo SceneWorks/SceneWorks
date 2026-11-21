@@ -12,8 +12,9 @@
 // base#1 != base#2 -> `nondeterministic_on_runner` (numeric difference recorded once, no more
 // runs); base#1 == base#2 -> `head_differs` (non-zero exit, payload diff printed). Time and memory
 // are observations and never fail the job. A route whose weights are absent from every hub root is
-// `skipped` with its reason. Explicit Wan A14B witnesses require every chosen route. An opt-in
-// --stage-wan pass may populate their MLX cache before the read-only comparison.
+// `skipped` with its reason. Explicit Wan A14B witnesses require an equal verdict for every chosen route. An opt-in
+// --stage-wan pass may populate their MLX cache before the read-only comparison. Each fresh
+// API data directory still needs the public Hugging Face metadata for its pinned source ledger.
 //
 // Modes: --preflight-only (inputs, both checkouts, pins, tools, hub presence; no build, no model)
 //        --stage-wan      (opt-in pinned public MLX Wan download before the comparison)
@@ -72,6 +73,9 @@ function wanA14bRoute(backend, mode, sampler) {
   return {
     id: `${backend}-wan22-a14b-${mode}-${sampler}`, backend, model, mode: operation,
     kind: "video", wanA14b: true, referenceImage, tier: "q4", group: null,
+    // The 13-frame engine request has four latent frames. The MLX VAE emits 4F frames
+    // without trimming; Candle's causal VAE emits 1 + 4(F - 1). The worker encodes all of them.
+    engineFrames: 13, savedFrames: backend === "mlx" ? 16 : 13,
     endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 30,
     body: {
       model, mode: operation, prompt: "A turquoise disc rolls slowly across a pale yellow table.",
@@ -477,10 +481,37 @@ export function verifyWanRecipe(route, recipe, sourceAssetId, expectedRepo) {
   if (route.backend === "cuda") fact(recipe.rawAdapterSettings.repo === expectedRepo, "Candle runtime selected a different Wan repository");
   fact((recipe.normalizedSettings?.sourceAssetId ?? null) === (sourceAssetId ?? null), "Wan output lost its source image binding");
 }
+// Both providers publish the consumed numerical schedule through the completed job receipt.
+export function wanExecutionFacts(route, receipt, jobId, outputId) {
+  const backend = route.backend === "mlx" ? "mlx" : "candle";
+  fact(receipt?.version === 1 && receipt.jobId === jobId && receipt.acceptedBackend === backend, "Wan execution receipt identity mismatch");
+  const output = receipt.outputs?.[0];
+  fact(receipt.outputs?.length === 1 && output.artifactIds?.length === 1 && output.artifactIds[0] === outputId,
+    "Wan execution receipt must bind the saved video");
+  const execution = output.execution ?? receipt.execution;
+  fact(execution?.state === "resolved", `Wan execution identity unavailable: ${JSON.stringify(execution?.reason)}`);
+  const identity = execution.identity;
+  const provider = route.referenceImage ? "wan2_2_i2v_14b" : "wan2_2_t2v_14b";
+  fact(identity?.provider_id === provider && identity.backend === backend, "Wan provider substitution");
+  const sampling = identity.sampling, schedules = identity.schedule;
+  fact(sampling?.state === "resolved" && sampling.value?.length === 1
+    && schedules?.state === "resolved" && schedules.value?.length === 1, "Wan executed sampling or schedule absent");
+  const [sample] = sampling.value, [schedule] = schedules.value;
+  const mlx = backend === "mlx";
+  const solver = mlx ? sample.solver : sample;
+  const expectedSolver = mlx ? (route.body.advanced.sampler === "heun" ? "Heun" : "UniPC") : "wan_flow_unipc_bh2_order2_v1";
+  fact(solver === expectedSolver && (mlx ? sample.stage === schedule.stage : schedule.sampler === solver)
+    && (mlx ? sample.estimator : schedule.estimator) === "flow_velocity", "Wan executed solver or estimator differs from the fixture");
+  const digest = mlx ? schedule.digest : schedule.schedule;
+  fact(digest?.element === (mlx ? "f32_le_bits" : "f64_le_bits") && digest.count === route.body.advanced.steps + 1
+    && /^[a-f0-9]{64}$/.test(digest.sha256), "Wan numerical schedule digest absent or invalid");
+  return { provider, backend, solver, schedule: digest };
+}
 export function wanObservations(route, metrics, content) {
   const video = content.shape?.video;
   fact(content.method === "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams" && video?.width === route.body.width
-    && video.height === route.body.height && video.decodedFrames === 13 && video.avgFrameRate === "16/1", "Wan output must decode to 13 frames at 832x480 and 16 fps");
+    && video.height === route.body.height && video.decodedFrames === route.savedFrames && video.avgFrameRate === "16/1",
+    `${route.backend} Wan output must decode to ${route.savedFrames} frames at 832x480 and 16 fps`);
   const { advanced, width, height, seed } = route.body;
   const expected = { model: route.model, backend: route.backend, sampler: advanced.sampler, steps: advanced.steps,
     guidanceScale: advanced.guidanceScale, width, height, seed };
@@ -491,7 +522,7 @@ export function wanObservations(route, metrics, content) {
   // setting "bf16". Candle carries the tier marker through as Quant::Q4.
   fact(metrics.quantLabel === (route.backend === "cuda" ? "q4" : "bf16"), "Wan load-time quant marker changed");
   for (const key of ["sampleMs", "totalMs"]) fact(Number.isFinite(metrics[key]) && metrics[key] > 0, `Wan worker metric ${key} missing`);
-  return { ...expected, loadQuantLabel: metrics.quantLabel, workerTotalMs: metrics.totalMs,
+  return { ...expected, engineRequestFrames: route.engineFrames, decodedFrames: video.decodedFrames, loadQuantLabel: metrics.quantLabel, workerTotalMs: metrics.totalMs,
     progressSampleIntervalMs: metrics.sampleMs, workerPeakMemoryBytes: metrics.peakMemoryBytes ?? null,
     sampleBasis: "Worker interval from first observed step progress until decoding or completion" };
 }
@@ -659,6 +690,7 @@ export function hubMutationAttribution(route) {
 export const HUB_MUTATION_LISTING_LIMIT = 20_000;
 export function exitCodeFor(report) {
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
+  if (report.routes.some((route) => ROUTES[route.id]?.wanA14b && route.verdict !== "equal")) return 1;
   const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || (route.hubMutation?.changed && hubMutationAttribution(route) !== "base_only"));
   return bad || report.summary.ran === 0 || report.fatal ? 1 : 0;
 }
@@ -854,6 +886,7 @@ export function renderMarkdown(report) {
   }
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
+  if (report.sourceMetadata) lines.push(report.sourceMetadata, "");
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
   for (const route of report.routes) {
@@ -934,6 +967,7 @@ async function preflight(env, cfg, report) {
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
   if (cfg.routes.some((route) => route.wanA14b)) {
+    report.sourceMetadata = "Each fresh API data directory builds its trusted source ledger from the public Hugging Face tree at `https://huggingface.co/api/models/{repo}/tree/{revision}` for the exact selected revision. The worker verifies cached files against the ledger. These metadata requests require HTTPS access and use no credentials.";
     fact(report.tools.ffmpeg.available && report.tools.ffprobe.available, "Wan A/B requires ffmpeg and ffprobe for decoded output evidence");
   }
   for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
@@ -943,7 +977,9 @@ async function preflight(env, cfg, report) {
 }
 
 // Stage once before either compared binary starts, using the catalog campaign's HF CLI and its
-// manifest-pinned per-selector downloads. The preflight and both compared processes stay offline.
+// manifest-pinned per-selector downloads. HF_HUB_OFFLINE restricts the Hugging Face client.
+// Production admission separately fetches the pinned repository file metadata over HTTPS
+// into each fresh API data directory, using its empty credentials directory.
 export async function stageWanSnapshots(env, cfg, report, signal, runDownload = null) {
   fact(cfg.backend === "mlx" && cfg.routes.every((route) => route.wanA14b), "staging requires explicit MLX Wan A14B routes");
   const { firstAvailableHfCli, hfDownloadArgvs } = await import("./measure-memory-catalog.mjs");
@@ -1223,6 +1259,8 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
     record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
     if (route.wanA14b) {
+      const receipt = await endpoint.call("GET", `/api/v1/jobs/${job.id}/execution-receipt`);
+      record.identity.execution = wanExecutionFacts(route, receipt, job.id, assets[0].id);
       const selected = await readWanClaim(envs.api.SCENEWORKS_JOBS_DB_PATH, job.id, workerId);
       record.identity.claimedSource = wanClaimSource(route, plan, selected);
       const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
@@ -1328,9 +1366,14 @@ async function runComparison(env, cfg, report, signal) {
     const run = async (label) => {
       const runBefore = await hubFingerprint(route.hub, repos);
       const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal });
-      if (definition.wanA14b && record.status === "completed" && route.runs[0]?.status === "completed"
-          && record.identity.claimedSource.boundMembersSha256 !== route.runs[0].identity.claimedSource.boundMembersSha256) {
-        record.status = "error"; record.error = "Wan bound source file closure differs from base#1";
+      const base = route.runs[0];
+      if (definition.wanA14b && record.status === "completed" && base?.status === "completed") {
+        if (record.identity.claimedSource.boundMembersSha256 !== base.identity.claimedSource.boundMembersSha256) {
+          record.error = "Wan bound source file closure differs from base#1";
+        } else if (record.identity.execution.schedule.sha256 !== base.identity.execution.schedule.sha256) {
+          record.error = "Wan executed numerical schedule differs from base#1";
+        }
+        if (record.error) record.status = "error";
       }
       const runAfter = await hubFingerprint(route.hub, repos);
       record.hubMutation = { changed: JSON.stringify(runBefore.repos) !== JSON.stringify(runAfter.repos), diff: diffObjects(runBefore.repos, runAfter.repos, HUB_MUTATION_LISTING_LIMIT) };

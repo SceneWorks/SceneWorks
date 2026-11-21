@@ -11,7 +11,9 @@
 # the end of the job. Optional MLX Wan staging fetches pinned files before the read-only comparison.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
-# selector's trusted-ref rule), and their builds and processes receive no credential.
+# selector's trusted-ref rule), and their builds and processes receive no credential. Both fresh
+# API data directories need HTTPS access to Hugging Face's public file metadata at their selected
+# immutable revisions. Admission uses these ledgers to verify cached files despite HF_HUB_OFFLINE.
 #
 # CI_IMPACT: manual only. Ordinary CI runs only scripts/tier2-ab.test.mjs (pure functions and
 # static workflow contracts) through `npm run check`.

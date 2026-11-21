@@ -13,7 +13,7 @@ import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
   childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
-  summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe,
+  summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe, wanExecutionFacts,
 } from "./tier2-ab.mjs";
 
 const BASE = "d3f7b05bf22826e44fd43da19cff0985fb17d68b", HEAD = "d2b0c76c9b9b9e00b5174aceec61c11a186dac68";
@@ -144,11 +144,50 @@ test("Wan compares the accepted q4 source and worker settings, including a valid
     assert.throws(() => verifyWanRecipe(route, { ...recipe, ...changed }, "uploaded", row.repo));
   const metrics = { model: route.model, backend: "mlx", sampler: "heun", steps: 6, guidanceScale: 3.5, seed: 33401,
     width: 832, height: 480, quantLabel: "bf16", sampleMs: 999, totalMs: 5999, peakMemoryBytes: 10999 };
-  const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video: { width: 832, height: 480, decodedFrames: 13, avgFrameRate: "16/1" } } };
+  const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video: { width: 832, height: 480, decodedFrames: 16, avgFrameRate: "16/1" } } };
   assert.equal(wanObservations(route, metrics, content).progressSampleIntervalMs, 999);
   for (const bad of [{ backend: "cuda" }, { sampler: "default" }, { steps: 4 }, { sampleMs: null }])
     assert.throws(() => wanObservations(route, { ...metrics, ...bad }, content), /Wan worker/);
   assert.throws(() => wanObservations(route, metrics, { ...content, method: "file_bytes_no_probe" }), /decode/);
+});
+
+test("Wan validates each provider's decoded frame count and actual solver from its execution receipt", () => {
+  for (const route of Object.values(ROUTES).filter((r) => r.wanA14b)) {
+    const mlx = route.backend === "mlx";
+    const backend = mlx ? "mlx" : "candle";
+    const frames = mlx ? 16 : 13;
+    const { model, width, height, fps, advanced, seed } = route.body;
+    const metrics = { model, width, height, seed, backend: route.backend, steps: advanced.steps, sampler: advanced.sampler,
+      guidanceScale: advanced.guidanceScale, quantLabel: mlx ? "bf16" : "q4", totalMs: 99, sampleMs: 33 };
+    const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video: {
+      width, height, avgFrameRate: `${fps}/1`, decodedFrames: frames } } };
+    const obs = wanObservations(route, metrics, content);
+    assert.equal(obs.engineRequestFrames, 13); assert.equal(obs.decodedFrames, frames);
+    content.shape.video.decodedFrames = mlx ? 13 : 16;
+    assert.throws(() => wanObservations(route, metrics, content), /output must decode/);
+
+    const solver = mlx ? (advanced.sampler === "heun" ? "Heun" : "UniPC") : "wan_flow_unipc_bh2_order2_v1";
+    const stage = advanced.sampler === "heun" ? "wan_curated" : "wan";
+    const digest = { element: mlx ? "f32_le_bits" : "f64_le_bits", count: 7, sha256: "2".repeat(64) };
+    const provider = route.referenceImage ? "wan2_2_i2v_14b" : "wan2_2_t2v_14b";
+    const identity = { provider_id: provider, backend, sampling: { state: "resolved", value: [mlx
+      ? { stage, solver, estimator: "flow_velocity" } : solver] },
+      schedule: { state: "resolved", value: [mlx ? { stage, digest } : { sampler: solver, schedule: digest, estimator: "flow_velocity" }] } };
+    const receipt = { jobId: "job", version: 1, acceptedBackend: backend, outputs: [
+      { artifactIds: ["video"], execution: { state: "resolved", identity } }] };
+    assert.deepEqual(wanExecutionFacts(route, receipt, "job", "video"), { provider, backend, solver, schedule: digest });
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "different-asset"), /bind the saved video/);
+    identity.provider_id = "wan2_2_ti2v_5b";
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /provider substitution/);
+    identity.provider_id = provider;
+    digest.count = 6;
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /schedule digest/);
+    digest.count = 7;
+    identity.sampling.value = [mlx ? { stage, solver: "Euler", estimator: "flow_velocity" } : "wan_flow_euler_v1"];
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /executed solver/);
+    receipt.outputs[0].execution = { state: "unavailable", reason: { detail: "missing runtime schedule" } };
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /missing runtime schedule/);
+  }
 });
 
 test("only explicit MLX Wan stages pinned rows before comparison and refuses mismatched sources", async () => {
@@ -193,6 +232,15 @@ test("exit policy: head_differs, error, hub mutation and zero ran fail; nondeter
   const report = (routes, mode = "run") => ({ mode, routes, summary: summarize(routes) });
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal" }, { status: "skipped", skipReason: "absent" }])), 0);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "nondeterministic_on_runner" }])), 0);
+  const required = { id: "mlx-wan22-a14b-i2v-heun", status: "ran" };
+  const ordinary = { id: "mlx-moss-image-t2i", status: "ran", verdict: "equal" };
+  const firstDifference = verdictFor({ base1: run("a"), head: run("b") });
+  assert.equal(firstDifference.needBase2, true);
+  const diagnosed = verdictFor({ base1: run("a"), head: run("b"), base2: run("c") });
+  assert.equal(diagnosed.needBase2, false); assert.equal(diagnosed.verdict, "nondeterministic_on_runner");
+  assert.equal(exitCodeFor(report([ordinary, { ...required, verdict: diagnosed.verdict }])), 1);
+  assert.equal(exitCodeFor(report([ordinary, { ...required, status: "not_run" }])), 1);
+  assert.equal(exitCodeFor(report([ordinary, { ...required, verdict: "equal" }])), 0);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "head_differs" }])), 1);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "error" }])), 1);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true } }])), 1, "unattributed mutation fails");
