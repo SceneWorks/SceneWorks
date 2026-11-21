@@ -217,22 +217,31 @@ const FULL_INVENTORY_CHALLENGE_SOURCE: &str = "sceneworks:full-source-inventory"
 /// tells the waiting admission that this worker's attempt is over.
 const UNPROVED_CHALLENGE_ANSWER: &str = "unproved";
 
-/// Prove `challenge` from this worker's OWN registered sources, reading only files whose sizes
-/// the challenge names. The claim published is the one this worker's capture produced — its id,
-/// provenance and files — and only when it is exactly the challenged claim.
-fn prove_registered_challenge(
+/// Prove `challenge` from this worker's OWN registered sources, reading only the files the
+/// challenge names (see [`HashPermission::Proof`]). The claim published is the one this worker's
+/// capture produced — its id, provenance and files — and only when it is exactly the challenged
+/// claim. It is published the moment it is captured, so the next heartbeat carries it even while
+/// the scan goes on through unrelated sources.
+fn prove_registered_challenge(settings: &Settings, challenge: &PortableSourceChallenge) -> bool {
+    prove_registered_challenge_with(settings, challenge, |claim| {
+        pending_inventory()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .publish_probe(claim);
+    })
+}
+
+fn prove_registered_challenge_with(
     settings: &Settings,
     challenge: &PortableSourceChallenge,
-) -> Option<PortableSourceClaim> {
-    let sizes = challenge.files.iter().map(|file| file.size_bytes).collect();
-    let mut proved = None;
-    with_hash_permission(HashPermission::Sizes(sizes), || {
+    mut publish: impl FnMut(PortableSourceClaim),
+) -> bool {
+    let mut proved = false;
+    with_hash_permission(HashPermission::for_proof(&challenge.files), || {
         collect_source_claims(settings, |claim| {
-            if proved.is_none()
-                && claim.source_id == challenge.source_id
-                && claim.files == challenge.files
-            {
-                proved = Some(claim);
+            if !proved && claim.source_id == challenge.source_id && claim.files == challenge.files {
+                proved = true;
+                publish(claim);
             }
         });
     });
@@ -276,11 +285,7 @@ pub(crate) fn prove_app_managed_challenges(
             full_inventory_pass(settings);
             continue;
         }
-        if let Some(claim) = prove_registered_challenge(settings, &challenge) {
-            pending_inventory()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publish_probe(claim);
+        if prove_registered_challenge(settings, &challenge) {
             published = true;
             continue;
         }
@@ -2192,14 +2197,37 @@ fn capture_tree(
 /// verdict store already proves every file ([`HashPermission::RecordedOnly`]). A source the store
 /// cannot vouch for (a new import, a file whose stamp moved) is verified when a job needs it: API
 /// admission challenges the workers with the exact files, and the proof captures under
-/// [`HashPermission::Sizes`], reading only files of those sizes. Every other capture — the
+/// [`HashPermission::Proof`], reading only files of those sizes. Every other capture — the
 /// pre-loader guard included — hashes as it always has.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum HashPermission {
     #[default]
     Any,
     RecordedOnly,
-    Sizes(std::collections::BTreeSet<u64>),
+    /// An on-demand proof of the challenged `files`: a file is read only when its size is one of
+    /// theirs, and a checkpoint plan containing one of their digests is resolved as a whole (its
+    /// other layers too), since a plan resolves only when every layer verifies.
+    Proof {
+        sizes: std::collections::BTreeSet<u64>,
+        digests: std::collections::BTreeSet<String>,
+    },
+}
+
+impl HashPermission {
+    pub(crate) fn for_proof(files: &[PortableArtifactFile]) -> Self {
+        Self::Proof {
+            sizes: files.iter().map(|file| file.size_bytes).collect(),
+            digests: files
+                .iter()
+                .map(|file| bare_sha256(&file.sha256).to_owned())
+                .collect(),
+        }
+    }
+}
+
+/// A SHA-256 digest without its `sha256:` prefix, lowercase-hex as both ledgers write it.
+fn bare_sha256(digest: &str) -> &str {
+    digest.strip_prefix("sha256:").unwrap_or(digest)
 }
 
 thread_local! {
@@ -2229,12 +2257,15 @@ fn may_hash(size_bytes: u64) -> bool {
     HASH_PERMISSION.with(|cell| match &*cell.borrow() {
         HashPermission::Any => true,
         HashPermission::RecordedOnly => false,
-        HashPermission::Sizes(sizes) => sizes.contains(&size_bytes),
+        HashPermission::Proof { sizes, .. } => sizes.contains(&size_bytes),
     })
 }
 
 /// Resolve a checkpoint plan under this thread's [`HashPermission`]: a layer whose persisted stamp
-/// is trusted costs nothing; one that needs a hash is read only when the permission allows its size.
+/// is trusted costs nothing; one that needs a hash is read only when the permission allows its
+/// size — or, for a proof naming any of this plan's layers, as part of the whole plan closure.
+/// Per-layer sizes alone would deadlock a cold multi-layer plan: each layer's challenge would
+/// refuse the others, and the plan resolves only when every layer verifies.
 fn resolve_checkpoint_plan(
     store: &sceneworks_core::checkpoint_plan_store::CheckpointPlanStore,
     checkpoint_id: &str,
@@ -2242,9 +2273,33 @@ fn resolve_checkpoint_plan(
     sceneworks_core::checkpoint_plan_store::ResolvedCheckpointV1,
     sceneworks_core::checkpoint_plan_store::CheckpointPlanError,
 > {
+    let whole_plan = HASH_PERMISSION.with(|cell| match &*cell.borrow() {
+        HashPermission::Proof { digests, .. } => plan_layer_digests(store, checkpoint_id)
+            .iter()
+            .any(|digest| digests.contains(digest)),
+        _ => false,
+    });
     store.resolve_hashing_only(checkpoint_id, &|path| {
-        std::fs::metadata(path).is_ok_and(|metadata| may_hash(metadata.len()))
+        whole_plan || std::fs::metadata(path).is_ok_and(|metadata| may_hash(metadata.len()))
     })
+}
+
+/// The content digests a checkpoint's compiled plan names for its layers, read without hashing.
+fn plan_layer_digests(
+    store: &sceneworks_core::checkpoint_plan_store::CheckpointPlanStore,
+    checkpoint_id: &str,
+) -> Vec<String> {
+    let Ok(record) = store.record(checkpoint_id) else {
+        return Vec::new();
+    };
+    let Ok(plan) = store.plan(checkpoint_id, &record.plan.plan_id) else {
+        return Vec::new();
+    };
+    plan.layers
+        .iter()
+        .filter_map(|layer| layer.source.content_digest().ok())
+        .map(|digest| bare_sha256(digest).to_ascii_lowercase())
+        .collect()
 }
 
 /// This host's hash-once store, the one API admission and the worker runtime share.
@@ -2314,6 +2369,115 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A cold linked plan with two differently sized layers: a challenge for ONE layer's claim
+    /// authorizes the whole plan closure, because the plan resolves only when every layer
+    /// verifies. With per-size permission alone the other layer refused its hash, the plan never
+    /// resolved, and no challenge could ever prove any of its layers. The proved claim is
+    /// published from inside the capture, the moment it matches.
+    #[test]
+    fn a_challenged_layer_proves_a_cold_multi_layer_plan() {
+        use sceneworks_core::checkpoint_import::{
+            CheckpointCatalogRecordV1, CheckpointContainerV1, CheckpointInventoryV1, ImportLayerV1,
+            ImportPlanV1, SourceLocatorV1,
+        };
+        use sceneworks_core::checkpoint_plan_store::{linked_checkpoint_id, CheckpointPlanStore};
+        use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
+
+        let temp = tempfile::tempdir().unwrap();
+        let library = temp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let layers = [
+            (
+                "transformer",
+                "transformer.safetensors",
+                b"transformer bytes".to_vec(),
+            ),
+            ("text_encoder", "encoder.safetensors", b"encoder".to_vec()),
+        ];
+        for (_, name, bytes) in &layers {
+            std::fs::write(library.join(name), bytes).unwrap();
+        }
+        let library = std::fs::canonicalize(&library).unwrap();
+        let mut settings = Settings::for_test(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        let store = CheckpointPlanStore::open(&settings.data_dir);
+        let root = store.approve_root(&library).unwrap();
+        let sha = |bytes: &[u8]| sceneworks_core::hashing::sha256_bytes(bytes);
+        let plan = ImportPlanV1::new(
+            format!("checkpoint-plan-{}", "7".repeat(64)),
+            "krea_2",
+            layers
+                .iter()
+                .map(|(role, name, bytes)| ImportLayerV1 {
+                    layer_id: format!("artifact:{name}"),
+                    role: (*role).into(),
+                    target_path: (*name).into(),
+                    container: CheckpointContainerV1::Safetensors,
+                    source: SourceLocatorV1::linked(&root.root_id, *name, sha(bytes)).unwrap(),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let checkpoint_id = linked_checkpoint_id(&root.root_id, "two-layer");
+        let plans = settings.data_dir.join("checkpoints/plans");
+        std::fs::create_dir_all(&plans).unwrap();
+        std::fs::write(
+            plans.join(format!("{}.json", plan.plan_id)),
+            plan.canonical_json().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            settings.data_dir.join("checkpoints/inventory.json"),
+            CheckpointInventoryV1::new(vec![CheckpointCatalogRecordV1::from_plan(
+                &checkpoint_id,
+                &plan,
+            )
+            .unwrap()])
+            .unwrap()
+            .canonical_json()
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(settings.config_dir.join("manifests")).unwrap();
+        std::fs::write(
+            settings.config_dir.join("manifests/user.models.jsonc"),
+            json!({"schemaVersion":1, "models":[{"id":"two_layer_import", "type":"image",
+                "importPlan":{"checkpointId": checkpoint_id}}]})
+            .to_string(),
+        )
+        .unwrap();
+
+        // The challenge names only the transformer layer's content claim.
+        let (_, _, transformer) = &layers[0];
+        let files = vec![PortableArtifactFile {
+            relative_path: PathBuf::from("artifact"),
+            size_bytes: transformer.len() as u64,
+            sha256: format!("sha256:{}", sha(transformer)),
+        }];
+        let challenge = PortableSourceChallenge {
+            id: "layer-proof".into(),
+            source_id: sceneworks_core::portable_sources::registered_digest_claim_id(
+                "model-bytes",
+                "two_layer_import",
+                None,
+                &portable_file_ledger_sha256(&files).unwrap(),
+            )
+            .unwrap(),
+            files,
+        };
+        let mut published = Vec::new();
+        assert!(
+            prove_registered_challenge_with(&settings, &challenge, |claim| published.push(claim)),
+            "a challenged layer must prove its cold multi-layer plan"
+        );
+        assert_eq!(
+            published.len(),
+            1,
+            "exactly the challenged claim is published"
+        );
+        assert_eq!(published[0].source_id, challenge.source_id);
+    }
 
     /// A challenge for a source whose last attempt is running or cooling down is left pending —
     /// never answered "unproved", which would mark a utility challenge done without its proof —
@@ -2412,7 +2576,11 @@ mod tests {
         assert_eq!(read_counts::of(&named), 0, "the inventory read no bytes");
         assert_eq!(read_counts::of(&other), 0, "the inventory read no bytes");
 
-        with_hash_permission(HashPermission::Sizes([3].into()), || {
+        let proof = HashPermission::Proof {
+            sizes: [3].into(),
+            digests: Default::default(),
+        };
+        with_hash_permission(proof, || {
             assert!(capture_registered_files(&store, &named).is_ok());
             assert!(capture_registered_files(&store, &other).is_err());
         });
