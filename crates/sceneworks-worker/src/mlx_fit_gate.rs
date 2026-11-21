@@ -195,6 +195,9 @@ pub(crate) struct MlxRequestPlan {
     /// raw file size with its load-exact typed residency. Dense Wan adapters are folded into base
     /// weights and therefore contribute zero here; packed Wan residuals remain additive.
     folded_adapter_bytes: u64,
+    /// Provider-priced host and device bytes allocated together for one adapter phase, beyond the
+    /// ordinary installed adapter residency already included by the load estimate.
+    phase_adapter_workspace_bytes: u64,
     activation_headroom_bytes: u64,
     /// The resolution-INDEPENDENT slice of `activation_headroom_bytes` (sc-16195). Always
     /// `<= activation_headroom_bytes`, so the area term below can never go negative.

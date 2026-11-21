@@ -2008,7 +2008,7 @@ fn checkpoint_plan_raw_settings(
 
 /// The plan route's MLX request inputs. This skeleton serves plain text-to-image only — no
 /// references, adapters, PiD, or phases reach it (`prepare_checkpoint_plan_sources` refuses those
-/// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0)` produces
+/// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0, None)` produces
 /// for the same request, and the two lanes price the same geometry.
 #[cfg(target_os = "macos")]
 pub(super) fn checkpoint_plan_memory_inputs(

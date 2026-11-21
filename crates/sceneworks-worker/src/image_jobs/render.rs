@@ -642,9 +642,7 @@ pub(super) fn compile_render_plan(
     Ok(plan)
 }
 
-/// [`compile_render_plan`] for a route that only renders from a pre-load plan (the MLX FLUX.1
-/// ControlNet and PuLID lanes).
-#[cfg(target_os = "macos")]
+/// [`compile_render_plan`] for a request whose route requires a pre-load plan.
 pub(super) fn compile_required_render_plan(
     registry: &gen_core::ProviderRegistry,
     engine_id: &str,
