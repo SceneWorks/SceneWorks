@@ -3,6 +3,11 @@ use super::*;
 pub(crate) struct AuthenticatedWorkerClaims {
     pub(crate) claims: Vec<sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim>,
     pub(crate) seen_at: std::time::Instant,
+    /// Heartbeats received from this worker under its key. A worker heartbeats sequentially, so
+    /// the second one received after any moment was built after it: an on-demand source proof uses
+    /// that to know a worker's post-answer claims have arrived (a heartbeat's receipt time alone
+    /// does not, since it may carry claims snapshotted before the answer).
+    pub(crate) heartbeats: u64,
 }
 
 pub(crate) fn presented_worker_proof(
@@ -222,6 +227,7 @@ pub(crate) async fn register_worker(
             AuthenticatedWorkerClaims {
                 claims: submitted_claims,
                 seen_at: std::time::Instant::now(),
+                heartbeats: 0,
             },
         );
     }
@@ -275,6 +281,7 @@ pub(crate) async fn heartbeat_worker(
     .await?;
     if keyed {
         let prior = authenticated.remove(&authenticated_worker_id);
+        let heartbeats = prior.as_ref().map_or(0, |entry| entry.heartbeats) + 1;
         authenticated.insert(
             authenticated_worker_id,
             AuthenticatedWorkerClaims {
@@ -282,6 +289,7 @@ pub(crate) async fn heartbeat_worker(
                     .or_else(|| prior.map(|entry| entry.claims))
                     .unwrap_or_default(),
                 seen_at: std::time::Instant::now(),
+                heartbeats,
             },
         );
     }
@@ -376,6 +384,7 @@ pub(crate) async fn publish_portable_source_proof(
                 .expires_at
                 .is_some_and(|until| until > std::time::Instant::now())
     }) {
+        challenge.answered_worker_ids.insert(worker_id.clone());
         if let Ok(expected) =
             sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
                 &challenge.files,
