@@ -3060,10 +3060,12 @@ pub(super) async fn generate_video_using(
                 ));
             }
             let (input, mut request, plan, spec, plural_fit) = prepared?;
+            let is_plural = plural_fit.is_some();
             let cold_fit = plural_fit.clone();
             let fit_cancel = cancel.clone();
             let cold_h3_receipt = h3_receipt.clone();
             let load_generator = move |id: &str, spec: &LoadSpec| {
+                #[cfg(not(target_os = "macos"))]
                 if let Some(fit) = &cold_fit {
                     fit.check_live(spec, gen_core::MemoryCacheState::Cold, "cold_load", 0)
                         .map_err(|error| match error {
@@ -3073,9 +3075,9 @@ pub(super) async fn generate_video_using(
                             WorkerError::Canceled(_) => gen_core::Error::Canceled,
                             other => gen_core::Error::Unsupported(other.to_string()),
                         })?;
-                    if fit_cancel.is_cancelled() {
-                        return Err(gen_core::Error::Canceled);
-                    }
+                }
+                if is_plural && fit_cancel.is_cancelled() {
+                    return Err(gen_core::Error::Canceled);
                 }
                 if let Some(receipt) = &cold_h3_receipt {
                     receipt
@@ -3486,12 +3488,15 @@ pub(super) async fn generate_video_using(
                     }
                 },
             };
-            #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+            #[cfg(target_os = "macos")]
             let result = {
                 let _ = comfyui_load;
+                let mut load =
+                    crate::generator_cache::GeneratorRequestLoad::from((spec, prepared_h3_context));
+                load.scail2_fit = cold_fit;
                 crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
-                    (spec, prepared_h3_context),
+                    load,
                     "video load failed",
                     load_generator,
                     run,

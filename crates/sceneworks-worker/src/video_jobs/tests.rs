@@ -398,6 +398,64 @@ async fn scail_plural_fit_refuses_short_unknown_or_stale_evidence_before_factory
     assert!(!probe.loaded());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn scail_plural_cold_fit_keeps_measured_residency_under_generic_sequential_pressure() {
+    use gen_core::generator::scail2_fit::Scail2FitProfile;
+    let root = scail_fit_root();
+    let gross = 64 << 20;
+    let witness = scail_fit_witness(root.path(), 6);
+    let host = gross - witness.axes.source_bytes;
+    let mut control = scail_fit_input(root.path(), 6);
+    let mut spec = video_load_spec(&control);
+    let request = take_video_request(&mut control, &CancelFlag::new());
+    Scail2FitProfile::prepare_load(&mut spec, &request).unwrap();
+    temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "8", || {
+        let generic = crate::mlx_fit_gate::apply_residency_policy(spec, "scail2_14b").unwrap();
+        assert_eq!(generic.offload_policy, gen_core::OffloadPolicy::Sequential);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut input = scail_fit_input(root.path(), 6);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(
+            vec![witness.clone()],
+            gross - 1,
+            Some(host),
+        ));
+        let refused = ArmProbe::default();
+        let Err(WorkerError::InvalidPayload(reason)) =
+            runtime.block_on(drive_scail_fit(input, &refused))
+        else {
+            panic!("insufficient measured capacity must refuse before factory");
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "SCAIL-2 plural fit requires {gross} accelerator bytes, only {} are available",
+                gross - 1
+            )
+        );
+        assert!(!refused.loaded());
+
+        let mut input = scail_fit_input(root.path(), 6);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness], gross, Some(host)));
+        let admitted = ArmProbe::default();
+        runtime.block_on(drive_scail_fit(input, &admitted)).unwrap();
+        assert_eq!(
+            admitted
+                .spec
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .offload_policy,
+            gen_core::OffloadPolicy::Resident,
+        );
+    });
+}
+
 #[cfg(native_lane)]
 #[tokio::test]
 async fn scail_plural_warm_fit_credits_only_committed_provider_weights_and_rejects_replaced_members(

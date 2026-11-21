@@ -154,20 +154,24 @@ pub(crate) struct PreparedH3CacheContext {
 pub(crate) struct GeneratorRequestLoad {
     spec: LoadSpec,
     prepared_h3: Option<PreparedH3CacheContext>,
+    #[cfg(target_os = "macos")]
+    pub(crate) scail2_fit: Option<std::sync::Arc<crate::video_admission::Scail2PluralFit>>,
 }
 
 impl From<LoadSpec> for GeneratorRequestLoad {
     fn from(spec: LoadSpec) -> Self {
-        Self {
-            spec,
-            prepared_h3: None,
-        }
+        (spec, None).into()
     }
 }
 
 impl From<(LoadSpec, Option<PreparedH3CacheContext>)> for GeneratorRequestLoad {
     fn from((spec, prepared_h3): (LoadSpec, Option<PreparedH3CacheContext>)) -> Self {
-        Self { spec, prepared_h3 }
+        Self {
+            spec,
+            prepared_h3,
+            #[cfg(target_os = "macos")]
+            scail2_fit: None,
+        }
     }
 }
 
@@ -1507,7 +1511,6 @@ where
     P: 'static,
     R: Send + 'static,
 {
-    let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
     with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared(
         &cache.worker,
         async {
@@ -1518,8 +1521,7 @@ where
             }
         },
         engine_id,
-        spec,
-        prepared_h3,
+        load.into(),
         load_error_context,
         0,
         |_| Ok(()),
@@ -1554,13 +1556,11 @@ async fn with_cached_generator_for_request_using_on<R>(
 where
     R: Send + 'static,
 {
-    let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
     with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
         worker,
         evict_transform,
         engine_id,
-        spec,
-        prepared_h3,
+        load.into(),
         load_error_context,
         0,
         |_| Ok(()),
@@ -1601,8 +1601,7 @@ where
         worker,
         evict_transform,
         engine_id,
-        spec,
-        None,
+        spec.into(),
         load_error_context,
         incoming_reclaimable_weight_bytes,
         cold_admission,
@@ -1618,8 +1617,7 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3
     worker: &mpsc::Sender<GeneratorJob>,
     evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
-    spec: LoadSpec,
-    prepared_h3: Option<PreparedH3CacheContext>,
+    load: GeneratorRequestLoad,
     load_error_context: impl Into<String>,
     incoming_reclaimable_weight_bytes: u64,
     cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
@@ -1644,8 +1642,7 @@ where
         worker,
         evict_transform,
         engine_id,
-        spec,
-        prepared_h3,
+        load,
         load_error_context,
         incoming_reclaimable_weight_bytes,
         cold_admission,
@@ -1663,8 +1660,7 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3
     worker: &mpsc::Sender<GeneratorJob>,
     evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
-    spec: LoadSpec,
-    prepared_h3: Option<PreparedH3CacheContext>,
+    load: GeneratorRequestLoad,
     load_error_context: impl Into<String>,
     incoming_reclaimable_weight_bytes: u64,
     cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
@@ -1688,6 +1684,12 @@ where
     P: 'static,
     R: Send + 'static,
 {
+    let GeneratorRequestLoad {
+        spec,
+        prepared_h3,
+        #[cfg(target_os = "macos")]
+        scail2_fit,
+    } = load;
     // One resident engine across the generator and transform caches (sc-25683): a resident
     // restoration transform is dropped before a generator can load on top of it. A no-op when no
     // transform was ever loaded. Injected (production passes the process-global
@@ -1710,6 +1712,17 @@ where
         spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("Generator cold-load source validation failed", error)
         })?;
+        // The plural SCAIL measurement binds the source and placement together. Check the
+        // measured cold price before load; changing placement here invalidates that measurement.
+        #[cfg(target_os = "macos")]
+        let spec = match scail2_fit {
+            Some(fit) => {
+                fit.check_live(&spec, MemoryCacheState::Cold, "cold_load", 0)?;
+                spec
+            }
+            None => crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?,
+        };
+        #[cfg(not(target_os = "macos"))]
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
         spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error(
