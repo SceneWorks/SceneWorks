@@ -84,7 +84,83 @@ def sample_values(samples, width, label):
     return values
 
 
-def windows_device_peak(guard, native, adapter, raw_gross):
+def tenant_growth(guard, uuid, absolute, unknown, baseline):
+    """Read the child charge from the same supervisor sample as its whole-card upper bound."""
+    samples = guard.get("samples")
+    require(isinstance(samples, list), "missing supervisor CUDA samples")
+    events = [
+        event for event in samples if event.get("phase") == "cuda-global-used-upper-bound-sample"
+    ]
+    require(len(events) <= unknown, "unexpected supervisor CUDA sample count")
+    peak = last = 0
+    for event in events:
+        upper = byte_count(event.get("globalUsedUpperBoundBytes"))
+        charge = byte_count(event.get("childGlobalUsedGrowthBytes"))
+        require(
+            event.get("cudaDeviceUuid") == uuid
+            and max(0, upper - baseline) <= charge <= upper <= absolute
+            and type(event.get("at_ns")) is int
+            and event["at_ns"] > last,
+            "inconsistent supervisor CUDA charge or device",
+        )
+        byte_count(event.get("gpuFreeBytes"))
+        peak = max(peak, charge)
+        last = event["at_ns"]
+    return peak, len(events)
+
+
+def validate_render_scope(scope, end, dedicated, misses, pool, card):
+    """Bind the capture verifier's post-output exception to its unchanged raw Job/card records."""
+    require(
+        isinstance(scope, dict),
+        "incomplete WDDM measurement without verified render scope",
+    )
+    identity = {
+        "pid": dedicated["pid"],
+        "created_filetime": dedicated["created_filetime"],
+        "cuda_uuid": dedicated["adapter"]["cuda_uuid"],
+    }
+    pool_mark, zero = end["pool"], end["zero"]
+    require(
+        isinstance(pool_mark, dict) and isinstance(zero, dict) and end["pool_ticks"] > 0,
+        "missing WDDM render markers",
+    )
+    for mark, value in ((pool_mark, pool), (zero, 0)):
+        index = byte_count(mark["card_index"])
+        require(
+            all(type(mark.get(k)) is type(v) and mark[k] == v for k, v in identity.items())
+            and index < len(card)
+            and byte_count(mark["at_ns"]) == card[index][0]
+            and value == card[index][2],
+            "crossed WDDM render marker or card sample",
+        )
+    require(
+        pool_mark["basis"] == "verified-output-pool"
+        and byte_count(pool_mark["pool_reserved_high_bytes"]) == pool
+        and zero["basis"] == "owned-process-attributed"
+        and pool_mark["card_index"] < zero["card_index"] == len(card) - 1
+        and (zero["before"], zero["after"])
+        in {
+            ("live", "live"),
+            ("live", "exited_empty"),
+            ("exited_empty", "exited_empty"),
+        },
+        "invalid WDDM output or release marker",
+    )
+    expected = dict(
+        identity,
+        pool_card_index=pool_mark["card_index"],
+        zero_card_index=zero["card_index"],
+        dedicated_missing_after_output=misses[0],
+        shared_missing_after_output=misses[1],
+    )
+    require(
+        scope == expected and all(type(scope[k]) is type(v) for k, v in expected.items()),
+        "verified render scope differs from original WDDM observations",
+    )
+
+
+def windows_device_peak(guard, native, adapter, raw_gross, scope=None):
     admission = guard["admission"]
     baseline = byte_count(admission.get("gpuGlobalUsedBaselineBytes"))
     attribution = guard["cuda_attribution"]
@@ -104,6 +180,7 @@ def windows_device_peak(guard, native, adapter, raw_gross):
         and dedicated["created_filetime"] > 0,
         "invalid WDDM adapter or process identity",
     )
+    misses = [byte_count(rows["missing_active_polls"]) for rows in (dedicated, shared)]
     for rows in (dedicated, shared):
         require(
             rows["adapter"] == adapter
@@ -111,8 +188,7 @@ def windows_device_peak(guard, native, adapter, raw_gross):
             and rows["pid"] == guard["pid"]
             and type(rows["created_filetime"]) is int
             and rows["created_filetime"] == dedicated["created_filetime"]
-            and rows["error"] is None
-            and byte_count(rows["missing_active_polls"]) == 0,
+            and rows["error"] is None,
             "incomplete or crossed WDDM process measurements",
         )
     wddm = sample_values(dedicated["samples"], 2, "WDDM dedicated")
@@ -137,16 +213,37 @@ def windows_device_peak(guard, native, adapter, raw_gross):
         "inconsistent owned-PID or whole-card CUDA measurement",
     )
     owned_or_floor = max(pool, pid, max(wddm), byte_count(native["axes"]["floor_device_bytes"]))
+    card = observation["card_samples_monotonic_ns_free_owned_or_fallback_bytes"]
+    free = sample_values(card, 3, "free-card")
+    growth, growth_count = tenant_growth(guard, adapter["cuda_uuid"], absolute, unknown, baseline)
+    if "cuda_render_end" in observation:
+        end = observation["cuda_render_end"]
+        require(
+            isinstance(end, dict) and byte_count(end.get("pool_ticks")) + growth_count == unknown,
+            "unaccounted supervisor CUDA fallback tick",
+        )
+        if any(misses):
+            require(fallback == pool, "output marker differs from native pool fallback")
+            validate_render_scope(scope, end, dedicated, misses, pool, card)
+        else:
+            require(scope is None, "unexpected WDDM render-scope exception")
+        classified = max(owned_or_floor, growth)
+        require(
+            classified == raw_gross and classified <= byte_count(admission["childGpuCapBytes"]),
+            "device measurement differs from verified native quote or exceeds guard",
+        )
+        return classified
+    # Older producers quote the absolute card peak and have no output marker. Keep their
+    # strict gap-free requirement and their conservative checks against both card baselines.
+    require(
+        not any(misses) and scope is None,
+        "incomplete WDDM measurement without render evidence",
+    )
     require(
         max(absolute, owned_or_floor) == raw_gross,
         "device measurement differs from verified native quote",
     )
-    # These card series have independent baselines. Only the whole-card samples include
-    # the launcher's existing allocations. The native pool and PID gauges already measure
-    # this child and are never reduced or added to each other.
-    card = observation["card_samples_monotonic_ns_free_owned_or_fallback_bytes"]
-    free = sample_values(card, 3, "free-card")
-    return max(owned_or_floor, max(0, absolute - baseline), free[0] - min(free))
+    return max(owned_or_floor, growth, max(0, absolute - baseline), free[0] - min(free))
 
 
 def project(receipt_path, review_path):
@@ -249,7 +346,11 @@ def project(receipt_path, review_path):
             "device": (
                 native["allocator_peak"],
                 windows_device_peak(
-                    guard, native, receipt["adapter"], witness["gross_device_bytes"]
+                    guard,
+                    native,
+                    receipt["adapter"],
+                    witness["gross_device_bytes"],
+                    row.get("cuda_render_scope"),
                 ),
                 admission["childGpuCapBytes"],
             ),

@@ -28,7 +28,20 @@ def windows_guard():
     return adapter, {
         "pid": 41,
         "peak_gpu_bytes": 80,
-        "admission": {"gpuGlobalUsedBaselineBytes": 20, "cudaDeviceUuid": adapter["cuda_uuid"]},
+        "samples": [
+            {
+                "phase": "cuda-global-used-upper-bound-sample",
+                "cudaDeviceUuid": adapter["cuda_uuid"],
+                "globalUsedUpperBoundBytes": 110,
+                "childGlobalUsedGrowthBytes": 90,
+                "gpuFreeBytes": 95,
+                "at_ns": 105,
+            }
+        ],
+        "admission": {
+            "gpuGlobalUsedBaselineBytes": 20,
+            "cudaDeviceUuid": adapter["cuda_uuid"],
+        },
         "cuda_attribution": {
             "wddm_dedicated": dedicated,
             "pid_peak_bytes": 77,
@@ -48,9 +61,76 @@ def windows_guard():
     }
 
 
-@pytest.mark.parametrize("backend", ["mlx", "cuda"])
-def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path, backend):
-    mlx = backend == "mlx"
+def render_scope_guard(guard):
+    observation = guard["fit_observation"]
+    dedicated = guard["cuda_attribution"]["wddm_dedicated"]
+    identity = {
+        "pid": guard["pid"],
+        "created_filetime": dedicated["created_filetime"],
+        "cuda_uuid": dedicated["adapter"]["cuda_uuid"],
+    }
+    guard["admission"]["childGpuCapBytes"] = 160
+    guard["cuda_attribution"]["unknown_pid_polls"] = 2
+    guard["samples"][0]["childGlobalUsedGrowthBytes"] = 110
+    dedicated["missing_active_polls"] = observation["wddm_shared"]["missing_active_polls"] = 1
+    observation["card_samples_monotonic_ns_free_owned_or_fallback_bytes"] = [
+        [100, 190, 0],
+        [200, 95, 80],
+        [300, 145, 0],
+    ]
+    observation["wddm_retry"] = {
+        key: {
+            "attempts": 1,
+            "events": [
+                {
+                    "start_ns": 270,
+                    "end_ns": 290,
+                    "retried": True,
+                    "local_filetime_before": 904,
+                    "local_filetime_after": 905,
+                    "previous": series["samples"][-1],
+                    "retry_sample": None,
+                    "recovered": False,
+                }
+            ],
+        }
+        for key, series in (
+            ("dedicated", dedicated),
+            ("shared", observation["wddm_shared"]),
+        )
+    }
+    observation["cuda_render_end"] = {
+        "pool_ticks": 1,
+        "pool": dict(
+            identity,
+            basis="verified-output-pool",
+            card_index=1,
+            at_ns=200,
+            pool_reserved_high_bytes=80,
+        ),
+        "zero": dict(
+            identity,
+            basis="owned-process-attributed",
+            card_index=2,
+            at_ns=300,
+            before="live",
+            after="exited_empty",
+        ),
+    }
+    return dict(
+        identity,
+        pool_card_index=1,
+        zero_card_index=2,
+        dedicated_missing_after_output=1,
+        shared_missing_after_output=1,
+    )
+
+
+@pytest.mark.parametrize("case", ["mlx", "cuda", "cuda_render_scope"])
+def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path, case):
+    mlx = case == "mlx"
+    backend = "mlx" if mlx else "cuda"
+    scope = None
     os_name = "macos" if mlx else "windows"
     axes = {"backend": backend, "references": 4, "classifier_free_guidance": True}
     revision = "a" * 40
@@ -70,6 +150,8 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         guard["admission"].update(cuda.pop("admission"))
         guard.update(cuda)
         axes["floor_device_bytes"] = 70
+        if case == "cuda_render_scope":
+            scope = render_scope_guard(guard)
     guard_name = "count-4.supervisor.json"
     guard_file = tmp_path / guard_name
     guard_file.write_text(json.dumps(guard))
@@ -78,7 +160,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         "text_tokens": 512,
         "gross_host_bytes": 145,
         "gross_unified_bytes": 140,
-        "gross_device_bytes": 120,
+        "gross_device_bytes": 110 if scope else 120,
         "mlx_decode_budget_bytes": 16 if mlx else None,
     }
     native = {
@@ -93,6 +175,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         "runtime": "version",
         "inference_revision": revision,
         "witness": witness,
+        **({"cuda_render_scope": scope} if scope else {}),
     }
     receipt = {
         "accepted": True,
@@ -159,7 +242,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
         review_file.write_text(json.dumps(review))
         measured = project()
         assert measured["bounds"]["device"]["observed_peak_bytes"] == 80
-        assert measured["bounds"]["device"]["classified_peak_bytes"] == 100
+        assert measured["bounds"]["device"]["classified_peak_bytes"] == (110 if scope else 100)
         assert measured["bounds"]["host"]["classified_peak_bytes"] == 145
     guard_file.write_text("{}")
     with pytest.raises(ValueError, match="guard record changed"):
@@ -184,6 +267,7 @@ def test_windows_device_peak_deducts_each_card_baseline_only_from_its_own_series
     attrs["pid_peak_bytes"] = guard["peak_gpu_bytes"] = 103
     assert peak(guard, native, adapter, 120) == 103
     attrs.update(unknown_pid_polls=0, global_upper_bytes=0, pool_fallback_peak_bytes=0)
+    guard["samples"] = []
     assert peak(guard, native, adapter, 103) == 103
     native["axes"]["floor_device_bytes"] = 110
     assert peak(guard, native, adapter, 110) == 110
@@ -226,5 +310,74 @@ def test_windows_device_peak_refuses_incomplete_or_crossed_attribution(path, inv
         parent[path[-1]] = invalid
     with pytest.raises(ValueError):
         tool["windows_device_peak"](
-            guard, {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}}, adapter, 120
+            guard,
+            {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}},
+            adapter,
+            120,
+        )
+
+
+def test_new_gapless_capture_binds_supervisor_charge_even_when_old_card_baseline_was_larger():
+    adapter, guard = windows_guard()
+    render_scope_guard(guard)
+    guard["cuda_attribution"]["wddm_dedicated"]["missing_active_polls"] = 0
+    guard["fit_observation"]["wddm_shared"]["missing_active_polls"] = 0
+    native = {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}}
+    # Launcher tenants have released their allocation. Static card growth is 100 but
+    # the supervisor measured a child charge of 110 on the selected CUDA device.
+    assert tool["windows_device_peak"](guard, native, adapter, 110) == 110
+    with pytest.raises(ValueError):
+        tool["windows_device_peak"](guard, native, adapter, 100)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("scope", "cuda_uuid"), "different card"),
+        (("scope", "dedicated_missing_after_output"), 0),
+        (("scope", "pool_card_index"), True),
+        (("scope", "pid"), 999),
+        (("end", "pool", "created_filetime"), 999),
+        (("end", "zero", "basis"), "global-used-upper-bound"),
+        (("end", "zero", "card_index"), 1),
+        (("end", "zero", "at_ns"), 201),
+        (("end", "zero", "before"), "exited_empty"),
+        (("end", "pool", "pool_reserved_high_bytes"), 79),
+        (("end", "pool_ticks"), 2),
+        (("guard", "fit_observation", "wddm_shared", "error"), "stat failure"),
+        (("guard", "samples", 0, "cudaDeviceUuid"), "different card"),
+        (("guard", "samples", 0, "childGlobalUsedGrowthBytes"), 89),
+        (("guard", "samples", 0, "childGlobalUsedGrowthBytes"), 111),
+        (("guard", "admission", "childGpuCapBytes"), 109),
+    ],
+)
+def test_new_cuda_capture_refuses_changed_evidence(path, value):
+    adapter, guard = windows_guard()
+    scope = render_scope_guard(guard)
+    end = guard["fit_observation"]["cuda_render_end"]
+    if path == ("end", "zero", "before"):
+        end["zero"]["after"] = "live"
+    item = {"scope": scope, "guard": guard, "end": end}
+    for k in path[:-1]:
+        item = item[k]
+    item[path[-1]] = value
+    with pytest.raises(ValueError):
+        tool["windows_device_peak"](
+            guard,
+            {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}},
+            adapter,
+            110,
+            scope,
+        )
+
+
+def test_raw_teardown_gaps_without_verified_summary_still_refuse():
+    adapter, guard = windows_guard()
+    render_scope_guard(guard)
+    with pytest.raises(ValueError, match="without verified render scope"):
+        tool["windows_device_peak"](
+            guard,
+            {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}},
+            adapter,
+            110,
         )

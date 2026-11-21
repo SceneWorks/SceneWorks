@@ -1157,6 +1157,8 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         const wddmProcess = { adapter: receipt.adapter, pid: guard.pid, created_filetime: 900 + n, error: null, missing_active_polls: 0 };
         Object.assign(guard.admission, { cudaDeviceUuid: receipt.adapter.cuda_uuid, gpuGlobalUsedBaselineBytes: 20 });
         guard.peak_gpu_bytes = 80;
+        guard.samples = [{ phase: "cuda-global-used-upper-bound-sample", cudaDeviceUuid: receipt.adapter.cuda_uuid,
+          globalUsedUpperBoundBytes: 120, childGlobalUsedGrowthBytes: 100, gpuFreeBytes: 95, at_ns: 105 }];
         guard.cuda_attribution = { wddm_dedicated: { ...wddmProcess, samples: [[901, 60], [902, 93]] },
           pid_peak_bytes: 77, unknown_pid_polls: 1, global_upper_bytes: 120, pool_fallback_peak_bytes: 80 };
         guard.fit_observation = { wddm_shared: { ...wddmProcess, samples: [[901, 0], [902, 2]] },
