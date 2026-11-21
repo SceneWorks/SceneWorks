@@ -1347,6 +1347,40 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         r => {r.bounds.device_interval="full_job";}]) {
         const wrong = structuredClone(archived); mutate(wrong[4]); assert.throws(() => read(wrong, archiveCoverage));
       }
+      const partial = structuredClone(archived);
+      const partialPin = "f5c9ff80acd00334fd668e4ecc8d56be3347affd";
+      const certificates = {3:"c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d",
+        5:"bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"};
+      for (const r of partial) {
+        r.bounds.capture_adapter = {cuda_uuid:"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid:"luid_0x00000000_0x0001f603", node_mask:1};
+        if (r.axes.references === 6) continue;
+        const cert = certificates[r.axes.references];
+        Object.assign(r, {accepted:false, count_accepted:!cert, artifact_id:14725116132, inference_revision:partialPin,
+          receipt_sha256:"d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af"});
+        r.bounds.device = {...r.bounds.host};
+        if (cert) {
+          r.recovery_certificate_sha256 = cert;
+          r.bounds.device_interval = "load_through_completed_rgb";
+        }
+      }
+      const partialCoverage = {...archiveCoverage, coverage:[...archiveCoverage.coverage, {...coverage, capture_revision:partialPin}]};
+      assert.deepEqual(read(partial, partialCoverage).map(r => r.references), counts);
+      for (const [count, change] of [
+        [3, r => {delete r.recovery_certificate_sha256;}],
+        [3, r => {r.recovery_certificate_sha256=certificates[5];}],
+        [5, r => {r.accepted=true; delete r.count_accepted; delete r.recovery_certificate_sha256; delete r.bounds.device_interval;}],
+        [5, r => {delete r.bounds.device_interval;}],
+        [2, r => {r.recovery_certificate_sha256=certificates[3];}],
+        [4, r => {r.count_accepted=false;}],
+        [2, r => {r.inference_revision=target;}],
+        [2, r => {r.artifact_id+=1;}],
+        [4, r => {r.receipt_sha256=sha256("another receipt");}],
+        [3, r => {r.bounds.capture_adapter.node_mask=2;}],
+      ]) {
+        const wrong = structuredClone(partial);
+        change(wrong.find(r => r.axes.references === count));
+        assert.throws(() => read(wrong, partialCoverage));
+      }
       const joined = read(split, both);
       assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
         split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));

@@ -19,6 +19,7 @@ struct Capture {
     receipt_sha256: String,
     guard_policy_sha256: String,
     accepted: bool,
+    count_accepted: Option<bool>,
     recovery_certificate_sha256: Option<String>,
     post_execution_verified: bool,
     guard_exit_code: i32,
@@ -249,13 +250,52 @@ fn valid_hex(value: &str, length: usize) -> bool {
 }
 
 impl Capture {
-    fn qualify(self) -> Result<QualifiedWitness, String> {
+    fn source_accepted(&self) -> bool {
         const ARCHIVED_SIX_ARTIFACT: u64 = 14_719_969_057;
         const ARCHIVED_SIX_RECEIPT: &str =
             "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f";
         const RECOVERY_CERTIFICATE: &str =
             "dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f";
-        let admitted_source = match self.recovery_certificate_sha256.as_deref() {
+        const FOUR_COUNT_ARTIFACT: u64 = 14_725_116_132;
+        const FOUR_COUNT_RECEIPT: &str =
+            "d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af";
+        if self.artifact_id == FOUR_COUNT_ARTIFACT || self.receipt_sha256 == FOUR_COUNT_RECEIPT {
+            return self.artifact_id == FOUR_COUNT_ARTIFACT
+                && self.receipt_sha256 == FOUR_COUNT_RECEIPT
+                && self.inference_revision == "f5c9ff80acd00334fd668e4ecc8d56be3347affd"
+                && !self.accepted
+                && self.platform == "windows"
+                && matches!(&self.bounds, PhysicalBounds::WindowsJobAndWddm { capture_adapter, device: Envelope::MeasuredAggregate {..}, device_interval,.. }
+                    if capture_adapter.cuda_uuid == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+                        && capture_adapter.luid == "luid_0x00000000_0x0001f603" && capture_adapter.node_mask == 1
+                        && device_interval.is_some() == (self.count_accepted == Some(false)))
+                && matches!(
+                    (
+                        self.axes.references,
+                        self.count_accepted,
+                        self.recovery_certificate_sha256.as_deref()
+                    ),
+                    (2 | 4, Some(true), None)
+                        | (
+                            3,
+                            Some(false),
+                            Some(
+                                "c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d"
+                            )
+                        )
+                        | (
+                            5,
+                            Some(false),
+                            Some(
+                                "bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"
+                            )
+                        )
+                );
+        }
+        if self.count_accepted.is_some() {
+            return false;
+        }
+        match self.recovery_certificate_sha256.as_deref() {
             None => {
                 self.accepted
                     && self.artifact_id != ARCHIVED_SIX_ARTIFACT
@@ -270,8 +310,11 @@ impl Capture {
                     && self.receipt_sha256 == ARCHIVED_SIX_RECEIPT
                     && self.inference_revision == "7f6c4cca3fc053030bd71f0bfce6886adb762eb6"
             }
-        };
-        if !admitted_source
+        }
+    }
+
+    fn qualify(self) -> Result<QualifiedWitness, String> {
+        if !self.source_accepted()
             || !self.post_execution_verified
             || self.guard_exit_code != 0
             || self.artifact_id == 0
@@ -318,7 +361,9 @@ impl Capture {
                         device_interval,
                     },
                 ) if capture_adapter.valid()
-                    && (self.accepted || device_interval.is_some())
+                    && (self.accepted
+                        || self.count_accepted == Some(true)
+                        || device_interval.is_some())
                     && (device_interval.is_none()
                         || matches!(device, Envelope::MeasuredAggregate { .. })) =>
                 {
@@ -373,4 +418,76 @@ pub(super) fn packaged() -> crate::WorkerResult<&'static [QualifiedWitness]> {
                 "invalid SCAIL-2 plural memory evidence: {e}"
             ))
         })
+}
+
+#[test]
+fn continuation_keeps_each_original_count_and_its_own_certificate() {
+    use serde_json::{json, Value};
+    let certificates = [
+        "c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d",
+        "bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7",
+    ];
+    let original = serde_json::from_slice::<Vec<Value>>(INDEX)
+        .unwrap()
+        .remove(0);
+    let mut row = original.clone();
+    row["platform"] = json!("windows");
+    row["axes"]["backend"] = json!("cuda");
+    row["artifact_id"] = json!(14_725_116_132_u64);
+    row["receipt_sha256"] =
+        json!("d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af");
+    row["inference_revision"] = json!("f5c9ff80acd00334fd668e4ecc8d56be3347affd");
+    row["accepted"] = json!(false);
+    let measured = json!({"basis":"measured_aggregate", "observed_peak_bytes":1,"classified_peak_bytes":1,
+                          "co_live_extra_bytes":0,"uncertainty_allowance_bytes":0,"review_sha256":"1".repeat(64)});
+    row["bounds"] = json!({"measurement":"windows_job_and_wddm", "device":measured, "host":measured,
+        "capture_adapter":{"cuda_uuid":"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+                           "luid":"luid_0x00000000_0x0001f603", "node_mask":1}});
+    let accepted = |value: &Value| {
+        serde_json::from_value::<Capture>(value.clone())
+            .unwrap()
+            .source_accepted()
+    };
+    for count in 2..=5 {
+        let mut r = row.clone();
+        r["axes"]["references"] = json!(count);
+        let ordinary = count % 2 == 0;
+        r["count_accepted"] = json!(ordinary);
+        if !ordinary {
+            r["recovery_certificate_sha256"] = json!(certificates[(count - 3) / 2]);
+            r["bounds"]["device_interval"] = json!("load_through_completed_rgb");
+        }
+        assert!(accepted(&r));
+        for (name, crossed) in [
+            ("artifact_id", json!(1)),
+            ("receipt_sha256", json!("0".repeat(64))),
+            ("inference_revision", json!("0".repeat(40))),
+            ("count_accepted", json!(!ordinary)),
+            ("accepted", json!(true)),
+        ] {
+            let mut invalid = r.clone();
+            invalid[name] = crossed;
+            assert!(!accepted(&invalid), "{count} {name}");
+        }
+        let mut crossed = r.clone();
+        crossed["recovery_certificate_sha256"] = json!(if count == 3 {
+            certificates[1]
+        } else {
+            certificates[0]
+        });
+        assert!(!accepted(&crossed));
+        if !ordinary {
+            r.as_object_mut()
+                .unwrap()
+                .remove("recovery_certificate_sha256");
+            assert!(!accepted(&r));
+            r["accepted"] = json!(true);
+            r.as_object_mut().unwrap().remove("count_accepted");
+            r["bounds"]
+                .as_object_mut()
+                .unwrap()
+                .remove("device_interval");
+            assert!(!accepted(&r));
+        }
+    }
 }

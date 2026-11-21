@@ -93,6 +93,31 @@ export function scailPackageDigests(index, coverage, source) {
   return { indexSha256: approved(index, "APPROVED_INDEX_SHA256"), coverageSha256: approved(coverage, "APPROVED") };
 }
 
+function acceptedCapture(row, mlx) {
+  const a = row.axes;
+  const partialArtifact = row.artifact_id === 14725116132;
+  const partialReceipt = row.receipt_sha256 === "d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af";
+  if (partialArtifact || partialReceipt) {
+    const bounds = row.bounds, adapter = bounds.capture_adapter;
+    if (mlx || !partialArtifact || !partialReceipt || row.accepted !== false
+      || row.inference_revision !== "f5c9ff80acd00334fd668e4ecc8d56be3347affd"
+      || adapter?.cuda_uuid !== "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+      || adapter.luid !== "luid_0x00000000_0x0001f603" || adapter.node_mask !== 1
+      || bounds.device.basis !== "measured_aggregate") return false;
+    if ([2, 4].includes(a.references)) return row.count_accepted === true && row.recovery_certificate_sha256 === undefined && bounds.device_interval === undefined;
+    const cert = {3:"c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d", 5:"bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"}[a.references];
+    return cert !== undefined && row.recovery_certificate_sha256 === cert && row.count_accepted === false
+      && bounds.device_interval === "load_through_completed_rgb";
+  }
+  if (row.count_accepted !== undefined) return false;
+  const archivedArtifact = row.artifact_id === 14719969057;
+  const archivedReceipt = row.receipt_sha256 === "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f";
+  return row.recovery_certificate_sha256 === undefined ? row.accepted === true && !archivedArtifact && !archivedReceipt :
+    !mlx && row.accepted === false && a.references === 6 && row.recovery_certificate_sha256 === "dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f"
+    && archivedArtifact && archivedReceipt
+    && row.inference_revision === "7f6c4cca3fc053030bd71f0bfce6886adb762eb6";
+}
+
 export function scailFitEvidence(pool, backend, { compiledPin, coverage, closures, host }) {
   const mlx = backend === "mlx", platform = mlx ? "macos" : "windows";
   const counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
@@ -110,13 +135,7 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     const a = row.axes;
     if (a?.backend !== backend || a.artifact_sha256 !== scailArtifactSha256 || a.effective_tier !== "q4"
       || a.artifact_tier !== "q4" || a.width !== 832 || a.height !== 480 || !Number.isInteger(a.references) || a.references < 2 || a.references > 6) continue;
-    const archivedArtifact = row.artifact_id === 14719969057;
-    const archivedReceipt = row.receipt_sha256 === "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f";
-    const accepted = row.recovery_certificate_sha256 === undefined ? row.accepted === true && !archivedArtifact && !archivedReceipt :
-      !mlx && row.accepted === false && a.references === 6 && row.recovery_certificate_sha256 === "dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f"
-      && archivedArtifact && archivedReceipt
-      && row.inference_revision === "7f6c4cca3fc053030bd71f0bfce6886adb762eb6";
-    assert.ok(accepted && row.post_execution_verified === true && row.guard_exit_code === 0
+    assert.ok(acceptedCapture(row, mlx) && row.post_execution_verified === true && row.guard_exit_code === 0
       && Number.isSafeInteger(row.artifact_id) && row.artifact_id > 0 && digestPattern.test(row.receipt_sha256)
       && digestPattern.test(row.guard_policy_sha256) && /^[a-f0-9]{40}$/.test(row.inference_revision)
       && row.device?.trim() && row.runtime?.trim(), "invalid projected physical capture");

@@ -10,11 +10,16 @@ reviewed extra/uncertainty or overshoot bytes. Capture facts come from the files
 For the archived GPU0 six, supply --recovery-archive and --recovery-certificate.
 The independent review must name the hash of the native verifier's certificate.
 The original campaign acceptance remains false. Device observations end at the
-completed RGB output; the separate Windows Job counters cover host lifetime.
+completed RGB output. The separate Windows Job counters cover host lifetime.
+For the four-count GPU0 continuation, supply the original --recovery-archive for
+each count. Counts 3 and 5 also require the native owned-zero certificate map.
+The review names the SHA-256 of the count's sorted compact JSON certificate plus
+one newline. Each projection retains the original campaign and count verdicts.
 """
 
 import argparse
 import hashlib
+import itertools
 import json
 import re
 from pathlib import Path
@@ -235,7 +240,9 @@ def validate_render_scope(scope, end, dedicated, misses, pool, card):
     )
 
 
-def validate_rejected_growth(guard, end, native_pool, card, pool_high, *, completed=False):
+def validate_rejected_growth(
+    guard, end, native_pool, card, pool_high, *, completed=False, tied_read=False
+):
     """A failed read is chargeable only when this Job's verified output pool has retired."""
     mark, zero = end["pool"], end["zero"]
     require(
@@ -313,6 +320,29 @@ def validate_rejected_growth(guard, end, native_pool, card, pool_high, *, comple
     # A rejected sample may extend live GPU usage beyond a previously plausible terminal PDH gap.
     observation = guard["fit_observation"]
     last_used = max(last_positive_read, max(t for t, _, value in card if value > 0))
+    if tied_read:
+        events = end["rejected_growth"]
+        final = events[-1]
+        require(
+            len(events) >= 2
+            and [v["card_index"] for v in end["pool_growth"]]
+            == list(range(mark["card_index"], zero["card_index"]))
+            and all(v["next_card_index"] == zero["card_index"] for v in events)
+            and all(
+                a["child_growth_bytes"] >= b["child_growth_bytes"]
+                for a, b in itertools.pairwise(events)
+            )
+            and mark["at_ns"] < events[-2]["at_ns"] < final["read_ns"] == last_used
+            and 0 < final["child_growth_bytes"] < reserved
+            and final["before"] == "live"
+            and final["after"] == "exited_empty"
+            and final["detail"] == "CUDA pool proof exceeds concurrent global use"
+            and exited_at == final["next_card_index"] == zero["card_index"]
+            and final["read_ns"] <= final["at_ns"] < zero["at_ns"]
+            and zero["before"] == zero["after"] == "exited_empty",
+            "terminal CUDA read does not precede this Job's measured zero",
+        )
+    gaps = []
     for name, series in (
         ("dedicated", guard["cuda_attribution"]["wddm_dedicated"]),
         ("shared", observation["wddm_shared"]),
@@ -324,41 +354,52 @@ def validate_rejected_growth(guard, end, native_pool, card, pool_high, *, comple
             len(missed) == series["missing_active_polls"],
             "unlocated WDDM gap during CUDA pool retry",
         )
-        for item in missed:
+        if tied_read:
             require(
-                max(mark["at_ns"], last_used)
-                < byte_count(item["start_ns"])
-                <= byte_count(item["end_ns"])
-                <= zero["at_ns"]
+                len(missed) == 1
+                and len(observation["wddm_retry"][name]["events"])
+                == observation["wddm_retry"][name]["attempts"]
+                == 1,
+                "terminal read lacks both original isolated gauge gaps",
+            )
+        for item in missed:
+            start = byte_count(item["start_ns"])
+            if tied_read:
+                gaps.append(item)
+                tick_ns = byte_count(guard["admission"]["pollMillis"]) * 1_000_000
+                finish = byte_count(item["end_ns"])
+                lower, upper = (
+                    byte_count(item["local_filetime_before"]),
+                    byte_count(item["local_filetime_after"]),
+                )
+                require(
+                    0 < lower <= upper
+                    and (upper - lower) * 100 <= tick_ns
+                    and 0 <= finish - start <= tick_ns
+                    and final["read_ns"] <= start <= finish <= final["at_ns"],
+                    "terminal gauge retry falls outside its source attempt",
+                )
+            require(
+                (start >= last_used if tied_read else start > max(mark["at_ns"], last_used))
+                and start <= byte_count(item["end_ns"]) <= zero["at_ns"]
                 and item["retried"] is True
                 and item["retry_sample"] is None
                 and item["previous"] == series["samples"][-1]
                 and byte_count(item["local_filetime_before"]) >= series["samples"][-1][0],
                 "WDDM gap overlaps a rejected CUDA reading",
             )
+    if tied_read:
+        dedicated, shared = gaps
+        require(
+            dedicated["start_ns"] == final["read_ns"]
+            and dedicated["end_ns"] <= shared["start_ns"] <= shared["end_ns"] == final["at_ns"]
+            and dedicated["local_filetime_after"] <= shared["local_filetime_before"],
+            "synchronous terminal gauge order differs from the original CUDA read",
+        )
 
 
-def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool):
-    """Verify observed load through output. The final Job release supplies no PID memory sample."""
-    end = guard["fit_observation"]["cuda_render_end"]
-    mark, events = end["pool"], end["rejected_growth"]
-    pid, uuid = guard["pid"], guard["admission"]["cudaDeviceUuid"]
-    require(
-        end["zero"] is None
-        and uuid == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
-        and mark["basis"] == "verified-output-pool"
-        and mark["pid"] == pid
-        and mark["cuda_uuid"] == uuid
-        and byte_count(mark["card_index"]) < len(card)
-        and (mark["at_ns"], mark["pool_reserved_high_bytes"]) == (card[mark["card_index"]][0], pool)
-        and card[mark["card_index"]][2] == pool
-        and claim["physical_index"] == 0
-        and claim["device_uuid"] == uuid
-        and claim["lease_released"] is True
-        and claim["post_execution_verified"] is True
-        and claim["release_metadata_verification"] == {"status": "verified"},
-        "CUDA completion does not identify the released output and selected device",
-    )
+def validate_job_release(guard, claim, basis):
+    pid = guard["pid"]
     if basis == "owned-job-completion":
         expected = {
             "scope": "supervisor-owned-windows-job",
@@ -389,6 +430,48 @@ def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool
         ),
         "missing five quiet selected-card release samples",
     )
+
+
+def validate_cuda_guard_samples(guard, end, card):
+    cap, reserve = guard["admission"]["childGpuCapBytes"], guard["admission"]["gpuFreeReserveBytes"]
+    values = [(free, used) for _, free, used in card]
+    values.extend(
+        (v["gpuFreeBytes"], v["childGlobalUsedGrowthBytes"])
+        for v in guard["samples"]
+        if v.get("phase") == "cuda-global-used-upper-bound-sample"
+    )
+    values.extend(
+        (v["free_bytes"], v["child_growth_bytes"])
+        for v in end["pool_growth"] + end["rejected_growth"]
+    )
+    require(
+        all(free >= reserve and used <= cap for free, used in values),
+        "completed CUDA Job exceeded guard",
+    )
+
+
+def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool):
+    """Verify observed load through output. The final Job release supplies no PID memory sample."""
+    end = guard["fit_observation"]["cuda_render_end"]
+    mark, events = end["pool"], end["rejected_growth"]
+    pid, uuid = guard["pid"], guard["admission"]["cudaDeviceUuid"]
+    require(
+        end["zero"] is None
+        and uuid == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+        and mark["basis"] == "verified-output-pool"
+        and mark["pid"] == pid
+        and mark["cuda_uuid"] == uuid
+        and byte_count(mark["card_index"]) < len(card)
+        and (mark["at_ns"], mark["pool_reserved_high_bytes"]) == (card[mark["card_index"]][0], pool)
+        and card[mark["card_index"]][2] == pool
+        and claim["physical_index"] == 0
+        and claim["device_uuid"] == uuid
+        and claim["lease_released"] is True
+        and claim["post_execution_verified"] is True
+        and claim["release_metadata_verification"] == {"status": "verified"},
+        "CUDA completion does not identify the released output and selected device",
+    )
+    validate_job_release(guard, claim, basis)
     final = [v for v in events if v["next_card_index"] == len(card)]
     require(
         len(final) == 4
@@ -402,18 +485,7 @@ def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool
         "incomplete CUDA post-output attempt sequence",
     )
     validate_rejected_growth(guard, end, native_pool, card, pool, completed=True)
-    cap, reserve = guard["admission"]["childGpuCapBytes"], guard["admission"]["gpuFreeReserveBytes"]
-    values = [(free, used) for _, free, used in card]
-    values.extend(
-        (v["gpuFreeBytes"], v["childGlobalUsedGrowthBytes"])
-        for v in guard["samples"]
-        if v.get("phase") == "cuda-global-used-upper-bound-sample"
-    )
-    values.extend((v["free_bytes"], v["child_growth_bytes"]) for v in end["pool_growth"] + events)
-    require(
-        all(free >= reserve and used <= cap for free, used in values),
-        "completed CUDA Job exceeded guard",
-    )
+    validate_cuda_guard_samples(guard, end, card)
     expected = {
         "basis": basis,
         "pid": pid,
@@ -470,7 +542,15 @@ def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool
 
 
 def windows_device_peak(
-    guard, native, adapter, raw_gross, scope=None, native_pool=None, *, completion=None
+    guard,
+    native,
+    adapter,
+    raw_gross,
+    scope=None,
+    native_pool=None,
+    *,
+    completion=None,
+    tied_read=False,
 ):
     admission = guard["admission"]
     baseline = byte_count(admission.get("gpuGlobalUsedBaselineBytes"))
@@ -549,9 +629,20 @@ def windows_device_peak(
             validate_completed_job(guard, claim, summary, basis, pool, card, native_pool)
         elif any(misses) or rejected:
             require(fallback == pool, "output marker differs from native pool fallback")
+            if tied_read:
+                scope = scope.copy()
+                final = rejected[-1]
+                for field, raw in (
+                    ("terminal_rejected_read_ns", "read_ns"),
+                    ("terminal_rejected_at_ns", "at_ns"),
+                ):
+                    require(
+                        byte_count(scope.pop(field)) == final[raw],
+                        "certificate terminal read timestamp differs",
+                    )
             validate_render_scope(scope, end, dedicated, misses, pool, card)
             if rejected:
-                validate_rejected_growth(guard, end, native_pool, card, pool)
+                validate_rejected_growth(guard, end, native_pool, card, pool, tied_read=tied_read)
         else:
             require(scope is None, "unexpected WDDM render-scope exception")
         classified = max(owned_or_floor, growth)
@@ -583,6 +674,66 @@ RECOVERED_SIX = {
     "archive_sha256": "83985597d8d0cf2399b2311c1f1d737058cc1c1530b1a53fce6c79faee123969",
     "receipt_sha256": "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f",
 }
+
+
+FOUR_COUNT_CAPTURE = {
+    "run_id": "44944284405",
+    "run_attempt": "1",
+    "artifact_id": "14725116132",
+    "inference_revision": "f5c9ff80acd00334fd668e4ecc8d56be3347affd",
+    "plan_sha256": "0f4b541c702bf45d607e138b56044fa8407a788b3b041d6e5f600b040097cf35",
+    "archive_sha256": "39366924a8a5e09d4e1b0186615b6d3d5de7995ac18c87cad2f48ca918feb8e8",
+    "receipt_sha256": "d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af",
+}
+FOUR_COUNT_CERTIFICATES = {
+    3: "c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d",
+    5: "bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7",
+}
+
+
+def partial_count_row(receipt, review, archive, certificates):
+    identity = FOUR_COUNT_CAPTURE
+    count = review["references"]
+    require(
+        archive
+        and sha256(archive.read_bytes()) == identity["archive_sha256"]
+        and all(
+            str(review[k]) == identity[k]
+            for k in ("artifact_id", "receipt_sha256", "run_id", "run_attempt")
+        )
+        and receipt["contract"]["head"] == identity["inference_revision"]
+        and sha256(json.dumps(receipt["contract"], sort_keys=True, separators=(",", ":")).encode())
+        == identity["plan_sha256"]
+        and receipt["accepted"] is False
+        and count in (2, 3, 4, 5),
+        "different four-count archive or review",
+    )
+    record = receipt["counts"][str(count)]
+    if count in (2, 4):
+        require(
+            record["accepted"] is True
+            and certificates is None
+            and "recovery_certificate_sha256" not in review,
+            "original accepted count cannot use recovery",
+        )
+        return record["candidate_row_pending_physical_review"]
+    require(
+        certificates
+        and record["accepted"] is False
+        and record["telemetry_failure"] == "incomplete_wddm_samples"
+        and "candidate_row_pending_physical_review" not in record,
+        "missing original rejected count or separate certificate",
+    )
+    cert = json.loads(certificates.read_bytes())[str(count)]
+    digest = sha256((json.dumps(cert, sort_keys=True, separators=(",", ":")) + "\n").encode())
+    require(
+        cert["schema"] == "scail2-quiet-gpu0-owned-zero-recovery-v1"
+        and cert["references"] == count
+        and cert["capture"] == identity
+        and digest == FOUR_COUNT_CERTIFICATES[count] == review["recovery_certificate_sha256"],
+        "different owned-zero recovery certificate",
+    )
+    return cert["candidate_row_pending_physical_review"]
 
 
 def recovered_row(receipt, review, certificate_path, archive_path):
@@ -621,9 +772,13 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
         "review belongs to a different receipt",
     )
     receipt = json.loads(receipt_bytes)
-    recovery = certificate_path is not None or archive_path is not None
+    partial = (
+        str(review["artifact_id"]) == FOUR_COUNT_CAPTURE["artifact_id"]
+        or review["receipt_sha256"] == FOUR_COUNT_CAPTURE["receipt_sha256"]
+    )
+    recovery = not partial and (certificate_path is not None or archive_path is not None)
     require(
-        (receipt["accepted"] is True or recovery)
+        (receipt["accepted"] is True or recovery or partial)
         and receipt["contract"]["protocol"] == "scail2-plural-fit-v1",
         "incomplete or unrelated campaign",
     )
@@ -651,7 +806,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
     )
     record = receipt["counts"][str(count)]
     require(
-        (record["accepted"] is True or recovery)
+        (record["accepted"] is True or recovery or partial)
         and record["claim"]["post_execution_verified"] is True,
         "capture did not complete",
     )
@@ -666,12 +821,12 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
         guard["returncode"] == 0 and guard["pid"] == record["native"]["pid"],
         "capture guard did not complete for this process",
     )
-    row = (
-        recovered_row(receipt, review, certificate_path, archive_path)
-        if recovery
-        else record["candidate_row_pending_physical_review"]
-    )
-    if not recovery:
+    if partial:
+        row = partial_count_row(receipt, review, archive_path, certificate_path)
+    elif recovery:
+        row = recovered_row(receipt, review, certificate_path, archive_path)
+    else:
+        row = record["candidate_row_pending_physical_review"]
         require(
             "recovery_certificate_sha256" not in review,
             "unexpected recovery review for ordinary capture",
@@ -796,6 +951,25 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                 "completed Job polling interval differs from the signed policy",
             )
             completion = (record["claim"], summary, basis)
+        if partial:
+            require(
+                guard["admission"]["pollMillis"]
+                == receipt["request"]["policy"]["pollMillis"]
+                == 250
+                and record["claim"]["device_uuid"] == hw["uuid"]
+                and record["claim"]["physical_index"] == 0
+                and record["claim"]["lease_released"] is True
+                and record["claim"]["release_metadata_verification"] == {"status": "verified"}
+                and review["domains"]["device"]["basis"] == "measured_aggregate",
+                "partial CUDA count lacks original signed guard or release",
+            )
+            validate_job_release(guard, record["claim"], "owned-job-completion")
+            validate_cuda_guard_samples(
+                guard,
+                end,
+                guard["fit_observation"]["card_samples_monotonic_ns_free_owned_or_fallback_bytes"],
+            )
+        if completion or partial:
             counters = guard["fit_observation"]["windows_peak"]
             host = max(
                 byte_count(guard["peak_host_bytes"]),
@@ -834,13 +1008,18 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                     row.get("cuda_render_scope"),
                     native_pool,
                     completion=completion,
+                    tied_read=partial and not record["accepted"],
                 ),
                 admission["childGpuCapBytes"],
             ),
         }
         bounds = {
             "measurement": "windows_job_and_wddm",
-            **({"device_interval": "load_through_completed_rgb"} if completion else {}),
+            **(
+                {"device_interval": "load_through_completed_rgb"}
+                if completion or (partial and not record["accepted"])
+                else {}
+            ),
             "capture_adapter": {
                 k: receipt["adapter"][k] for k in ("cuda_uuid", "luid", "node_mask")
             },
@@ -864,9 +1043,10 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
         "receipt_sha256": review["receipt_sha256"],
         "guard_policy_sha256": admission["policySha256"],
         "accepted": receipt["accepted"],
+        **({"count_accepted": record["accepted"]} if partial else {}),
         **(
             {"recovery_certificate_sha256": review["recovery_certificate_sha256"]}
-            if recovery
+            if recovery or (partial and not record["accepted"])
             else {}
         ),
         "post_execution_verified": record["claim"]["post_execution_verified"],

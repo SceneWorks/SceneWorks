@@ -925,3 +925,150 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
     cert.write_bytes(cert.read_bytes() + b" ")
     with pytest.raises(ValueError, match="certificate"):
         recover()
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        None,
+        "strict_old_scope",
+        "certificate_time",
+        "early_dedicated",
+        "late_dedicated",
+        "early_shared_end",
+        "crossed_filetime",
+        "reversed_filetime",
+        "earlier_reader",
+        "missing_retry",
+        "wrong_zero",
+        "missing_pool_sample",
+        "growing_rejected_charge",
+    ],
+)
+def test_owned_zero_requires_both_gauge_gaps_in_the_same_final_cuda_read(changed):
+    adapter, guard = windows_guard()
+    scope, pool = with_rejected_reads(guard)
+    o = guard["fit_observation"]
+    end = o["cuda_render_end"]
+    guard["admission"]["pollMillis"] = 250
+    last = end["rejected_growth"][-1]
+    last.update(
+        detail="CUDA pool proof exceeds concurrent global use",
+        global_used_upper_bytes=30,
+        child_growth_bytes=18,
+    )
+    scope.update(terminal_rejected_read_ns=230, terminal_rejected_at_ns=245)
+    d, s = [o["wddm_retry"][g]["events"][0] for g in ("dedicated", "shared")]
+    d.update(start_ns=230, end_ns=235)
+    s.update(start_ns=236, end_ns=245, local_filetime_before=905)
+    if changed == "certificate_time":
+        scope["terminal_rejected_read_ns"] += 1
+    elif changed == "early_dedicated":
+        d["start_ns"] -= 1
+    elif changed == "late_dedicated":
+        d["start_ns"] += 1
+    elif changed == "early_shared_end":
+        s["end_ns"] -= 1
+    elif changed == "crossed_filetime":
+        s["local_filetime_before"] -= 1
+    elif changed == "reversed_filetime":
+        d["local_filetime_after"] = 903
+    elif changed == "earlier_reader":
+        end["rejected_growth"].pop(0)
+        guard["cuda_attribution"]["unknown_pid_polls"] -= 1
+    elif changed == "missing_retry":
+        d["retried"] = False
+    elif changed == "wrong_zero":
+        end["zero"]["before"] = "live"
+    elif changed == "missing_pool_sample":
+        end["pool_growth"].clear()
+    elif changed == "growing_rejected_charge":
+        last["child_growth_bytes"] = last["global_used_upper_bytes"] = 41
+    elif changed == "strict_old_scope":
+        del scope["terminal_rejected_at_ns"], scope["terminal_rejected_read_ns"]
+
+    def peak():
+        return tool["windows_device_peak"](
+            guard,
+            {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}},
+            adapter,
+            110,
+            scope,
+            pool,
+            tied_read=changed != "strict_old_scope",
+        )
+
+    if changed is None:
+        assert peak() == 110
+    else:
+        with pytest.raises(ValueError):
+            peak()
+
+
+def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_path, monkeypatch):
+    receipt = {"accepted": False, "contract": {"head": "a" * 40}, "counts": {}}
+    archive, proofs = tmp_path / "archive.zip", tmp_path / "certificates.json"
+    archive.write_bytes(b"original archive")
+
+    def compact(v):
+        return json.dumps(v, sort_keys=True, separators=(",", ":")).encode()
+
+    identity = dict(
+        tool["FOUR_COUNT_CAPTURE"],
+        inference_revision=receipt["contract"]["head"],
+        plan_sha256=tool["sha256"](compact(receipt["contract"])),
+        archive_sha256=tool["sha256"](archive.read_bytes()),
+    )
+    namespace = tool["partial_count_row"].__globals__
+    monkeypatch.setitem(namespace, "FOUR_COUNT_CAPTURE", identity)
+    certificates, hashes = {}, {}
+    for count in range(2, 6):
+        row = {"measured": count}
+        record = {"accepted": count in (2, 4)}
+        if record["accepted"]:
+            record["candidate_row_pending_physical_review"] = row
+        else:
+            record["telemetry_failure"] = "incomplete_wddm_samples"
+            cert = {
+                "schema": "scail2-quiet-gpu0-owned-zero-recovery-v1",
+                "capture": identity,
+                "references": count,
+                "candidate_row_pending_physical_review": row,
+            }
+            certificates[str(count)] = cert
+            hashes[count] = tool["sha256"](compact(cert) + b"\n")
+        receipt["counts"][str(count)] = record
+    monkeypatch.setitem(namespace, "FOUR_COUNT_CERTIFICATES", hashes)
+    proofs.write_bytes(compact(certificates))
+    for count in range(2, 6):
+        review = {
+            k: identity[k] for k in ("artifact_id", "receipt_sha256", "run_id", "run_attempt")
+        }
+        review["references"] = count
+        source = None
+        if count in hashes:
+            review["recovery_certificate_sha256"] = hashes[count]
+            source = proofs
+        read = tool["partial_count_row"]
+        assert read(receipt, review, archive, source) == {"measured": count}
+        for name in ("artifact_id", "receipt_sha256", "run_id", "run_attempt"):
+            with pytest.raises(ValueError):
+                read(receipt, dict(review, **{name: "other"}), archive, source)
+        if source:
+            with pytest.raises(ValueError):
+                read(receipt, review, archive, None)
+            with pytest.raises(ValueError):
+                read(
+                    receipt,
+                    dict(review, recovery_certificate_sha256=hashes[8 - count]),
+                    archive,
+                    proofs,
+                )
+        else:
+            with pytest.raises(ValueError):
+                read(receipt, review, archive, proofs)
+        record = receipt["counts"][str(count)]
+        record["accepted"] = not record["accepted"]
+        with pytest.raises(ValueError):
+            read(receipt, review, archive, source)
+        record["accepted"] = not record["accepted"]
