@@ -51,8 +51,8 @@ pub(super) fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
     for value in job.extra.values_mut() {
         redact_private_binding_markers(value);
     }
-    // Worker source guards may include an OS path in a refusal. Public diagnostics keep the
-    // actionable prefix while removing the path and any following private detail.
+    // Worker source guards may include an OS path in a refusal. Keep the planner's failure reason
+    // while removing filesystem locations from public diagnostics.
     redact_absolute_paths_with(&mut job.message, "[redacted path]");
     if let Some(error) = job.error.as_mut() {
         redact_absolute_paths_with(error, "[redacted path]");
@@ -434,8 +434,9 @@ pub(super) fn redact_selected_text_encoder_paths(
 /// A confinement error can enumerate unrelated allowed roots and a later symlink error can name a
 /// target that no longer matches the selected source. This pure lexical pass is deliberately
 /// scoped to jobs carrying the server-private encoder resolution; it performs no filesystem I/O
-/// while projecting an HTTP/SSE response. Once a filesystem location is found, the remainder is
-/// dropped rather than guessing where an unquoted `Path::display()` value containing spaces ends.
+/// while projecting an HTTP/SSE response. The logical-weight planner's explicit `(mapping-id):`
+/// boundary retains its following diagnostic. Other `Path::display()` values still drop the tail
+/// rather than guess where an unquoted path containing spaces ends.
 /// Web URLs and relative paths remain intact, while `file://` URLs are filesystem locations and
 /// are therefore private.
 pub(super) fn redact_absolute_paths(value: &mut String) {
@@ -534,6 +535,8 @@ fn redact_absolute_paths_with(value: &mut String, replacement: &str) {
         }
         end
     };
+    let mut output = String::with_capacity(value.len());
+    let mut copied_through = 0;
     let mut index = 0;
     while index < bytes.len() {
         if is_web_url(index) {
@@ -549,9 +552,34 @@ fn redact_absolute_paths_with(value: &mut String, replacement: &str) {
         let prefix_end = index
             .checked_sub(1)
             .filter(|previous| matches!(bytes[*previous], b'"' | b'\'' | b'`' | b'<'));
-        value.truncate(prefix_end.unwrap_or(index));
-        value.push_str(replacement);
-        return;
+        // This is a formatter boundary, not whitespace: a path can contain spaces. Prefer the
+        // planner's final mapping delimiter over delimiters embedded in a filename. Scan subsequent
+        // diagnostics too, so a second absolute path cannot escape redaction.
+        let planner_end = if value[..index].ends_with("logical weight plan for ") {
+            value[index..].rmatch_indices(" (").find_map(|(offset, _)| {
+                let rest = &value[index + offset + 2..];
+                let (mapping, _) = rest.split_once("): ")?;
+                (!mapping.is_empty()
+                    && mapping
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+                .then_some(index + offset)
+            })
+        } else {
+            None
+        };
+        output.push_str(&value[copied_through..prefix_end.unwrap_or(index)]);
+        output.push_str(replacement);
+        let Some(end) = planner_end else {
+            *value = output;
+            return;
+        };
+        copied_through = end;
+        index = end;
+    }
+    if copied_through != 0 {
+        output.push_str(&value[copied_through..]);
+        *value = output;
     }
 }
 
@@ -690,6 +718,35 @@ mod portable_redaction_tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn checkpoint_plan_redaction_preserves_failure_detail_without_exposing_paths() {
+        for path in [
+            r"C:\Users\Private Name\Models\muse.safetensors",
+            r"\\?\C:\Users\Private Name\Models\muse.safetensors",
+            r"\\server\Private Share\muse.safetensors",
+            "/Volumes/Private Models/muse.safetensors",
+            // A filename must not supply an earlier, fake end to the redacted path.
+            "/private/fake (other-adapter): secret/muse.safetensors",
+        ] {
+            let detail = "layer \"blocks.0.attn.gate\": descriptor carries `convrot`; rotated int8 checkpoints are not the plain per-row format";
+            let mut message = format!(
+                "Krea 2 imported checkpoint generation failed: backend op failed: logical weight plan for {path} (krea-native-to-diffusers-v1): {detail}"
+            );
+            redact_absolute_paths_with(&mut message, "[redacted path]");
+            assert_eq!(message, format!(
+                "Krea 2 imported checkpoint generation failed: backend op failed: logical weight plan for [redacted path] (krea-native-to-diffusers-v1): {detail}"
+            ));
+            assert!(!message.contains(path));
+        }
+
+        let mut nested = "logical weight plan for /private/model.safetensors (adapter-v1): missing companion in C:\\Private Models\\scale.bin".to_owned();
+        redact_absolute_paths_with(&mut nested, "[redacted path]");
+        assert_eq!(nested, "logical weight plan for [redacted path] (adapter-v1): missing companion in [redacted path]");
+        let mut ambiguous = "/Volumes/Private Models/model.safetensors secret remainder".to_owned();
+        redact_absolute_paths_with(&mut ambiguous, "[redacted path]");
+        assert_eq!(ambiguous, "[redacted path]");
+    }
+
     /// SW-7033 Tier 2: the public job kept dropping `ui.promptGuide.path` because the web asset
     /// URL `/prompt-guides/flux-dev.md` starts with `/`. It is served data, not a host locator; a
     /// host path placed in the same field is still removed, as is every real locator.
@@ -793,6 +850,25 @@ mod portable_redaction_tests {
         assert!(!diagnostics.contains("C:\\private"));
         assert!(!diagnostics.contains("\\\\worker"));
         assert!(diagnostics.contains("[redacted path]"));
+        let mut failed = raw.clone();
+        failed.error = Some("Krea 2 imported checkpoint generation failed: backend op failed: logical weight plan for C:\\Private Models\\muse.safetensors (krea-native-to-diffusers-v1): layer \"blocks.0.attn.gate\": descriptor carries `convrot`".into());
+        failed.message = failed.error.clone().unwrap();
+        let public_failure = public_job_snapshot(failed.clone());
+        for diagnostic in [
+            &public_failure.message,
+            public_failure.error.as_ref().unwrap(),
+        ] {
+            assert!(
+                diagnostic.contains("layer \"blocks.0.attn.gate\": descriptor carries `convrot`")
+            );
+            assert!(!diagnostic.contains("Private Models"));
+        }
+        let mut failed_event = serde_json::to_value(failed).unwrap();
+        redact_private_job_metadata_from_event("job.updated", &mut failed_event);
+        assert_eq!(
+            failed_event["error"].as_str(),
+            public_failure.error.as_deref()
+        );
         assert_eq!(public.payload["modelManifestEntry"]["id"], "trained_iris");
         assert_eq!(
             public.payload["modelManifestEntry"]["components"][0]["componentId"],

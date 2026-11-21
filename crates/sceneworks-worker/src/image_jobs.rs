@@ -3757,6 +3757,8 @@ mod krea_turbo_raw;
 // so the shape-detection + `advanced.phases` parse/validate + engine invocation are all backend-neutral.
 #[cfg(native_lane)]
 mod checkpoint_plan;
+#[cfg(any(test, native_lane))]
+mod krea_checkpoint_routing;
 #[cfg(target_os = "macos")]
 mod krea_control;
 #[cfg(native_lane)]

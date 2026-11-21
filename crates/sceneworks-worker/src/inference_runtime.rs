@@ -343,6 +343,7 @@ pub(crate) fn media_encoder_contract(id: &str) -> Option<gen_core::EncoderContra
 /// before any load. A non-portable job, and any source outside a served snapshot, is unaffected.
 pub(crate) fn refuse_unverified_portable_sources(spec: &LoadSpec) -> gen_core::Result<()> {
     let sources = std::iter::once(&spec.weights)
+        .chain(spec.components.values())
         .chain(spec.control.iter())
         .chain(spec.extra_controls.iter())
         .chain(spec.ip_adapter.iter())
