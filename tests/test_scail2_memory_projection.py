@@ -864,7 +864,7 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
         "uncertainty_allowance_bytes": 8,
     }
     review = {
-        "artifact_id": int(base["artifact_id"]),
+        "artifact_id": 333,
         "run_id": int(base["run_id"]),
         "run_attempt": 1,
         "receipt_sha256": tool["sha256"](receipt.read_bytes()),
@@ -885,6 +885,7 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
     )
     receipt = write("receipt.json", capture)
     review["receipt_sha256"] = base["receipt_sha256"] = tool["sha256"](receipt.read_bytes())
+    review["artifact_id"] = int(base["artifact_id"])
     summary["basis"] = "archived-supervisor-return"
     archive = write("synthetic.archive", "sealed test input")
     base["archive_sha256"] = tool["sha256"](archive.read_bytes())
@@ -899,6 +900,11 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
         },
     )
     review["recovery_certificate_sha256"] = tool["sha256"](cert.read_bytes())
+    monkeypatch.setitem(
+        tool["recovered_row"].__globals__,
+        "RECOVERY_CERTIFICATE_SHA256",
+        review["recovery_certificate_sha256"],
+    )
     reviewed = write("review.json", review)
     with pytest.raises(ValueError, match="incomplete"):
         tool["project"](receipt, reviewed)

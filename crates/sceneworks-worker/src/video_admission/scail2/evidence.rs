@@ -250,16 +250,24 @@ fn valid_hex(value: &str, length: usize) -> bool {
 
 impl Capture {
     fn qualify(self) -> Result<QualifiedWitness, String> {
+        const ARCHIVED_SIX_ARTIFACT: u64 = 14_719_969_057;
+        const ARCHIVED_SIX_RECEIPT: &str =
+            "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f";
+        const RECOVERY_CERTIFICATE: &str =
+            "dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f";
         let admitted_source = match self.recovery_certificate_sha256.as_deref() {
-            None => self.accepted,
+            None => {
+                self.accepted
+                    && self.artifact_id != ARCHIVED_SIX_ARTIFACT
+                    && self.receipt_sha256 != ARCHIVED_SIX_RECEIPT
+            }
             Some(certificate) => {
                 !self.accepted
-                    && valid_hex(certificate, 64)
+                    && certificate == RECOVERY_CERTIFICATE
                     && self.platform == "windows"
                     && self.axes.references == 6
-                    && self.artifact_id == 14719969057
-                    && self.receipt_sha256
-                        == "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f"
+                    && self.artifact_id == ARCHIVED_SIX_ARTIFACT
+                    && self.receipt_sha256 == ARCHIVED_SIX_RECEIPT
                     && self.inference_revision == "7f6c4cca3fc053030bd71f0bfce6886adb762eb6"
             }
         };

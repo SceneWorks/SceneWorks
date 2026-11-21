@@ -1335,13 +1335,15 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       const archived = structuredClone(split);
       Object.assign(archived[4], {accepted:false, artifact_id:14719969057,
         inference_revision:"7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
-        receipt_sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f", recovery_certificate_sha256:sha256("reviewed certificate")});
+        receipt_sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f", recovery_certificate_sha256:"dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f"});
       archived[4].bounds.device_interval = "load_through_completed_rgb";
       archived[4].bounds.device = {...archived[4].bounds.host};
       const archiveCoverage = {...both, coverage:[coverage, {...both.coverage[1], capture_revision:archived[4].inference_revision}]};
       assert.equal(read(archived, archiveCoverage).at(-1).recoveryCertificateSha256, archived[4].recovery_certificate_sha256);
       for (const mutate of [r => {r.accepted=true;}, r => {r.receipt_sha256=sha256("other");},
         r => {r.artifact_id+=1;}, r => {delete r.recovery_certificate_sha256;},
+        r => {r.recovery_certificate_sha256=sha256("other certification");},
+        r => {r.accepted=true; delete r.recovery_certificate_sha256; delete r.bounds.device_interval;},
         r => {r.bounds.device_interval="full_job";}]) {
         const wrong = structuredClone(archived); mutate(wrong[4]); assert.throws(() => read(wrong, archiveCoverage));
       }

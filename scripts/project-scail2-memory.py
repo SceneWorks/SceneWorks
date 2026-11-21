@@ -573,6 +573,7 @@ def windows_device_peak(
     return max(owned_or_floor, growth, max(0, absolute - baseline), free[0] - min(free))
 
 
+RECOVERY_CERTIFICATE_SHA256 = "dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f"
 RECOVERED_SIX = {
     "run_id": "44935671433",
     "run_attempt": "1",
@@ -604,7 +605,9 @@ def recovered_row(receipt, review, certificate_path, archive_path):
         and receipt["counts"]["6"]["accepted"] is False
         and "candidate_row_pending_physical_review" not in receipt["counts"]["6"]
         and sha256(archive_path.read_bytes()) == RECOVERED_SIX["archive_sha256"]
-        and review.get("recovery_certificate_sha256") == sha256(certificate_bytes),
+        and review.get("recovery_certificate_sha256")
+        == sha256(certificate_bytes)
+        == RECOVERY_CERTIFICATE_SHA256,
         "recovery certificate, original capture and independent review must agree",
     )
     return certificate["candidate_row_pending_physical_review"]
@@ -629,6 +632,11 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
         and str(review["run_attempt"]) == receipt["run_attempt"],
         "review belongs to another workflow attempt",
     )
+    if (
+        str(review["artifact_id"]) == RECOVERED_SIX["artifact_id"]
+        or review["receipt_sha256"] == RECOVERED_SIX["receipt_sha256"]
+    ):
+        require(recovery, "archived six can qualify only through the recovered count")
     count = review["references"]
     require(
         type(count) is int

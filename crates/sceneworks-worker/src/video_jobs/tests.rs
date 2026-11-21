@@ -586,6 +586,8 @@ fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices
         "missing_overrun",
         "linux",
         "fake_price",
+        "archived_artifact_as_accepted",
+        "archived_receipt_as_accepted",
         "unchecked_claim",
     ] {
         let mut fake = projection.clone();
@@ -600,6 +602,11 @@ fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices
             }
             "linux" => fake[0]["platform"] = json!("linux"),
             "fake_price" => fake[0]["gross_device_bytes"] = json!(1),
+            "archived_artifact_as_accepted" => fake[0]["artifact_id"] = json!(14_719_969_057_u64),
+            "archived_receipt_as_accepted" => {
+                fake[0]["receipt_sha256"] =
+                    json!("750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f")
+            }
             _ => fake[0]["post_execution_verified"] = json!(false),
         }
         let fake = serde_json::to_vec(&fake).unwrap();
