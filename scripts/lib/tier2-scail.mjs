@@ -235,12 +235,15 @@ export function scailFitEvents(text, route, jobId, admitted, sources, evidence) 
     const measured = donor(fields, evidence, route.references);
     for (const [key, expected] of Object.entries({ width: 832, height: 480, frames: 45, referenceCount: route.references }))
       assert.equal(Number(fields[key]), expected, key);
-    const receipt = fields.carrierReceipt;
-    assert.ok(receipt?.startsWith(`scail2-carrier-v2:backend-${backend}:task-animation:composite-832x480:characters-${route.references}:`));
+    const parts = fields.carrierReceipt?.split("+");
+    assert.equal(parts?.length, 3, "incomplete or unexpected SCAIL admission overlay");
+    const [providerMode, carrier, seal] = parts;
+    assert.equal(providerMode, "provider_video_mode:animation");
     const pairs = Array.from({ length: route.references }, (_, i) => `reference-${i}-1:0:832x480:reference-mask-${i}-1:0:832x480`).join(":");
     const frames = Array.from({ length: 45 }, (_, i) => `${i}:832x480`).join(",");
-    assert.ok(receipt.includes(`:${pairs}:driving-frames-45:${frames}:driving-mask-45:${frames}:`), "incorrect ordered character or driving axes");
-    assert.match(receipt, /frame-0\+scail2-carrier-request-seal-v2-[a-f0-9]{64}$/);
+    assert.equal(carrier, `scail2-carrier-v2:backend-${backend}:task-animation:composite-832x480:characters-${route.references}:${pairs}` +
+      `:driving-frames-45:${frames}:driving-mask-45:${frames}:strength-3f800000:mode-FaceOnly:frame-0`);
+    assert.match(seal, /^scail2-carrier-request-seal-v2-[a-f0-9]{64}$/);
     for (const key of ["requiredAcceleratorBytes", "availableAcceleratorBytes", "requiredPhysicalHostBytes", "availablePhysicalHostBytes"]) {
       assert.ok(Number.isSafeInteger(fields[key]) && (key.startsWith("available") ? fields[key] >= 0 : fields[key] > 0), key);
     }

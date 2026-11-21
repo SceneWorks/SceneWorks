@@ -1022,7 +1022,7 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
       const lane = backend === "mlx" ? backend : "candle";
       const pairs = sources.references.map((_, i) => `reference-${i}-1:0:832x480:reference-mask-${i}-1:0:832x480`).join(":");
       const frames = Array.from({ length: 45 }, (_, i) => `${i}:832x480`).join(",");
-      const carrier = `scail2-carrier-v2:backend-${lane}:task-animation:composite-832x480:characters-${n}:${pairs}:driving-frames-45:${frames}:driving-mask-45:${frames}:strength-3f800000:mode-FaceOnly:frame-0+scail2-carrier-request-seal-v2-${sha256("carrier")}`;
+      const carrier = `provider_video_mode:animation+scail2-carrier-v2:backend-${lane}:task-animation:composite-832x480:characters-${n}:${pairs}:driving-frames-45:${frames}:driving-mask-45:${frames}:strength-3f800000:mode-FaceOnly:frame-0+scail2-carrier-request-seal-v2-${sha256("carrier")}`;
       const price = { grossHostBytes: backend === "mlx" ? 0 : 100, grossDeviceBytes: backend === "mlx" ? 0 : 100,
         grossUnifiedBytes: backend === "mlx" ? 100 : 0 };
       const cold = { ...price, event: "scail2_plural_fit", evidenceSha256: sha256("shared-receipt"), evidenceArtifactId: 781, evidenceReferences: n, jobId: "owned", stage: "cold_load", backend: lane, tier: "q4", artifactTier: "q4",
@@ -1056,6 +1056,11 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
         { jobId: "another" }, { carrierReceipt: carrier.replace(sha256("carrier"), sha256("another")) },
         { availablePhysicalHostBytes: null }, { availableAcceleratorBytes: 99 }, { tier: "bf16" }]) {
         assert.throws(() => verify([cold, { ...execution, ...change }]));
+      }
+      for (const malformed of [carrier.replace("provider_video_mode:animation+", ""),
+        carrier.replace("provider_video_mode:animation", "provider_video_mode:replacement"),
+        carrier.replace("animation+", "animation++"), carrier + "+extra", carrier.replace(":strength-", ":extra:strength-")]) {
+        assert.throws(() => verify([cold, execution].map((e) => ({ ...e, carrierReceipt: malformed }))));
       }
       const denied = { ...cold, admitted: false, availableAcceleratorBytes: 99 };
       assert.equal(verify([denied], false).length, 1);
