@@ -36,6 +36,11 @@ on:
         required: false
         type: string
         default: ""
+      krea_performance:
+        description: "Opt in to the separate six-pair Krea performance comparison"
+        required: false
+        type: boolean
+        default: false
       routes:
         description: "JSON array of route ids; empty selects the backend's default routes"
         required: false
@@ -82,6 +87,7 @@ jobs:
       TIER2_AB_BASE_DIR: ${{ github.workspace }}/tier2-ab-base
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}/tier2-ab-head
       TIER2_AB_SUITE: ${{ inputs.suite }}
+      TIER2_AB_KREA_PERFORMANCE: ${{ inputs.krea_performance }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -187,6 +193,7 @@ jobs:
       TIER2_AB_BASE_DIR: ${{ github.workspace }}\tier2-ab-base
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}\tier2-ab-head
       TIER2_AB_SUITE: ${{ inputs.suite }}
+      TIER2_AB_KREA_PERFORMANCE: ${{ inputs.krea_performance }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}

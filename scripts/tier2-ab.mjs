@@ -41,6 +41,10 @@ import {
   assertKreaCatalogRows, assertKreaLoraManifest, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importLinkedKrea,
   assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaPerformance,
 } from "./krea-tier2-proof.mjs";
+import {
+  SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedGpuSample,
+  kreaSamplerReceipt, kreaPerformanceObservation, compareKreaPerformance,
+} from "./krea-tier2-performance.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -156,6 +160,8 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const suite = env.TIER2_AB_SUITE || "tier2-ab";
   fact(["tier2-ab", KREA_SUITE].includes(suite), "unknown Tier 2 suite");
   const krea = suite === KREA_SUITE;
+  const perf = env.TIER2_AB_KREA_PERFORMANCE === "true";
+  fact(!perf || krea, "Krea performance requires the explicit Krea suite");
   const routes = krea ? kreaRoutes(backend) : selectRoutes(backend, env.TIER2_AB_ROUTES);
   if (krea) {
     assertKreaPins(baseSha, KREA_BASE_ENGINE, headSha, inferenceSha);
@@ -167,7 +173,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { suite, krea, backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes,
+  return { suite, krea, perf, backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes,
     hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
@@ -183,12 +189,13 @@ export function dispatchOptions(inputs, dispatchedSha) {
   try { options = JSON.parse(inputs.moss_options_json || "{}"); } catch { throw new Error("moss_options_json must be a JSON object"); }
   fact(options && typeof options === "object" && !Array.isArray(options), "tier2-ab options must be a JSON object");
   if (options.suite === KREA_SUITE) {
-    fact(Object.keys(options).every((key) => ["suite", "head_sha", "preflight_only"].includes(key)), "Krea selector accepts suite, head_sha, and preflight_only");
+    fact(Object.keys(options).every((key) => ["suite", "head_sha", "preflight_only", "performance"].includes(key)), "Krea selector accepts suite, head_sha, preflight_only, and performance");
     fact(options.preflight_only === undefined || typeof options.preflight_only === "boolean", "preflight_only must be boolean");
+    fact(options.performance === undefined || typeof options.performance === "boolean", "performance must be boolean");
     const preflight = options.preflight_only ?? true;
     fact(!inputs.qwen_persistent_weights && (inputs.download_missing === true) === !preflight, "Krea execution requires download_missing; metadata preflight leaves it off");
     assertKreaPins(KREA_BASE_APP, KREA_BASE_ENGINE, options.head_sha, inputs.inference_sha);
-    return { suite: KREA_SUITE, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha };
+    return { suite: KREA_SUITE, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha, krea_performance: options.performance ?? false };
   }
   fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "tier2-ab never downloads; leave download_missing and qwen_persistent_weights off");
   const unknown = Object.keys(options).filter((key) => !DISPATCH_OPTION_KEYS.includes(key));
@@ -546,7 +553,8 @@ export function exitCodeFor(report) {
     if (report.fatal || report.routes.length !== 2) return 1;
     if (report.mode === "preflight") return report.staging?.files?.length > 0 ? 0 : 1;
     if (report.mode === "stage" || report.mode === "build") return report.summary.ready === 2 ? 0 : 1;
-    return report.routes.every((route) => route.status === "ran" && ["equal", "product_pass_oracle_required"].includes(route.verdict)) ? 0 : 1;
+    const productPassed = report.routes.every((route) => route.status === "ran" && ["equal", "product_pass_oracle_required"].includes(route.verdict));
+    return productPassed && (!report.performanceProtocol || report.routes.every((route) => route.performanceComparison?.status === "pass")) ? 0 : 1;
   }
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
   const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || (route.hubMutation?.changed && hubMutationAttribution(route) !== "base_only"));
@@ -685,6 +693,12 @@ async function sampleMacTree(pid) {
   fact(footprintBytes !== null, "worker footprint sample unavailable");
   return { pids: tree.length, rssBytes, footprintBytes };
 }
+async function sampleKreaMacLifetime(pid) {
+  const helper = fileURLToPath(new URL("./ci/iris-mlx-real-weights/tree_guard.py", import.meta.url));
+  const snippet = "import runpy, sys; value = runpy.run_path(sys.argv[1])['rusage'](int(sys.argv[2])); print(value[1] if value else '')";
+  const { stdout } = await execFile("python3.12", ["-I", "-c", snippet, helper, String(pid)], { timeout: 10_000 });
+  return Number(stdout.trim());
+}
 async function sampleWindowsProcess(pid) {
   const script = `$p = Get-Process -Id ${Number(pid)} -ErrorAction Stop; "$($p.WorkingSet64) $($p.PeakWorkingSet64) $($p.PrivateMemorySize64)"`;
   const out = (await execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { timeout: 15_000, windowsHide: true })).stdout.trim().split(/\s+/).map(Number);
@@ -744,6 +758,7 @@ export function renderMarkdown(report) {
   }
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
+  if (report.performanceProtocol) lines.push(`- Performance protocol: ${report.performanceProtocol}; results remain separate from output evidence.`, "");
   if (report.kind === KREA_SUITE && report.staging) lines.push(`- Exact asset inventory: ${report.staging.files.length} files, ${gib(report.staging.bytes)}. ${report.staging.stagedFileCount ? "Digest-verified in the attempt-owned hub." : "Metadata pricing only."}`, "");
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
@@ -758,7 +773,8 @@ export function renderMarkdown(report) {
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
-    if (route.comparison?.observedPerformance) {
+    if (route.performanceComparison) lines.push(`- PERF-1/2: ${route.performanceComparison.status}. ${route.performanceComparison.reason ?? "See six ordered pairs and domain verdicts in report.json."}`);
+    if (route.comparison?.observedPerformance && !report.performanceProtocol) {
       const { base, head } = route.comparison.observedPerformance;
       lines.push(`- Worker sampleMs per observed step: ${base.secondsPerObservedStep.toFixed(3)} s base, ${head.secondsPerObservedStep.toFixed(3)} s head. ${base.method}. Paired observations only.`, `- Observed memory: ${memoryCell(base.memory)} base, ${memoryCell(head.memory)} head.`);
     }
@@ -808,6 +824,10 @@ async function preflight(env, cfg, report, signal) {
       assertPins(contents, await readFile(path.join(side.checkout, "Cargo.lock"), "utf8"), side.inferencePin);
       const loras = await readFile(path.join(side.checkout, "config", "manifests", "builtin.loras.jsonc"), "utf8");
       assertKreaLoraManifest(JSON.parse(stripJsoncComments(loras)).loras);
+      if (cfg.perf) {
+        const { sourceSha256, overlaySha256 } = await bindKreaSamplerOverlay(await readFile(path.join(side.checkout, SAMPLER_SOURCE_FILE)), side.sha === cfg.baseSha ? "base" : "head");
+        side.samplerOverlay = { sourceSha256, overlaySha256 };
+      }
     }
   } else if (cfg.inferenceSha) for (const side of [report.base, report.head]) fact(side.inferencePin === cfg.inferenceSha, `inference pin ${side.inferencePin} differs from the requested ${cfg.inferenceSha}`);
   if (cfg.backend === "mlx") fact(report.base.pmetalSource && report.base.pmetalSource === report.head.pmetalSource, "base and head must pin the same pmetal-mlx-sys revision (one prebuilt MLX serves both builds)");
@@ -879,7 +899,21 @@ async function build(env, cfg, report) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
-    const result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+    let result;
+    if (cfg.perf) {
+      const file = path.join(dir, SAMPLER_SOURCE_FILE);
+      const original = await readFile(file);
+      const overlay = await bindKreaSamplerOverlay(original, label);
+      assert.deepEqual(report[label].samplerOverlay, { sourceSha256: overlay.sourceSha256, overlaySha256: overlay.overlaySha256 });
+      try {
+        await writeFile(file, overlay.content);
+        result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+      } finally {
+        await writeFile(file, original);
+      }
+    } else {
+      result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+    }
     if (result.code !== 0) { await writeFile(path.join(evidence, `build-${label}.tail.log`), await tail(log, 64_000)); throw new Error(`${label} release build failed (${JSON.stringify(result)}); see build-${label}.tail.log`); }
     fact(await git(dir, "status", "--porcelain") === "" && await git(dir, "rev-parse", "HEAD") === sha, `${label} build changed its checkout`);
     let metallib = null;
@@ -890,10 +924,10 @@ async function build(env, cfg, report) {
     const bin = path.join(scratch, "bin", label); await mkdir(bin, { recursive: true });
     for (const entry of await readdir(path.join(target, "release"), { withFileTypes: true })) if (entry.isFile() && (entry.name === exe || /\.(dll|dylib|so)$/i.test(entry.name))) await copyFile(path.join(target, "release", entry.name), path.join(bin, entry.name));
     const binary = path.join(bin, exe);
-    built[label] = { binary, binarySha256: await fileSha256(binary), metallib, buildSeconds: (Date.now() - started) / 1000 };
+    built[label] = { binary, binarySha256: await fileSha256(binary), samplerOverlay: report[label].samplerOverlay ?? null, metallib, buildSeconds: (Date.now() - started) / 1000 };
     report[label] = { ...report[label], binarySha256: built[label].binarySha256, buildSeconds: built[label].buildSeconds, metallibSha256: metallib?.sha256 ?? null };
   }
-  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, built }, null, 2) + "\n");
+  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, built }, null, 2) + "\n");
   return built;
 }
 
@@ -967,7 +1001,8 @@ export function childEnvironments(env, { backend, state, hub, xet, workerId, met
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
 const decodedBuffers = new WeakMap();
-async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal }) {
+const kreaImportFiles = [path.join("data", "checkpoints"), path.join("config", "manifests", "user.models.jsonc")];
+async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, previousImport }) {
   const sideCfg = side === "base" ? { dir: cfg.baseDir, sha: cfg.baseSha } : { dir: cfg.headDir, sha: cfg.headSha };
   const slug = `${route.id}-${label.replace("#", "")}`;
   const runRoot = path.join(cfg.work, "scratch", "runs", slug), evidence = path.join(evidenceRoot, "runs", route.id, label.replace("#", ""));
@@ -975,6 +1010,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const state = path.join(runRoot, "state"), xet = path.join(runRoot, "xet"), logs = path.join(runRoot, "logs");
   for (const dir of [path.join(state, "data", "projects"), path.join(state, "credentials"), xet, logs]) await mkdir(dir, { recursive: true });
   await cp(path.join(sideCfg.dir, "config"), path.join(state, "config"), { recursive: true });
+  if (previousImport) for (const file of kreaImportFiles) await cp(path.join(previousImport.state, file), path.join(state, file), { recursive: true });
   const workerId = `tier2-ab-${side}-${process.pid}-${Date.now().toString(36)}`;
   const claimMinutes = cfg.claimMinutesOverride ?? route.claimMinutes;
   const record = { label, side, sha: sideCfg.sha, binarySha256: built[side].binarySha256, workerId, status: "running", phase: "starting", startedAt: new Date().toISOString(), timing: {}, memory: {}, identity: {}, watchdog: { capBytes: null, claimMinutes, timeoutMinutes: route.timeoutMinutes } };
@@ -1037,7 +1073,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       fact(upload.status < 300 && upload.body?.id, `reference audio upload refused (${upload.status}): ${JSON.stringify(upload.body).slice(0, 600)}`);
       referenceAudioAssetId = upload.body.id;
     }
-    if (route.proof === "hires") {
+    if (route.proof === "hires" && previousImport) {
+      const catalog = await endpoint.call("GET", "/api/v1/models");
+      const entry = catalog.find(({ id }) => id === route.body.model);
+      fact(entry?.importPlan?.checkpointId === previousImport.receipt.checkpointId, "cold performance worker did not reuse the exact linked checkpoint stamp");
+      record.import = { ...previousImport.receipt, reused: true };
+    } else if (route.proof === "hires") {
       record.import = await importLinkedKrea({ endpoint, hub: plan.hub, wait, trackJob: (job) => { accepted = job; }, ownsWorker: (id) => id === workerId || id === utilityWorkerId(workerId) || id?.startsWith(`${utilityWorkerId(workerId)}-`) });
       accepted = null;
     }
@@ -1060,15 +1101,50 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     } else {
       const cap = Math.floor(os.totalmem() * 0.75); record.watchdog.capBytes = cap;
       const smi = nvidiaSmiPath(env);
-      const baseline = []; for (let i = 0; i < 5; i++) { baseline.push((await sampleGpu(smi)).usedBytes); await delay(200); }
+      const baseline = [];
+      for (let i = 0; i < 5; i++) {
+        const sample = await sampleGpu(smi);
+        baseline.push(sample.usedBytes);
+        memory.gpuUuid ??= sample.uuid;
+        fact(memory.gpuUuid === sample.uuid, "physical GPU changed during pre-request admission sampling");
+        await delay(200);
+      }
+      if (cfg.perf) {
+        const uuid = memory.gpuUuid;
+        memory.ownedGpuSamples = 0;
+        memory.ownedGpuErrors = 0;
+        memory.ownedGpuUnavailable = false;
+        memory.ownedGpuPeakBytes = 0;
+        samplers.push((async () => {
+          while (sampling) {
+            try {
+              const args = ["--query-compute-apps=pid,used_gpu_memory,gpu_uuid", "--format=csv,noheader,nounits"];
+              const { stdout } = await execFile(smi, args, { timeout: 10_000, windowsHide: true });
+              const row = kreaOwnedGpuSample(stdout, worker.pid, uuid);
+              if (row.attached && row.bytes === null) memory.ownedGpuUnavailable = true;
+              if (row.bytes > 0) {
+                if (memory.ownedGpuMissingAfterAttach) memory.ownedGpuUnavailable = true;
+                memory.ownedGpuSamples++;
+                memory.ownedGpuPeakBytes = Math.max(memory.ownedGpuPeakBytes, row.bytes);
+              } else if (!row.attached && memory.ownedGpuSamples > 0) {
+                memory.ownedGpuMissingAfterAttach = true;
+              }
+            } catch {
+              memory.ownedGpuErrors++;
+            }
+            await delay(500);
+          }
+        })());
+      }
       memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
       memory.gpuBaselineBytes = Math.max(...baseline);
       if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
+      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if (cfg.perf && memory.gpuUuid !== s.uuid) memory.ownedGpuUnavailable = true; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     const posted = Date.now();
-    const response = await endpoint.exchange("POST", route.endpoint, body);
+    let postedMonotonicMs;
+    const response = await endpoint.exchange("POST", route.endpoint, body, cfg.perf ? { onRequest: () => { postedMonotonicMs = performance.now(); } } : undefined);
     record.acceptedStatus = response.status;
     fact(response.status < 300 && response.body?.id, `API refused the request (${response.status}): ${JSON.stringify(response.body).slice(0, 1500)}`);
     accepted = response.body; record.jobId = accepted.id;
@@ -1107,6 +1183,13 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       memory.peakBytes = memory.gpuPeakBytes ?? null;
       memory.peakAboveBaselineBytes = Number.isFinite(memory.gpuPeakBytes) ? Math.max(0, memory.gpuPeakBytes - memory.gpuBaselineBytes) : null;
     }
+    if (cfg.perf) {
+      try {
+        memory.hostLifetimePeakBytes = cfg.backend === "mlx" ? await sampleKreaMacLifetime(worker.pid) : (await sampleWindowsProcess(worker.pid)).peakWorkingSetBytes;
+      } catch (error) {
+        memory.hostLifetimeError = error.message;
+      }
+    }
     memory.workerReportedPeakGpuMemoryPct = job.peakGpuMemoryPct ?? null;
     record.memory = memory;
     const at = (stage) => stages.find((item) => item.stage === stage)?.atSeconds;
@@ -1142,8 +1225,21 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       record.productProof = assertKreaOutput({ route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved), width, height, workerId, projectId: project.id });
       record.productProof.imageStats = imageQualityStats(rgba);
       fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
-      const metrics = await wait(async () => { const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`); return value?.sampleMs > 0 && value; }, 30, "Krea native metrics");
-      record.performance = kreaPerformance(metrics, route, memory);
+      if (!cfg.perf) {
+        const metrics = await wait(async () => { const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`); return value?.sampleMs > 0 && value; }, 30, "Krea native metrics");
+        record.performance = kreaPerformance(metrics, route, memory);
+      } else {
+        try {
+          const nativeMetrics = await wait(async () => {
+            const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`);
+            return value?.totalMs > 0 && value;
+          }, 30, "Krea native memory metrics");
+          const passes = kreaSamplerReceipt(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route);
+          record.performance = kreaPerformanceObservation({ route, passes, postedMonotonicMs, events: record.observedEvents, memory, metrics: nativeMetrics, machine: os.hostname() });
+        } catch (error) {
+          record.performance = { eligibility: "inconclusive", reason: error.message };
+        }
+      }
     }
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
@@ -1236,8 +1332,13 @@ async function runComparison(env, cfg, report, signal) {
   const scratch = path.join(cfg.work, "scratch"), evidence = path.join(cfg.work, "evidence");
   const recorded = JSON.parse(await readFile(path.join(scratch, "build.json"), "utf8"));
   fact(recorded.baseSha === cfg.baseSha && recorded.headSha === cfg.headSha && recorded.backend === cfg.backend, "build.json belongs to a different base/head/backend");
+  fact(Boolean(recorded.perf) === cfg.perf, "build.json belongs to a different instrumentation mode");
   const built = recorded.built;
-  for (const side of ["base", "head"]) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
+  for (const side of ["base", "head"]) {
+    if (cfg.perf) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
+    fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`);
+    report[side].binarySha256 = built[side].binarySha256;
+  }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
   for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
   let firstRoute = true;
@@ -1249,9 +1350,15 @@ async function runComparison(env, cfg, report, signal) {
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
+    const previousImport = {};
     const run = async (label) => {
+      const side = label.startsWith("base") ? "base" : "head";
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side, built, evidenceRoot: evidence, secrets, signal, previousImport: previousImport[side] });
+      if (cfg.perf && definition.proof === "hires" && record.status === "completed" && !previousImport[side]) {
+        const slug = `${definition.id}-${label.replace("#", "")}`;
+        previousImport[side] = { state: path.join(scratch, "runs", slug, "state"), receipt: record.import };
+      }
       const runAfter = await hubFingerprint(route.hub, repos);
       record.hubMutation = { changed: JSON.stringify(runBefore.repos) !== JSON.stringify(runAfter.repos), diff: diffObjects(runBefore.repos, runAfter.repos, HUB_MUTATION_LISTING_LIMIT) };
       if (record.hubMutation.changed) progress({ route: route.id, run: label, phase: "hub_mutation", entries: record.hubMutation.diff.count });
@@ -1275,8 +1382,8 @@ async function runComparison(env, cfg, report, signal) {
     if (definition.proof === "raw" && base1.status === "completed" && head?.status === "completed") {
       decision = { verdict: "product_pass_oracle_required", reason: "both public routes passed; exact pinned adapter contains a text-fusion projector affected by the frozen baseline's known bug; compare against the independent source-bound oracle" };
     }
-    if (decision.needBase2 && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
-    if (decision.verdict === null) decision = { verdict: "error", reason: "interrupted before base#2" };
+    if (decision.needBase2 && !cfg.perf && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
+    if (decision.verdict === null) decision = { verdict: "error", reason: cfg.perf ? "instrumented priming outputs differed" : "interrupted before base#2" };
     route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
     route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
     if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
@@ -1289,6 +1396,25 @@ async function runComparison(env, cfg, report, signal) {
       route.comparison.observedPerformance = { base: base1.performance, head: head.performance, comparisonScope: "single paired observations on the same device; no performance claim" };
     }
     if (decision.verdict === "head_differs" || decision.verdict === "product_pass_oracle_required") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
+    if (cfg.perf) {
+      const pairs = [];
+      route.performancePairs = pairs;
+      if (base1.performance?.eligibility === "valid" && head?.performance?.eligibility === "valid" && ["equal", "product_pass_oracle_required"].includes(route.verdict)) {
+        for (const [index, order] of KREA_PERF_ORDER.entries()) {
+          const pair = { order };
+          pairs.push(pair);
+          for (const side of order) {
+            if (signal.aborted) break;
+            pair[side] = await run(`${side}-pair-${index + 1}`);
+            if (pair[side].performance?.eligibility !== "valid") break;
+          }
+          if (order.some((side) => pair[side]?.performance?.eligibility !== "valid")) break;
+        }
+        route.performanceComparison = compareKreaPerformance(pairs, cfg.backend);
+      } else {
+        route.performanceComparison = { status: "inconclusive", reason: "priming arm did not prove its product route and attributed measurements" };
+      }
+    }
     const after = await hubFingerprint(route.hub, repos);
     // Only the route's own repositories decide `changed`; the shared root listing can legitimately
     // change under another runner job, so it is recorded but never fails this one.
@@ -1331,6 +1457,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
   const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
+  if (cfg.perf) report.performanceProtocol = "cold one-job workers; one priming arm per side and route, then six fixed interleaved AB/BA pairs; 210-minute aggregate execution cap; no allowance beyond 1.02";
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("A/B interrupted by signal"));
   const runCeiling = cfg.krea && mode === "run" ? setTimeout(() => controller.abort(new Error("Krea run reached its 210-minute ceiling")), 210 * 60_000) : null;

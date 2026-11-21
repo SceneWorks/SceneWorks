@@ -231,7 +231,7 @@ export async function openKreaEvents(endpoint, url, signal, fetchImpl = fetch) {
         if (event === "ready") ready();
         if (event !== "job.updated") continue;
         const value = JSON.parse(fields.filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n"));
-        updates.push({ id: value.id, stage: value.stage, status: value.status, message: value.message, backend: value.backend, workerId: value.workerId, publishedAssets: value.result?.assets?.length ?? 0 });
+        updates.push({ id: value.id, stage: value.stage, status: value.status, message: value.message, backend: value.backend, workerId: value.workerId, publishedAssets: value.result?.assets?.length ?? 0, receivedMonotonicMs: performance.now() });
       }
       assert.ok(pending.length < 16 * 1024 * 1024 && updates.length < 1024, "owned job event stream exceeded the evidence limit");
     }
@@ -242,7 +242,7 @@ export async function openKreaEvents(endpoint, url, signal, fetchImpl = fetch) {
   try { await Promise.race([started, finished]); } finally { clearTimeout(timer); }
   return {
     async collect(id, wait) {
-      await Promise.race([finished, wait(async () => updates.some((event) => event.id === id && event.status === "completed"), 15, "completed event")]);
+      await Promise.race([finished, wait(async () => updates.some((event) => event.id === id && event.status === "completed" && event.publishedAssets === 1), 15, "completed event")]);
       return updates.filter((event) => event.id === id);
     },
     async close() {

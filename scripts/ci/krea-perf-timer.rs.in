@@ -1,0 +1,83 @@
+// Build-only observer for the dispatch-only Krea performance receipt. The callback is
+// below the Hires.fix wrapper, so pass 1 retains its own Decoding boundary here.
+struct KreaPerformanceSampler {
+    started: Option<std::time::Instant>,
+    steps: u32,
+    invalid: bool,
+    engine: &'static str,
+    width: u32,
+    height: u32,
+}
+
+impl KreaPerformanceSampler {
+    fn new(
+        generator: &dyn gen_core::Generator,
+        request: &gen_core::GenerationRequest,
+    ) -> Option<Self> {
+        let engine = match generator.descriptor().id {
+            "krea_2_raw" => "krea_2_raw",
+            "krea_2_turbo" => "krea_2_turbo",
+            _ => return None,
+        };
+        Some(Self {
+            started: None,
+            steps: 0,
+            invalid: false,
+            engine,
+            width: request.width,
+            height: request.height,
+        })
+    }
+
+    fn observe(&mut self, progress: &gen_core::Progress) {
+        match progress {
+            gen_core::Progress::Step { current: 1, .. }
+                if self.started.is_none() && self.steps == 0 =>
+            {
+                self.invalid = !krea_performance_fence();
+                self.started = Some(std::time::Instant::now());
+                self.steps = 1;
+            }
+            gen_core::Progress::Step { current, .. } => {
+                // Raw exposes phase-local step numbers. Count Euler ticks here;
+                // the public proof validates their exact ordered numbering/slices.
+                self.invalid |= self.started.is_none() || *current == 0;
+                self.steps += 1;
+            }
+            gen_core::Progress::Decoding => {
+                let synchronized = krea_performance_fence();
+                let elapsed_ns = self.started.take().map_or(0, |start| {
+                    start.elapsed().as_nanos().try_into().unwrap_or(0_u64)
+                });
+                tracing::info!(
+                    event = "sgaf336_krea_sampler",
+                    engine = self.engine,
+                    width = self.width,
+                    height = self.height,
+                    steps = self.steps,
+                    elapsed_ns,
+                    valid = !self.invalid && synchronized && elapsed_ns > 0,
+                    "Opt-in Krea sampler timing from first Step to pre-Decode on the render thread"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn krea_performance_fence() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mlx_rs::Stream::task_local_or_gpu()
+            .synchronize_and_retire()
+            .is_ok()
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        runtime_cuda::media::candle_core::cuda::cudarc::driver::result::ctx::synchronize().is_ok()
+    }
+    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+    {
+        false
+    }
+}
