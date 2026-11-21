@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9168d0d166c1ca2e8e6d52953f9e27a46da4138b9eedc621ba144c01f327a3ce",
+    "sceneWorksRevision": "source-tree:9d83457828c2108a79f53be9489d6ebf7c59526d3cd7d1715e80104eebb5b201",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "b04e989bf386630a19b7f34d8794074b9fab361217908b7108135bf788791383"
+        "sha256": "5d6a5ab78f8badea79298402d2a35ebaf6653c2c4a434102a3dbf62cda6ffffc"
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
-        "sha256": "ec68d46b294f3de966b248be06a44f790ed28a4a108989a71dbdee1cfe0d3ffe"
+        "sha256": "4210f7472bd87015015baf7d3af77491136fa2d58abbb31da5f11cd0200aa746"
       },
       "routePolicy": {
         "path": "config/manifests/registry/route-policy.json",
@@ -17,7 +17,7 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "91438fc5b0d697069a315ec73b0d5bf526ac8bc990e992d206bb56e19186bf3f"
+        "sha256": "54fd9f678adfcf714bb50fb4f020ac5d843b708646bcbf98e990b54deff5b5d0"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -25,11 +25,11 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "1d183ecd148d8d7bf1a489ac72746e000a82153b35ac422641586bdf3a9eaf71"
+        "sha256": "1020026230307697b15db640af9b8d0440f6ec99b489a674619c283a76b62e82"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "c190fabb1fdc21ae2ffb2e25b9c2c65665e4318a7c21af1195e67ade5938f1e3"
+        "sha256": "5dedd0f6472f70d7af31e600e612fb595d0ee706857613b8f93ceae9af38eb63"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -69,7 +69,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "30c4f37082c3c1f2f79762f31dc2a187b2860e98413a8e87a5d666ff478724b3"
+        "sha256": "65d78d4fb4779ad02d4bcb4c05b92c5f090ee82c9897cb77afa3e8a09ecc16c3"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -89,7 +89,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "3e35b8d884604d9db68fa6aaf3afa21bd6994debabd385d6caed406a40e1286c"
+        "sha256": "229b3f079387f546a3c497118f092185bd4a6f33d1fa59cfac8fb47d006e5306"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -97,15 +97,15 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "7685182fce5ad80866360f11105b51e48cb303302a0e8151889b98a89004111d"
+        "sha256": "f430e6c666b693719b0591848ab38f81e3453c410ee8438f65d318921a368a0c"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "26bf3cb732e70ea1c572774b97c7376774173f5ad07d79d301949108b66170d0"
+        "sha256": "d31fad62595a91c6bcdf2bf3b54c664b2bd594a8005407f94e2e2851443d70ad"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "93e380b015e25f5c3b85dd8cc0110dc81dc6112f4f6d5ec2b82096a7ba9920cc"
+        "sha256": "3c788e8d72cfd74a36bb0824fdf6963251ebdec70776d6e905544070333c8fa6"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
