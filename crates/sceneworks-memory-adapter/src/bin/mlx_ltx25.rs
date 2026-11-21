@@ -622,6 +622,7 @@ fn context(
         has_reference: false,
         use_pid: false,
         has_phases: true,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: target.geometry.width,
             height: target.geometry.height,

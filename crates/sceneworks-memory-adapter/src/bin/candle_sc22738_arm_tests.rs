@@ -41,6 +41,7 @@ fn context(strategy: MemoryStrategy) -> MemoryRunContext {
         has_reference: false,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: 1024,
             height: 1024,

@@ -660,6 +660,7 @@ fn a_reference_carrying_bernini_request_would_build_a_context_the_engine_admits(
         // Phase-resolved evidence is not a multi-phase request modifier; the worker's own
         // `MemoryRunContext` literal carries this false and Bernini runs a single-phase denoise.
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

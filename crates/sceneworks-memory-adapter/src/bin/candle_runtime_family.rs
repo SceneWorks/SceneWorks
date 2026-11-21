@@ -865,6 +865,7 @@ pub(super) fn missing_contract_reason(generator: &dyn Generator, request: &Value
         has_reference: false,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: 0,
             height: 0,
@@ -1081,6 +1082,7 @@ pub(super) fn pulid_flux_context(
         has_reference: true,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,
@@ -1751,6 +1753,7 @@ pub(super) fn run_sc22737_video_capture(
         has_reference: arm.reference_count > 0,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: target.width,
             height: target.height,

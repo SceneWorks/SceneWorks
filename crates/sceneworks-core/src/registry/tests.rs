@@ -862,7 +862,14 @@ fn hook4_low_res_start_feature_projects_from_runtime_snapshot_and_flips_when_pre
 {
     let low_res_option = crate::options::by_wire("advanced", "lowResStart")
         .expect("lowResStart OptionSpec must exist");
-    for (id, expected_steps, expected_max_k) in [("flux_schnell", 4, 3), ("flux_dev", 25, 24)] {
+    for (id, expected_steps, expected_max_k) in [
+        ("flux_schnell", 4, 3),
+        ("flux_dev", 25, 24),
+        ("flux2_dev", 28, 27),
+        ("flux2_klein_9b", 4, 3),
+        ("qwen_image_2_1", 40, 39),
+        ("sdxl", 30, 29),
+    ] {
         let spec = builtin_model_spec(id).unwrap_or_else(|| panic!("missing builtin {id}"));
         assert_eq!(
             spec.features.get("low_res_start"),
@@ -914,13 +921,11 @@ fn hook4_low_res_start_feature_projects_from_runtime_snapshot_and_flips_when_pre
     // Conditioned and unmigrated models must omit low_res_start and scrub forged user features.
     for unsupported in [
         "pulid_flux_dev",
-        "flux2_dev",
-        "flux2_klein_9b",
         "flux3_klein",
         "krea_2_raw",
         "krea_2_turbo",
-        "qwen_image_2_1",
-        "sdxl",
+        "sana_sprint_1600m",
+        "boogu_image_turbo",
         "ltx_2_5",
     ] {
         let spec = builtin_model_spec(unsupported)

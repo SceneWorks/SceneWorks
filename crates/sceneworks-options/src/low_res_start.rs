@@ -439,11 +439,6 @@ pub fn route_admits_reference_asset_for_plain_img2img(
             | "qwen_image"
             | "krea_2_turbo"
             | "krea_2_raw"
-            | "sdxl"
-            | "realvisxl"
-            | "realvisxl_lightning"
-            | "illustrious_xl_v1"
-            | "illustrious_xl_v2"
             | "chroma"
             | "anima"
             | "pixart_sigma"
@@ -1214,5 +1209,69 @@ mod tests {
         )
         .expect_err("z_image_turbo with referenceStrength > 0 must be refused");
         assert_eq!(err.field, "advanced.lowResStart");
+
+        // SDXL-family T2I requests omit ui.img2img and use referenceAssetId for IP-Adapter
+        // conditioning, while ordinary img2img uses sourceAssetId:
+        let sdxl_entry = json!({
+            "id": "sdxl",
+            "family": "sdxl",
+            "defaults": {
+                "steps": 25,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let sdxl_ref_payload = json!({
+            "model": "sdxl",
+            "mode": "text_to_image",
+            "referenceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "sdxl",
+            &sdxl_ref_payload,
+            sdxl_ref_payload["advanced"].as_object().unwrap(),
+            &sdxl_entry,
+        )
+        .expect_err("sdxl T2I referenceAssetId is IP-Adapter conditioning and must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        let sdxl_source_payload = json!({
+            "model": "sdxl",
+            "mode": "text_to_image",
+            "sourceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "strength": 0.4,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let sdxl_resolved = requested_low_res_start(
+            "sdxl",
+            &sdxl_source_payload,
+            sdxl_source_payload["advanced"].as_object().unwrap(),
+            &sdxl_entry,
+        )
+        .expect("sdxl sourceAssetId plain img2img remains admitted")
+        .expect("present");
+        assert_eq!(sdxl_resolved.executed_steps, 6);
     }
 }

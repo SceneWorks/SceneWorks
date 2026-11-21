@@ -238,7 +238,29 @@ pub fn assemble(
         for (&backend, dump) in &exports {
             if let Some(provider) = dump.model_mappings.get(&id) {
                 if let Some(route) = dump.snapshot.generator(provider, backend) {
-                    routes.insert(backend.to_owned(), route.clone());
+                    let mut route = route.clone();
+                    if backend == "candle" {
+                        let candle_guidance = product
+                            .fields
+                            .get("candle")
+                            .and_then(|b| b.get("limits"))
+                            .and_then(|l| l.get("guidanceMethods"))
+                            .or_else(|| {
+                                product
+                                    .fields
+                                    .get("limits")
+                                    .and_then(|l| l.get("guidanceMethods"))
+                            })
+                            .and_then(Value::as_array);
+                        route.supported_guidance_methods.retain(|method| {
+                            method == "cfg"
+                                || candle_guidance.is_some_and(|list| {
+                                    list.iter()
+                                        .any(|entry| entry.as_str() == Some(method.as_str()))
+                                })
+                        });
+                    }
+                    routes.insert(backend.to_owned(), route);
                 }
             }
             let mut video = Vec::new();

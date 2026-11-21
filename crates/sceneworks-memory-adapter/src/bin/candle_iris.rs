@@ -291,6 +291,7 @@ fn context(
         has_reference: false,
         use_pid: false,
         has_phases: route.mode == "text_to_image",
+        low_res_start: None,
         geometry,
         reference_resources: None,
         overlay: None,

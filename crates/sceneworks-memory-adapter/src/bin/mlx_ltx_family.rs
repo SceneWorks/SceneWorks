@@ -1245,6 +1245,7 @@ pub(super) fn ltx_context(
         // `true` this arm used to carry would have failed every capture at the provider's own
         // admission — masked until sc-22738 by the unconditional pre-load refusal.
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: geometry.width,
             height: geometry.height,

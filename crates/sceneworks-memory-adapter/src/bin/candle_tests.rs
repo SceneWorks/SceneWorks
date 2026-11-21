@@ -42,6 +42,7 @@ fn bernini_reference_probe_passes_the_provider_scope_and_binds_its_image() {
                 reference_count: 1,
                 use_pid: false,
                 has_phases: false,
+                low_res_start: None,
                 overlay,
             },
         )

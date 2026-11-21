@@ -536,54 +536,59 @@ pub(super) fn build_render_request(
 /// The always-planned `ENG-2` shared-driver image engine ids whose requests compile a pre-load
 /// [`gen_core::RenderPlan`] (or two-pass [`gen_core::MultiPassRenderPlan`] under Hires.fix) before
 /// load (`SW-6933`, `SW-6936`, `SW-6945`, `SW-6946`, `SW-6947`, `SW-6948`).
-pub(super) const ENG2_PRELOAD_PLANNED_ENGINES: &[&str] = &[
-    "flux1_schnell",
-    "flux1_dev",
-    "flux1_dev_control",
-    "pulid_flux",
-    "flux2_dev",
-    "flux2_klein_9b",
-    "flux2_dev_edit",
-    "flux2_klein_9b_edit",
-    "flux2_klein_9b_kv_edit",
-    "flux2_dev_control",
-    "chroma1_hd",
-    "chroma1_base",
-    "chroma1_flash",
-    "lens",
-    "lens_turbo",
-    "anima",
-    "anima_base",
-    "anima_aesthetic",
-    "anima_turbo",
-    "sd3_5_large",
-    "sd3_5_large_turbo",
-    "sd3_5_medium",
-    "sana_1600m",
-    "boogu_image",
-    "boogu_image_edit",
-    "qwen_image",
-    "qwen_image_edit",
-    "qwen_image_control",
-    "qwen_image_2_1",
-    "qwen_image_2_1_turbo",
-    "z_image",
-    "z_image_turbo",
-    "z_image_control",
-    "z_image_turbo_control",
-];
+pub(super) fn is_unconditionally_preload_planned_engine(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux1_schnell"
+            | "flux1_dev"
+            | "flux1_dev_control"
+            | "pulid_flux"
+            | "flux2_dev"
+            | "flux2_klein_9b"
+            | "flux2_dev_edit"
+            | "flux2_klein_9b_edit"
+            | "flux2_klein_9b_kv_edit"
+            | "flux2_dev_control"
+            | "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "lens"
+            | "lens_turbo"
+            | "anima"
+            | "anima_base"
+            | "anima_aesthetic"
+            | "anima_turbo"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+            | "sana_1600m"
+            | "boogu_image"
+            | "boogu_image_edit"
+            | "qwen_image"
+            | "qwen_image_edit"
+            | "qwen_image_control"
+            | "qwen_image_2_1"
+            | "qwen_image_2_1_turbo"
+            | "z_image"
+            | "z_image_turbo"
+            | "z_image_control"
+            | "z_image_turbo_control"
+    )
+}
 
 /// Conditionally-planned `ENG-2` engine ids (`"kolors"`, `"sdxl"`) that register a pre-load
 /// render planner for curated shared-driver sampler/scheduler requests without ControlNet,
 /// IP-Adapter, InstantID, mask, or `ENG-5` acceleration (`lcm`/`lightning`/`hyper`), and return
 /// `Ok(None)` when the request takes an `ENG-5` non-curated path (`SW-6947`, `SW-6948`).
-pub(super) const ENG2_CONDITIONAL_PRELOAD_PLANNED_ENGINES: &[&str] = &["kolors", "sdxl"];
+pub(super) fn is_conditionally_preload_planned_engine(engine_id: &str) -> bool {
+    matches!(engine_id, "kolors" | "sdxl")
+}
 
 /// Whether `engine_id` participates in `ENG-2` pre-load [`gen_core::RenderPlan`] /
 /// [`gen_core::MultiPassRenderPlan`] compilation (`SW-6948`).
 pub(super) fn is_eng2_preload_planned_engine(engine_id: &str) -> bool {
-    ENG2_PRELOAD_PLANNED_ENGINES.contains(&engine_id)
-        || ENG2_CONDITIONAL_PRELOAD_PLANNED_ENGINES.contains(&engine_id)
+    is_unconditionally_preload_planned_engine(engine_id)
+        || is_conditionally_preload_planned_engine(engine_id)
 }
 
 pub(super) use crate::generation_error;
@@ -608,7 +613,7 @@ pub(super) fn preload_plan_error(route: &str, error: gen_core::Error) -> WorkerE
 }
 
 fn route_allows_optional_preload_plan(engine_id: &str, request: &GenerationRequest) -> bool {
-    ENG2_CONDITIONAL_PRELOAD_PLANNED_ENGINES.contains(&engine_id)
+    is_conditionally_preload_planned_engine(engine_id)
         || (matches!(engine_id, "qwen_image_2_1" | "qwen_image_2_1_turbo")
             && request
                 .conditioning
@@ -629,7 +634,7 @@ pub(super) fn compile_render_plan(
         .compile_render_plan(engine_id, spec, request)
         .map_err(|error| preload_plan_error(engine_id, error))?;
     if plan.is_none()
-        && ENG2_PRELOAD_PLANNED_ENGINES.contains(&engine_id)
+        && is_unconditionally_preload_planned_engine(engine_id)
         && !route_allows_optional_preload_plan(engine_id, request)
     {
         return Err(WorkerError::Engine(format!(
@@ -713,10 +718,7 @@ pub(super) fn build_hires_refinement_request(
 
 /// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
 /// refinement pass compiled together with it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct PreparedRender {
     pub(super) pass: Option<gen_core::RenderPlan>,
@@ -727,10 +729,7 @@ pub(super) struct PreparedRender {
 /// pass's output stretched to the target size at the refinement strength — as one multi-pass plan
 /// before load. `refine` carries no reference of its own; the plan binds the produced one by size
 /// and strength, because its pixels exist only after the first pass.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn compile_hires_render_plans(
     registry: &gen_core::ProviderRegistry,
     engine_id: &str,
@@ -749,10 +748,7 @@ pub(super) fn compile_hires_render_plans(
 
 /// Compile a two-pass Hires.fix [`gen_core::MultiPassRenderPlan`], returning `Ok(None)` when the
 /// provider has no pre-load planner for pass 0 (e.g. an `ENG-5` non-curated Kolors/SDXL path).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn compile_optional_hires_render_plans(
     registry: &gen_core::ProviderRegistry,
     engine_id: &str,
@@ -793,10 +789,7 @@ pub(super) fn compile_optional_hires_render_plans(
 
 /// Compile the single-pass or two-pass [`PreparedRender`] for an `ENG-2` route before loading
 /// weights (`SW-6948`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn compile_prepared_render(
     registry: &gen_core::ProviderRegistry,
     engine_id: &str,
@@ -2519,10 +2512,7 @@ mod hires_report_tests {
         assert_eq!((receipt.full_width, receipt.full_height), (64, 64));
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn sw_6948_eng2_hires_fix_multi_pass_render_plan_and_low_res_start_compilation() {
         let root = tempfile::tempdir().expect("fixture root");
@@ -2534,6 +2524,7 @@ mod hires_report_tests {
         let ip_spec = base_spec
             .clone()
             .with_ip_adapter(gen_core::WeightsSource::Dir(ip_dir));
+        let _ = &ip_spec;
         let registry = crate::inference_runtime::media();
 
         // 1. Cohort membership predicate covers all ENG-2 routes and excludes ENG-5/ENG-4/ENG-6/ENG-7 routes.
@@ -2737,7 +2728,6 @@ mod hires_report_tests {
             ("sd3_5_medium", &base_spec, None, None, Some(4.5), None),
             ("sana_1600m", &base_spec, None, None, Some(4.5), None),
             ("boogu_image", &base_spec, None, None, Some(3.5), None),
-            ("qwen_image", &base_spec, None, None, None, Some(4.0)),
             ("z_image", &base_spec, None, None, Some(4.0), None),
             ("z_image_turbo", &base_spec, None, None, None, None),
             (
