@@ -2984,25 +2984,25 @@ pub(super) async fn generate_video_using(
             let prepare_cancel = cancel.clone();
             let prepare_model = admission_model_id.clone();
             let prepare_mode = admission_mode.clone();
-            let (input, mut request, plan, spec) =
-                crate::load_progress::spawn_blocking(move || {
-                    let request = take_video_request(&mut input, &prepare_cancel);
-                    let plan = prepare_video_reservation(
-                        &spec,
-                        &input,
-                        &request,
-                        &prepare_model,
-                        &prepare_mode,
-                    )?;
-                    Ok::<_, WorkerError>((input, request, plan, spec))
-                })
-                .await
-                .map_err(|error| WorkerError::Engine(error.to_string()))??;
+            let prepared = crate::load_progress::spawn_blocking(move || {
+                let request = take_video_request(&mut input, &prepare_cancel);
+                let plan = prepare_video_reservation(
+                    &spec,
+                    &input,
+                    &request,
+                    &prepare_model,
+                    &prepare_mode,
+                )?;
+                Ok::<_, WorkerError>((input, request, plan, spec))
+            })
+            .await
+            .map_err(|error| WorkerError::Engine(error.to_string()))?;
             if cancel.is_cancelled() {
                 return Err(WorkerError::Canceled(
                     "Video generation canceled during reservation preparation.".into(),
                 ));
             }
+            let (input, mut request, plan, spec) = prepared?;
             let cold_h3_receipt = h3_receipt.clone();
             let load_generator = move |id: &str, spec: &LoadSpec| {
                 if let Some(receipt) = &cold_h3_receipt {

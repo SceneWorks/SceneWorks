@@ -1787,10 +1787,8 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             if let Some((planned, load_policy)) = self.planned {
                 // The measured stage may already include these buffers. Compare it with the
                 // independently known simultaneous allocations before crediting resident weights.
-                let weights = (strategy == MemoryStrategy::Resident
-                    && self.contract.load_shape == gen_core::LoadShape::EagerMaterialization
-                    && load_policy == OffloadPolicy::Resident)
-                    .then_some(&self.contract.asset_facts);
+                let (denoise_weights, decode_weights) =
+                    planned_stage_weights(self.contract, self.identity.lane, strategy, load_policy);
                 let with_credit = |live, stage_weight| {
                     planned_phase_before_credit(
                         live,
@@ -1799,14 +1797,8 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                         self.attributable_resident_bytes,
                     )
                 };
-                let denoise = with_credit(
-                    planned.denoise_live_bytes,
-                    weights.map_or(0, |f| f.transformer_bytes),
-                );
-                let decode = with_credit(
-                    planned.decode_live_bytes,
-                    weights.map_or(0, |f| f.decoder_bytes),
-                );
+                let denoise = with_credit(planned.denoise_live_bytes, denoise_weights);
+                let decode = with_credit(planned.decode_live_bytes, decode_weights);
                 let (Some(denoise), Some(decode)) = (denoise, decode) else {
                     self.accounting_error = Some("planned video phase byte bound overflow".into());
                     return VideoRungSelection::Undecidable;
@@ -2860,6 +2852,30 @@ impl<'a> NativeQuantRequest<'a> {
     }
 }
 
+fn planned_stage_weights(
+    contract: &MemoryProviderContract,
+    lane: VideoLane,
+    strategy: MemoryStrategy,
+    placement: OffloadPolicy,
+) -> (u64, u64) {
+    if strategy != MemoryStrategy::Resident
+        || contract.load_shape != gen_core::LoadShape::EagerMaterialization
+        || placement != OffloadPolicy::Resident
+    {
+        return (0, 0);
+    }
+    if lane == VideoLane::Candle && contract.provider_id == "scail2_14b" {
+        // The Candle provider loads TE, CLIP, DiT and VAE as one cached Components value
+        // during the first generation. All four survive denoise and output conversion.
+        let resident = contract.total_resident_bytes();
+        return (resident, resident);
+    }
+    (
+        contract.asset_facts.transformer_bytes,
+        contract.asset_facts.decoder_bytes,
+    )
+}
+
 /// The ladder subtracts the observed weight credit once from the final phase envelope.
 /// Include that credit here so it can never cancel new live buffers. Without per-component
 /// attribution, any weight outside the cached set could belong to this stage.
@@ -2890,6 +2906,22 @@ pub(crate) fn admit_video_host_bytes(
             "planned video output needs {needed} additional host bytes, but available host RAM could not be verified"
         ))),
     }
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn additional_physical_host_bytes(
+    plan: &gen_core::VideoRenderPlan,
+    domain: gen_core::MemoryBudgetDomain,
+) -> gen_core::Result<u64> {
+    // A live physical-RAM probe sees the request's existing RGB storage. All provider-side
+    // resized inputs, including driving/mask f32 stacks, are still future allocations.
+    plan.minimum_live_bytes(domain)?
+        .checked_sub(plan.source_bytes(domain))
+        .ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "video host peak is below its live input allocation".into(),
+            )
+        })
 }
 
 /// A weights-free projection of the provider plan. The gate grades each distinct physical
@@ -2948,17 +2980,8 @@ impl PlannedVideoReservation {
         let decode_live_bytes = plan.minimum_decode_live_bytes(domain)?;
         let denoise_live_bytes = plan.minimum_denoise_live_bytes(domain)?;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        let additional_host_bytes = {
-            use gen_core::MemoryBudgetDomain::HostRam;
-            // The live host probe already sees the input frames and masks held by the request.
-            plan.minimum_decode_live_bytes(HostRam)?
-                .checked_sub(plan.minimum_denoise_live_bytes(HostRam)?)
-                .ok_or_else(|| {
-                    gen_core::Error::Unsupported(
-                        "video host peak is below its live input allocation".into(),
-                    )
-                })?
-        };
+        let additional_host_bytes =
+            additional_physical_host_bytes(&plan, gen_core::MemoryBudgetDomain::HostRam)?;
         Ok(Self {
             plan,
             overlay,

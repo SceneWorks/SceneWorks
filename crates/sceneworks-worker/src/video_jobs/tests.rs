@@ -230,6 +230,27 @@ fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding(
         (request.frames, reservation.plan.geometry().frames),
         (Some(61), 45)
     );
+    // The live process owns 6 original pairs and 45 driving/mask pairs at 32x32. The
+    // provider builds both resized f32 stacks at the render size after this snapshot.
+    let mut resized = request.clone();
+    resized.width = 512;
+    resized.height = 512;
+    let resized = reserve(&resized).unwrap().unwrap().plan;
+    let physical_host = if cfg!(target_os = "macos") {
+        gen_core::MemoryBudgetDomain::UnifiedMemory
+    } else {
+        gen_core::MemoryBudgetDomain::HostRam
+    };
+    let held = (2 * 6 + 2 * 45) * 32 * 32 * 3;
+    let future_stacks = 2 * 45 * 512 * 512 * 3 * 4;
+    assert_eq!(resized.source_bytes(physical_host), held);
+    let additional =
+        crate::video_admission::additional_physical_host_bytes(&resized, physical_host).unwrap();
+    assert_eq!(
+        additional + held,
+        resized.minimum_live_bytes(physical_host).unwrap()
+    );
+    assert!(additional >= future_stacks);
     let candidate = reservation.geometries()[0];
     let phase = &reservation.plan.layout().phases[0];
     assert_eq!(
@@ -4265,6 +4286,8 @@ fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
         // disk outright (see `crate::test_fixture_disk`).
         crate::test_fixture_disk::create_sparse_weights(&root.join(relative), len);
     }
+    // The production plan reads the codec geometry before the recording factory is opened.
+    std::fs::write(root.join("vae/config.json"), b"{}").unwrap();
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     std::fs::write(
         root.join("q4").join("split_model.json"),
