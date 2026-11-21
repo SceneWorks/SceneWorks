@@ -393,10 +393,7 @@ pub fn route_admits_source_asset_for_plain_img2img(model: &str) -> bool {
         model,
         "flux_schnell"
             | "flux_dev"
-            | "flux1_schnell"
-            | "flux1_dev"
             | "flux2_dev"
-            | "flux2_klein_4b"
             | "flux2_klein_9b"
             | "flux2_klein_9b_kv"
             | "flux2_klein_9b_true_v2"
@@ -404,7 +401,6 @@ pub fn route_admits_source_asset_for_plain_img2img(model: &str) -> bool {
             | "sd3_5_large_turbo"
             | "sd3_5_medium"
             | "sana_1600m"
-            | "sana_1_6b"
             | "boogu_image"
             | "z_image"
             | "z_image_turbo"

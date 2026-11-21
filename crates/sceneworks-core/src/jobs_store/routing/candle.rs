@@ -19,6 +19,7 @@ use crate::jobs_store::routing::mlx::{
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_nonempty_array, has_nonempty_or_malformed_array,
     has_nonempty_or_malformed_string, has_nonempty_string, has_nonempty_string_array,
+    source_asset_refused_for_plain_img2img,
 };
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
@@ -567,7 +568,8 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::SanaCarrier, |model, context| {
         matches!(model, "sana_1600m" | "sana_sprint_1600m")
             && (has_nonempty_or_malformed_string(context.payload, "referenceAssetId")
-                || sana_has_unsupported_carrier_with_facts(context.payload, context.options))
+                || sana_has_unsupported_carrier_with_facts(context.payload, context.options)
+                || source_asset_refused_for_plain_img2img(model, context.payload))
     }),
     (CandleImageRefusal::ReferenceOnlyMode, |model, context| {
         candle_refuses_reference_only_mode(model, context.payload)
@@ -718,11 +720,10 @@ fn candle_refuses_edit_mode(_model: &str, payload: &Map<String, Value>) -> bool 
     payload.get("mode").and_then(Value::as_str) == Some("edit_image")
 }
 
-/// Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) is refused by
-/// this base lane. Applies to EVERY candle family including Lens (pure T2I — no conditioning
-/// shapes in the Lens port).
-fn candle_refuses_conditioning_carrier(_model: &str, payload: &Map<String, Value>) -> bool {
-    has_nonempty_string(payload, "sourceAssetId")
+/// The generic lane accepts an ordinary img2img source on models whose worker consumes it.
+fn candle_refuses_conditioning_carrier(model: &str, payload: &Map<String, Value>) -> bool {
+    (has_nonempty_string(payload, "sourceAssetId")
+        && source_asset_refused_for_plain_img2img(model, payload))
         || has_nonempty_string(payload, "referenceAssetId")
         || has_nonempty_string_array(payload, "referenceAssetIds")
         || has_nonempty_string(payload, "maskAssetId")
@@ -1922,6 +1923,7 @@ fn sana_img2img_candle_eligible_with_facts(
 ) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
         && has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
         && !sana_has_unsupported_carrier_with_facts(payload, facts)
 }
 
@@ -1932,9 +1934,7 @@ fn sana_has_unsupported_carrier_with_facts(
     ["referenceAssetIds", "controls", "controlnets", "loras"]
         .iter()
         .any(|key| has_nonempty_or_malformed_array(payload, key))
-        || ["sourceAssetId", "maskAssetId"]
-            .iter()
-            .any(|key| has_nonempty_or_malformed_string(payload, key))
+        || has_nonempty_or_malformed_string(payload, "maskAssetId")
         || ["poses", "phases"]
             .iter()
             .any(|key| crate::jobs_store::routing::route_nested_array_material(facts, key))

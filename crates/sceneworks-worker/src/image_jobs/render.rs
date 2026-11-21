@@ -213,9 +213,7 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// trajectory receipt (`lowResStartExecutionReport`, SW-6942) — is collected for provenance.
     pub(crate) low_res_start_report:
         Option<&'a std::cell::RefCell<Option<gen_core::LowResStartExecutionReport>>>,
-    /// Ordinary single-source img2img (`§6.13`) input `(source_image, strength)` for base FLUX.1
-    /// (`GenerationRequest.source_image` + `GenerationRequest.strength`), distinct from the
-    /// `Conditioning::Reference` IP-Adapter slot.
+    /// Ordinary img2img input for providers that consume `GenerationRequest::source_image`.
     pub(crate) source_image: Option<&'a (Image, f32)>,
     /// Request-local completed provider report; a caller forwards it with the
     /// output instead of reading mutable generator state after another render.
