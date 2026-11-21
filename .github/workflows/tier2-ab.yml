@@ -8,7 +8,8 @@
 # same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
 # The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
 # comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
-# the end of the job; the model hub is never written or deleted and nothing is downloaded.
+# the end of the job. The original suite uses read-only hubs. The opt-in Krea suite stages its
+# fixed public assets into a separate attempt-owned hub before building.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
 # selector's trusted-ref rule), and their builds and processes receive no credential.
@@ -30,6 +31,11 @@ on:
         description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, physical GPU1)"
         required: true
         type: string
+      suite:
+        description: "Empty for the original Tier 2 A/B, or krea-scoped-acceptance for SW-F336"
+        required: false
+        type: string
+        default: ""
       routes:
         description: "JSON array of route ids; empty selects the backend's default routes"
         required: false
@@ -41,7 +47,7 @@ on:
         type: string
         default: ""
       inference_sha:
-        description: "Optional cross-check: both checkouts must pin this inference revision"
+        description: "Optional common pin cross-check for A/B, or required exact candidate pin for Krea"
         required: false
         type: string
         default: ""
@@ -75,6 +81,7 @@ jobs:
       TIER2_AB_HEAD_SHA: ${{ inputs.head_sha }}
       TIER2_AB_BASE_DIR: ${{ github.workspace }}/tier2-ab-base
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}/tier2-ab-head
+      TIER2_AB_SUITE: ${{ inputs.suite }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -111,6 +118,9 @@ jobs:
           node-version: 22
       - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
         run: node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
+      - name: Stage and verify the allowlisted Krea assets into attempt-owned scratch
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.preflight_only }}
+        run: node tier2-ab-driver/scripts/tier2-ab.mjs --stage-krea
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ !inputs.preflight_only }}
         with:
@@ -176,6 +186,7 @@ jobs:
       TIER2_AB_HEAD_SHA: ${{ inputs.head_sha }}
       TIER2_AB_BASE_DIR: ${{ github.workspace }}\tier2-ab-base
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}\tier2-ab-head
+      TIER2_AB_SUITE: ${{ inputs.suite }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -222,6 +233,11 @@ jobs:
         run: |
           node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab preflight failed' }
+      - name: Stage and verify the allowlisted Krea assets into attempt-owned scratch
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.preflight_only }}
+        run: |
+          node tier2-ab-driver/scripts/tier2-ab.mjs --stage-krea
+          if ($LASTEXITCODE -ne 0) { throw 'Krea asset staging failed' }
       - name: Prepare the Rust toolchain
         if: ${{ !inputs.preflight_only }}
         uses: ./tier2-ab-driver/.github/actions/prepare-rust-runner

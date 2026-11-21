@@ -34,8 +34,13 @@ import { createHash } from "node:crypto";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
-import { buildChildEnv } from "./qwen-image-2-1-app-lifecycle.mjs";
-import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText } from "./flux3-image-klein-app-lifecycle.mjs";
+import { assertPins, buildChildEnv } from "./qwen-image-2-1-app-lifecycle.mjs";
+import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText, utilityWorkerId } from "./flux3-image-klein-app-lifecycle.mjs";
+import {
+  KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, assertKreaPins, kreaRoutes, kreaAssetInventory,
+  assertKreaCatalogRows, assertKreaLoraManifest, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importLinkedKrea,
+  assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaPerformance,
+} from "./krea-tier2-proof.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -148,14 +153,22 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
     const rel = paths.relative(paths.resolve(env.RUNNER_TEMP), work);
     fact(rel && !rel.startsWith("..") && !paths.isAbsolute(rel), "TIER2_AB_WORK must be under RUNNER_TEMP in Actions");
   }
-  const routes = selectRoutes(backend, env.TIER2_AB_ROUTES);
+  const suite = env.TIER2_AB_SUITE || "tier2-ab";
+  fact(["tier2-ab", KREA_SUITE].includes(suite), "unknown Tier 2 suite");
+  const krea = suite === KREA_SUITE;
+  const routes = krea ? kreaRoutes(backend) : selectRoutes(backend, env.TIER2_AB_ROUTES);
+  if (krea) {
+    assertKreaPins(baseSha, KREA_BASE_ENGINE, headSha, inferenceSha);
+    fact(!env.TIER2_AB_ROUTES && !env.TIER2_AB_HUBS, "Krea uses its fixed routes and attempt-owned staging hub");
+  }
   const hubs = listInput(env.TIER2_AB_HUBS, /[;\r\n]+/) ?? defaultHubs(backend, home);
   fact(hubs.length > 0 && hubs.every((hub) => absoluteFor(platform, hub)), "every hub root must be an absolute path");
   // Optional operator knob: one claim bound (minutes) for every route, e.g. to fail fast.
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes, hubs: hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
+  return { suite, krea, backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes,
+    hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
 // Pure selector for the registered dispatcher (memory-catalog-campaign.yml, profile tier2-ab).
@@ -166,10 +179,18 @@ export function dispatchOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, "tier2-ab");
   fact(SHA.test(dispatchedSha ?? "") && inputs.ref === dispatchedSha, "ref must equal the exact dispatched source SHA (the driver's own commit)");
   fact(["mlx", "candle"].includes(inputs.backend), "backend must be mlx or candle");
-  fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "tier2-ab never downloads; leave download_missing and qwen_persistent_weights off");
   let options;
   try { options = JSON.parse(inputs.moss_options_json || "{}"); } catch { throw new Error("moss_options_json must be a JSON object"); }
   fact(options && typeof options === "object" && !Array.isArray(options), "tier2-ab options must be a JSON object");
+  if (options.suite === KREA_SUITE) {
+    fact(Object.keys(options).every((key) => ["suite", "head_sha", "preflight_only"].includes(key)), "Krea selector accepts suite, head_sha, and preflight_only");
+    fact(options.preflight_only === undefined || typeof options.preflight_only === "boolean", "preflight_only must be boolean");
+    const preflight = options.preflight_only ?? true;
+    fact(!inputs.qwen_persistent_weights && (inputs.download_missing === true) === !preflight, "Krea execution requires download_missing; metadata preflight leaves it off");
+    assertKreaPins(KREA_BASE_APP, KREA_BASE_ENGINE, options.head_sha, inputs.inference_sha);
+    return { suite: KREA_SUITE, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha };
+  }
+  fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "tier2-ab never downloads; leave download_missing and qwen_persistent_weights off");
   const unknown = Object.keys(options).filter((key) => !DISPATCH_OPTION_KEYS.includes(key));
   fact(unknown.length === 0, `unknown tier2-ab option(s): ${unknown.join(", ")}`);
   fact(SHA.test(options.base_sha ?? "") && SHA.test(options.head_sha ?? "") && options.base_sha !== options.head_sha, "base_sha and head_sha must be distinct exact 40-hex SHAs");
@@ -322,7 +343,7 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
       try {
         const rows = routeDownloadRows(headModel, { platform, tier }), baseRows = routeDownloadRows(baseModel, { platform, tier });
         if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { refusal = { skipReason: `pinned download rows for ${route.model} (${rows.tier ?? "untiered"}) differ between base and head catalogs`, rows: { base: baseRows, head: rows } }; break; }
-        rowsByTier.push(rows);
+        rowsByTier.push(route.proof ? assertKreaCatalogRows(route, rows, evidence) : rows);
       } catch (error) { if (!route.tierCandidates) { refusal = { skipReason: error.message }; break; } }
     }
     if (refusal) { planned.push({ ...entry, status: "skipped", ...refusal }); continue; }
@@ -521,6 +542,12 @@ export function hubMutationAttribution(route) {
 // Full mutation listings go to report.json; the Markdown shows a handful.
 export const HUB_MUTATION_LISTING_LIMIT = 20_000;
 export function exitCodeFor(report) {
+  if (report.kind === KREA_SUITE) {
+    if (report.fatal || report.routes.length !== 2) return 1;
+    if (report.mode === "preflight") return report.staging?.files?.length > 0 ? 0 : 1;
+    if (report.mode === "stage" || report.mode === "build") return report.summary.ready === 2 ? 0 : 1;
+    return report.routes.every((route) => route.status === "ran" && ["equal", "product_pass_oracle_required"].includes(route.verdict)) ? 0 : 1;
+  }
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
   const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || (route.hubMutation?.changed && hubMutationAttribution(route) !== "base_only"));
   return bad || report.summary.ran === 0 || report.fatal ? 1 : 0;
@@ -717,6 +744,7 @@ export function renderMarkdown(report) {
   }
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
+  if (report.kind === KREA_SUITE && report.staging) lines.push(`- Exact asset inventory: ${report.staging.files.length} files, ${gib(report.staging.bytes)}. ${report.staging.stagedFileCount ? "Digest-verified in the attempt-owned hub." : "Metadata pricing only."}`, "");
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
   for (const route of report.routes) {
@@ -730,6 +758,10 @@ export function renderMarkdown(report) {
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
+    if (route.comparison?.observedPerformance) {
+      const { base, head } = route.comparison.observedPerformance;
+      lines.push(`- Worker sampleMs per observed step: ${base.secondsPerObservedStep.toFixed(3)} s base, ${head.secondsPerObservedStep.toFixed(3)} s head. ${base.method}. Paired observations only.`, `- Observed memory: ${memoryCell(base.memory)} base, ${memoryCell(head.memory)} head.`);
+    }
     if (route.comparison?.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
     if (route.hubMutation?.changed) {
       const attribution = hubMutationAttribution(route);
@@ -755,7 +787,7 @@ async function sideIdentity(label, dir, sha) {
 async function tool(command, args) { try { const { stdout, stderr } = await execFile(command, args, { timeout: 20_000, windowsHide: true }); return { available: true, version: `${stdout}${stderr}`.split(/\r?\n/)[0].slice(0, 200) }; } catch (error) { return { available: false, error: error.message.slice(0, 200) }; } }
 async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: true }); return Number(fs.bavail * fs.bsize); } catch { return null; } }
 
-async function preflight(env, cfg, report) {
+async function preflight(env, cfg, report, signal) {
   const platform = process.platform;
   if (cfg.backend === "mlx") fact(platform === "darwin" && process.arch === "arm64", "the mlx backend needs a native Apple-silicon Mac");
   else fact(platform === "win32", "the cuda backend needs the Windows CUDA runner");
@@ -767,7 +799,17 @@ async function preflight(env, cfg, report) {
   if (cfg.backend === "cuda") fact(env.CUDA_DEVICE_ORDER === "PCI_BUS_ID", "CUDA_DEVICE_ORDER=PCI_BUS_ID required");
   report.base = { ...report.base, ...(await sideIdentity("base", cfg.baseDir, cfg.baseSha)) };
   report.head = { ...report.head, ...(await sideIdentity("head", cfg.headDir, cfg.headSha)) };
-  if (cfg.inferenceSha) for (const side of [report.base, report.head]) fact(side.inferencePin === cfg.inferenceSha, `inference pin ${side.inferencePin} differs from the requested ${cfg.inferenceSha}`);
+  if (cfg.krea) {
+    assertKreaPins(report.base.sha, report.base.inferencePin, report.head.sha, report.head.inferencePin);
+    fact(report.head.inferencePin === cfg.inferenceSha, "candidate checkout does not source-pin the requested inference SHA");
+    for (const side of [report.base, report.head]) {
+      const manifests = ["Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml"];
+      const contents = await Promise.all(manifests.map((file) => readFile(path.join(side.checkout, file), "utf8")));
+      assertPins(contents, await readFile(path.join(side.checkout, "Cargo.lock"), "utf8"), side.inferencePin);
+      const loras = await readFile(path.join(side.checkout, "config", "manifests", "builtin.loras.jsonc"), "utf8");
+      assertKreaLoraManifest(JSON.parse(stripJsoncComments(loras)).loras);
+    }
+  } else if (cfg.inferenceSha) for (const side of [report.base, report.head]) fact(side.inferencePin === cfg.inferenceSha, `inference pin ${side.inferencePin} differs from the requested ${cfg.inferenceSha}`);
   if (cfg.backend === "mlx") fact(report.base.pmetalSource && report.base.pmetalSource === report.head.pmetalSource, "base and head must pin the same pmetal-mlx-sys revision (one prebuilt MLX serves both builds)");
   const ffmpeg = env.SCENEWORKS_FFMPEG || "ffmpeg";
   report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, ffprobe: { command: ffprobePath(ffmpeg), ...(await tool(ffprobePath(ffmpeg), ["-version"])) }, git: await tool("git", ["--version"]) };
@@ -793,6 +835,23 @@ async function preflight(env, cfg, report) {
   const evidence = headEvidence.size ? headEvidence : await readPatternEvidence(cfg.baseDir);
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
+  if (cfg.krea) {
+    const inventory = kreaAssetInventory(evidence, cfg.routes);
+    const stageReceipt = path.join(cfg.work, "scratch", "krea-stage.json");
+    if (["preflight", "stage"].includes(report.mode)) {
+      report.staging = await priceKreaAssets(inventory, signal);
+      fact(report.routes.every((route) => route.rows?.required?.length), "Krea public catalog no longer provides both exact proof routes");
+      if (report.mode === "stage") {
+        report.staging = await stageKreaAssets(cfg.hubs[0], report.staging, signal);
+        await writeFile(stageReceipt, JSON.stringify(report.staging) + "\n", { flag: "wx" });
+        report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
+      }
+    } else {
+      report.staging = JSON.parse(await readFile(stageReceipt, "utf8"));
+      await assertStagedKreaAssets(cfg.hubs[0], report.staging, inventory);
+    }
+    if (report.mode !== "preflight") fact(report.routes.every((route) => route.status === "ready"), "both pinned Krea cases must be eligible to run");
+  }
   for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
     if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
     else if (!report.tools.ffprobe.available) route.note = "ffprobe unavailable: video fidelity falls back to file bytes (no stream geometry/timing)";
@@ -934,7 +993,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     child.done = new Promise((resolve) => { child.once("error", (error) => resolve({ error: error.message })); child.once("exit", (code, sig) => resolve({ code, signal: sig })); });
     return child;
   };
-  let endpoint, apiUrl, job, accepted, samplers = [], sampling = false;
+  let endpoint, apiUrl, job, accepted, events, samplers = [], sampling = false;
   const runStarted = Date.now();
   // Outer backstop only; the claim and execution bounds below stop a run first and say why.
   const runMinutes = claimMinutes + route.timeoutMinutes + 15;
@@ -978,7 +1037,17 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       fact(upload.status < 300 && upload.body?.id, `reference audio upload refused (${upload.status}): ${JSON.stringify(upload.body).slice(0, 600)}`);
       referenceAudioAssetId = upload.body.id;
     }
+    if (route.proof === "hires") {
+      record.import = await importLinkedKrea({ endpoint, hub: plan.hub, wait, trackJob: (job) => { accepted = job; }, ownsWorker: (id) => id === workerId || id === utilityWorkerId(workerId) || id?.startsWith(`${utilityWorkerId(workerId)}-`) });
+      accepted = null;
+    }
     const body = requestBody(route, project.id, referenceAudioAssetId);
+    if (route.proof) {
+      const refused = await endpoint.exchange("POST", route.endpoint, { ...body, advanced: { ...body.advanced, enhancePrompt: true } });
+      assertKreaEnhancementRefused(refused);
+      record.enhancementRefusal = { status: refused.status, detail: refused.body.detail };
+      events = await openKreaEvents(endpoint, url, controller.signal);
+    }
     record.requestSha256 = sha256(JSON.stringify({ ...body, projectId: "<project>", ...(route.referenceAudio ? { referenceAudioAssetId: "<reference-audio>" } : {}) }));
     fact(record.requestSha256 === plan.request.sha256, "request body diverged from the route template");
     // Memory baselines and samplers start before the POST and stop at completion.
@@ -1025,6 +1094,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       if (decision.state === "completed") { job = current; break; }
       await delay(500);
     }
+    if (route.proof) {
+      record.observedEvents = await events.collect(accepted.id, wait);
+      record.eventProof = assertKreaEvents(record.observedEvents, route);
+      await events.close();
+      events = null;
+    }
     record.timing.enqueueToCompleteSeconds = (Date.now() - posted) / 1000;
     await phase("completed", { side, job: accepted.id, total_s: record.timing.enqueueToCompleteSeconds.toFixed(1) });
     sampling = false; await Promise.all(samplers); samplers = [];
@@ -1047,11 +1122,29 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     fact(assets.length === 1, `expected exactly one ${route.kind} asset, saw ${assets.length}`);
     const relative = assets[0].file?.path;
     fact(typeof relative === "string" && relative && !relative.split("/").includes(".."), "saved asset path invalid");
+    if (route.proof) fact(assets[0].file?.mimeType === "image/png" && /^assets\/images\/[A-Za-z0-9_./-]+\.png$/.test(relative), "Krea worker must persist a project-local PNG");
     const media = path.resolve(projectPath, ...relative.split("/"));
     fact(!path.relative(projectPath, media).startsWith(".."), "saved asset escaped the project");
     const served = await endpoint.served(`/api/v1/projects/${project.id}/files/${relative.split("/").map(encodeURIComponent).join("/")}`);
     const saved = await readFile(media);
     fact(sha256(served.bytes) === sha256(saved), "API-served bytes differ from the saved project file");
+    if (route.proof) {
+      const expectedBackend = cfg.backend === "mlx" ? "mlx" : "candle";
+      fact(job.backend === expectedBackend, `public job ran on ${job.backend}, expected ${expectedBackend}`);
+      const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
+      const sidecarFile = media.replace(/\.png$/, ".sceneworks.json");
+      const diskFiles = await readdir(path.join(projectPath, "assets", "images"), { recursive: true, withFileTypes: true });
+      const candidates = diskFiles.filter((entry) => entry.isFile() && /(?:\.png|\.sceneworks\.json)$/.test(entry.name)).map((entry) => path.join(entry.parentPath, entry.name));
+      assert.deepEqual(candidates.sort(), [media, sidecarFile].sort(), "project image directory must contain only the final PNG and its sidecar");
+      const sidecar = JSON.parse(await readFile(sidecarFile, "utf8"));
+      const { imageQualityStats, readWorkflowShareFromPng } = await import("./pag-acceptance.mjs");
+      const { width, height, rgba } = decodePng(saved);
+      record.productProof = assertKreaOutput({ route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved), width, height, workerId, projectId: project.id });
+      record.productProof.imageStats = imageQualityStats(rgba);
+      fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
+      const metrics = await wait(async () => { const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`); return value?.sampleMs > 0 && value; }, 30, "Krea native metrics");
+      record.performance = kreaPerformance(metrics, route, memory);
+    }
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
     record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
@@ -1063,6 +1156,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   } catch (error) {
     record.status = "error"; record.error = error.message;
   } finally {
+    await events?.close().catch(() => {});
     clearTimeout(timer); signal.removeEventListener("abort", onAbort);
     sampling = false; await Promise.all(samplers);
     if (record.status !== "completed" && apiUrl) {
@@ -1086,6 +1180,16 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
     for (const name of ["api", "worker"]) {
       const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
+      if (name === "worker" && route.proof) {
+        record.scopePolicyEvents = text.split(/\r?\n/).flatMap((line) => {
+          try {
+            const { fields } = JSON.parse(line);
+            if (fields?.event !== "generation_memory_policy_applied" || !String(fields.engine).startsWith("krea_2")) return [];
+            const { engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component } = fields;
+            return [{ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }];
+          } catch { return []; }
+        });
+      }
       if (text) await writeFile(path.join(evidence, `${name}.log`), redactSensitiveText(text, secrets));
       if (record.status !== "completed") (record.diagnostics ??= {})[`${name}LogTail`] = lastLines(redactSensitiveText(text, secrets), 50);
     }
@@ -1139,7 +1243,7 @@ async function runComparison(env, cfg, report, signal) {
   let firstRoute = true;
   for (const route of report.routes.filter((item) => item.status === "ready")) {
     if (route.status !== "ready") continue;
-    const definition = ROUTES[route.id];
+    const definition = cfg.routes.find(({ id }) => id === route.id);
     const repos = [...route.rows.required, ...route.rows.optional];
     const before = await hubFingerprint(route.hub, repos);
     route.runs = []; route.status = "running";
@@ -1168,17 +1272,28 @@ async function runComparison(env, cfg, report, signal) {
     const head = signal.aborted ? null : await run("head");
     let decision = verdictFor({ base1, head });
     let base2 = null;
+    if (definition.proof === "raw" && base1.status === "completed" && head?.status === "completed") {
+      decision = { verdict: "product_pass_oracle_required", reason: "both public routes passed; exact pinned adapter contains a text-fusion projector affected by the frozen baseline's known bug; compare against the independent source-bound oracle" };
+    }
     if (decision.needBase2 && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
     if (decision.verdict === null) decision = { verdict: "error", reason: "interrupted before base#2" };
     route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
     route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
     if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
-    if (decision.verdict === "head_differs") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
+    if (definition.proof && base1.status === "completed" && head?.status === "completed") {
+      if (cfg.backend === "cuda" && (!base1.memory.gpuUuid || base1.memory.gpuUuid !== head.memory.gpuUuid)) {
+        route.verdict = "error";
+        route.verdictReason = "the two CUDA arms must report the same admitted physical GPU UUID";
+      }
+      route.comparison.productOutputHashesMatch = contentOf(base1) === contentOf(head);
+      route.comparison.observedPerformance = { base: base1.performance, head: head.performance, comparisonScope: "single paired observations on the same device; no performance claim" };
+    }
+    if (decision.verdict === "head_differs" || decision.verdict === "product_pass_oracle_required") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
     const after = await hubFingerprint(route.hub, repos);
     // Only the route's own repositories decide `changed`; the shared root listing can legitimately
     // change under another runner job, so it is recorded but never fails this one.
     route.hubMutation = { changed: JSON.stringify(before.repos) !== JSON.stringify(after.repos), rootChanged: JSON.stringify([before.root, before.hfHome]) !== JSON.stringify([after.root, after.hfHome]), diff: diffObjects(before, after, HUB_MUTATION_LISTING_LIMIT), method: "readdir/stat of the hub root, its parent, and each route repository's dir/refs/snapshots/blobs (metadata only)" };
-    progress({ route: route.id, phase: "verdict", verdict: decision.verdict, reason: decision.reason });
+    progress({ route: route.id, phase: "verdict", verdict: route.verdict, reason: route.verdictReason });
     if (decision.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
     await writeReport(cfg, report);
     if (signal.aborted) break;
@@ -1198,7 +1313,7 @@ async function writeReport(cfg, report) {
 async function cleanup(env, cfg) {
   const allowedRoots = [env.RUNNER_TEMP, env.GITHUB_WORKSPACE].filter(Boolean);
   fact(allowedRoots.length, "--cleanup needs RUNNER_TEMP or GITHUB_WORKSPACE to bound what it may remove");
-  const protectedRoots = [...cfg.hubs, ...defaultHubs(cfg.backend)];
+  const protectedRoots = [...(cfg.krea ? [] : cfg.hubs), ...defaultHubs(cfg.backend)];
   let failed = 0;
   for (const target of [cfg.work, cfg.baseDir, cfg.headDir]) {
     try { const result = await removeScratch(target, { allowedRoots, protectedRoots }); progress({ phase: "cleanup", target, removed: result.removed, restored_dirs: result.restoredDirectories, restored_files: result.restoredFiles }); }
@@ -1208,18 +1323,20 @@ async function cleanup(env, cfg) {
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
-  const modes = { "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
-  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --build-only, --run, --cleanup is required");
+  const modes = { "--stage-krea": "stage", "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
+  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-krea, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
   if (mode === "cleanup") return cleanup(env, cfg);
+  if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
-  const report = { schemaVersion: 1, kind: "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
+  const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("A/B interrupted by signal"));
+  const runCeiling = cfg.krea && mode === "run" ? setTimeout(() => controller.abort(new Error("Krea run reached its 210-minute ceiling")), 210 * 60_000) : null;
   process.once("SIGTERM", interrupt); process.once("SIGINT", interrupt);
   try {
-    await preflight(env, cfg, report);
+    await preflight(env, cfg, report, controller.signal);
     if (mode === "build") await build(env, cfg, report);
     if (mode === "run") await runComparison(env, cfg, report, controller.signal);
     if (controller.signal.aborted) throw controller.signal.reason;
@@ -1227,10 +1344,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   } catch (error) {
     report.status = "failed"; report.fatal = error.message;
   } finally {
+    clearTimeout(runCeiling);
     process.removeListener("SIGTERM", interrupt); process.removeListener("SIGINT", interrupt);
     report.finishedAt = new Date().toISOString();
     report.summary = summarize(report.routes);
-    report.exitCode = mode === "build" ? (report.fatal ? 1 : 0) : exitCodeFor(report);
+    report.exitCode = mode === "build" && !cfg.krea ? (report.fatal ? 1 : 0) : exitCodeFor(report);
     await writeReport(cfg, report).catch((error) => { process.stderr.write(`report write failed: ${error.message}\n`); report.exitCode = 1; });
   }
   process.stdout.write(renderMarkdown(report));
