@@ -1804,24 +1804,7 @@ pub(super) struct LaneConditioning {
 /// FLUX.1 (`flux_schnell`, `flux_dev`) when `sourceAssetId` is supplied in `text_to_image` mode.
 #[cfg(native_lane)]
 pub(super) fn supports_eng2_ordinary_img2img_source(model: &str) -> bool {
-    matches!(
-        model,
-        "flux_schnell"
-            | "flux_dev"
-            | "flux1_schnell"
-            | "flux1_dev"
-            | "flux2_dev"
-            | "flux2_klein_4b"
-            | "flux2_klein_9b"
-            | "sd3_5_large"
-            | "sd3_5_large_turbo"
-            | "sd3_5_medium"
-            | "z_image"
-            | "z_image_turbo"
-            | "kolors"
-            | "sdxl"
-            | "realvisxl"
-    )
+    sceneworks_core::options::low_res_start::route_admits_source_asset_for_plain_img2img(model)
 }
 
 #[cfg(native_lane)]

@@ -281,7 +281,8 @@ pub(crate) fn resolve_lane_request_controls_with_pid(
         .and_then(|s| u32::try_from(s).ok())
         .unwrap_or(default_steps);
     let low_res_start_supported = !caps.supports_phases
-        && caps.conditioning != [gen_core::ConditioningKind::Control]
+        && (caps.supports_low_res_start
+            || caps.conditioning != [gen_core::ConditioningKind::Control])
         && request
             .model_manifest_entry
             .get("features")
@@ -1234,6 +1235,53 @@ mod tests {
             unsupported.to_string().contains("Low Res Start")
                 || unsupported.to_string().contains("lowResStart"),
             "{unsupported}"
+        );
+
+        // Candle SDXL advertises `conditioning: &[ConditioningKind::Control]` alongside
+        // `supports_low_res_start: true` on its base generator descriptor, whereas ControlNet-only
+        // descriptors set `supports_low_res_start: false`:
+        let mut candle_sdxl_caps = honouring();
+        candle_sdxl_caps.conditioning = vec![gen_core::ConditioningKind::Control];
+        candle_sdxl_caps.supports_low_res_start = true;
+        let sdxl_payload = json!({
+            "projectId": "p",
+            "model": "sdxl",
+            "prompt": "a tower",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 30,
+                "sampler": "euler",
+                "scheduler": "karras",
+                "lowResStart": { "version": 1, "k": 8, "scale": 0.5 }
+            },
+            "modelManifestEntry": {
+                "id": "sdxl",
+                "type": "image",
+                "features": { "low_res_start": true }
+            }
+        });
+        let sdxl_obj = sdxl_payload.as_object().unwrap();
+        let sdxl_req = ImageRequest::from_resolved(sdxl_obj, sdxl_obj).unwrap();
+        let sdxl_resolved =
+            resolve_lane_request_controls(&sdxl_req, &candle_sdxl_caps, Some(7.0), None)
+                .expect("Candle SDXL base descriptor with supports_low_res_start=true must pass worker capability gate");
+        assert_eq!(
+            sdxl_resolved.low_res_start,
+            Some(gen_core::LowResStartSpec::new(8, Some(0.5)))
+        );
+
+        let mut control_only_caps = candle_sdxl_caps;
+        control_only_caps.supports_low_res_start = false;
+        let control_only_err =
+            resolve_lane_request_controls(&sdxl_req, &control_only_caps, Some(7.0), None)
+                .expect_err(
+                    "ControlNet-only descriptor with supports_low_res_start=false must refuse",
+                );
+        assert!(
+            control_only_err.to_string().contains("Low Res Start")
+                || control_only_err.to_string().contains("lowResStart"),
+            "{control_only_err}"
         );
 
         // Bespoke conditioned route rejection helper refuses `lowResStart` before load:

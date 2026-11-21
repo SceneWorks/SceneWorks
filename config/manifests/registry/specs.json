@@ -31630,7 +31630,8 @@
           "discrete"
         ],
         "supported_guidance_methods": [
-          "cfg"
+          "cfg",
+          "cfg_pp"
         ],
         "supported_quants": [
           "q4",
@@ -33270,7 +33271,8 @@
           "discrete"
         ],
         "supported_guidance_methods": [
-          "cfg"
+          "cfg",
+          "cfg_pp"
         ],
         "supported_quants": [
           "q4",
@@ -64990,7 +64992,8 @@
           "discrete"
         ],
         "supported_guidance_methods": [
-          "cfg"
+          "cfg",
+          "cfg_pp"
         ],
         "supported_quants": [
           "q4",
@@ -66595,7 +66598,8 @@
           "discrete"
         ],
         "supported_guidance_methods": [
-          "cfg"
+          "cfg",
+          "cfg_pp"
         ],
         "supported_quants": [
           "q4",
@@ -72908,7 +72912,8 @@
           "discrete"
         ],
         "supported_guidance_methods": [
-          "cfg"
+          "cfg",
+          "cfg_pp"
         ],
         "supported_quants": [
           "q4",

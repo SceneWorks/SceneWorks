@@ -374,7 +374,8 @@ pub fn resolve_executed_steps(
         });
     let num_steps = crate::limits::requested_steps(advanced).unwrap_or(default_steps);
 
-    let has_source = has_nonempty_str(payload, "sourceAssetId")
+    let has_source = (has_nonempty_str(payload, "sourceAssetId")
+        && route_admits_source_asset_for_plain_img2img(model))
         || (has_nonempty_str(payload, "referenceAssetId")
             && route_uses_reference_asset_for_plain_img2img(model, payload, advanced, entry));
     let authored_strength = resolve_raw_img2img_strength(payload, advanced)?;
@@ -383,6 +384,36 @@ pub fn resolve_executed_steps(
         has_source,
         authored_strength,
     ))
+}
+
+/// Whether `model` supports ordinary single-source img2img (`§6.13`) via `sourceAssetId` in
+/// `text_to_image` / `image_generation` mode on the worker generic lane.
+pub fn route_admits_source_asset_for_plain_img2img(model: &str) -> bool {
+    matches!(
+        model,
+        "flux_schnell"
+            | "flux_dev"
+            | "flux1_schnell"
+            | "flux1_dev"
+            | "flux2_dev"
+            | "flux2_klein_4b"
+            | "flux2_klein_9b"
+            | "flux2_klein_9b_kv"
+            | "flux2_klein_9b_true_v2"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+            | "sana_1600m"
+            | "sana_1_6b"
+            | "boogu_image"
+            | "z_image"
+            | "z_image_turbo"
+            | "kolors"
+            | "sdxl"
+            | "realvisxl"
+            | "illustrious_xl_v1"
+            | "illustrious_xl_v2"
+    )
 }
 
 /// Whether a single `referenceAssetId` on `model` represents a plain img2img initial source image
@@ -401,7 +432,12 @@ pub fn route_admits_reference_asset_for_plain_img2img(
     if family == "flux"
         || matches!(
             model,
-            "flux_dev" | "flux_schnell" | "flux1_dev" | "flux1_schnell" | "pulid_flux_dev"
+            "flux_dev"
+                | "flux_schnell"
+                | "flux1_dev"
+                | "flux1_schnell"
+                | "flux2_dev"
+                | "pulid_flux_dev"
         )
         || model.starts_with("flux1_")
         || model.starts_with("flux3")
@@ -429,19 +465,19 @@ pub fn route_admits_reference_asset_for_plain_img2img(
         "sd3_5_medium"
             | "sd3_5_large"
             | "sd3_5_large_turbo"
-            | "flux2_dev"
+            | "flux2_klein_4b"
             | "flux2_klein_9b"
+            | "flux2_klein_9b_kv"
+            | "flux2_klein_9b_true_v2"
             | "z_image_turbo"
             | "z_image"
+            | "sana_1600m"
             | "sana_1_6b"
+            | "sana_sprint_1600m"
             | "sana_sprint_1_6b"
             | "boogu_image"
-            | "qwen_image"
             | "krea_2_turbo"
             | "krea_2_raw"
-            | "chroma"
-            | "anima"
-            | "pixart_sigma"
     )
 }
 
@@ -559,9 +595,12 @@ pub fn requested_low_res_start_with_pid_active(
         ));
     }
 
+    let disallow_source_asset_id = has_nonempty_str(payload, "sourceAssetId")
+        && !route_admits_source_asset_for_plain_img2img(model);
     let disallow_reference_asset_id = has_nonempty_str(payload, "referenceAssetId")
         && !route_uses_reference_asset_for_plain_img2img(model, payload, advanced, entry);
-    let has_forbidden_conditioning = disallow_reference_asset_id
+    let has_forbidden_conditioning = disallow_source_asset_id
+        || disallow_reference_asset_id
         || has_nonempty_array(payload, "referenceAssetIds")
         || has_nonempty_array(payload, "sourceAssetIds")
         || has_nonempty_str(payload, "maskAssetId")
@@ -1007,7 +1046,6 @@ mod tests {
             ("sd3_5_medium", "sd3"),
             ("sd3_5_large", "sd3"),
             ("sd3_5_large_turbo", "sd3"),
-            ("flux2_dev", "flux2"),
             ("flux2_klein_9b", "flux2"),
         ] {
             let entry = json!({
@@ -1273,5 +1311,112 @@ mod tests {
         .expect("sdxl sourceAssetId plain img2img remains admitted")
         .expect("present");
         assert_eq!(sdxl_resolved.executed_steps, 6);
+
+        // FLUX.2 Dev routes referenceAssetId to the bespoke flux2_dev_edit token-concatenated
+        // edit lane, so referenceAssetId + lowResStart must be refused while sourceAssetId remains
+        // admitted for ordinary img2img:
+        let flux2_dev_entry = json!({
+            "id": "flux2_dev",
+            "family": "flux2",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let flux2_dev_ref_payload = json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "referenceAssetId": "ref_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "flux2_dev",
+            &flux2_dev_ref_payload,
+            flux2_dev_ref_payload["advanced"].as_object().unwrap(),
+            &flux2_dev_entry,
+        )
+        .expect_err("flux2_dev referenceAssetId routes to flux2_dev_edit and must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        let flux2_dev_src_payload = json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "sourceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "strength": 0.4,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let flux2_dev_resolved = requested_low_res_start(
+            "flux2_dev",
+            &flux2_dev_src_payload,
+            flux2_dev_src_payload["advanced"].as_object().unwrap(),
+            &flux2_dev_entry,
+        )
+        .expect("flux2_dev sourceAssetId ordinary img2img remains admitted")
+        .expect("present");
+        assert_eq!(flux2_dev_resolved.executed_steps, 6);
+
+        // Pure text-to-image routes without ordinary img2img source resolution (e.g. chroma1_hd)
+        // must refuse sourceAssetId + lowResStart instead of silently dropping the source:
+        let chroma_entry = json!({
+            "id": "chroma1_hd",
+            "family": "chroma",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let chroma_src_payload = json!({
+            "model": "chroma1_hd",
+            "mode": "text_to_image",
+            "sourceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "strength": 0.4,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "chroma1_hd",
+            &chroma_src_payload,
+            chroma_src_payload["advanced"].as_object().unwrap(),
+            &chroma_entry,
+        )
+        .expect_err(
+            "chroma1_hd does not resolve sourceAssetId img2img and must refuse lowResStart",
+        );
+        assert_eq!(err.field, "advanced.lowResStart");
     }
 }
