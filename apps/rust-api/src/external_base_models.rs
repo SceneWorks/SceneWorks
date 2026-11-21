@@ -21,7 +21,6 @@ pub(crate) use sceneworks_core::external_base_models::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Map;
 
     /// Write a safetensors file whose header declares `(name, dtype)` tensors. Only
     /// the header is read, but the declared data must be present or the header is
@@ -30,32 +29,11 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("parent dir");
         }
-        let mut header = Map::new();
-        let mut payload = Vec::new();
-        for (key, dtype) in entries {
-            let start = payload.len();
-            match *dtype {
-                "F8_E4M3" | "F8_E5M2" | "U8" => payload.push(1),
-                "F16" | "BF16" => payload.extend([0; 2]),
-                "F32" => payload.extend(1.0_f32.to_le_bytes()),
-                other => panic!("unknown fixture dtype {other}"),
-            }
-            let shape = if key.ends_with(".weight") {
-                vec![1, 1]
-            } else {
-                vec![1]
-            };
-            header.insert(
-                (*key).to_owned(),
-                json!({ "dtype": dtype, "shape": shape, "data_offsets": [start, payload.len()] }),
-            );
-        }
-        let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("header json");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&header_bytes);
-        bytes.extend(payload);
-        std::fs::write(path, bytes).expect("write safetensors");
+        std::fs::write(
+            path,
+            crate::tests::support::test_safetensors_bytes_with_typed_keys(entries),
+        )
+        .expect("write safetensors");
     }
 
     fn z_image_keys() -> Vec<(&'static str, &'static str)> {
