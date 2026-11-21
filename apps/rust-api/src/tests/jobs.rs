@@ -12397,6 +12397,10 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         body["referenceAssetIds"] = json!(references);
         let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(
+            job["payload"]["modelManifestEntry"]["ui"]["scail2MultiReference"],
+            true
+        );
         assert_eq!(job["payload"]["referenceAssetIds"], json!(references));
     }
 

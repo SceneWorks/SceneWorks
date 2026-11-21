@@ -425,7 +425,7 @@ async fn scail_plural_warm_fit_credits_only_committed_provider_weights_and_rejec
         gpu: "fixture".into(),
         fixture: Some(fixture),
     };
-    let rows = probe.witnesses().unwrap();
+    let rows = probe.witnesses(2).unwrap();
     let fit = Scail2PluralFit::prepare(&plan, &spec, &request, "warm", probe, &rows).unwrap();
     assert!(matches!(
         fit.with_execution(|| Ok(1)),
@@ -451,6 +451,131 @@ async fn scail_plural_warm_fit_credits_only_committed_provider_weights_and_rejec
     assert_ne!(
         key,
         LoadIdentity::try_from_load_spec("scail2_14b", &changed).unwrap()
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices() {
+    use crate::video_admission::scail2_verified_test_quotes;
+    use sceneworks_core::hashing::sha256_bytes;
+    let root = scail_fit_root();
+    let row = scail_fit_witness(root.path(), 2);
+    let revision = "1".repeat(40);
+    let cap = 64_u64 << 20;
+    let env = json!({"basis":"guarded_ceiling","observed_peak_bytes": cap-256, "guard_ceiling_bytes": cap, "unsampled_overshoot_upper_bytes": 128});
+    let (os, bounds) = if cfg!(target_os = "macos") {
+        (
+            "macos",
+            json!({"measurement":"darwin_lifetime_footprint","unified":env,"mlx_decode_budget_bytes":cap}),
+        )
+    } else {
+        (
+            "windows",
+            json!({"measurement":"windows_job_and_wddm","host":env,"device":env}),
+        )
+    };
+    let tokens = vec![
+        512;
+        if row.axes.classifier_free_guidance {
+            2
+        } else {
+            1
+        }
+    ];
+    let projection = json!([{"platform":os, "device":"fixture", "runtime":"native-v1", "inference_revision":revision,
+        "artifact_id":123, "receipt_sha256":"a".repeat(64), "guard_policy_sha256":"b".repeat(64), "accepted":true,
+        "post_execution_verified":true, "guard_exit_code":0, "axes":row.axes, "prompt_tokens":tokens, "bounds":bounds}]);
+    let bytes = serde_json::to_vec(&projection).unwrap();
+    let approved = sha256_bytes(&bytes);
+    let verify =
+        |bytes: &[u8], digest: &str| scail2_verified_test_quotes(bytes, digest, os, &revision, 2);
+    let qualified = verify(&bytes, &approved).unwrap().pop().unwrap();
+    assert_eq!(
+        qualified
+            .gross_unified_bytes
+            .max(qualified.gross_device_bytes),
+        cap + 128
+    );
+    assert!(
+        scail2_verified_test_quotes(&bytes, &approved, os, &"2".repeat(40), 2)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        scail2_verified_test_quotes(&bytes, &approved, os, &revision, 6)
+            .unwrap()
+            .is_empty()
+    );
+    let mut empirical = projection.clone();
+    let pool = if os == "macos" { "unified" } else { "device" };
+    empirical[0]["bounds"][pool] = json!({"basis":"measured_aggregate","observed_peak_bytes":cap,
+        "co_live_extra_bytes":512,"uncertainty_allowance_bytes":256,"review_sha256":"c".repeat(64)});
+    let bytes_empirical = serde_json::to_vec(&empirical).unwrap();
+    let price = verify(&bytes_empirical, &sha256_bytes(&bytes_empirical))
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        price.gross_unified_bytes.max(price.gross_device_bytes),
+        cap + 768
+    );
+    let mut altered = projection.clone();
+    altered[0]["axes"]["width"] = json!(64);
+    assert!(verify(&serde_json::to_vec(&altered).unwrap(), &approved).is_err());
+    for mutation in [
+        "guard_exit_code",
+        "missing_overrun",
+        "linux",
+        "fake_price",
+        "unchecked_claim",
+    ] {
+        let mut fake = projection.clone();
+        match mutation {
+            "guard_exit_code" => fake[0]["guard_exit_code"] = json!(125),
+            "missing_overrun" => {
+                let pool = if os == "macos" { "unified" } else { "device" };
+                fake[0]["bounds"][pool]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("unsampled_overshoot_upper_bytes");
+            }
+            "linux" => fake[0]["platform"] = json!("linux"),
+            "fake_price" => fake[0]["gross_device_bytes"] = json!(1),
+            _ => fake[0]["post_execution_verified"] = json!(false),
+        }
+        let fake = serde_json::to_vec(&fake).unwrap();
+        assert!(verify(&fake, &approved).is_err());
+        assert!(verify(&fake, &sha256_bytes(&fake)).is_err());
+    }
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_product_arm_refuses_missing_capture_before_media_or_tier_access() {
+    let settings = offline_settings();
+    let mut job = mochi_job_snapshot();
+    job.payload = json!({"projectId":"absent-project", "model":"scail2_14b", "mode":"animate_character",
+        "prompt":"animate", "referenceAssetIds":["absent-a","absent-b"], "sourceClipAssetId":"absent-driving"})
+        .as_object().unwrap().clone();
+    job.payload.insert(
+        "modelManifestEntry".into(),
+        Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("scail2_14b")
+                .unwrap()
+                .clone(),
+        ),
+    );
+    let api = ApiClient::new(&settings);
+    let result = crate::video_admission::SCAIL2_TEST_MACHINE
+        .scope(
+            ("unqualified fixture".into(), "unqualified runtime".into()),
+            super::run_video_generate_job(&api, &settings, &job, &Default::default()),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(WorkerError::InvalidPayload(ref reason)) if reason.contains("no verified accelerator and host memory fit for 2 ordered character references")),
+        "{result:?}"
     );
 }
 

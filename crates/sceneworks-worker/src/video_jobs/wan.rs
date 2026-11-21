@@ -2992,23 +2992,25 @@ pub(super) async fn generate_video_using(
             let prepare_mode = admission_mode.clone();
             let prepared = crate::load_progress::spawn_blocking(move || {
                 let request = take_video_request(&mut input, &prepare_cancel);
-                let evidence = if engine_id == "scail2_14b"
-                    && gen_core::generator::Scail2CharacterReferences::from_request(
+                let character_count = if engine_id == "scail2_14b" {
+                    gen_core::generator::Scail2CharacterReferences::from_request(
                         engine_id, &request,
                     )
                     .map_err(|e| {
                         crate::classify_engine_error("SCAIL-2 reference carrier rejected", e)
                     })?
                     .reference_count()
-                        > 1
-                {
+                } else {
+                    0
+                };
+                let evidence = if character_count > 1 {
                     let probe = crate::video_admission::Scail2FitProbe {
                         runtime: fit_runtime,
                         gpu: fit_gpu,
                         #[cfg(test)]
                         fixture: input.scail2_fit_fixture.take(),
                     };
-                    let rows = probe.witnesses()?;
+                    let rows = probe.witnesses(character_count as usize)?;
                     if !rows.is_empty() {
                         // The existing cache key includes the actual snapshot members. Avoid
                         // acquiring any large files when this hardware has no measured row.

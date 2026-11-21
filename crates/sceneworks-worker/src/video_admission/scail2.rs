@@ -22,59 +22,61 @@ pub(crate) fn scail2_carrier_receipt(
     .map_err(|error| error.to_string())
 }
 
-#[cfg(all(test, native_lane))]
-pub(crate) use plural::Scail2FitFixture;
 #[cfg(native_lane)]
-pub(crate) use plural::{Scail2FitProbe, Scail2PluralFit};
+#[path = "scail2/evidence.rs"]
+mod evidence;
+
+#[cfg(native_lane)]
+pub(crate) use plural::{check_scail2_plural_package, Scail2FitProbe, Scail2PluralFit};
+#[cfg(all(test, native_lane))]
+pub(crate) use plural::{Scail2FitFixture, SCAIL2_TEST_MACHINE};
+
+#[cfg(all(test, native_lane))]
+pub(crate) fn scail2_verified_test_quotes(
+    bytes: &[u8],
+    index_digest: &str,
+    os: &str,
+    revision: &str,
+    count: usize,
+) -> Result<Vec<gen_core::generator::scail2_fit::Scail2FitWitness>, String> {
+    Ok(evidence::qualify_index(bytes, index_digest)?
+        .into_iter()
+        .filter(|q| q.covers(os, revision, count))
+        .map(|q| q.witness)
+        .collect())
+}
 
 #[cfg(native_lane)]
 mod plural {
+    use super::evidence::packaged;
     use super::*;
     use gen_core::generator::scail2_fit::{Scail2FitPrice, Scail2FitProfile, Scail2FitWitness};
     use gen_core::{LoadSpec, MemoryBudgetDomain, MemoryCacheState};
-    use serde::Deserialize;
     use std::{sync::OnceLock, time::Duration};
     use tokio::runtime::Handle;
 
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct QualifiedWitness {
-        platform: String,
-        inference_revision: String,
-        device: String,
-        runtime: String,
-        evidence_sha256: String,
-        witness: Scail2FitWitness,
-    }
-
     /// The digest names the reviewed physical capture that supplied both domains.
     pub(crate) struct WitnessSource {
+        artifact_id: u64,
         digest: String,
         witness: Scail2FitWitness,
     }
 
     struct Quotation {
+        artifact_id: u64,
         evidence: String,
         price: Scail2FitPrice,
     }
 
-    fn packaged() -> crate::WorkerResult<&'static [QualifiedWitness]> {
-        static ROWS: OnceLock<Result<Vec<QualifiedWitness>, String>> = OnceLock::new();
-        ROWS.get_or_init(|| {
-            serde_json::from_str(include_str!("../../../../config/scail2-plural-memory.json"))
-                .map_err(|e| e.to_string())
-        })
-        .as_ref()
-        .map(Vec::as_slice)
-        .map_err(|e| {
-            crate::WorkerError::InvalidPayload(format!(
-                "invalid SCAIL-2 plural memory evidence: {e}"
-            ))
-        })
-    }
+    #[cfg(test)]
+    tokio::task_local! { pub(crate) static SCAIL2_TEST_MACHINE: (String, String); }
 
     async fn hardware(gpu_id: &str) -> Option<(String, String)> {
         use tokio::process::Command;
+        #[cfg(test)]
+        if let Ok(machine) = SCAIL2_TEST_MACHINE.try_with(Clone::clone) {
+            return Some(machine);
+        }
         #[cfg(target_os = "macos")]
         let (command, separator) = {
             let _ = gpu_id;
@@ -112,6 +114,84 @@ mod plural {
             .then(|| (device.to_owned(), runtime.to_owned()))
     }
 
+    async fn hardware_witnesses(
+        gpu: &str,
+        count: usize,
+    ) -> crate::WorkerResult<Vec<WitnessSource>> {
+        let rows = packaged()?;
+        let eligible = |r: &super::evidence::QualifiedWitness| {
+            r.covers(
+                std::env::consts::OS,
+                sceneworks_core::inference_provenance::INFERENCE_REVISION,
+                count,
+            )
+        };
+        if !rows.iter().any(eligible) {
+            return Ok(Vec::new());
+        }
+        let (device, version) = hardware(gpu).await.ok_or_else(|| {
+            crate::WorkerError::InvalidPayload(
+                "SCAIL-2 device and runtime identity unavailable".into(),
+            )
+        })?;
+        Ok(rows
+            .iter()
+            .filter(|r| eligible(r) && r.device == device && r.runtime == version)
+            .map(|r| WitnessSource {
+                artifact_id: r.artifact_id,
+                digest: r.evidence_sha256.clone(),
+                witness: r.witness.clone(),
+            })
+            .collect())
+    }
+
+    pub(crate) async fn check_scail2_plural_package(
+        gpu: &str,
+        count: usize,
+    ) -> crate::WorkerResult<()> {
+        if count > 1 && hardware_witnesses(gpu, count).await?.is_empty() {
+            return Err(crate::WorkerError::InvalidPayload(format!("SCAIL-2 has no verified accelerator and host memory fit for {count} ordered character references on this device and runtime")));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(windows, test))]
+    fn windows_available_host_bytes(text: &str) -> Option<u64> {
+        let mut counters = text.lines().map(|s| s.trim().parse::<u64>().ok());
+        let physical = counters.next()??;
+        let commit_limit = counters.next()??;
+        let committed = counters.next()??;
+        if counters.next().is_some() || commit_limit == 0 {
+            return None;
+        }
+        Some(physical.min(commit_limit.checked_sub(committed)?))
+    }
+
+    #[cfg(windows)]
+    async fn available_host() -> Option<u64> {
+        let mut command = tokio::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command",
+            "$m = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -ErrorAction Stop; $m.AvailableBytes; $m.CommitLimit; $m.CommittedBytes"]);
+        let output = crate::gpu::run_bounded_command(command, Duration::from_secs(10))
+            .await
+            .ok()?;
+        windows_available_host_bytes(std::str::from_utf8(&output.stdout).ok()?)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn scail_plural_windows_host_capacity_requires_both_ram_and_commit() {
+        assert_eq!(windows_available_host_bytes("40\n80\n20\n"), Some(40));
+        assert_eq!(
+            windows_available_host_bytes("100\r\n80\r\n20\r\n"),
+            Some(60)
+        );
+        assert_eq!(windows_available_host_bytes("100\n80\n80"), Some(0));
+        for invalid in ["100\n80", "100\n80\n90", "100\n0\n0", "broken\n80\n5"] {
+            assert_eq!(windows_available_host_bytes(invalid), None);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) struct Scail2FitFixture {
         pub(crate) rows: Vec<Scail2FitWitness>,
@@ -129,7 +209,7 @@ mod plural {
     }
 
     impl Scail2FitProbe {
-        pub(crate) fn witnesses(&self) -> crate::WorkerResult<Vec<WitnessSource>> {
+        pub(crate) fn witnesses(&self, count: usize) -> crate::WorkerResult<Vec<WitnessSource>> {
             #[cfg(test)]
             if let Some(fixture) = &self.fixture {
                 return Ok(fixture
@@ -137,41 +217,13 @@ mod plural {
                     .iter()
                     .cloned()
                     .map(|witness| WitnessSource {
+                        artifact_id: 0,
                         digest: "test-capture".into(),
                         witness,
                     })
                     .collect());
             }
-            let rows = packaged()?;
-            let current = |row: &QualifiedWitness| {
-                row.platform == std::env::consts::OS
-                    && row.inference_revision
-                        == sceneworks_core::inference_provenance::INFERENCE_REVISION
-            };
-            if !rows.iter().any(current) {
-                return Ok(Vec::new());
-            }
-            let (device, version) =
-                self.runtime.block_on(hardware(&self.gpu)).ok_or_else(|| {
-                    crate::WorkerError::InvalidPayload(
-                        "SCAIL-2 device and runtime identity unavailable".into(),
-                    )
-                })?;
-            Ok(rows
-                .iter()
-                .filter(|r| current(r))
-                .filter(|r| r.device == device && r.runtime == version)
-                .filter(|r| {
-                    r.evidence_sha256.len() == 64
-                        && r.evidence_sha256
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                })
-                .map(|r| WitnessSource {
-                    digest: r.evidence_sha256.clone(),
-                    witness: r.witness.clone(),
-                })
-                .collect())
+            self.runtime.block_on(hardware_witnesses(&self.gpu, count))
         }
 
         fn budget(
@@ -215,11 +267,13 @@ mod plural {
             }
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             {
-                Ok((
-                    state.budget,
-                    self.runtime
-                        .block_on(crate::yue2_admission::host_available_bytes()),
-                ))
+                // A Windows Job/WDDM capture includes private commit and resident RAM.
+                // A Linux MemAvailable reading lacks the effective cgroup ancestor limits.
+                #[cfg(windows)]
+                let physical = self.runtime.block_on(available_host());
+                #[cfg(not(windows))]
+                let physical = None;
+                Ok((state.budget, physical))
             }
         }
     }
@@ -266,6 +320,7 @@ mod plural {
             for row in rows {
                 if let Ok(price) = profile.price(std::slice::from_ref(&row.witness)) {
                     prices.push(Quotation {
+                        artifact_id: row.artifact_id,
                         evidence: row.digest.clone(),
                         price,
                     });
@@ -358,7 +413,7 @@ mod plural {
                 let result = check_available(accelerator, host, Some(free), physical);
                 tracing::info!(event="scail2_plural_fit", jobId=%self.job, stage, backend=LANE.as_key(),
                     tier=%self.profile.axes().effective_tier, artifactTier=%self.profile.axes().artifact_tier,
-                    referenceRgbSha256=%self.reference_digests, evidenceSha256=%quote.evidence,
+                    referenceRgbSha256=%self.reference_digests, evidenceSha256=%quote.evidence, evidenceArtifactId=quote.artifact_id,
                     grossHostBytes=price.host_bytes, grossDeviceBytes=price.device_bytes, grossUnifiedBytes=price.unified_bytes,
                     acceleratorReserveBytes=budget.reserved_headroom_bytes,
                     artifactSha256=%self.profile.axes().artifact_sha256,
