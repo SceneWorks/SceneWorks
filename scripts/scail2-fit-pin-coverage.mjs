@@ -14,6 +14,7 @@ const revision = /^[0-9a-f]{40}$/u;
 // These files form the reviewed diagnostic/bounded-proof delta and the separate
 // image follow-up. Other files in scripts/ci include production artifact producers.
 const proofInputs = new Set([
+  "scripts/ci/flux1_pair/cuda_probe.py",
   "scripts/ci/scail2_plural_fit.py",
   "scripts/ci/scail_plural/README.md",
   "scripts/ci/scail_plural/contract.py",
@@ -25,6 +26,7 @@ const proofInputs = new Set([
   "scripts/ci/video_tier1_cuda_diagnostic_retained.json",
   "scripts/ci/video_tier1_followup.py",
   "scripts/ci/wan_pair/common.rs.in",
+  "scripts/ci/wan_pair/conditioning.rs.in",
   "scripts/ci/wddm_process_memory.py",
   "scripts/media_campaign_windows.py",
   "scripts/tests/test_flux1_cuda_probe.py",
