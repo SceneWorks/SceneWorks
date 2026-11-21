@@ -1332,6 +1332,19 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       const approvals = `const APPROVED_INDEX_SHA256: &str = "${sha256(indexBytes)}"; const APPROVED: &str = "${sha256(staleApproval)}";`;
       assert.deepEqual(read(exactSix, changed).map((r) => r.references), counts);
       assert.throws(() => scailPackageDigests(indexBytes, JSON.stringify(changed.coverage), approvals), /APPROVED/);
+      const archived = structuredClone(split);
+      Object.assign(archived[4], {accepted:false, artifact_id:14719969057,
+        inference_revision:"7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
+        receipt_sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f", recovery_certificate_sha256:sha256("reviewed certificate")});
+      archived[4].bounds.device_interval = "load_through_completed_rgb";
+      archived[4].bounds.device = {...archived[4].bounds.host};
+      const archiveCoverage = {...both, coverage:[coverage, {...both.coverage[1], capture_revision:archived[4].inference_revision}]};
+      assert.equal(read(archived, archiveCoverage).at(-1).recoveryCertificateSha256, archived[4].recovery_certificate_sha256);
+      for (const mutate of [r => {r.accepted=true;}, r => {r.receipt_sha256=sha256("other");},
+        r => {r.artifact_id+=1;}, r => {delete r.recovery_certificate_sha256;},
+        r => {r.bounds.device_interval="full_job";}]) {
+        const wrong = structuredClone(archived); mutate(wrong[4]); assert.throws(() => read(wrong, archiveCoverage));
+      }
       const joined = read(split, both);
       assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
         split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));

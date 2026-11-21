@@ -110,7 +110,11 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     const a = row.axes;
     if (a?.backend !== backend || a.artifact_sha256 !== scailArtifactSha256 || a.effective_tier !== "q4"
       || a.artifact_tier !== "q4" || a.width !== 832 || a.height !== 480 || !Number.isInteger(a.references) || a.references < 2 || a.references > 6) continue;
-    assert.ok(row.accepted === true && row.post_execution_verified === true && row.guard_exit_code === 0
+    const accepted = row.recovery_certificate_sha256 === undefined ? row.accepted === true :
+      !mlx && row.accepted === false && a.references === 6 && digestPattern.test(row.recovery_certificate_sha256)
+      && row.artifact_id === 14719969057 && row.receipt_sha256 === "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f"
+      && row.inference_revision === "7f6c4cca3fc053030bd71f0bfce6886adb762eb6";
+    assert.ok(accepted && row.post_execution_verified === true && row.guard_exit_code === 0
       && Number.isSafeInteger(row.artifact_id) && row.artifact_id > 0 && digestPattern.test(row.receipt_sha256)
       && digestPattern.test(row.guard_policy_sha256) && /^[a-f0-9]{40}$/.test(row.inference_revision)
       && row.device?.trim() && row.runtime?.trim(), "invalid projected physical capture");
@@ -125,6 +129,10 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
       !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
     const b = row.bounds;
     assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
+    if (row.recovery_certificate_sha256 !== undefined || b.device_interval !== undefined) {
+      assert.ok(!mlx && b.device_interval === "load_through_completed_rgb" && b.device.basis === "measured_aggregate",
+        "missing empirical CUDA output interval");
+    }
     const adapter = b.capture_adapter;
     if (!mlx && host) assert.ok(adapter && host.captureAdapter && adapter.cuda_uuid === host.captureAdapter.cuda_uuid
       && adapter.luid === host.captureAdapter.luid && adapter.node_mask === host.captureAdapter.node_mask,
@@ -142,6 +150,7 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     // must identify the compiled pin's provider and shared contract before counts can be joined.
     const campaign = JSON.stringify([nativePolicy, mlx ? row.inference_revision : null, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null]);
     rows.push({ device: row.device, runtime: row.runtime, ...(!mlx ? { captureAdapter: adapter } : {}), nativePolicy, campaign, references: a.references,
+      ...(row.recovery_certificate_sha256 ? {recoveryCertificateSha256: row.recovery_certificate_sha256} : {}),
       inferenceRevision: row.inference_revision, sha256: row.receipt_sha256, artifactId: row.artifact_id, price, acceleratorBytes: mlx ? price.grossUnifiedBytes : price.grossDeviceBytes });
   }
   const complete = rows.filter((row) => counts.every((n) => rows.some((r) => r.campaign === row.campaign && r.references === n)));

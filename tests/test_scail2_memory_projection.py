@@ -619,3 +619,292 @@ def test_gapless_pdh_still_requires_the_native_pool_and_output_markers_for_faile
     obs["cuda_render_end"]["zero"] = None
     with pytest.raises(ValueError):
         quote(*args, 117, None, pool)
+
+
+def completed_job_fixture():
+    adapter, guard = windows_guard()
+    uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+    adapter["cuda_uuid"] = guard["admission"]["cudaDeviceUuid"] = guard["samples"][0][
+        "cudaDeviceUuid"
+    ] = uuid
+    scope, pool = with_rejected_reads(guard)
+    observation = guard["fit_observation"]
+    end = observation["cuda_render_end"]
+    guard["returncode"] = 0
+    completion = {
+        "scope": "supervisor-owned-windows-job",
+        "root_pid": 41,
+        "root_returncode": 0,
+        "waited_returncode": 0,
+        "job_member_pids": [],
+        "owned_pids": [],
+    }
+    guard["owned_completion"] = completion.copy()
+    claim = {
+        "physical_index": 0,
+        "device_uuid": uuid,
+        "lease_released": True,
+        "post_execution_verified": True,
+        "release_metadata_verification": {"status": "verified"},
+        "owned_execution_completion": completion.copy(),
+        "release_background_activity": {
+            "samples": [
+                {
+                    "selected_index_matches_admission": True,
+                    "post_owned_exit_primary_metadata_valid": True,
+                    "selected_card": {"index": 0, "used_mib": 0, "utilization_percent": 0},
+                }
+                for _ in range(5)
+            ]
+        },
+    }
+    del scope["zero_card_index"]
+    scope.update(basis="owned-job-completion", terminal_rejected_attempts=4)
+    end["zero"] = None
+    observation["card_samples_monotonic_ns_free_owned_or_fallback_bytes"].pop()
+    end["rejected_growth"] = [
+        dict(
+            end["rejected_growth"][0],
+            read_ns=250 + i * 10,
+            at_ns=259 + i * 10,
+            child_growth_bytes=40 - i,
+            global_used_upper_bytes=60 - i,
+        )
+        for i in range(4)
+    ]
+    guard["cuda_attribution"]["unknown_pid_polls"] = 6
+    for i, (name, series) in enumerate(
+        (
+            ("dedicated", guard["cuda_attribution"]["wddm_dedicated"]),
+            ("shared", observation["wddm_shared"]),
+        )
+    ):
+        series["samples"][:0] = [[898 + j, 0] for j in range(3)]
+        event = observation["wddm_retry"][name]["events"][0]
+        event.update(
+            start_ns=281 + 3 * i,
+            end_ns=283 + 3 * i,
+            local_filetime_before=904 + 2 * i,
+            local_filetime_after=905 + 2 * i,
+        )
+    return (guard, claim, scope, pool)
+
+
+def completed_peak(guard, claim, scope, pool):
+    native = {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}}
+    return tool["windows_device_peak"](
+        guard,
+        native,
+        guard["cuda_attribution"]["wddm_dedicated"]["adapter"],
+        110,
+        native_pool=pool,
+        completion=(claim, scope, scope["basis"]),
+    )
+
+
+def test_completed_job_proves_output_interval_with_all_raw_tail_readings():
+    guard, claim, scope, pool = completed_job_fixture()
+    assert completed_peak(guard, claim, scope, pool) == 110
+    assert guard["fit_observation"]["cuda_render_end"]["zero"] is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "release",
+        "owned",
+        "cap",
+        "reserve",
+        "retry",
+        "read",
+        "reentry",
+        "gap",
+        "marker",
+        "missing-counter",
+        "gauge-order",
+    ],
+)
+def test_completed_job_fails_on_unproven_terminal_evidence(change):
+    guard, claim, scope, pool = completed_job_fixture()
+    end = guard["fit_observation"]["cuda_render_end"]
+    if change == "release":
+        claim["release_background_activity"]["samples"][0]["selected_card"]["used_mib"] = 1
+    elif change == "owned":
+        claim["owned_execution_completion"]["job_member_pids"] = [41]
+    elif change == "cap":
+        guard["samples"][0]["childGlobalUsedGrowthBytes"] = 161
+    elif change == "reserve":
+        end["pool_growth"][0]["free_bytes"] = 1
+    elif change == "retry":
+        end["rejected_growth"].pop()
+    elif change == "read":
+        end["rejected_growth"][2]["child_growth_bytes"] += 2
+    elif change == "reentry":
+        end["rejected_growth"][0]["after"] = "exited_empty"
+    elif change == "gap":
+        guard["fit_observation"]["wddm_retry"]["dedicated"]["events"][0]["start_ns"] = 235
+    elif change == "missing-counter":
+        guard["fit_observation"]["wddm_shared"]["samples"].pop(0)
+    elif change == "gauge-order":
+        guard["fit_observation"]["wddm_retry"]["shared"]["events"][0]["start_ns"] = 281
+    else:
+        scope["pool_card_index"] += 1
+    with pytest.raises(ValueError):
+        completed_peak(guard, claim, scope, pool)
+
+
+def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
+    tmp_path, monkeypatch
+):
+    guard, claim, summary, pool = completed_job_fixture()
+    base = tool["RECOVERED_SIX"].copy()
+
+    def write(name, data):
+        path = tmp_path / name
+        path.write_bytes((json.dumps(data, sort_keys=True) + "\n").encode())
+        return path
+
+    guard["peak_host_bytes"] = 95
+    guard["fit_observation"]["windows_peak"] = {
+        "peak_job_commit_bytes": 110,
+        "peak_private_commit_bytes": 90,
+        "peak_working_set_bytes": 100,
+    }
+    policy = {
+        k: guard["admission"][k]
+        for k in ("cudaDeviceUuid", "childGpuCapBytes", "gpuFreeReserveBytes")
+    }
+    guard["admission"].update(
+        childFootprintCapBytes=200,
+        policySha256=tool["sha256"](
+            (json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ),
+    )
+    adapter = guard["cuda_attribution"]["wddm_dedicated"]["adapter"]
+    axes = {
+        "backend": "cuda",
+        "references": 6,
+        "classifier_free_guidance": True,
+        "floor_device_bytes": 70,
+        "floor_host_bytes": 60,
+    }
+    native = {
+        "axes": axes,
+        "pid": 41,
+        "allocator_peak": 80,
+        "prompt_tokens": [512, 512],
+        "cuda_device": {
+            "ordinal": 0,
+            "visible_count": 1,
+            "uuid": adapter["cuda_uuid"],
+            "pci_bus_id": "00000000:21:00.0",
+            "luid": adapter["luid"],
+            "node_mask": 1,
+        },
+    }
+    row = {
+        "platform": "windows",
+        "device": "board",
+        "runtime": "runtime",
+        "inference_revision": base["inference_revision"],
+        "cuda_completed_job": summary,
+        "witness": {
+            "axes": axes,
+            "text_tokens": 512,
+            "gross_device_bytes": 110,
+            "gross_host_bytes": 112,
+            "gross_unified_bytes": 0,
+            "mlx_decode_budget_bytes": None,
+        },
+    }
+    record = {
+        "accepted": True,
+        "native": native,
+        "claim": claim,
+        "candidate_row_pending_physical_review": row,
+    }
+    capture = {
+        "accepted": True,
+        "run_id": base["run_id"],
+        "run_attempt": "1",
+        "contract": {
+            "protocol": "scail2-plural-fit-v1",
+            "head": base["inference_revision"],
+            "request": {"policy": policy},
+        },
+        "counts": {"6": record},
+        "request": {"policy": policy},
+        "adapter": adapter,
+        "hardware": {
+            "index": "0",
+            "pci.bus_id": "00000000:21:00.0",
+            "uuid": adapter["cuda_uuid"],
+            "name": "board",
+            "driver_version": "runtime",
+        },
+        "logs": {},
+    }
+    for name, data in (("count-6.cuda-pool.json", pool), ("count-6.supervisor.json", guard)):
+        capture["logs"][name] = {"sha256": tool["sha256"](write(name, data).read_bytes())}
+    receipt = write("receipt.json", capture)
+    empirical = {
+        "basis": "measured_aggregate",
+        "co_live_extra_bytes": 0,
+        "uncertainty_allowance_bytes": 8,
+    }
+    review = {
+        "artifact_id": int(base["artifact_id"]),
+        "run_id": int(base["run_id"]),
+        "run_attempt": 1,
+        "receipt_sha256": tool["sha256"](receipt.read_bytes()),
+        "references": 6,
+        "rationale": "test",
+        "domains": {"host": empirical, "device": empirical},
+    }
+    result = tool["project"](receipt, write("review.json", review))
+    assert result["accepted"] is True and "recovery_certificate_sha256" not in result
+    assert result["bounds"]["device_interval"] == "load_through_completed_rgb"
+
+    del record["candidate_row_pending_physical_review"]
+    capture["accepted"] = record["accepted"] = False
+    del claim["owned_execution_completion"]
+    del guard["owned_completion"]
+    capture["logs"]["count-6.supervisor.json"]["sha256"] = tool["sha256"](
+        write("count-6.supervisor.json", guard).read_bytes()
+    )
+    receipt = write("receipt.json", capture)
+    review["receipt_sha256"] = base["receipt_sha256"] = tool["sha256"](receipt.read_bytes())
+    summary["basis"] = "archived-supervisor-return"
+    archive = write("synthetic.archive", "sealed test input")
+    base["archive_sha256"] = tool["sha256"](archive.read_bytes())
+    monkeypatch.setitem(tool["recovered_row"].__globals__, "RECOVERED_SIX", base)
+    cert = write(
+        "certificate.json",
+        {
+            "schema": "scail2-quiet-gpu0-six-recovery-v1",
+            "capture": base,
+            "references": 6,
+            "candidate_row_pending_physical_review": row,
+        },
+    )
+    review["recovery_certificate_sha256"] = tool["sha256"](cert.read_bytes())
+    reviewed = write("review.json", review)
+    with pytest.raises(ValueError, match="incomplete"):
+        tool["project"](receipt, reviewed)
+
+    def recover():
+        return tool["project"](receipt, reviewed, certificate_path=cert, archive_path=archive)
+
+    recovered = recover()
+    assert recovered["accepted"] is False
+    assert recovered["receipt_sha256"] == base["receipt_sha256"]
+    assert recovered["recovery_certificate_sha256"] == review["recovery_certificate_sha256"]
+    assert recovered["bounds"]["device"]["classified_peak_bytes"] == 110
+    original = archive.read_bytes()
+    archive.write_bytes(b"another archive")
+    with pytest.raises(ValueError, match="certificate"):
+        recover()
+    archive.write_bytes(original)
+    cert.write_bytes(cert.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="certificate"):
+        recover()

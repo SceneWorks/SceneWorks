@@ -19,6 +19,7 @@ struct Capture {
     receipt_sha256: String,
     guard_policy_sha256: String,
     accepted: bool,
+    recovery_certificate_sha256: Option<String>,
     post_execution_verified: bool,
     guard_exit_code: i32,
     axes: Scail2FitAxes,
@@ -37,9 +38,16 @@ enum PhysicalBounds {
         // Identifies the measuring adapter in the signed-off package for product proof.
         // Deployed workers match its hardware class, driver and native execution axes.
         capture_adapter: CaptureAdapter,
+        device_interval: Option<DeviceInterval>,
         host: Envelope,
         device: Envelope,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DeviceInterval {
+    LoadThroughCompletedRgb,
 }
 
 #[derive(Deserialize)]
@@ -242,7 +250,20 @@ fn valid_hex(value: &str, length: usize) -> bool {
 
 impl Capture {
     fn qualify(self) -> Result<QualifiedWitness, String> {
-        if !self.accepted
+        let admitted_source = match self.recovery_certificate_sha256.as_deref() {
+            None => self.accepted,
+            Some(certificate) => {
+                !self.accepted
+                    && valid_hex(certificate, 64)
+                    && self.platform == "windows"
+                    && self.axes.references == 6
+                    && self.artifact_id == 14719969057
+                    && self.receipt_sha256
+                        == "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f"
+                    && self.inference_revision == "7f6c4cca3fc053030bd71f0bfce6886adb762eb6"
+            }
+        };
+        if !admitted_source
             || !self.post_execution_verified
             || self.guard_exit_code != 0
             || self.artifact_id == 0
@@ -286,13 +307,20 @@ impl Capture {
                         host,
                         device,
                         capture_adapter,
+                        device_interval,
                     },
-                ) if capture_adapter.valid() => (
-                    host.price(self.axes.floor_host_bytes)?,
-                    device.price(self.axes.floor_device_bytes)?,
-                    0,
-                    None,
-                ),
+                ) if capture_adapter.valid()
+                    && (self.accepted || device_interval.is_some())
+                    && (device_interval.is_none()
+                        || matches!(device, Envelope::MeasuredAggregate { .. })) =>
+                {
+                    (
+                        host.price(self.axes.floor_host_bytes)?,
+                        device.price(self.axes.floor_device_bytes)?,
+                        0,
+                        None,
+                    )
+                }
                 _ => {
                     return Err(
                         "capture has no verified physical bounds for this platform and provider"
