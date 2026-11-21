@@ -175,6 +175,7 @@ pub(super) fn sensenova_context(
         // The pinned SenseNova route gate fails a phase-bearing context closed on the registry
         // fixture surface; the anchor is the plain single-phase text-to-image route.
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

@@ -226,6 +226,7 @@ pub(super) fn run_qwen_edit(request: &Value) -> Result<Value, String> {
         has_reference: true,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

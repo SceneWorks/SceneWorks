@@ -883,9 +883,9 @@ pub(super) struct CachedGeneratorFactory<L> {
     pub(super) load: L,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(native_lane)]
 pub(super) type PreparedRenderPlans = Box<
-    dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<Option<gen_core::RenderPlan>>> + Send,
+    dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<super::render::PreparedRender>> + Send,
 >;
 
 #[allow(clippy::too_many_arguments)]

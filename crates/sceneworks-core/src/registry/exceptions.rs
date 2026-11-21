@@ -252,18 +252,38 @@ fn validate_live_cells(records: &[ApprovedBackendException]) -> Result<(), Strin
                     _ => false,
                 },
                 "guidanceMethod" => {
-                    spec.routes.get("mlx").is_some_and(|route| {
-                        route
-                            .supported_guidance_methods
-                            .iter()
-                            .any(|method| method == value)
-                    }) && !spec.routes.get("candle").is_some_and(|route| {
-                        route
-                            .supported_guidance_methods
-                            .iter()
-                            .any(|method| method == value)
-                            || (value == "cfg" && policy.candle_routed())
-                    })
+                    let product_lists = |backend: &str| {
+                        spec.product
+                            .fields
+                            .get(backend)
+                            .and_then(|b| b.get("limits"))
+                            .and_then(|l| l.get("guidanceMethods"))
+                            .or_else(|| {
+                                spec.product
+                                    .fields
+                                    .get("limits")
+                                    .and_then(|l| l.get("guidanceMethods"))
+                            })
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|list| {
+                                list.iter().any(|entry| entry.as_str() == Some(value))
+                            })
+                    };
+                    product_lists("mlx")
+                        && spec.routes.get("mlx").is_some_and(|route| {
+                            route
+                                .supported_guidance_methods
+                                .iter()
+                                .any(|method| method == value)
+                        })
+                        && !(product_lists("candle")
+                            && spec.routes.get("candle").is_some_and(|route| {
+                                route
+                                    .supported_guidance_methods
+                                    .iter()
+                                    .any(|method| method == value)
+                            })
+                            || (value == "cfg" && policy.candle_routed()))
                 }
                 _ => false,
             };
@@ -507,17 +527,36 @@ mod tests {
                         _ => panic!("approved precision cell disagrees with route policy: {cell}"),
                     },
                     "guidanceMethod" => {
+                        let product_lists = |backend: &str| {
+                            spec.product
+                                .fields
+                                .get(backend)
+                                .and_then(|b| b.get("limits"))
+                                .and_then(|l| l.get("guidanceMethods"))
+                                .or_else(|| {
+                                    spec.product
+                                        .fields
+                                        .get("limits")
+                                        .and_then(|l| l.get("guidanceMethods"))
+                                })
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|list| {
+                                    list.iter().any(|entry| entry.as_str() == Some(value))
+                                })
+                        };
                         let mlx = spec.routes.get("mlx").unwrap_or_else(|| panic!("{cell}"));
                         let candle = spec
                             .routes
                             .get("candle")
                             .unwrap_or_else(|| panic!("{cell}"));
                         assert!(
-                            mlx.supported_guidance_methods.iter().any(|g| g == value),
+                            product_lists("mlx")
+                                && mlx.supported_guidance_methods.iter().any(|g| g == value),
                             "{cell}"
                         );
                         assert!(
-                            !candle.supported_guidance_methods.iter().any(|g| g == value),
+                            !(product_lists("candle")
+                                && candle.supported_guidance_methods.iter().any(|g| g == value)),
                             "{cell}"
                         );
                     }

@@ -580,6 +580,7 @@ fn context(
         has_reference: arm.carrier.reference_count() > 0,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: geometry.width,
             height: geometry.height,

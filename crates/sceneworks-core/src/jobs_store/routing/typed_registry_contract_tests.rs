@@ -195,10 +195,27 @@ fn guidance_and_adapter_axes_remain_backend_specific() {
             .supported_guidance_methods
             .iter()
             .any(|value| value == "cfg_pp"));
-        assert!(!candle
+        assert!(candle
             .supported_guidance_methods
             .iter()
             .any(|value| value == "cfg_pp"));
+        assert!(spec.product.fields["mlx"]["limits"]["guidanceMethods"]
+            .as_array()
+            .is_some_and(|list| list.iter().any(|value| value == "cfg_pp")));
+        assert!(!spec
+            .product
+            .fields
+            .get("candle")
+            .and_then(|b| b.get("limits"))
+            .and_then(|l| l.get("guidanceMethods"))
+            .or_else(|| {
+                spec.product
+                    .fields
+                    .get("limits")
+                    .and_then(|l| l.get("guidanceMethods"))
+            })
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|list| list.iter().any(|value| value == "cfg_pp")));
         for backend in ["mlx", "candle"] {
             assert!(image_claim(
                 model,

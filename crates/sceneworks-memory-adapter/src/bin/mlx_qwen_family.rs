@@ -357,6 +357,7 @@ pub(super) fn qwen_provider_context(
         has_reference: false,
         use_pid: false,
         has_phases: true,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

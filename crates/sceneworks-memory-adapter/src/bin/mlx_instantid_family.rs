@@ -99,6 +99,7 @@ pub(super) fn instantid_context(
         has_reference: true,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

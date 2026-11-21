@@ -86,18 +86,14 @@ fn defaults_and_capabilities_come_from_real_model_facts() {
 
     let unsupported = json!({
         "projectId": "p",
-        "model": "qwen_image_2_1",
+        "model": "flux3_klein",
         "prompt": "a tree",
         "advanced": {"lowResStart":{"version":1,"k":2,"scale":0.5}}
     });
     assert_eq!(
-        compare(
-            "image",
-            unsupported,
-            facts("qwen_image_2_1", "text_to_image")
-        )
-        .unwrap_err()
-        .field,
+        compare("image", unsupported, facts("flux3_klein", "text_to_image"))
+            .unwrap_err()
+            .field,
         "advanced.lowResStart"
     );
 }

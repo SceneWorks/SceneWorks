@@ -335,6 +335,7 @@ pub(super) fn kolors_strict_control_test_fixture(path: PathBuf) -> KolorsStrictC
             predicted_peak_bytes: 1,
             cache_state: gen_core::MemoryCacheState::Cold,
             evidence_revision: "test-fixture".to_owned(),
+            low_res_start: None,
         },
     }
 }

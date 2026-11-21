@@ -77,6 +77,7 @@ fn context(
         has_reference: false,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: edge,
             height: edge,

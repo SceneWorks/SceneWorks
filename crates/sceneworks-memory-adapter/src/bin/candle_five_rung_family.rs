@@ -809,6 +809,7 @@ pub(super) fn run_five_rung_reference_loaded(
         has_reference: edit,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

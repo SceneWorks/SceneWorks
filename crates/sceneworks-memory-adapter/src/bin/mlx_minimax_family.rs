@@ -386,6 +386,7 @@ pub(super) fn minimax_context(
         has_reference: member.reference_count > 0,
         use_pid: false,
         has_phases: true,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: geometry.width,
             height: geometry.height,
