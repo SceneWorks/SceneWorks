@@ -1326,6 +1326,12 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     assert.throws(() => read(split, changed), /no packaged native/);
     if (mlx) assert.throws(() => read(split, both), /no packaged native/);
     else {
+      const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
+      const exactSix = structuredClone(split); exactSix[4].inference_revision = target;
+      const indexBytes = JSON.stringify(exactSix), staleApproval = JSON.stringify([]);
+      const approvals = `const APPROVED_INDEX_SHA256: &str = "${sha256(indexBytes)}"; const APPROVED: &str = "${sha256(staleApproval)}";`;
+      assert.deepEqual(read(exactSix, changed).map((r) => r.references), counts);
+      assert.throws(() => scailPackageDigests(indexBytes, JSON.stringify(changed.coverage), approvals), /APPROVED/);
       const joined = read(split, both);
       assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
         split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));
