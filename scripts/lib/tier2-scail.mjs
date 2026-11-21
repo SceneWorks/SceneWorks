@@ -146,7 +146,13 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
   const complete = rows.filter((row) => counts.every((n) => rows.some((r) => r.campaign === row.campaign && r.references === n)));
   assert.ok(complete.length, `no packaged native SCAIL q4 evidence covering the required counts on the same ${platform} policy`);
   // Windows acceptance claims five exact counts under a single guard and device policy.
-  if (!mlx) return complete;
+  if (!mlx) {
+    for (const row of complete) {
+      assert.ok(rows.every((other) => other.nativePolicy !== row.nativePolicy || other.campaign === row.campaign),
+        "worker-eligible CUDA counts have different capture guards");
+    }
+    return complete;
+  }
   // The worker can also try an independently reviewed, cheaper quotation for this native policy.
   // Keep such rows available for exact donor matching and the isolated negative budget.
   return rows.filter((row) => complete.some((r) => r.nativePolicy === row.nativePolicy));

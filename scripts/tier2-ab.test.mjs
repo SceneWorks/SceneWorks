@@ -1331,7 +1331,10 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       const altered = structuredClone(split);
       altered[4].guard_policy_sha256 = sha256("different capture guard");
       assert.throws(() => read(altered, both), /no packaged native/);
-      assert.deepEqual(read([...split, altered[4]], both), joined);
+      altered[4].bounds.device.unsampled_overshoot_upper_bytes -= 1;
+      assert.throws(() => read([...split, altered[4]], both), /different capture guards/);
+      for (const row of altered) row.guard_policy_sha256 = sha256("different capture guard");
+      assert.throws(() => read([...split, ...altered], both), /different capture guards/);
     }
     assert.throws(() => read(projected, { ...changed, coverage:[] }), /no packaged native/);
     assert.throws(() => read(projected, { ...changed, coverage:[{ ...coverage, provider_digest:sha256("wrong") }] }), /no packaged native/);
