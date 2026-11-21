@@ -258,13 +258,21 @@ export function assertKreaEnhancementRefused(response) {
   assert.equal(response.body?.id, undefined);
 }
 
+export function kreaExpectedStepEvents(route) {
+  return route.proof === "raw"
+    ? PHASES.flatMap(({ steps }) => Array.from({ length: steps }, (_, index) => [index + 1, steps]))
+    : Array.from({ length: route.executedSteps }, (_, index) => [index + 1, route.steps]);
+}
+
 export function assertKreaEvents(events, route) {
   assert.ok(events.some((event) => event.status === "completed"), "worker terminal event missing");
   const steps = events.flatMap(({ message }) => { const m = /\bstep (\d+)\/(\d+)\b/i.exec(message ?? ""); return m ? [[Number(m[1]), Number(m[2])]] : []; });
   const unique = steps.filter((pair, index) => index === 0 || pair[0] !== steps[index - 1][0] || pair[1] !== steps[index - 1][1]);
   // Hires.fix keeps the two-pass authored total on the wire while Krea clips the refine
   // schedule at floor(4 * (1 - 0.5)) = 2. Its two emitted ticks are numbered 9 and 10.
-  assert.deepEqual(unique, Array.from({ length: route.executedSteps }, (_, index) => [index + 1, route.steps]), "public step events must match the authored budget and actual clipped schedule");
+  // Raw calls the native solver on separate phase slices. Both pinned engines forward
+  // their numbering unchanged, so every phase's first Step starts at 1 on the public wire.
+  assert.deepEqual(unique, kreaExpectedStepEvents(route), "public step events must match the authored phase slices or actual clipped schedule");
   const decoding = events.filter((event) => event.status === "running" && /\bdecoding\b/i.test(event.message ?? ""));
   assert.equal(decoding.length, 1, "only final decoding may be published");
   assert.ok(events.filter((event) => event.status !== "completed").every((event) => event.publishedAssets === 0), "intermediate output reached public job events");
@@ -323,7 +331,7 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
 }
 
 export function kreaPerformance(metrics, route, memory) {
-  assert.equal(metrics?.steps, route.steps, "native worker metrics must identify the authored step budget");
+  assert.equal(metrics?.steps, kreaExpectedStepEvents(route)[0][1], "native metrics must match the first observed step denominator");
   assert.equal(metrics.imageCount, 1);
   assert.ok(Number.isFinite(metrics.sampleMs) && metrics.sampleMs > 0, "native sampleMs is missing");
   assert.ok(memory.samples > 0 && memory.peakBytes > 0, "observed memory peak and sample count are required");

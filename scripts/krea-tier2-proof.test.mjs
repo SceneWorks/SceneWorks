@@ -4,7 +4,7 @@ import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvide
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
   assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, kreaRoutes,
-  kreaAssetInventory, kreaPerformance, openKreaEvents, priceKreaAssets,
+  kreaAssetInventory, kreaExpectedStepEvents, kreaPerformance, openKreaEvents, priceKreaAssets,
 } from "./krea-tier2-proof.mjs";
 
 const HEAD = "1".repeat(40);
@@ -68,7 +68,7 @@ test("asset metadata pricing refuses digest and length drift before downloading"
 
 function jobEvents(route) {
   return [
-    ...Array.from({ length: route.executedSteps }, (_, i) => ({ status: "running", message: `Image 1/1 · step ${i + 1}/${route.steps}` })),
+    ...kreaExpectedStepEvents(route).map(([current, total]) => ({ status: "running", message: `Image 1/1 · step ${current}/${total}` })),
     { status: "running", message: "decoding" },
     { status: "completed", publishedAssets: 1 },
   ].map((event) => ({ publishedAssets: 0, ...event }));
@@ -77,7 +77,10 @@ function jobEvents(route) {
 test("queue proof checks observed CFG phase and clipped Hires progress without exposing intermediate output", () => {
   assert.doesNotThrow(() => assertKreaEnhancementRefused({ status: 400, body: { detail: "advanced.enhancePrompt is supported only by FLUX.2-dev" } }));
   assert.throws(() => assertKreaEnhancementRefused({ status: 400, body: { detail: "model missing" } }), /match/);
-  assert.deepEqual(assertKreaEvents(jobEvents(RAW), RAW).executedStepSlices, [3, 4, 3]);
+  const raw = assertKreaEvents(jobEvents(RAW), RAW);
+  assert.deepEqual(raw.executedStepSlices, [3, 4, 3]);
+  assert.deepEqual(raw.observedSteps, [[1, 3], [2, 3], [3, 3], [1, 4], [2, 4], [3, 4], [4, 4], [1, 3], [2, 3], [3, 3]]);
+  assert.equal(kreaPerformance({ steps: 3, imageCount: 1, sampleMs: 5000 }, RAW, { peakBytes: 100, samples: 2 }).secondsPerObservedStep, 0.5);
   assert.deepEqual(assertKreaEvents(jobEvents(HIRES), HIRES).executedStepSlices, [8, 2]);
   assert.throws(() => assertKreaEvents(jobEvents(HIRES).slice(1), HIRES), /clipped schedule/);
   const leaked = jobEvents(HIRES);
