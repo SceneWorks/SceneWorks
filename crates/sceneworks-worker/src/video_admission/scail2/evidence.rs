@@ -104,8 +104,101 @@ pub(super) struct QualifiedWitness {
 impl QualifiedWitness {
     pub(super) fn covers(&self, platform: &str, revision: &str, count: usize) -> bool {
         self.platform == platform
-            && self.inference_revision == revision
+            && permits_revision(
+                &self.inference_revision,
+                revision,
+                self.witness.axes.backend,
+            )
             && (2..=self.witness.axes.references as usize).contains(&count)
+    }
+}
+
+/// A cross-pin qualification is limited to a reviewed pair of immutable revisions and one
+/// native backend. The full source-tree delta covers inputs outside the provider's compile digest.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PinCoverage {
+    capture_revision: String,
+    target_revision: String,
+    backend: Scail2FitBackend,
+    provider_digest: String,
+    shared_contract_digest: String,
+    tree_diff_sha256: String,
+}
+
+impl PinCoverage {
+    fn matches(&self, capture: &str, target: &str, backend: Scail2FitBackend) -> bool {
+        self.capture_revision == capture
+            && self.target_revision == target
+            && self.backend == backend
+    }
+
+    fn valid(&self) -> bool {
+        valid_hex(&self.capture_revision, 40)
+            && valid_hex(&self.target_revision, 40)
+            && self.capture_revision != self.target_revision
+            && [
+                &self.provider_digest,
+                &self.shared_contract_digest,
+                &self.tree_diff_sha256,
+            ]
+            .iter()
+            .all(|digest| valid_hex(digest, 64))
+    }
+}
+
+fn approved_pin_coverage(bytes: &[u8], approved: &str) -> Option<Vec<PinCoverage>> {
+    if sceneworks_core::hashing::sha256_bytes(bytes) != approved {
+        return None;
+    }
+    let rows: Vec<PinCoverage> = serde_json::from_slice(bytes).ok()?;
+    rows.iter().all(PinCoverage::valid).then_some(rows)
+}
+
+fn permits_revision(capture: &str, target: &str, backend: Scail2FitBackend) -> bool {
+    if capture == target {
+        return true;
+    }
+    static APPROVALS: OnceLock<Vec<PinCoverage>> = OnceLock::new();
+    APPROVALS
+        .get_or_init(|| {
+            const BYTES: &[u8] =
+                include_bytes!("../../../../../config/scail2-memory-pin-coverage.json");
+            // Approve this digest only after reviewing the entire Git delta and matching both
+            // closure digests offline. Runtime uses the certified immutable pair.
+            const APPROVED: &str =
+                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570";
+            approved_pin_coverage(BYTES, APPROVED).unwrap_or_default()
+        })
+        .iter()
+        .any(|entry| entry.matches(capture, target, backend))
+}
+
+#[cfg(test)]
+#[test]
+fn scail_plural_pin_coverage_binds_source_target_backend_and_reviewed_digests() {
+    let capture = "a".repeat(40);
+    let target = "b".repeat(40);
+    let unrelated = "c".repeat(40);
+    let fixture = serde_json::json!([{"capture_revision":capture,"target_revision":target,"backend":"mlx",
+        "provider_digest":"1".repeat(64),"shared_contract_digest":"2".repeat(64),"tree_diff_sha256":"3".repeat(64)}]);
+    let bytes = serde_json::to_vec(&fixture).unwrap();
+    let approved = sceneworks_core::hashing::sha256_bytes(&bytes);
+    let rows = approved_pin_coverage(&bytes, &approved).unwrap();
+    assert!(rows[0].matches(&capture, &target, Scail2FitBackend::Mlx));
+    assert!(!rows[0].matches(&unrelated, &target, Scail2FitBackend::Mlx));
+    assert!(!rows[0].matches(&capture, &unrelated, Scail2FitBackend::Mlx));
+    assert!(!rows[0].matches(&capture, &target, Scail2FitBackend::Cuda));
+    for key in [
+        "provider_digest",
+        "shared_contract_digest",
+        "tree_diff_sha256",
+    ] {
+        let mut tampered = fixture.clone();
+        tampered[0][key] = serde_json::json!("9".repeat(64));
+        assert!(
+            approved_pin_coverage(&serde_json::to_vec(&tampered).unwrap(), &approved).is_none()
+        );
     }
 }
 

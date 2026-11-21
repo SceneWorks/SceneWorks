@@ -63,6 +63,7 @@ mod plural {
     }
 
     struct Quotation {
+        evidence_references: u32,
         artifact_id: u64,
         evidence: String,
         price: Scail2FitPrice,
@@ -320,6 +321,7 @@ mod plural {
             for row in rows {
                 if let Ok(price) = profile.price(std::slice::from_ref(&row.witness)) {
                     prices.push(Quotation {
+                        evidence_references: row.witness.axes.references,
                         artifact_id: row.artifact_id,
                         evidence: row.digest.clone(),
                         price,
@@ -413,7 +415,7 @@ mod plural {
                 let result = check_available(accelerator, host, Some(free), physical);
                 tracing::info!(event="scail2_plural_fit", jobId=%self.job, stage, backend=LANE.as_key(),
                     tier=%self.profile.axes().effective_tier, artifactTier=%self.profile.axes().artifact_tier,
-                    referenceRgbSha256=%self.reference_digests, evidenceSha256=%quote.evidence, evidenceArtifactId=quote.artifact_id,
+                    referenceRgbSha256=%self.reference_digests, evidenceSha256=%quote.evidence, evidenceArtifactId=quote.artifact_id, evidenceReferences=quote.evidence_references,
                     grossHostBytes=price.host_bytes, grossDeviceBytes=price.device_bytes, grossUnifiedBytes=price.unified_bytes,
                     acceleratorReserveBytes=budget.reserved_headroom_bytes,
                     artifactSha256=%self.profile.axes().artifact_sha256,
