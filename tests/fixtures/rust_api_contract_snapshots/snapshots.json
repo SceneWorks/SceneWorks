@@ -1739,6 +1739,87 @@
                 }
               ],
               "family": "sdxl",
+              "feature_details": {
+                "low_res_start": {
+                  "applicable": true,
+                  "available": true,
+                  "class": "recipe",
+                  "classification": "recipe",
+                  "conflicts": [
+                    "phases",
+                    "pass0_reference_conditioning",
+                    "pass0_control_conditioning",
+                    "pass0_edit_conditioning",
+                    "krea_multiphase"
+                  ],
+                  "hook_points": [
+                    "schedule_transform",
+                    "phase_transition"
+                  ],
+                  "id": "low_res_start",
+                  "inapplicability_reasons": [],
+                  "memory_effect": {
+                    "extra_resident_weight_bytes": 0,
+                    "introduces_denoise_phase_boundary": true,
+                    "introduces_pass_boundary": false,
+                    "retains_single_pass_schedule": true,
+                    "transition_residency": "in_device_latent_unpack_resize_repack"
+                  },
+                  "parameter_schema": {
+                    "k": {
+                      "default_executed_steps": 30,
+                      "max": 29,
+                      "max_exclusive": "executed_steps",
+                      "min": 1,
+                      "range": "1..executed_steps",
+                      "required": true,
+                      "type": "step_index"
+                    },
+                    "scale": {
+                      "default": 0.5,
+                      "inclusive": true,
+                      "max": 0.9,
+                      "min": 0.25,
+                      "required": false,
+                      "type": "float_range"
+                    },
+                    "version": 1
+                  },
+                  "parameters": {
+                    "k": {
+                      "default_executed_steps": 30,
+                      "max": 29,
+                      "max_exclusive": "executed_steps",
+                      "min": 1,
+                      "range": "1..executed_steps",
+                      "required": true,
+                      "type": "step_index"
+                    },
+                    "scale": {
+                      "default": 0.5,
+                      "inclusive": true,
+                      "max": 0.9,
+                      "min": 0.25,
+                      "required": false,
+                      "type": "float_range"
+                    },
+                    "version": 1
+                  },
+                  "reasons": [],
+                  "requires": [
+                    "render_plan",
+                    "packed_image_trajectory",
+                    "spatial_unpack_repack",
+                    "clean_estimate_renoise_transition",
+                    "noise_start_pass0"
+                  ],
+                  "supported": true,
+                  "version": 1
+                }
+              },
+              "features": {
+                "low_res_start": true
+              },
               "gated": false,
               "id": "realvisxl",
               "image": {
@@ -2302,6 +2383,153 @@
             }
           ],
           "family": "z-image",
+          "feature_details": {
+            "low_res_start": {
+              "applicable": true,
+              "available": true,
+              "class": "recipe",
+              "classification": "recipe",
+              "conditioned_routes": {
+                "z_image_turbo_control": {
+                  "applicable": false,
+                  "available": false,
+                  "class": "recipe",
+                  "classification": "recipe",
+                  "conflicts": [
+                    "phases",
+                    "pass0_reference_conditioning",
+                    "pass0_control_conditioning",
+                    "pass0_edit_conditioning",
+                    "krea_multiphase"
+                  ],
+                  "hook_points": [
+                    "schedule_transform",
+                    "phase_transition"
+                  ],
+                  "id": "low_res_start",
+                  "inapplicability_reasons": [
+                    "conflicts_with_pass0_control_conditioning"
+                  ],
+                  "memory_effect": {
+                    "extra_resident_weight_bytes": 0,
+                    "introduces_denoise_phase_boundary": true,
+                    "introduces_pass_boundary": false,
+                    "retains_single_pass_schedule": true,
+                    "transition_residency": "in_device_latent_unpack_resize_repack"
+                  },
+                  "parameter_schema": {
+                    "k": {
+                      "default_executed_steps": 4,
+                      "max": 3,
+                      "max_exclusive": "executed_steps",
+                      "min": 1,
+                      "range": "1..executed_steps",
+                      "required": true,
+                      "type": "step_index"
+                    },
+                    "scale": {
+                      "default": 0.5,
+                      "inclusive": true,
+                      "max": 0.9,
+                      "min": 0.25,
+                      "required": false,
+                      "type": "float_range"
+                    },
+                    "version": 1
+                  },
+                  "parameters": null,
+                  "reasons": [
+                    {
+                      "code": "conflicts_with_pass0_control_conditioning",
+                      "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+                    }
+                  ],
+                  "requires": [
+                    "render_plan",
+                    "packed_image_trajectory",
+                    "spatial_unpack_repack",
+                    "clean_estimate_renoise_transition",
+                    "noise_start_pass0"
+                  ],
+                  "supported": false,
+                  "version": 1
+                }
+              },
+              "conflicts": [
+                "phases",
+                "pass0_reference_conditioning",
+                "pass0_control_conditioning",
+                "pass0_edit_conditioning",
+                "krea_multiphase"
+              ],
+              "hook_points": [
+                "schedule_transform",
+                "phase_transition"
+              ],
+              "id": "low_res_start",
+              "inapplicability_reasons": [],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": true,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "in_device_latent_unpack_resize_repack"
+              },
+              "parameter_schema": {
+                "k": {
+                  "default_executed_steps": 4,
+                  "max": 3,
+                  "max_exclusive": "executed_steps",
+                  "min": 1,
+                  "range": "1..executed_steps",
+                  "required": true,
+                  "type": "step_index"
+                },
+                "scale": {
+                  "default": 0.5,
+                  "inclusive": true,
+                  "max": 0.9,
+                  "min": 0.25,
+                  "required": false,
+                  "type": "float_range"
+                },
+                "version": 1
+              },
+              "parameters": {
+                "k": {
+                  "default_executed_steps": 4,
+                  "max": 3,
+                  "max_exclusive": "executed_steps",
+                  "min": 1,
+                  "range": "1..executed_steps",
+                  "required": true,
+                  "type": "step_index"
+                },
+                "scale": {
+                  "default": 0.5,
+                  "inclusive": true,
+                  "max": 0.9,
+                  "min": 0.25,
+                  "required": false,
+                  "type": "float_range"
+                },
+                "version": 1
+              },
+              "reasons": [],
+              "requires": [
+                "render_plan",
+                "packed_image_trajectory",
+                "spatial_unpack_repack",
+                "clean_estimate_renoise_transition",
+                "noise_start_pass0"
+              ],
+              "supported": true,
+              "version": 1
+            }
+          },
+          "features": {
+            "low_res_start": true
+          },
           "gated": false,
           "id": "z_image_turbo",
           "image": {
@@ -2995,6 +3223,153 @@
         }
       ],
       "family": "z-image",
+      "feature_details": {
+        "low_res_start": {
+          "applicable": true,
+          "available": true,
+          "class": "recipe",
+          "classification": "recipe",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": false,
+              "available": false,
+              "class": "recipe",
+              "classification": "recipe",
+              "conflicts": [
+                "phases",
+                "pass0_reference_conditioning",
+                "pass0_control_conditioning",
+                "pass0_edit_conditioning",
+                "krea_multiphase"
+              ],
+              "hook_points": [
+                "schedule_transform",
+                "phase_transition"
+              ],
+              "id": "low_res_start",
+              "inapplicability_reasons": [
+                "conflicts_with_pass0_control_conditioning"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": true,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "in_device_latent_unpack_resize_repack"
+              },
+              "parameter_schema": {
+                "k": {
+                  "default_executed_steps": 4,
+                  "max": 3,
+                  "max_exclusive": "executed_steps",
+                  "min": 1,
+                  "range": "1..executed_steps",
+                  "required": true,
+                  "type": "step_index"
+                },
+                "scale": {
+                  "default": 0.5,
+                  "inclusive": true,
+                  "max": 0.9,
+                  "min": 0.25,
+                  "required": false,
+                  "type": "float_range"
+                },
+                "version": 1
+              },
+              "parameters": null,
+              "reasons": [
+                {
+                  "code": "conflicts_with_pass0_control_conditioning",
+                  "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+                }
+              ],
+              "requires": [
+                "render_plan",
+                "packed_image_trajectory",
+                "spatial_unpack_repack",
+                "clean_estimate_renoise_transition",
+                "noise_start_pass0"
+              ],
+              "supported": false,
+              "version": 1
+            }
+          },
+          "conflicts": [
+            "phases",
+            "pass0_reference_conditioning",
+            "pass0_control_conditioning",
+            "pass0_edit_conditioning",
+            "krea_multiphase"
+          ],
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "id": "low_res_start",
+          "inapplicability_reasons": [],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "parameters": {
+            "k": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "requires": [
+            "render_plan",
+            "packed_image_trajectory",
+            "spatial_unpack_repack",
+            "clean_estimate_renoise_transition",
+            "noise_start_pass0"
+          ],
+          "supported": true,
+          "version": 1
+        }
+      },
+      "features": {
+        "low_res_start": true
+      },
       "gated": false,
       "hasVariantMatrix": true,
       "id": "z_image_turbo",

@@ -1803,12 +1803,17 @@ pub(super) struct LaneConditioning {
 /// Resolve an ordinary single-source img2img (`§6.13`) input `(source_image, strength)` for base
 /// FLUX.1 (`flux_schnell`, `flux_dev`) when `sourceAssetId` is supplied in `text_to_image` mode.
 #[cfg(native_lane)]
+pub(super) fn supports_eng2_ordinary_img2img_source(model: &str) -> bool {
+    sceneworks_core::options::low_res_start::route_admits_source_asset_for_plain_img2img(model)
+}
+
+#[cfg(native_lane)]
 pub(super) fn resolve_flux1_ordinary_img2img_source(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
 ) -> WorkerResult<Option<(Image, f32)>> {
-    if !matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
+    if !supports_eng2_ordinary_img2img_source(&request.model)
         || !matches!(request.mode.as_str(), "text_to_image" | "image_generation")
     {
         return Ok(None);
@@ -1864,8 +1869,15 @@ pub(super) fn resolve_generic_lane_conditioning(
         } else {
             resolve_identity_init(request, settings, project_path)?
         };
+        let flux_source_image = if init.is_none() && !has_reference && request.mode != "edit_image"
+        {
+            resolve_flux1_ordinary_img2img_source(request, settings, project_path)?
+        } else {
+            None
+        };
         Ok(LaneConditioning {
             identity_init: init,
+            flux_source_image,
             ..Default::default()
         })
     } else if is_flux_model(&request.model) && has_reference && request.mode != "edit_image" {
@@ -1904,7 +1916,7 @@ pub(super) fn resolve_generic_lane_conditioning(
             ideogram_edit_mask: None,
             flux_source_image: None,
         })
-    } else if is_flux_model(&request.model)
+    } else if supports_eng2_ordinary_img2img_source(&request.model)
         && !has_reference
         && non_empty(&request.source_asset_id)
         && matches!(request.mode.as_str(), "text_to_image" | "image_generation")

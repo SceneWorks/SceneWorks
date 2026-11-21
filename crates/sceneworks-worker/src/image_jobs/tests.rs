@@ -1881,6 +1881,7 @@ fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::Memor
         predicted_peak_bytes: 1 << 20,
         cache_state: gen_core::MemoryCacheState::Cold,
         evidence_revision: "test".to_owned(),
+        low_res_start: None,
     }
 }
 

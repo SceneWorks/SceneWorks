@@ -533,14 +533,63 @@ pub(super) fn build_render_request(
     Ok(request)
 }
 
-/// The FLUX.1 provider ids whose every request — base text-to-image, XLabs IP-Adapter, ControlNet
-/// and PuLID — renders from a render plan compiled before load (SW-6933 / SW-6936).
-pub(super) const FLUX1_PRELOAD_PLANNED_ENGINES: &[&str] = &[
-    "flux1_schnell",
-    "flux1_dev",
-    "flux1_dev_control",
-    "pulid_flux",
-];
+/// The always-planned `ENG-2` shared-driver image engine ids whose requests compile a pre-load
+/// [`gen_core::RenderPlan`] (or two-pass [`gen_core::MultiPassRenderPlan`] under Hires.fix) before
+/// load (`SW-6933`, `SW-6936`, `SW-6945`, `SW-6946`, `SW-6947`, `SW-6948`).
+pub(super) fn is_unconditionally_preload_planned_engine(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux1_schnell"
+            | "flux1_dev"
+            | "flux1_dev_control"
+            | "pulid_flux"
+            | "flux2_dev"
+            | "flux2_klein_9b"
+            | "flux2_dev_edit"
+            | "flux2_klein_9b_edit"
+            | "flux2_klein_9b_kv_edit"
+            | "flux2_dev_control"
+            | "chroma1_hd"
+            | "chroma1_base"
+            | "chroma1_flash"
+            | "lens"
+            | "lens_turbo"
+            | "anima"
+            | "anima_base"
+            | "anima_aesthetic"
+            | "anima_turbo"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+            | "sana_1600m"
+            | "boogu_image"
+            | "boogu_image_edit"
+            | "qwen_image"
+            | "qwen_image_edit"
+            | "qwen_image_control"
+            | "qwen_image_2_1"
+            | "qwen_image_2_1_turbo"
+            | "z_image"
+            | "z_image_turbo"
+            | "z_image_control"
+            | "z_image_turbo_control"
+    )
+}
+
+/// Conditionally-planned `ENG-2` engine ids (`"kolors"`, `"sdxl"`) that register a pre-load
+/// render planner for curated shared-driver sampler/scheduler requests without ControlNet,
+/// IP-Adapter, InstantID, mask, or `ENG-5` acceleration (`lcm`/`lightning`/`hyper`), and return
+/// `Ok(None)` when the request takes an `ENG-5` non-curated path (`SW-6947`, `SW-6948`).
+pub(super) fn is_conditionally_preload_planned_engine(engine_id: &str) -> bool {
+    matches!(engine_id, "kolors" | "sdxl")
+}
+
+/// Whether `engine_id` participates in `ENG-2` pre-load [`gen_core::RenderPlan`] /
+/// [`gen_core::MultiPassRenderPlan`] compilation (`SW-6948`).
+pub(super) fn is_eng2_preload_planned_engine(engine_id: &str) -> bool {
+    is_unconditionally_preload_planned_engine(engine_id)
+        || is_conditionally_preload_planned_engine(engine_id)
+}
 
 pub(super) use crate::generation_error;
 
@@ -563,6 +612,15 @@ pub(super) fn preload_plan_error(route: &str, error: gen_core::Error) -> WorkerE
     }
 }
 
+fn route_allows_optional_preload_plan(engine_id: &str, request: &GenerationRequest) -> bool {
+    is_conditionally_preload_planned_engine(engine_id)
+        || (matches!(engine_id, "qwen_image_2_1" | "qwen_image_2_1_turbo")
+            && request
+                .conditioning
+                .iter()
+                .any(|c| matches!(c, Conditioning::ReferenceRgba { .. })))
+}
+
 /// Resolve a provider's owner-local plan before `start_cached_gen_stream` can load weights.
 /// The registry returns `None` for routes that have not migrated yet; an invalid request is a
 /// pre-load error rather than a fallback to the legacy call.
@@ -575,7 +633,10 @@ pub(super) fn compile_render_plan(
     let plan = registry
         .compile_render_plan(engine_id, spec, request)
         .map_err(|error| preload_plan_error(engine_id, error))?;
-    if plan.is_none() && FLUX1_PRELOAD_PLANNED_ENGINES.contains(&engine_id) {
+    if plan.is_none()
+        && is_unconditionally_preload_planned_engine(engine_id)
+        && !route_allows_optional_preload_plan(engine_id, request)
+    {
         return Err(WorkerError::Engine(format!(
             "{engine_id}: route has no registered pre-load render planner"
         )));
@@ -657,8 +718,8 @@ pub(super) fn build_hires_refinement_request(
 
 /// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
 /// refinement pass compiled together with it.
-#[cfg(target_os = "macos")]
-#[derive(Default)]
+#[cfg(native_lane)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct PreparedRender {
     pub(super) pass: Option<gen_core::RenderPlan>,
     pub(super) hires: Option<gen_core::RenderPlan>,
@@ -668,7 +729,7 @@ pub(super) struct PreparedRender {
 /// pass's output stretched to the target size at the refinement strength — as one multi-pass plan
 /// before load. `refine` carries no reference of its own; the plan binds the produced one by size
 /// and strength, because its pixels exist only after the first pass.
-#[cfg(target_os = "macos")]
+#[cfg(native_lane)]
 pub(super) fn compile_hires_render_plans(
     registry: &gen_core::ProviderRegistry,
     engine_id: &str,
@@ -677,6 +738,25 @@ pub(super) fn compile_hires_render_plans(
     refine: &GenerationRequest,
     hires: &HiresFixPlan,
 ) -> WorkerResult<(gen_core::RenderPlan, gen_core::RenderPlan)> {
+    compile_optional_hires_render_plans(registry, engine_id, spec, first, refine, hires)?
+        .ok_or_else(|| {
+            WorkerError::Engine(format!(
+                "{engine_id}: Hires.fix route has no registered pre-load render planner"
+            ))
+        })
+}
+
+/// Compile a two-pass Hires.fix [`gen_core::MultiPassRenderPlan`], returning `Ok(None)` when the
+/// provider has no pre-load planner for pass 0 (e.g. an `ENG-5` non-curated Kolors/SDXL path).
+#[cfg(native_lane)]
+pub(super) fn compile_optional_hires_render_plans(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    first: &GenerationRequest,
+    refine: &GenerationRequest,
+    hires: &HiresFixPlan,
+) -> WorkerResult<Option<(gen_core::RenderPlan, gen_core::RenderPlan)>> {
     let passes = [
         gen_core::PlannedPassRequest {
             request: first,
@@ -692,21 +772,55 @@ pub(super) fn compile_hires_render_plans(
             }),
         },
     ];
-    let plan = registry
+    let Some(plan) = registry
         .compile_multi_pass_render_plan(engine_id, spec, &passes)
         .map_err(|error| preload_plan_error(engine_id, error))?
-        .ok_or_else(|| {
-            WorkerError::Engine(format!(
-                "{engine_id}: Hires.fix route has no registered pre-load render planner"
-            ))
-        })?;
+    else {
+        return Ok(None);
+    };
     match plan.passes() {
-        [first, refine] => Ok((first.clone(), refine.clone())),
+        [first, refine] => Ok(Some((first.clone(), refine.clone()))),
         passes => Err(WorkerError::Engine(format!(
             "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
             passes.len()
         ))),
     }
+}
+
+/// Compile the single-pass or two-pass [`PreparedRender`] for an `ENG-2` route before loading
+/// weights (`SW-6948`).
+#[cfg(native_lane)]
+pub(super) fn compile_prepared_render(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    candidate: &GenerationRequest,
+    refine: Option<(&GenerationRequest, &HiresFixPlan)>,
+) -> WorkerResult<PreparedRender> {
+    let Some((refine_req, hires)) = refine else {
+        return Ok(PreparedRender {
+            pass: compile_render_plan(registry, engine_id, spec, candidate)?,
+            hires: None,
+        });
+    };
+    if route_allows_optional_preload_plan(engine_id, candidate) {
+        let Some((pass, hires)) = compile_optional_hires_render_plans(
+            registry, engine_id, spec, candidate, refine_req, hires,
+        )?
+        else {
+            return Ok(PreparedRender::default());
+        };
+        return Ok(PreparedRender {
+            pass: Some(pass),
+            hires: Some(hires),
+        });
+    }
+    let (pass, hires) =
+        compile_hires_render_plans(registry, engine_id, spec, candidate, refine_req, hires)?;
+    Ok(PreparedRender {
+        pass: Some(pass),
+        hires: Some(hires),
+    })
 }
 
 /// Render one image of a bespoke MLX FLUX.1 lane (ControlNet, PuLID) from its pre-load plan inside
@@ -842,7 +956,7 @@ pub(super) fn resolve_hires_fix_plan(
     let provider_reference_strength = if matches!(family.as_str(), "sdxl" | "ideogram") {
         denoising_strength
     } else {
-        1.0 - denoising_strength
+        (1.0 - denoising_strength).clamp(0.0, 1.0)
     };
     let cfg = request
         .hires_fix
@@ -2396,5 +2510,1057 @@ mod hires_report_tests {
         assert_eq!(receipt.k, 2);
         assert_eq!((receipt.low_width, receipt.low_height), (32, 32));
         assert_eq!((receipt.full_width, receipt.full_height), (64, 64));
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn sw_6948_eng2_hires_fix_multi_pass_render_plan_and_low_res_start_compilation() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let base_dir = root.path().join("base");
+        let ip_dir = root.path().join("ip_adapter");
+        std::fs::create_dir_all(&base_dir).expect("base dir");
+        std::fs::create_dir_all(&ip_dir).expect("ip dir");
+        let base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base_dir));
+        let ip_spec = base_spec
+            .clone()
+            .with_ip_adapter(gen_core::WeightsSource::Dir(ip_dir));
+        let _ = &ip_spec;
+        let registry = crate::inference_runtime::media();
+
+        // 1. Cohort membership predicate covers all ENG-2 routes and excludes ENG-5/ENG-4/ENG-6/ENG-7 routes.
+        for eng2_route in [
+            "flux1_schnell",
+            "flux1_dev",
+            "flux1_dev_control",
+            "pulid_flux",
+            "flux2_dev",
+            "flux2_klein_9b",
+            "flux2_dev_edit",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+            "flux2_dev_control",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
+            "lens",
+            "lens_turbo",
+            "anima",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "boogu_image",
+            "boogu_image_edit",
+            "qwen_image",
+            "qwen_image_edit",
+            "qwen_image_control",
+            "qwen_image_2_1",
+            "qwen_image_2_1_turbo",
+            "z_image",
+            "z_image_turbo",
+            "z_image_control",
+            "z_image_turbo_control",
+            "kolors",
+            "sdxl",
+        ] {
+            assert!(
+                is_eng2_preload_planned_engine(eng2_route),
+                "{eng2_route} must be in the ENG-2 pre-load planned cohort"
+            );
+        }
+        for excluded_route in [
+            "sana_sprint_1600m",
+            "boogu_image_turbo",
+            "krea_2_raw",
+            "krea_2_turbo",
+            "flux3_klein",
+            "ideogram_4",
+            "bernini",
+        ] {
+            assert!(
+                !is_eng2_preload_planned_engine(excluded_route),
+                "{excluded_route} must NOT be in the ENG-2 pre-load planned cohort"
+            );
+        }
+
+        // 2. Single-pass ENG-2 compilation with low_res_start across all ENG-2 base families.
+        type SinglePassRouteCase<'a> = (
+            &'a str,
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<f32>,
+            Option<f32>,
+        );
+        let low_res_spec = gen_core::LowResStartSpec::new(2, Some(0.5));
+        let single_pass_routes: &[SinglePassRouteCase<'_>] = &[
+            ("flux1_schnell", None, None, None, None),
+            ("flux1_dev", None, None, Some(3.5), None),
+            ("flux2_dev", None, None, Some(3.5), None),
+            ("flux2_klein_9b", None, None, None, None),
+            ("chroma1_hd", None, None, None, Some(4.0)),
+            ("chroma1_base", None, None, None, Some(4.0)),
+            ("chroma1_flash", None, None, None, None),
+            ("lens", None, None, Some(4.0), None),
+            ("lens_turbo", None, None, None, None),
+            ("anima_base", None, None, Some(4.0), None),
+            ("anima_aesthetic", None, None, Some(4.0), None),
+            ("anima_turbo", None, None, None, None),
+            ("sd3_5_large", None, None, Some(4.5), None),
+            ("sd3_5_large_turbo", None, None, None, None),
+            ("sd3_5_medium", None, None, Some(4.5), None),
+            ("sana_1600m", None, None, Some(4.5), None),
+            ("boogu_image", None, None, Some(3.5), None),
+            ("qwen_image", None, None, None, Some(4.0)),
+            ("qwen_image_2_1", None, None, None, Some(4.0)),
+            ("qwen_image_2_1_turbo", None, None, None, None),
+            ("z_image", None, None, Some(4.0), None),
+            ("z_image_turbo", None, None, None, None),
+            ("kolors", Some("euler"), Some("karras"), Some(5.0), None),
+            ("sdxl", Some("euler"), Some("karras"), Some(7.0), None),
+        ];
+
+        let spec_for_single_pass = |route: &str| -> gen_core::LoadSpec {
+            if route == "qwen_image_2_1_turbo" {
+                gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+                    root.path().join("qwen_image_2_1_turbo_synthetic"),
+                ))
+            } else {
+                base_spec.clone()
+            }
+        };
+        for &(route, sampler, scheduler, guidance, true_cfg) in single_pass_routes {
+            let route_spec = spec_for_single_pass(route);
+            let req = gen_core::GenerationRequest {
+                prompt: "a mountain lake at sunrise".to_owned(),
+                width: 1024,
+                height: 1024,
+                count: 1,
+                seed: Some(17),
+                steps: Some(6),
+                guidance,
+                true_cfg,
+                sampler: sampler.map(str::to_owned),
+                scheduler: scheduler.map(str::to_owned),
+                low_res_start: Some(low_res_spec),
+                ..Default::default()
+            };
+            let prepared = compile_prepared_render(registry, route, &route_spec, &req, None)
+                .unwrap_or_else(|error| {
+                    panic!("{route}: single-pass low_res_start render plan failed: {error}")
+                });
+            let plan = prepared
+                .pass
+                .unwrap_or_else(|| panic!("{route}: expected Some(RenderPlan)"));
+            assert!(prepared.hires.is_none(), "{route}");
+            assert_eq!(plan.pass_index(), 0, "{route}");
+            assert_eq!(plan.output_size(), (1024, 1024), "{route}");
+            let resolved_low_res = plan
+                .low_res_start()
+                .unwrap_or_else(|| panic!("{route}: RenderPlan must bind low_res_start"));
+            assert_eq!(resolved_low_res.k, 2, "{route}");
+            assert_eq!(
+                (resolved_low_res.low_width, resolved_low_res.low_height),
+                (512, 512),
+                "{route}"
+            );
+            assert_eq!(
+                (resolved_low_res.full_width, resolved_low_res.full_height),
+                (1024, 1024),
+                "{route}"
+            );
+        }
+
+        // 3. Two-pass Hires.fix MultiPassRenderPlan compilation and ProducedReference validation
+        // across all reference-accepting ENG-2 routes (including low_res_start on pass 0 only!).
+        let hires = HiresFixPlan {
+            width: 1280,
+            height: 1280,
+            steps: 6,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.45,
+        };
+        type TwoPassRouteCase<'a> = (
+            &'a str,
+            &'a gen_core::LoadSpec,
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<f32>,
+            Option<f32>,
+        );
+        #[cfg(target_os = "macos")]
+        let two_pass_routes: &[TwoPassRouteCase<'_>] = &[
+            ("flux1_dev", &ip_spec, None, None, Some(3.5), None),
+            ("flux2_dev", &base_spec, None, None, Some(3.5), None),
+            ("flux2_klein_9b", &base_spec, None, None, None, None),
+            ("sd3_5_large", &base_spec, None, None, Some(4.5), None),
+            ("sd3_5_large_turbo", &base_spec, None, None, None, None),
+            ("sd3_5_medium", &base_spec, None, None, Some(4.5), None),
+            ("sana_1600m", &base_spec, None, None, Some(4.5), None),
+            ("boogu_image", &base_spec, None, None, Some(3.5), None),
+            ("qwen_image", &base_spec, None, None, None, Some(4.0)),
+            ("z_image", &base_spec, None, None, Some(4.0), None),
+            ("z_image_turbo", &base_spec, None, None, None, None),
+            (
+                "kolors",
+                &base_spec,
+                Some("euler"),
+                Some("karras"),
+                Some(5.0),
+                None,
+            ),
+            (
+                "sdxl",
+                &base_spec,
+                Some("euler"),
+                Some("karras"),
+                Some(7.0),
+                None,
+            ),
+        ];
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let two_pass_routes: &[TwoPassRouteCase<'_>] = &[
+            ("sd3_5_large", &base_spec, None, None, Some(4.5), None),
+            ("sd3_5_large_turbo", &base_spec, None, None, None, None),
+            ("sd3_5_medium", &base_spec, None, None, Some(4.5), None),
+            ("sana_1600m", &base_spec, None, None, Some(4.5), None),
+            ("boogu_image", &base_spec, None, None, Some(3.5), None),
+            ("z_image", &base_spec, None, None, Some(4.0), None),
+            ("z_image_turbo", &base_spec, None, None, None, None),
+            (
+                "kolors",
+                &base_spec,
+                Some("euler"),
+                Some("karras"),
+                Some(5.0),
+                None,
+            ),
+        ];
+
+        let pass0_ref = gen_core::Conditioning::Reference {
+            image: gen_core::Image {
+                width: 512,
+                height: 512,
+                pixels: vec![96; 512 * 512 * 3],
+            },
+            strength: Some(0.65),
+        };
+        let wrong_768 = gen_core::Image {
+            width: 768,
+            height: 768,
+            pixels: vec![42; 768 * 768 * 3],
+        };
+
+        for &(route, spec, sampler, scheduler, guidance, true_cfg) in two_pass_routes {
+            let needs_pass0_ref =
+                matches!(route, "flux1_dev" | "boogu_image_edit" | "qwen_image_edit");
+            let (base_dim, hires_dim) = if matches!(route, "kolors" | "sdxl") {
+                (1024, 1280)
+            } else {
+                (512, 1024)
+            };
+            let mut route_hires = hires;
+            route_hires.width = hires_dim;
+            route_hires.height = hires_dim;
+            route_hires.guidance = guidance;
+            route_hires.true_cfg = true_cfg;
+            let stretched_hires = gen_core::Image {
+                width: hires_dim,
+                height: hires_dim,
+                pixels: vec![42; (hires_dim * hires_dim * 3) as usize],
+            };
+
+            let first = gen_core::GenerationRequest {
+                prompt: "a coastal lighthouse".to_owned(),
+                width: base_dim,
+                height: base_dim,
+                count: 1,
+                seed: Some(29),
+                steps: Some(6),
+                guidance,
+                true_cfg,
+                sampler: sampler.map(str::to_owned),
+                scheduler: scheduler.map(str::to_owned),
+                conditioning: if needs_pass0_ref {
+                    vec![pass0_ref.clone()]
+                } else {
+                    Vec::new()
+                },
+                low_res_start: if needs_pass0_ref {
+                    None
+                } else {
+                    Some(low_res_spec)
+                },
+                ..Default::default()
+            };
+            let refine = gen_core::GenerationRequest {
+                prompt: "a coastal lighthouse".to_owned(),
+                width: hires_dim,
+                height: hires_dim,
+                count: 1,
+                seed: Some(29),
+                steps: Some(6),
+                guidance,
+                true_cfg,
+                sampler: sampler.map(str::to_owned),
+                scheduler: scheduler.map(str::to_owned),
+                enhance_prompt: route == "flux2_dev",
+                ..Default::default()
+            };
+
+            let prepared = compile_prepared_render(
+                registry,
+                route,
+                spec,
+                &first,
+                Some((&refine, &route_hires)),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{route}: two-pass Hires.fix MultiPassRenderPlan compilation failed: {error}"
+                )
+            });
+            let first_plan = prepared
+                .pass
+                .unwrap_or_else(|| panic!("{route}: expected pass-0 RenderPlan"));
+            let refine_plan = prepared
+                .hires
+                .unwrap_or_else(|| panic!("{route}: expected pass-1 hires RenderPlan"));
+
+            assert_eq!(first_plan.pass_index(), 0, "{route}");
+            assert_eq!(first_plan.output_size(), (base_dim, base_dim), "{route}");
+            assert_eq!(
+                first_plan.low_res_start().is_some(),
+                !needs_pass0_ref,
+                "{route}: pass 0 must retain low_res_start when noise-start"
+            );
+
+            assert_eq!(refine_plan.pass_index(), 1, "{route}");
+            assert_eq!(refine_plan.output_size(), (hires_dim, hires_dim), "{route}");
+            assert!(
+                refine_plan.low_res_start().is_none(),
+                "{route}: pass 1 must NEVER carry low_res_start (FEAT-1)"
+            );
+            assert_eq!(
+                refine_plan.produced_reference(),
+                Some(gen_core::ProducedReference {
+                    from_pass: 0,
+                    width: hires_dim,
+                    height: hires_dim,
+                    strength: Some(route_hires.provider_reference_strength),
+                }),
+                "{route}"
+            );
+            check_produced_reference(&refine_plan, &stretched_hires).unwrap_or_else(|e| {
+                panic!("{route}: valid {hires_dim}x{hires_dim} produced reference failed: {e}")
+            });
+            assert!(
+                matches!(
+                    check_produced_reference(&refine_plan, &wrong_768),
+                    Err(WorkerError::InvalidPayload(_))
+                ),
+                "{route}: mismatched produced reference size must be rejected"
+            );
+        }
+
+        // 4. T2I-only / non-img2img-noise-blend ENG-2 routes (chroma1_hd, lens, anima_base,
+        // qwen_image_2_1, qwen_image_2_1_turbo, base flux1_dev without IP-Adapter)
+        // refuse two-pass Hires.fix with fractional denoising_strength before load with InvalidPayload.
+        for qwen_model in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+            let payload = serde_json::json!({
+                "projectId": "p",
+                "model": qwen_model,
+                "prompt": "a portrait",
+                "width": 512,
+                "height": 512,
+                "hiresFix": {
+                    "enabled": true,
+                    "upscaleBy": 2.0,
+                    "denoisingStrength": 0.55
+                }
+            });
+            let obj = payload.as_object().unwrap();
+            let req = ImageRequest::from_resolved(obj, obj).unwrap();
+            let qwen_hires =
+                resolve_hires_fix_plan(&req, 6, None, Some(4.0)).expect("hires fix plan");
+            assert!(
+                (qwen_hires.provider_reference_strength - 0.45).abs() < 1e-6,
+                "{qwen_model}: resolve_hires_fix_plan must translate denoising_strength without silent 1.0 override"
+            );
+            let first = gen_core::GenerationRequest {
+                prompt: "a portrait".to_owned(),
+                width: 512,
+                height: 512,
+                count: 1,
+                seed: Some(7),
+                steps: Some(4),
+                true_cfg: (qwen_model == "qwen_image_2_1").then_some(4.0),
+                ..Default::default()
+            };
+            let refine = gen_core::GenerationRequest {
+                prompt: "a portrait".to_owned(),
+                width: 1024,
+                height: 1024,
+                count: 1,
+                seed: Some(7),
+                steps: Some(6),
+                true_cfg: (qwen_model == "qwen_image_2_1").then_some(4.0),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    compile_hires_render_plans(
+                        registry,
+                        qwen_model,
+                        &base_spec,
+                        &first,
+                        &refine,
+                        &qwen_hires,
+                    ),
+                    Err(WorkerError::InvalidPayload(_))
+                ),
+                "{qwen_model}: compile_hires_render_plans must reject fractional denoising_strength pre-load"
+            );
+        }
+        for t2i_only_route in ["flux1_dev", "chroma1_hd", "lens", "anima_base"] {
+            let first = gen_core::GenerationRequest {
+                prompt: "a portrait".to_owned(),
+                width: 512,
+                height: 512,
+                count: 1,
+                seed: Some(7),
+                steps: Some(4),
+                ..Default::default()
+            };
+            let refine = gen_core::GenerationRequest {
+                prompt: "a portrait".to_owned(),
+                width: 1024,
+                height: 1024,
+                count: 1,
+                seed: Some(7),
+                steps: Some(6),
+                ..Default::default()
+            };
+            assert!(
+                matches!(
+                    compile_prepared_render(
+                        registry,
+                        t2i_only_route,
+                        &base_spec,
+                        &first,
+                        Some((&refine, &hires)),
+                    ),
+                    Err(WorkerError::InvalidPayload(_))
+                ),
+                "{t2i_only_route}: T2I-only route must refuse two-pass Hires.fix before load"
+            );
+        }
+
+        // 5. ENG-5 non-curated Kolors/SDXL paths yield PreparedRender { pass: None, hires: None }
+        // so legacy B5 Hires.fix execution remains intact for ENG-5 paths.
+        for (eng5_route, eng5_sampler, eng5_scheduler) in [
+            ("kolors", Some("euler_discrete"), None),
+            ("kolors", Some("euler"), Some("discrete")),
+            ("sdxl", Some("euler"), Some("discrete")),
+        ] {
+            let first = gen_core::GenerationRequest {
+                prompt: "a street scene".to_owned(),
+                width: 512,
+                height: 512,
+                count: 1,
+                seed: Some(11),
+                steps: Some(6),
+                sampler: eng5_sampler.map(str::to_owned),
+                scheduler: eng5_scheduler.map(str::to_owned),
+                ..Default::default()
+            };
+            let refine = gen_core::GenerationRequest {
+                prompt: "a street scene".to_owned(),
+                width: 1024,
+                height: 1024,
+                count: 1,
+                seed: Some(11),
+                steps: Some(6),
+                sampler: eng5_sampler.map(str::to_owned),
+                scheduler: eng5_scheduler.map(str::to_owned),
+                ..Default::default()
+            };
+            let prepared = compile_prepared_render(
+                registry,
+                eng5_route,
+                &base_spec,
+                &first,
+                Some((&refine, &hires)),
+            )
+            .expect("ENG-5 non-curated Kolors/SDXL must not fail pre-load planning");
+            assert!(
+                prepared.pass.is_none() && prepared.hires.is_none(),
+                "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must defer to ENG-5 legacy path"
+            );
+        }
+    }
+
+    #[test]
+    fn sw_6948_eng2_hires_fix_two_pass_execution_prompt_enhancement_progress_and_low_res_start_pass0_only(
+    ) {
+        struct PlannedHiresProbe {
+            descriptor: gen_core::ModelDescriptor,
+            seen_requests: std::sync::Mutex<Vec<gen_core::GenerationRequest>>,
+            seen_plan_indices: std::sync::Mutex<Vec<Option<usize>>>,
+        }
+
+        impl PlannedHiresProbe {
+            fn execute_pass(
+                &self,
+                req: &gen_core::GenerationRequest,
+                plan: Option<&gen_core::RenderPlan>,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<CompletedGeneration> {
+                if let Some(plan) = plan {
+                    plan.check_request(&self.descriptor, req)?;
+                }
+                self.seen_requests.lock().unwrap().push(req.clone());
+                self.seen_plan_indices
+                    .lock()
+                    .unwrap()
+                    .push(plan.map(gen_core::RenderPlan::pass_index));
+                if req.prompt_enhancement.is_active() {
+                    req.prompt_enhancement
+                        .emit(gen_core::PromptEnhancementReport::enhanced(
+                            &req.prompt,
+                            format!("{} [enhanced on pass 1]", req.prompt),
+                        ));
+                }
+                let total = req.steps.unwrap_or(4);
+                for current in 1..=total {
+                    on_progress(Progress::Step { current, total });
+                }
+                on_progress(Progress::Decoding);
+                let pixel_val = if plan.map(gen_core::RenderPlan::pass_index) == Some(0) {
+                    11_u8
+                } else {
+                    22_u8
+                };
+                let mut report = gen_core::GenerationReport::from_output(
+                    gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                        width: req.width,
+                        height: req.height,
+                        pixels: vec![pixel_val; (req.width * req.height * 3) as usize],
+                    }]),
+                );
+                if let Some(spec) = req.low_res_start {
+                    let resolved = spec
+                        .resolve_geometry(
+                            self.descriptor.id,
+                            req.width,
+                            req.height,
+                            total as usize,
+                            8,
+                            2,
+                            16,
+                            256,
+                        )
+                        .unwrap();
+                    let sigmas: Vec<f32> = (0..=total as usize)
+                        .map(|i| 1.0 - (i as f32 / (total as f32)))
+                        .collect();
+                    report.low_res_start = Some(
+                        resolved
+                            .execution_report(
+                                0,
+                                &sigmas,
+                                gen_core::sampling::Solver::Euler,
+                                "cfg_guided",
+                                4.5,
+                                "base_dit",
+                                "bf16",
+                                2,
+                                1,
+                                16,
+                                64,
+                            )
+                            .unwrap(),
+                    );
+                }
+                CompletedGeneration::new(
+                    report,
+                    ExecutionIdentity::provider_default(),
+                    &self.descriptor,
+                )
+            }
+        }
+
+        impl gen_core::Generator for PlannedHiresProbe {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor {
+                &self.descriptor
+            }
+            fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn generate(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<gen_core::GenerationOutput> {
+                Ok(self
+                    .execute_pass(req, None, on_progress)?
+                    .generation
+                    .output
+                    .unwrap())
+            }
+            fn generate_with_execution_report(
+                &self,
+                req: &gen_core::GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<CompletedGeneration> {
+                self.execute_pass(req, None, on_progress)
+            }
+            fn generate_planned_with_execution_report(
+                &self,
+                req: &gen_core::GenerationRequest,
+                plan: &gen_core::RenderPlan,
+                _scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<CompletedGeneration> {
+                self.execute_pass(req, Some(plan), on_progress)
+            }
+        }
+
+        let descriptor = gen_core::ModelDescriptor {
+            id: "qwen_image_2_1",
+            family: "qwen_image_2_1",
+            backend: "test",
+            modality: gen_core::Modality::Image,
+            capabilities: gen_core::Capabilities {
+                min_size: 256,
+                max_size: 2048,
+                conditioning: vec![
+                    gen_core::ConditioningKind::Reference,
+                    gen_core::ConditioningKind::MultiReference,
+                ],
+                ..Default::default()
+            },
+            denoiser_output_latent_space: Some(&gen_core::QWEN_IMAGE_2_1_Z64_LATENT_SPACE),
+            control_kinds: None,
+            encoder_contract: None,
+            required_components: &[],
+        };
+        let probe = PlannedHiresProbe {
+            descriptor: descriptor.clone(),
+            seen_requests: std::sync::Mutex::new(Vec::new()),
+            seen_plan_indices: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let ref_a = gen_core::Image {
+            width: 512,
+            height: 512,
+            pixels: vec![1; 512 * 512 * 3],
+        };
+        let ref_b = gen_core::Image {
+            width: 512,
+            height: 512,
+            pixels: vec![2; 512 * 512 * 3],
+        };
+        let multi_refs = vec![ref_a, ref_b];
+        let low_res_spec = gen_core::LowResStartSpec::new(2, Some(0.5));
+        let enhance = PromptEnhance {
+            enabled: true,
+            temperature: Some(0.25),
+            max_tokens: Some(96),
+        };
+        let hires = HiresFixPlan {
+            width: 1024,
+            height: 1024,
+            steps: 6,
+            guidance: Some(4.5),
+            true_cfg: None,
+            provider_reference_strength: 0.4,
+        };
+        let controls = super::super::lane_controls::LaneRequestControls {
+            low_res_start: Some(low_res_spec),
+            ..Default::default()
+        };
+        let cancel = CancelFlag::new();
+
+        // Build the exact pass-0 and pass-1 requests to compile the MultiPassRenderPlan
+        // (Case A: noise-start pass 0 with low_res_start active; Case B: multi-reference pass 0
+        // replaced by single stretched pass-1 reference).
+        let planned_pass0 = build_render_request(
+            "a library in the clouds",
+            512,
+            512,
+            77,
+            4,
+            Some(4.5),
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &LaneRgbaSurface {
+                output_channels: gen_core::OutputChannels::Rgb,
+                controls: controls.clone(),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .expect("pass-0 planning request");
+        let planned_pass1 = build_hires_refinement_request(
+            "a library in the clouds",
+            77,
+            &hires,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &enhance,
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &LaneRgbaSurface {
+                output_channels: gen_core::OutputChannels::Rgba,
+                controls: controls.clone(),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .expect("pass-1 planning request");
+
+        let multi_plan = gen_core::MultiPassRenderPlan::compile(
+            &[
+                gen_core::PlannedPassRequest {
+                    request: &planned_pass0,
+                    produced_reference: None,
+                },
+                gen_core::PlannedPassRequest {
+                    request: &planned_pass1,
+                    produced_reference: Some(gen_core::ProducedReference {
+                        from_pass: 0,
+                        width: hires.width,
+                        height: hires.height,
+                        strength: Some(hires.provider_reference_strength),
+                    }),
+                },
+            ],
+            |req| {
+                let steps = req.steps.unwrap_or(4) as usize;
+                let sigmas: Vec<f32> = (0..=steps)
+                    .map(|i| 1.0 - (i as f32 / (steps as f32)))
+                    .collect();
+                gen_core::RenderPlan::packed_image_trajectory(
+                    &descriptor,
+                    req,
+                    gen_core::render::PackedImagePass {
+                        pixel_stride: 16,
+                        token_width: 64,
+                        sampler: "euler",
+                        guidance: req.guidance.unwrap_or(4.5),
+                        sigmas,
+                        executed_steps: steps,
+                        capture_sigma: 0.0,
+                    },
+                )
+                .map(Some)
+            },
+        )
+        .expect("MultiPassRenderPlan compiles")
+        .expect("two-pass plan present");
+        let [first_plan, refine_plan] = multi_plan.passes() else {
+            panic!("expected 2 passes");
+        };
+
+        let enhancement_reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_reports = enhancement_reports.clone();
+        let enhancement_sink = gen_core::PromptEnhancementSink::new(move |report| {
+            captured_reports.lock().unwrap().push(report);
+        });
+        let low_res_sink = std::cell::RefCell::new(None);
+        let exec_sink = std::cell::RefCell::new(None);
+        let mut progress_events = Vec::new();
+
+        let (out_w, out_h, out_pixels) = generate_one_with_hires_on_surface(
+            &probe,
+            "a library in the clouds",
+            512,
+            512,
+            77,
+            4,
+            Some(4.5),
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &enhance,
+            Some(hires),
+            gen_core::PreviewSink::default(),
+            enhancement_sink,
+            &LaneRgbaSurface {
+                output_channels: gen_core::OutputChannels::Rgba,
+                controls,
+                execution_report: Some(&exec_sink),
+                low_res_start_report: Some(&low_res_sink),
+                render_plan: Some(first_plan),
+                hires_render_plan: Some(refine_plan),
+                ..Default::default()
+            },
+            &cancel,
+            &mut |event| progress_events.push(event),
+        )
+        .expect("planned two-pass Hires.fix render succeeds");
+
+        assert_eq!((out_w, out_h), (1024, 1024));
+        assert!(out_pixels.iter().all(|&b| b == 22));
+        assert_eq!(
+            *probe.seen_plan_indices.lock().unwrap(),
+            vec![Some(0), Some(1)],
+            "both passes must execute through generate_planned_with_execution_report"
+        );
+
+        let requests = probe.seen_requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        // Pass 0: base geometry, unenhanced prompt, RGB intermediate output, low_res_start active.
+        assert_eq!((requests[0].width, requests[0].height), (512, 512));
+        assert!(!requests[0].enhance_prompt);
+        assert!(!requests[0].prompt_enhancement.is_active());
+        assert_eq!(requests[0].output_channels, gen_core::OutputChannels::Rgb);
+        assert_eq!(requests[0].low_res_start, Some(low_res_spec));
+
+        // Pass 1: target geometry, final-pass prompt enhancement active, single stretched replacement reference, low_res_start = None.
+        assert_eq!((requests[1].width, requests[1].height), (1024, 1024));
+        assert!(requests[1].enhance_prompt);
+        assert!(requests[1].prompt_enhancement.is_active());
+        assert_eq!(requests[1].output_channels, gen_core::OutputChannels::Rgba);
+        assert!(requests[1].low_res_start.is_none());
+        assert!(requests[1].source_image.is_none());
+        assert!(!requests[1].use_pid);
+        match requests[1].conditioning.as_slice() {
+            [Conditioning::Reference { image, strength }] => {
+                assert_eq!((image.width, image.height), (1024, 1024));
+                assert!(image.pixels.iter().all(|&b| b == 11));
+                assert_eq!(*strength, Some(0.4));
+            }
+            other => panic!("expected single replacement reference on pass 1, got {other:?}"),
+        }
+
+        // Case B: multi-reference pass 0 (2 references) replaced by single stretched pass-1 reference.
+        probe.seen_requests.lock().unwrap().clear();
+        probe.seen_plan_indices.lock().unwrap().clear();
+        let multi_ref_pass0 = build_render_request(
+            "a library in the clouds",
+            512,
+            512,
+            77,
+            4,
+            Some(4.5),
+            None,
+            None,
+            &multi_refs,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &LaneRgbaSurface {
+                output_channels: gen_core::OutputChannels::Rgb,
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .expect("multi-ref pass-0 planning request");
+        let multi_ref_plan = gen_core::MultiPassRenderPlan::compile(
+            &[
+                gen_core::PlannedPassRequest {
+                    request: &multi_ref_pass0,
+                    produced_reference: None,
+                },
+                gen_core::PlannedPassRequest {
+                    request: &planned_pass1,
+                    produced_reference: Some(gen_core::ProducedReference {
+                        from_pass: 0,
+                        width: hires.width,
+                        height: hires.height,
+                        strength: Some(hires.provider_reference_strength),
+                    }),
+                },
+            ],
+            |req| {
+                let steps = req.steps.unwrap_or(4) as usize;
+                let sigmas: Vec<f32> = (0..=steps)
+                    .map(|i| 1.0 - (i as f32 / (steps as f32)))
+                    .collect();
+                gen_core::RenderPlan::packed_image_trajectory(
+                    &descriptor,
+                    req,
+                    gen_core::render::PackedImagePass {
+                        pixel_stride: 16,
+                        token_width: 64,
+                        sampler: "euler",
+                        guidance: req.guidance.unwrap_or(4.5),
+                        sigmas,
+                        executed_steps: steps,
+                        capture_sigma: 0.0,
+                    },
+                )
+                .map(Some)
+            },
+        )
+        .expect("multi-ref MultiPassRenderPlan compiles")
+        .expect("two-pass plan present");
+        let [multi_first_plan, multi_refine_plan] = multi_ref_plan.passes() else {
+            panic!("expected 2 passes");
+        };
+        let multi_exec_sink = std::cell::RefCell::new(None);
+        generate_one_with_hires_on_surface(
+            &probe,
+            "a library in the clouds",
+            512,
+            512,
+            77,
+            4,
+            Some(4.5),
+            None,
+            None,
+            &multi_refs,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &enhance,
+            Some(hires),
+            gen_core::PreviewSink::default(),
+            gen_core::PromptEnhancementSink::default(),
+            &LaneRgbaSurface {
+                output_channels: gen_core::OutputChannels::Rgba,
+                execution_report: Some(&multi_exec_sink),
+                render_plan: Some(multi_first_plan),
+                hires_render_plan: Some(multi_refine_plan),
+                ..Default::default()
+            },
+            &cancel,
+            &mut |_| {},
+        )
+        .expect("multi-ref planned two-pass Hires.fix render succeeds");
+        let multi_seen = probe.seen_requests.lock().unwrap();
+        assert_eq!(multi_seen[0].image_reference_count(), 2);
+        assert_eq!(multi_seen[1].image_reference_count(), 1);
+
+        // Only 1 prompt enhancement report published (final pass only).
+        let reports = enhancement_reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            reports[0].effective_prompt,
+            "a library in the clouds [enhanced on pass 1]"
+        );
+
+        // Outer step progress is continuous 1..=(4 + 6 = 10) and intermediate Decoding is hidden.
+        let step_events: Vec<(u32, u32)> = progress_events
+            .iter()
+            .filter_map(|e| match e {
+                Progress::Step { current, total } => Some((*current, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            step_events,
+            (1..=10).map(|step| (step, 10)).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            progress_events
+                .iter()
+                .filter(|e| matches!(e, Progress::Decoding))
+                .count(),
+            1,
+            "intermediate pass-0 Progress::Decoding must be hidden"
+        );
+
+        // Pass 0's low_res_start execution report is preserved on the surface sink.
+        let low_res_receipt = low_res_sink
+            .take()
+            .expect("pass-0 low_res_start receipt preserved");
+        assert_eq!(low_res_receipt.k, 2);
+        assert_eq!(
+            (low_res_receipt.low_width, low_res_receipt.low_height),
+            (256, 256)
+        );
+        assert_eq!(
+            (low_res_receipt.full_width, low_res_receipt.full_height),
+            (512, 512)
+        );
+    }
+
+    #[test]
+    fn sw_6948_b5_legacy_hires_fix_plan_helpers_retained_for_later_cohorts() {
+        assert_eq!(hires_fix_reference_count(), 1);
+        let payload = serde_json::json!({
+            "projectId": "p",
+            "model": "krea_2_raw",
+            "prompt": "a cathedral",
+            "width": 512,
+            "height": 512,
+            "hiresFix": {
+                "enabled": true,
+                "upscaleBy": 2.0,
+                "steps": 6,
+                "denoisingStrength": 0.35
+            }
+        });
+        let obj = payload.as_object().unwrap();
+        let req = ImageRequest::from_resolved(obj, obj).unwrap();
+        let plan = resolve_hires_fix_plan(&req, 12, Some(3.5), None)
+            .expect("legacy resolve_hires_fix_plan must resolve for B5 cohorts");
+        assert_eq!((plan.width, plan.height), (1024, 1024));
+        assert_eq!(plan.steps, 6);
+        assert!((plan.provider_reference_strength - 0.65).abs() < 1e-6);
+
+        let krea_imported = include_str!("krea_imported.rs");
+        let sdxl_imported = include_str!("sdxl_imported.rs");
+        let memory_src = include_str!("memory.rs");
+        assert!(krea_imported.contains("resolve_hires_fix_plan("));
+        assert!(krea_imported.contains("hires_fix_reference_count()"));
+        assert!(sdxl_imported.contains("resolve_hires_fix_plan("));
+        assert!(sdxl_imported.contains("generate_one_with_hires_on_surface("));
+        assert!(memory_src.contains("hires_fix_reference_count()"));
     }
 }

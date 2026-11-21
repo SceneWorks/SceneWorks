@@ -1747,6 +1747,7 @@ pub(super) fn select_request_with_budget_using_bundle(
             evidence_revision: selected_record_id
                 .or(admission.evidence_revision)
                 .unwrap_or_else(|| REQUEST_EVIDENCE_REVISION.to_owned()),
+            low_res_start: None,
         },
     };
     tracing::info!(

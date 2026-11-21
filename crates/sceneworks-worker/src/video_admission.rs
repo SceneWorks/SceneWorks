@@ -2556,6 +2556,7 @@ fn admit_video_generation_with_curves_and_profiles(
                 predicted_peak_bytes: selected.predicted_peak_bytes,
                 cache_state: runtime.cache_state,
                 evidence_revision: selected.evidence_revision.clone(),
+                low_res_start: None,
             };
             tracing::info!(
                 event = "video_memory_context_built",

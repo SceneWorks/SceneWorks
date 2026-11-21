@@ -341,6 +341,7 @@ pub(super) fn run_z_image_reference_loaded(
         has_reference: arm.edit,
         use_pid: false,
         has_phases: true,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,
@@ -1288,6 +1289,7 @@ pub(super) fn mage_run_context(
         has_reference: arm.edit,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

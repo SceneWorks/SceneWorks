@@ -617,6 +617,7 @@ fn ideogram_cache_context(strategy: MemoryStrategy) -> MemoryRunContext {
         cache_state: MemoryCacheState::Cold,
         evidence_revision: crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION
             .to_owned(),
+        low_res_start: None,
     }
 }
 

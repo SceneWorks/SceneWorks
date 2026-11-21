@@ -1419,6 +1419,7 @@ pub(super) fn evaluate_shared_image_inner_priced_with_resources(
             } else {
                 selected_evidence.harness_version.clone()
             },
+            low_res_start: None,
         }
     };
     let mut selected_context = context_for(selection, selected_evidence, estimate_scoped);

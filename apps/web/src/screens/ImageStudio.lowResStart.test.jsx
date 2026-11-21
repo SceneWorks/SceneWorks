@@ -29,14 +29,16 @@ const checkboxByLabel = (container, text) =>
   );
 
 describe("SW-6942 · Low-res start controls & M6 public catalog population preservation", () => {
-  it("projects features.low_res_start onto migrated base FLUX.1 routes in the public catalog and preserves non-participating routes (M6 / §10.3 / HOOK-4)", async () => {
+  it("projects features.low_res_start onto migrated base FLUX.1 and ENG-2 routes in the public catalog and preserves non-participating routes (M6 / §10.3 / HOOK-4)", async () => {
     const catalog = currentCandidate();
     const imageModels = catalog.models.filter((model) => model.type === "image");
     const lowResRoutes = imageModels.filter((model) => model.features?.low_res_start === true).map((model) => model.id);
-    expect(lowResRoutes.sort()).toEqual(["flux_dev", "flux_schnell"]);
+    for (const participatingId of ["flux_dev", "flux_schnell", "flux2_dev", "flux2_klein_9b", "qwen_image_2_1", "sdxl"]) {
+      expect(lowResRoutes).toContain(participatingId);
+    }
 
     // Verify non-participating public image routes never expose the Low-res start control or emit lowResStart (PAT-8):
-    for (const modelId of ["sdxl", "krea_2_raw", "flux2_dev", "qwen_image_2_1"]) {
+    for (const modelId of ["krea_2_raw", "krea_2_turbo", "pulid_flux_dev", "flux3_klein"]) {
       const model = imageModels.find((entry) => entry.id === modelId);
       expect(model).toBeTruthy();
       expect(supportsLowResStart(model, { mode: "text_to_image" })).toBe(false);

@@ -169,6 +169,7 @@ pub(super) fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         has_reference: false,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: target.width,
             height: target.height,

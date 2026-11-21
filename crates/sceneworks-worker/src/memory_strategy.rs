@@ -2575,6 +2575,7 @@ mod tests {
             predicted_peak_bytes: 8,
             cache_state: MemoryCacheState::Cold,
             evidence_revision: "test".into(),
+            low_res_start: None,
         }
     }
 

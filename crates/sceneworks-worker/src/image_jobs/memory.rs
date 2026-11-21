@@ -135,7 +135,7 @@ pub(super) fn installed_tier_keys(
 /// A per-tier capability-fit result for the downtier chooser (sc-10733) — the lane-agnostic reduction
 /// of each lane's richer fit decision (candle's resident/offload/reject, MLX's resident/sequential/
 /// reject) to "does this tier run at all on this machine."
-#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum TierFit {
     /// Runs — resident or (where the provider stages components) sequentially.
@@ -145,7 +145,7 @@ pub(super) enum TierFit {
 }
 
 /// The capability-downtier decision (sc-10733).
-#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum DowntierPick {
     /// The resolved default tier fits — load it unchanged.
@@ -208,7 +208,7 @@ pub(super) fn choose_downtier(
 /// `Ok(None)` from `fit` SKIPS a tier rather than scoring it, preserving the caller's pre-existing
 /// filter for a candidate whose directory does not resolve: such a tier was absent from the eager
 /// slice entirely, so it must not become the named rejection either.
-#[cfg(any(all(target_os = "macos", test), feature = "backend-candle"))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 fn choose_downtier_lazy<F, E>(
     default_tier: &str,
     tiers: &[&'static str],

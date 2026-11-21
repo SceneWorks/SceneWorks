@@ -461,6 +461,7 @@ fn instantid_memory_context(
         predicted_peak_bytes,
         cache_state: gen_core::MemoryCacheState::Cold,
         evidence_revision: instantid_memory::REQUEST_EVIDENCE_REVISION.to_owned(),
+        low_res_start: None,
     })
 }
 

@@ -251,6 +251,7 @@ pub(super) fn flux_one_context(
         has_reference: arm.identity,
         use_pid: false,
         has_phases: false,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width,
             height,

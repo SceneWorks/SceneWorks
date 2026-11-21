@@ -498,6 +498,7 @@ pub(super) fn context(plan: &Plan, abi: u32, hardware_bytes: u64) -> MemoryRunCo
         reference_resources: None,
         use_pid: false,
         has_phases: true,
+        low_res_start: None,
         geometry: MemoryGeometry {
             width: 1024,
             height: 1024,

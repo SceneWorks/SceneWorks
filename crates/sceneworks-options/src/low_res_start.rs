@@ -374,16 +374,135 @@ pub fn resolve_executed_steps(
         });
     let num_steps = crate::limits::requested_steps(advanced).unwrap_or(default_steps);
 
-    let has_source = payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|s| !s.trim().is_empty());
+    let has_source = (has_nonempty_str(payload, "sourceAssetId")
+        && route_admits_source_asset_for_plain_img2img(model))
+        || (has_nonempty_str(payload, "referenceAssetId")
+            && route_uses_reference_asset_for_plain_img2img(model, payload, advanced, entry));
     let authored_strength = resolve_raw_img2img_strength(payload, advanced)?;
     Ok(executed_steps_after_img2img_strength(
         num_steps,
         has_source,
         authored_strength,
     ))
+}
+
+/// Whether `model` supports ordinary single-source img2img (`§6.13`) via `sourceAssetId` in
+/// `text_to_image` / `image_generation` mode on the worker generic lane.
+pub fn route_admits_source_asset_for_plain_img2img(model: &str) -> bool {
+    matches!(
+        model,
+        "flux_schnell"
+            | "flux_dev"
+            | "flux1_schnell"
+            | "flux1_dev"
+            | "flux2_dev"
+            | "flux2_klein_4b"
+            | "flux2_klein_9b"
+            | "flux2_klein_9b_kv"
+            | "flux2_klein_9b_true_v2"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "sd3_5_medium"
+            | "sana_1600m"
+            | "sana_1_6b"
+            | "boogu_image"
+            | "z_image"
+            | "z_image_turbo"
+            | "kolors"
+            | "sdxl"
+            | "realvisxl"
+            | "illustrious_xl_v1"
+            | "illustrious_xl_v2"
+    )
+}
+
+/// Whether a single `referenceAssetId` on `model` represents a plain img2img initial source image
+/// rather than pass-0 reference, IP-Adapter, identity, or multi-source conditioning (`SW-6946`).
+pub fn route_admits_reference_asset_for_plain_img2img(
+    model: &str,
+    entry: &JsonObject,
+    has_source_asset_id: bool,
+    has_ip_adapter_repo: bool,
+    reference_strength: Option<f64>,
+) -> bool {
+    let family = entry
+        .get("family")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if family == "flux"
+        || matches!(
+            model,
+            "flux_dev"
+                | "flux_schnell"
+                | "flux1_dev"
+                | "flux1_schnell"
+                | "flux2_dev"
+                | "pulid_flux_dev"
+        )
+        || model.starts_with("flux1_")
+        || model.starts_with("flux3")
+        || model.contains("ip_adapter")
+        || model.contains("kontext")
+        || model.contains("edit")
+        || model.contains("fill")
+        || model.contains("redux")
+        || model.contains("inpaint")
+        || has_ip_adapter_repo
+        || has_source_asset_id
+        || reference_strength.is_some_and(|strength| !strength.is_finite() || strength > 0.0)
+    {
+        return false;
+    }
+    if let Some(ui_img2img) = entry
+        .get("ui")
+        .and_then(|ui| ui.get("img2img"))
+        .and_then(Value::as_bool)
+    {
+        return ui_img2img;
+    }
+    matches!(
+        model,
+        "sd3_5_medium"
+            | "sd3_5_large"
+            | "sd3_5_large_turbo"
+            | "flux2_klein_4b"
+            | "flux2_klein_9b"
+            | "flux2_klein_9b_kv"
+            | "flux2_klein_9b_true_v2"
+            | "z_image_turbo"
+            | "z_image"
+            | "sana_1600m"
+            | "sana_1_6b"
+            | "sana_sprint_1600m"
+            | "sana_sprint_1_6b"
+            | "boogu_image"
+            | "krea_2_turbo"
+            | "krea_2_raw"
+    )
+}
+
+fn parse_reference_strength(advanced: &JsonObject) -> Option<f64> {
+    let raw = advanced.get("referenceStrength").filter(|v| !v.is_null())?;
+    Some(
+        raw.as_f64()
+            .or_else(|| raw.as_str()?.trim().parse::<f64>().ok())
+            .unwrap_or(f64::NAN),
+    )
+}
+
+fn route_uses_reference_asset_for_plain_img2img(
+    model: &str,
+    payload: &JsonObject,
+    advanced: &JsonObject,
+    entry: &JsonObject,
+) -> bool {
+    route_admits_reference_asset_for_plain_img2img(
+        model,
+        entry,
+        has_nonempty_str(payload, "sourceAssetId"),
+        has_nonempty_str(advanced, "ipAdapterRepo"),
+        parse_reference_strength(advanced),
+    )
 }
 
 fn has_nonempty_str(map: &JsonObject, key: &str) -> bool {
@@ -476,7 +595,12 @@ pub fn requested_low_res_start_with_pid_active(
         ));
     }
 
-    let has_forbidden_conditioning = has_nonempty_str(payload, "referenceAssetId")
+    let disallow_source_asset_id = has_nonempty_str(payload, "sourceAssetId")
+        && !route_admits_source_asset_for_plain_img2img(model);
+    let disallow_reference_asset_id = has_nonempty_str(payload, "referenceAssetId")
+        && !route_uses_reference_asset_for_plain_img2img(model, payload, advanced, entry);
+    let has_forbidden_conditioning = disallow_source_asset_id
+        || disallow_reference_asset_id
         || has_nonempty_array(payload, "referenceAssetIds")
         || has_nonempty_array(payload, "sourceAssetIds")
         || has_nonempty_str(payload, "maskAssetId")
@@ -914,5 +1038,385 @@ mod tests {
         .expect("present");
         assert_eq!((resolved.low_width, resolved.low_height), (256, 256));
         assert_eq!((resolved.full_width, resolved.full_height), (512, 512));
+    }
+
+    #[test]
+    fn sw_6946_plain_img2img_reference_asset_id_truncates_executed_steps_on_sd3_5_and_flux2() {
+        for (model, family) in [
+            ("sd3_5_medium", "sd3"),
+            ("sd3_5_large", "sd3"),
+            ("sd3_5_large_turbo", "sd3"),
+            ("flux2_klein_9b", "flux2"),
+        ] {
+            let entry = json!({
+                "id": model,
+                "family": family,
+                "defaults": {
+                    "steps": 28,
+                    "resolution": "1024x1024"
+                },
+                "ui": {
+                    "img2img": true
+                },
+                "features": {
+                    "low_res_start": true
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+
+            // M3 non-square strength fixture: 1200x700 source -> 1024x768 full target,
+            // steps=10, strength=0.4 => start_step=4, M=6, K=3, scale=0.5 => phase-0 512x384.
+            let m3_payload = json!({
+                "model": model,
+                "mode": "text_to_image",
+                "referenceAssetId": "src_1200x700",
+                "width": 1024,
+                "height": 768,
+                "advanced": {
+                    "steps": 10,
+                    "strength": 0.4,
+                    "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let resolved = requested_low_res_start(
+                model,
+                &m3_payload,
+                m3_payload["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect("M3 plain single-reference img2img lowResStart must succeed")
+            .expect("present");
+            assert_eq!(resolved.executed_steps, 6, "{model}");
+            assert_eq!(resolved.k, 3, "{model}");
+            assert_eq!(
+                (resolved.low_width, resolved.low_height),
+                (512, 384),
+                "{model}"
+            );
+            assert_eq!(
+                (resolved.full_width, resolved.full_height),
+                (1024, 768),
+                "{model}"
+            );
+
+            // k >= M (e.g. k = 6 when M = 6 after strength truncation) must be refused:
+            let mut k_too_large = m3_payload.clone();
+            k_too_large["advanced"]["lowResStart"]["k"] = json!(6);
+            let err = requested_low_res_start(
+                model,
+                &k_too_large,
+                k_too_large["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("k == M must be refused after referenceAssetId strength truncation");
+            assert_eq!(err.field, "advanced.lowResStart.k", "{model}");
+
+            // Multi-reference array or combined sourceAssetId + referenceAssetId must still be refused:
+            let mut multi_ref = m3_payload.clone();
+            multi_ref.remove("referenceAssetId");
+            multi_ref.insert("referenceAssetIds".into(), json!(["ref_1", "ref_2"]));
+            let err = requested_low_res_start(
+                model,
+                &multi_ref,
+                multi_ref["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("referenceAssetIds must be refused");
+            assert_eq!(err.field, "advanced.lowResStart", "{model}");
+
+            let mut dual_source = m3_payload.clone();
+            dual_source.insert("sourceAssetId".into(), json!("src_other"));
+            let err = requested_low_res_start(
+                model,
+                &dual_source,
+                dual_source["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("combined sourceAssetId + referenceAssetId must be refused");
+            assert_eq!(err.field, "advanced.lowResStart", "{model}");
+
+            // Positive referenceStrength activates Character Studio identity initialization, which must be refused:
+            let mut identity_init = m3_payload.clone();
+            identity_init["advanced"]["referenceStrength"] = json!(0.6);
+            let err = requested_low_res_start(
+                model,
+                &identity_init,
+                identity_init["advanced"].as_object().unwrap(),
+                &entry,
+            )
+            .expect_err("positive referenceStrength must be refused as identity conditioning");
+            assert_eq!(err.field, "advanced.lowResStart", "{model}");
+        }
+
+        // Kolors does not set ui.img2img: true; referenceAssetId in text_to_image mode activates
+        // IP-Adapter-Plus image prompt conditioning and must be refused with lowResStart:
+        let kolors_entry = json!({
+            "id": "kolors",
+            "family": "kolors",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let kolors_payload = json!({
+            "model": "kolors",
+            "mode": "text_to_image",
+            "referenceAssetId": "ref_ip_adapter",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "kolors",
+            &kolors_payload,
+            kolors_payload["advanced"].as_object().unwrap(),
+            &kolors_entry,
+        )
+        .expect_err("kolors referenceAssetId activates IP-Adapter-Plus and must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        // z_image_turbo admits plain referenceAssetId when referenceStrength is absent or 0.0,
+        // and refuses it when referenceStrength > 0.0 (Character Studio identity init):
+        let z_image_entry = json!({
+            "id": "z_image_turbo",
+            "family": "z-image",
+            "defaults": {
+                "steps": 8,
+                "resolution": "1024x1024"
+            },
+            "ui": {
+                "img2img": true
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let z_plain_payload = json!({
+            "model": "z_image_turbo",
+            "mode": "text_to_image",
+            "referenceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 8,
+                "strength": 0.5,
+                "referenceStrength": 0.0,
+                "lowResStart": { "version": 1, "k": 2, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let z_resolved = requested_low_res_start(
+            "z_image_turbo",
+            &z_plain_payload,
+            z_plain_payload["advanced"].as_object().unwrap(),
+            &z_image_entry,
+        )
+        .expect("z_image_turbo with referenceStrength 0.0 is plain img2img")
+        .expect("present");
+        assert_eq!(z_resolved.executed_steps, 4);
+
+        let mut z_identity_payload = z_plain_payload.clone();
+        z_identity_payload["advanced"]["referenceStrength"] = json!(0.6);
+        let err = requested_low_res_start(
+            "z_image_turbo",
+            &z_identity_payload,
+            z_identity_payload["advanced"].as_object().unwrap(),
+            &z_image_entry,
+        )
+        .expect_err("z_image_turbo with referenceStrength > 0 must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        // SDXL-family T2I requests omit ui.img2img and use referenceAssetId for IP-Adapter
+        // conditioning, while ordinary img2img uses sourceAssetId:
+        let sdxl_entry = json!({
+            "id": "sdxl",
+            "family": "sdxl",
+            "defaults": {
+                "steps": 25,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let sdxl_ref_payload = json!({
+            "model": "sdxl",
+            "mode": "text_to_image",
+            "referenceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "sdxl",
+            &sdxl_ref_payload,
+            sdxl_ref_payload["advanced"].as_object().unwrap(),
+            &sdxl_entry,
+        )
+        .expect_err("sdxl T2I referenceAssetId is IP-Adapter conditioning and must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        let sdxl_source_payload = json!({
+            "model": "sdxl",
+            "mode": "text_to_image",
+            "sourceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "strength": 0.4,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let sdxl_resolved = requested_low_res_start(
+            "sdxl",
+            &sdxl_source_payload,
+            sdxl_source_payload["advanced"].as_object().unwrap(),
+            &sdxl_entry,
+        )
+        .expect("sdxl sourceAssetId plain img2img remains admitted")
+        .expect("present");
+        assert_eq!(sdxl_resolved.executed_steps, 6);
+
+        // FLUX.2 Dev routes referenceAssetId to the bespoke flux2_dev_edit token-concatenated
+        // edit lane, so referenceAssetId + lowResStart must be refused while sourceAssetId remains
+        // admitted for ordinary img2img:
+        let flux2_dev_entry = json!({
+            "id": "flux2_dev",
+            "family": "flux2",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let flux2_dev_ref_payload = json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "referenceAssetId": "ref_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "flux2_dev",
+            &flux2_dev_ref_payload,
+            flux2_dev_ref_payload["advanced"].as_object().unwrap(),
+            &flux2_dev_entry,
+        )
+        .expect_err("flux2_dev referenceAssetId routes to flux2_dev_edit and must be refused");
+        assert_eq!(err.field, "advanced.lowResStart");
+
+        let flux2_dev_src_payload = json!({
+            "model": "flux2_dev",
+            "mode": "text_to_image",
+            "sourceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "strength": 0.4,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let flux2_dev_resolved = requested_low_res_start(
+            "flux2_dev",
+            &flux2_dev_src_payload,
+            flux2_dev_src_payload["advanced"].as_object().unwrap(),
+            &flux2_dev_entry,
+        )
+        .expect("flux2_dev sourceAssetId ordinary img2img remains admitted")
+        .expect("present");
+        assert_eq!(flux2_dev_resolved.executed_steps, 6);
+
+        // Pure text-to-image routes without ordinary img2img source resolution (e.g. chroma1_hd)
+        // must refuse sourceAssetId + lowResStart instead of silently dropping the source:
+        let chroma_entry = json!({
+            "id": "chroma1_hd",
+            "family": "chroma",
+            "defaults": {
+                "steps": 28,
+                "resolution": "1024x1024"
+            },
+            "features": {
+                "low_res_start": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let chroma_src_payload = json!({
+            "model": "chroma1_hd",
+            "mode": "text_to_image",
+            "sourceAssetId": "src_1",
+            "width": 1024,
+            "height": 1024,
+            "advanced": {
+                "steps": 10,
+                "strength": 0.4,
+                "lowResStart": { "version": 1, "k": 3, "scale": 0.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let err = requested_low_res_start(
+            "chroma1_hd",
+            &chroma_src_payload,
+            chroma_src_payload["advanced"].as_object().unwrap(),
+            &chroma_entry,
+        )
+        .expect_err(
+            "chroma1_hd does not resolve sourceAssetId img2img and must refuse lowResStart",
+        );
+        assert_eq!(err.field, "advanced.lowResStart");
     }
 }
