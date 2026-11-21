@@ -1100,8 +1100,39 @@ test("SCAIL requires an enabled candidate catalog and both pinned product compon
   }
 });
 
+test("CUDA grouped and standalone SCAIL refusals preserve the worker reserve above the effective cap", async () => {
+  const { scailFitEvidence, scailPackagedRefusalCapBytes, scailRefusalCapBytes, scailRefusalBudget, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
+  const config = async (name) => JSON.parse(await readFile(path.join(root, "config", name), "utf8"));
+  const [pool, coverage, closures, registry, anchor] = await Promise.all([
+    config("scail2-plural-memory.json"), config("scail2-memory-pin-coverage.json"), config("inference-provider-closures.json"),
+    config("manifests/registry/evidence.json"), readFile(path.join(root, "crates/sceneworks-core/src/memory_anchor.rs"), "utf8"),
+  ]);
+  const gib = 1024 ** 3;
+  const reserveBytes = Number(anchor.match(/pub const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = (\d+(?:\.\d+)?);/)[1]) * gib;
+  const evidence = scailFitEvidence(pool, "cuda", {coverage, closures, compiledPin: closures.inferenceRevision});
+  const six = evidence.find(row => row.references === 6);
+  const cold = {...six.price, stage:"cold_load", admitted:true, backend:"candle", referenceCount:6, providerCreditBytes:0,
+    requiredAcceleratorBytes:six.acceleratorBytes, acceleratorReserveBytes:reserveBytes,
+    evidenceArtifactId:six.artifactId, evidenceSha256:six.sha256, evidenceReferences:6};
+  const grouped = scailRefusalBudget("cuda", scailRefusalCapBytes([cold], evidence));
+  const standalone = scailRefusalBudget("cuda", scailPackagedRefusalCapBytes(evidence));
+  assert.deepEqual(grouped, standalone);
+  assert.deepEqual(grouped, {effectiveCapBytes:66_343_481_343, rawCapBytes:68_490_964_991});
+  const fromEnv = Number(String(grouped.rawCapBytes / gib)) * gib;
+  const legacyQ4Bytes = registry.scail2_14b.candle.vramGbByTier.q4 * gib + reserveBytes;
+  assert.ok(grouped.effectiveCapBytes < legacyQ4Bytes && fromEnv > legacyQ4Bytes);
+  assert.equal(fromEnv - reserveBytes, six.acceleratorBytes - 1);
+  const denied = {...cold, admitted:false, availableAcceleratorBytes:grouped.effectiveCapBytes};
+  const message = (e) => `video load failed: unsupported: SCAIL-2 plural fit requires ${e.requiredAcceleratorBytes} accelerator bytes, only ${e.availableAcceleratorBytes} are available`;
+  verifyScailRefusal([denied], grouped.effectiveCapBytes, message(denied));
+  assert.throws(() => verifyScailRefusal([{...denied, acceleratorReserveBytes:0}], grouped.effectiveCapBytes, message(denied)), /reserve/);
+  const over = {...denied, availableAcceleratorBytes:grouped.effectiveCapBytes + 1};
+  assert.throws(() => verifyScailRefusal([over], grouped.effectiveCapBytes, message(over)), /ceiling/);
+  assert.deepEqual(scailRefusalBudget("mlx", grouped.effectiveCapBytes), {effectiveCapBytes:grouped.effectiveCapBytes, rawCapBytes:grouped.effectiveCapBytes});
+});
+
 test("SCAIL workers must observe the exact file seal, ordered RGB inputs and live cold and execution budgets", async () => {
-  const { scailFitEvents, scailArtifactSha256, scailRefusalCapGiB, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
+  const { scailFitEvents, scailArtifactSha256, scailRefusalCapBytes, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
   for (const backend of ["mlx", "cuda"]) {
     for (const n of [2, 3, 4, 5, 6]) {
       const route = ROUTES[`${backend}-scail2-q4-animate-${n}`];
@@ -1115,7 +1146,7 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
       const cold = { ...price, event: "scail2_plural_fit", evidenceSha256: sha256("shared-receipt"), evidenceArtifactId: 781, evidenceReferences: n, jobId: "owned", stage: "cold_load", backend: lane, tier: "q4", artifactTier: "q4",
         width: 832, height: 480, frames: 45, referenceCount: n, artifactSha256: scailArtifactSha256, carrierReceipt: carrier,
         referenceRgbSha256: sources.references.map((r) => r.rgbSha256).join(","), requiredAcceleratorBytes: 100,
-        availableAcceleratorBytes: 100, requiredPhysicalHostBytes: 100, availablePhysicalHostBytes: 100, providerCreditBytes: 0, admitted: true };
+        availableAcceleratorBytes: 100, acceleratorReserveBytes: 2 * 1024 ** 3, requiredPhysicalHostBytes: 100, availablePhysicalHostBytes: 100, providerCreditBytes: 0, admitted: true };
       const execution = { ...cold, stage: "execution" };
       const pool = [...new Set([2, n, 6])].map((references) => ({ sha256: cold.evidenceSha256, artifactId: 781,
         device: "board", runtime: "runtime", nativePolicy:"native-policy", references, price, acceleratorBytes: 100 }));
@@ -1124,13 +1155,13 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
       const usingCapture = (references) => [cold, execution].map((event) => ({ ...event, evidenceReferences: references }));
       if (n === 6) {
         assert.throws(() => verify(usingCapture(2)), /covering the requested reference count/);
-        assert.equal(scailRefusalCapGiB([cold], pool), 99 / 1024 ** 3);
+        assert.equal(scailRefusalCapBytes([cold], pool), 99);
         const six = pool.find((row) => row.references === 6);
-        assert.equal(scailRefusalCapGiB([cold], [...pool, { ...six, artifactId:782, acceleratorBytes:75 },
-          { ...six, artifactId:783, nativePolicy:"other", acceleratorBytes:5 }]), 74 / 1024 ** 3);
-        assert.throws(() => scailRefusalCapGiB([cold], [...pool, six]), /one physical capture/);
-        assert.throws(() => scailRefusalCapGiB(usingCapture(2), pool), /covering the requested reference count/);
-        assert.throws(() => scailRefusalCapGiB([{ ...cold, evidenceArtifactId: 780 }], pool));
+        assert.equal(scailRefusalCapBytes([cold], [...pool, { ...six, artifactId:782, acceleratorBytes:75 },
+          { ...six, artifactId:783, nativePolicy:"other", acceleratorBytes:5 }]), 74);
+        assert.throws(() => scailRefusalCapBytes([cold], [...pool, six]), /one physical capture/);
+        assert.throws(() => scailRefusalCapBytes(usingCapture(2), pool), /covering the requested reference count/);
+        assert.throws(() => scailRefusalCapBytes([{ ...cold, evidenceArtifactId: 780 }], pool));
       }
       if (backend === "mlx" && n < 6) {
         assert.equal(verify(usingCapture(6)).length, 2);

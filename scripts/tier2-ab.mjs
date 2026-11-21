@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapGiB, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal } from "./lib/tier2-scail.mjs";
+import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapBytes, scailRefusalBudget, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal } from "./lib/tier2-scail.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
@@ -1276,7 +1276,7 @@ export function childEnvironments(env, { backend, physicalGpu = CUDA_PHYSICAL_GP
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
 const decodedBuffers = new WeakMap();
-async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, capGiB }) {
+async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, effectiveCapBytes }) {
   const sideCfg = side === "base" ? { dir: cfg.baseDir, sha: cfg.baseSha } : { dir: cfg.headDir, sha: cfg.headSha };
   const slug = `${route.id}-${label.replace("#", "")}`;
   const runRoot = path.join(cfg.work, "scratch", "runs", slug), evidence = path.join(evidenceRoot, "runs", route.id, label.replace("#", ""));
@@ -1328,7 +1328,8 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       scailEnv.RUST_LOG = "info";
       scailEnv.SCENEWORKS_SAM3_WEIGHTS = snapshotDir(plan.hub, SAM3.repo, SAM3.revision);
       if (route.refuse) {
-        fact(Number.isFinite(capGiB) && capGiB > 0, "no qualified six-character accelerator budget");
+        record.refusalBudget = scailRefusalBudget(cfg.backend, effectiveCapBytes);
+        const capGiB = record.refusalBudget.rawCapBytes / GIB;
         scailEnv[cfg.backend === "mlx" ? "SCENEWORKS_MLX_MEMORY_CAP_GB" : "SCENEWORKS_CUDA_VRAM_CAP_GB"] = String(capGiB);
         record.capGiB = capGiB;
       }
@@ -1432,7 +1433,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const decision = jobProgressDecision({ job: current, postedMs: posted, claimedAtMs, nowMs: Date.now(), claimMinutes, timeoutMinutes: route.timeoutMinutes });
       if (route.refuse && current.status === "failed" && current.workerId === workerId) {
         record.fit = scailFitEvents(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route, current.id, false, record.sources, plan.nativeFitEvidence);
-        verifyScailRefusal(record.fit, capGiB * GIB, current.error);
+        verifyScailRefusal(record.fit, record.refusalBudget.effectiveCapBytes, current.error);
         fact(!current.result?.assets?.length, "failed SCAIL job returned an output");
         const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
         const inputs = [record.sources.clip.id, ...record.sources.references.map((ref) => ref.id)];
@@ -1582,7 +1583,7 @@ async function runComparison(env, cfg, report, signal) {
   for (const side of runSides(cfg)) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
   for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
-  let firstRoute = true, scailCapGiB;
+  let firstRoute = true, scailCapBytes;
   const verifiedSegmenters = new Set();
   for (const route of report.routes.filter((item) => item.status === "ready")) {
     if (route.status !== "ready") continue;
@@ -1596,10 +1597,10 @@ async function runComparison(env, cfg, report, signal) {
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
-    const capGiB = route.packagedRefusal ? route.packagedRefusal.capBytes / GIB : scailCapGiB;
+    const effectiveCapBytes = route.packagedRefusal?.capBytes ?? scailCapBytes;
     const run = async (label) => {
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal, capGiB });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal, effectiveCapBytes });
       const base = route.runs[0];
       if (definition.wanA14b && record.status === "completed" && base?.status === "completed") {
         if (record.identity.claimedSource.boundMembersSha256 !== base.identity.claimedSource.boundMembersSha256) {
@@ -1620,7 +1621,7 @@ async function runComparison(env, cfg, report, signal) {
       route.status = "ran"; route.verdict = ok ? "verified" : "error";
       route.verdictReason = ok ? (definition.refuse ? "observed insufficient accelerator budget" : "exported plural character animation") : head.error;
       if (ok && !definition.refuse && definition.references === 6) {
-        scailCapGiB = scailRefusalCapGiB(head.fit, route.nativeFitEvidence);
+        scailCapBytes = scailRefusalCapBytes(head.fit, route.nativeFitEvidence);
       }
       if (!ok) report.fatal = `${route.id}: ${head.error ?? head.status}`;
     } else {

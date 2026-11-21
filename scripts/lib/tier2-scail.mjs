@@ -202,12 +202,12 @@ function donor(event, evidence, references) {
 }
 
 // An insufficient run starts cold. Its budget must also refuse a smaller eligible quotation.
-export function scailRefusalCapGiB(events, evidence) {
+export function scailRefusalCapBytes(events, evidence) {
   const cold = events.find((e) => e.stage === "cold_load" && e.admitted);
   assert.ok(cold?.providerCreditBytes === 0 && cold.referenceCount === 6, "no admitted cold six-reference capture");
   const bound = donor(cold, evidence, 6);
   const alternatives = evidence.filter((row) => row.nativePolicy === bound.nativePolicy && row.references === 6);
-  return (Math.min(cold.requiredAcceleratorBytes, ...alternatives.map((row) => row.acceleratorBytes)) - 1) / (1024 ** 3);
+  return Math.min(cold.requiredAcceleratorBytes, ...alternatives.map((row) => row.acceleratorBytes)) - 1;
 }
 // The caller restricted these authenticated rows to the actual device, runtime and worker
 // policy. Count six can only use a six-reference donor on either backend.
@@ -217,8 +217,20 @@ export function scailPackagedRefusalCapBytes(evidence) {
   return Math.min(...prices) - 1;
 }
 
-export function verifyScailRefusal(fit, capBytes, message) {
-  assert.ok(fit.length && fit.every((e) => e.availableAcceleratorBytes <= capBytes), "worker refusal did not use the selected accelerator ceiling");
+// The CUDA cap emulates total card capacity. The worker then deducts its dedicated
+// allocator reserve and existing commitments before comparing the plural quote.
+const cudaReserveBytes = 2 * 1024 ** 3; // sceneworks_core::memory_anchor::DEDICATED_VRAM_ALLOCATOR_SLACK_GB
+export function scailRefusalBudget(backend, effectiveCapBytes) {
+  assert.ok(Number.isSafeInteger(effectiveCapBytes) && effectiveCapBytes > 0, "no qualified six-character accelerator budget");
+  assert.ok(backend === "cuda" || backend === "mlx");
+  const rawCapBytes = effectiveCapBytes + (backend === "cuda" ? cudaReserveBytes : 0);
+  assert.ok(Number.isSafeInteger(rawCapBytes));
+  return {effectiveCapBytes, rawCapBytes};
+}
+
+export function verifyScailRefusal(fit, effectiveCapBytes, message) {
+  assert.ok(fit.length && fit.every((e) => e.availableAcceleratorBytes <= effectiveCapBytes), "worker refusal did not use the selected accelerator ceiling");
+  for (const e of fit) if (e.backend === "candle") assert.equal(e.acceleratorReserveBytes, cudaReserveBytes, "CUDA worker reserve differs from refusal emulation");
   // The worker returns the last refused quotation when all candidate donors fail.
   const last = fit.at(-1);
   // On Candle the cold gate returns Unsupported through the provider cache's load boundary.
