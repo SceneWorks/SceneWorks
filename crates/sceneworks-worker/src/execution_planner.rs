@@ -1516,6 +1516,90 @@ pub(crate) fn krea_hires_host_workspace_bytes(base: (u32, u32), target: (u32, u3
     krea_hires_pixel_workspace_bytes(base, target).max(target_rgb.saturating_mul(1 + 4 + 4))
 }
 
+/// Model-visible CUDA workspace above the loaded Krea assets. Source weights and external
+/// allocator headroom are priced by the imported checkpoint admission.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) struct KreaHiresCudaWorkspace {
+    pub(crate) forward_bytes: u64,
+    pub(crate) decode_bytes: u64,
+    pub(crate) encode_bytes: u64,
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn krea_hires_cuda_workspace(
+    (width, height): (u32, u32),
+    executed_steps: usize,
+    hidden: u64,
+    intermediate: u64,
+    heads: u64,
+    attention_scores_limit: u64,
+) -> KreaHiresCudaWorkspace {
+    let width = u64::from(width);
+    let height = u64::from(height);
+    let pixels = width.saturating_mul(height);
+    let latent_pixels = (width / 8).saturating_mul(height / 8);
+    let f32_bytes = 4_u64;
+    let score_pair = |rows: u64, cols: u64| {
+        let score_elements = rows.saturating_mul(cols);
+        // Candle chunks by query rows and keeps one row even if that row is over the budget.
+        let chunk = score_elements.min(attention_scores_limit.max(cols));
+        chunk.saturating_mul(2 * f32_bytes)
+    };
+
+    // Qwen VAE retains the input and normalized residual, im2col's 3x3 window, and the
+    // matmul result and its laid-out NCHW copy. The 96-channel full-resolution encoder
+    // residual dominates the smaller 192/384-channel spatial levels.
+    let convolution =
+        |area: u64, channels: u64| area.saturating_mul(channels * (9 + 5) * f32_bytes);
+    // MidAttention keeps the residual, norm, QKV, contiguous Q/K/V and transposed K,
+    // plus chunk outputs and their concatenation, before project/add.
+    let mid_feature_bytes = latent_pixels.saturating_mul(384 * (1 + 1 + 3 + 3 + 1 + 2) * f32_bytes);
+    let mid_peak = mid_feature_bytes.saturating_add(score_pair(latent_pixels, latent_pixels));
+    let encode_bytes = convolution(pixels, 96).max(mid_peak);
+    // The last decoder upsample opens a 192→96 full-grid convolution. The unchanged native
+    // policy tiles the tail at 512 above a 1536-pixel edge; the global middle still sees all pixels.
+    let tiled = width.max(height) > 1536;
+    let tail_pixels = if tiled {
+        width.min(512).saturating_mul(height.min(512))
+    } else {
+        pixels
+    };
+    let tail = convolution(tail_pixels, 192).saturating_add(mid_feature_bytes);
+    // The tile blender can retain previous/new RGB + weight accumulators and their sums.
+    let blend = if tiled {
+        pixels.saturating_mul(3 * (3 + 1) * f32_bytes)
+    } else {
+        0
+    };
+    let decode_bytes = mid_peak.max(tail.saturating_add(blend));
+
+    let forward_bytes = if executed_steps == 0 {
+        0
+    } else {
+        // Gated attention holds the stream and residuals, rotated Q/K, GQA-expanded K/V,
+        // and contiguous/result layouts. FFN holds gate, up, their product and a down projection.
+        // Use FP32 for the explicit work tensors, including cast/materialization paths.
+        let tokens = (width / 16)
+            .saturating_mul(height / 16)
+            .saturating_add(1024);
+        let context = tokens.saturating_mul(hidden).saturating_mul(f32_bytes);
+        let attention = context
+            .saturating_mul(1 + 2 + 3 + 3 + 3)
+            .saturating_add(score_pair(tokens, heads.saturating_mul(tokens)));
+        let mlp = context.saturating_mul(1 + 2 + 1).saturating_add(
+            tokens
+                .saturating_mul(intermediate)
+                .saturating_mul(3 * f32_bytes),
+        );
+        attention.max(mlp)
+    };
+    KreaHiresCudaWorkspace {
+        forward_bytes,
+        decode_bytes,
+        encode_bytes,
+    }
+}
+
 /// Complete pass-scoped [`gen_core::RequestLiveSetPlan`] pricing result for an `ENG-2` two-pass
 /// Hires.fix request (`ADM-3`, `§6.6`, `§6.13`, `§6.14`, `SW-6948`).
 #[cfg_attr(not(native_lane), allow(dead_code))]
@@ -1612,7 +1696,7 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
     base_steps: u32,
     hires_width: u32,
     hires_height: u32,
-    _hires_steps: u32,
+    hires_steps: u32,
     batch: u32,
     pass0_reference_canvases: &[(u32, u32)],
     low_res_start: Option<&gen_core::LowResStartSpec>,
@@ -2029,30 +2113,32 @@ pub(crate) fn price_eng2_hires_fix_request_live_set_plan(
     });
 
     // Pass 1 denoise at `(hires_width, hires_height)` with `low_res_start = None` and `reference_count = 1`.
-    operations.push(PhaseOperationLiveSet {
-        operation_id: "pass1_denoise".into(),
-        phase: MemoryPhase::Denoise,
-        pass_index: 1,
-        phase_index: 0,
-        stream_geometries: vec![pass1_geom.clone()],
-        resident_weights: vec![PricedAllocation::new(
-            "transformer",
-            domain,
-            resident_transformer_weights_bytes,
-        )],
-        resident_overlays: Vec::new(),
-        concurrent_stream_activations: vec![PricedAllocation::new(
-            "pass1_forward_workspace",
-            domain,
-            hires_forward_workspace_bytes,
-        )],
-        joint_workspaces: Vec::new(),
-        retained_state: vec![
-            PricedAllocation::new("pass1_prompt_embeddings", domain, 65_536),
-            PricedAllocation::new("pass1_latent", domain, hires_latent_fp32_bytes),
-        ],
-        evidence_peak: None,
-    });
+    if !krea_turbo || hires_steps > 0 {
+        operations.push(PhaseOperationLiveSet {
+            operation_id: "pass1_denoise".into(),
+            phase: MemoryPhase::Denoise,
+            pass_index: 1,
+            phase_index: 0,
+            stream_geometries: vec![pass1_geom.clone()],
+            resident_weights: vec![PricedAllocation::new(
+                "transformer",
+                domain,
+                resident_transformer_weights_bytes,
+            )],
+            resident_overlays: Vec::new(),
+            concurrent_stream_activations: vec![PricedAllocation::new(
+                "pass1_forward_workspace",
+                domain,
+                hires_forward_workspace_bytes,
+            )],
+            joint_workspaces: Vec::new(),
+            retained_state: vec![
+                PricedAllocation::new("pass1_prompt_embeddings", domain, 65_536),
+                PricedAllocation::new("pass1_latent", domain, hires_latent_fp32_bytes),
+            ],
+            evidence_peak: None,
+        });
+    }
 
     // Pass 1 final decode at `(hires_width, hires_height)` (refinement always decodes with `use_pid = false`).
     operations.push(PhaseOperationLiveSet {
@@ -3719,6 +3805,17 @@ mod corpus_replay_tests {
     }
 
     #[test]
+    fn krea_hires_cuda_prices_untiled_encode_and_omits_empty_forward() {
+        let ordinary = krea_hires_cuda_workspace((1024, 1024), 3, 6144, 16_384, 48, 1_000_000_000);
+        let refined = krea_hires_cuda_workspace((2048, 2048), 0, 6144, 16_384, 48, 1_000_000_000);
+        assert!(ordinary.forward_bytes > 0);
+        assert_eq!(refined.forward_bytes, 0);
+        assert!(refined.encode_bytes >= 2048 * 2048 * 96 * 4);
+        assert!(refined.encode_bytes > ordinary.encode_bytes);
+        assert!(refined.decode_bytes > 2048 * 2048 * 3);
+    }
+
+    #[test]
     fn krea_hires_prices_the_fitted_reference_in_its_memory_domain() {
         use gen_core::MemoryBudgetDomain::{DeviceVram, UnifiedMemory};
         let base = (512, 768);
@@ -3763,6 +3860,11 @@ mod corpus_replay_tests {
         );
         assert_eq!((device.pass1_width, device.pass1_height), refine);
         assert!(device.pass1_peak_bytes > reference_pixels * 12);
+        assert!(device
+            .request_live_set_plan
+            .operations
+            .iter()
+            .all(|operation| operation.operation_id != "pass1_denoise"));
         assert!(unified.pass1_peak_bytes >= device.pass1_peak_bytes + reference_pixels * 24);
         assert!(unified.transition_peak_bytes >= krea_hires_pixel_workspace_bytes(base, refine));
         assert!(device.transition_peak_bytes < unified.transition_peak_bytes);

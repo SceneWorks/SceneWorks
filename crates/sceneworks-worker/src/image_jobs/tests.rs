@@ -442,6 +442,8 @@ use super::krea_control_candle_available;
 #[cfg(target_os = "macos")]
 use super::krea_edit::krea_edit_generate_one;
 #[cfg(target_os = "macos")]
+use super::krea_imported::candle_hires_context;
+#[cfg(target_os = "macos")]
 use super::krea_imported::drive_krea_imported_mlx_items;
 #[cfg(native_lane)]
 use super::krea_imported::imported_model_quant;
@@ -1671,13 +1673,17 @@ struct HiresProbeGenerator {
     /// agreement the backend request scopes enforce.
     contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
     planned_seeds: std::sync::Mutex<Vec<u64>>,
+    scope_outcomes: std::sync::Mutex<Vec<gen_core::MemoryRunOutcome>>,
+    fail_planned_pass: Option<usize>,
 }
 
 #[cfg(native_lane)]
-struct ProbeMemoryRequestScope;
+struct ProbeMemoryRequestScope<'a> {
+    outcomes: &'a std::sync::Mutex<Vec<gen_core::MemoryRunOutcome>>,
+}
 
 #[cfg(native_lane)]
-impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
+impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope<'_> {
     fn configure_request(&mut self, _request: &mut GenerationRequest) -> gen_core::Result<()> {
         Ok(())
     }
@@ -1711,7 +1717,8 @@ impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
         Ok(())
     }
 
-    fn finish(&mut self, _outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+    fn finish(&mut self, outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+        self.outcomes.lock().unwrap().push(outcome);
         Ok(())
     }
 }
@@ -1734,6 +1741,8 @@ impl HiresProbeGenerator {
             requests: Default::default(),
             contexts: Default::default(),
             planned_seeds: Default::default(),
+            scope_outcomes: Default::default(),
+            fail_planned_pass: None,
         }
     }
 
@@ -1771,7 +1780,9 @@ impl Generator for HiresProbeGenerator {
         context: &gen_core::MemoryRunContext,
     ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
         self.contexts.lock().unwrap().push(context.clone());
-        Ok(Some(Box::new(ProbeMemoryRequestScope)))
+        Ok(Some(Box::new(ProbeMemoryRequestScope {
+            outcomes: &self.scope_outcomes,
+        })))
     }
 
     fn generate(
@@ -1815,6 +1826,9 @@ impl Generator for HiresProbeGenerator {
         );
         plan.check_request(self.descriptor(), request)?;
         self.planned_seeds.lock().unwrap().push(plan.base_seed());
+        if self.fail_planned_pass == Some(plan.pass_index()) {
+            return Err(gen_core::Error::Msg("planned refinement failed".into()));
+        }
         self.generate(request, progress)
             .map(gen_core::GenerationReport::from_output)
     }
@@ -2328,6 +2342,90 @@ fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() 
 /// evaluator substituted. It proves that every sequential t2i/img2img/edit image is evaluated and
 /// that every provider pass opens the admitted request scope, including both hires passes.
 /// Phased requests must deliver both their compiled seed and the admitted scope to the runner.
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_krea_hires_closes_each_candle_scope_on_refinement_failure() {
+    let mut generator = HiresProbeGenerator::krea("krea_2_turbo");
+    generator.fail_planned_pass = Some(1);
+    let spec = std::sync::Arc::new(LoadSpec::new(WeightsSource::Dir("/krea-base".into())));
+    let loaded_policy = crate::generator_cache::ExecutionPolicy::from_load_spec(&spec);
+    let prepared = PreparedKreaHires::prepare(
+        crate::inference_runtime::media(),
+        spec,
+        GenerationRequest {
+            prompt: "unchanged prompt".into(),
+            seed: Some(42),
+            width: 256,
+            height: 256,
+            steps: Some(2),
+            ..Default::default()
+        },
+        HiresFixPlan {
+            width: 512,
+            height: 512,
+            steps: 1,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        },
+    )
+    .expect("both Krea plans compile");
+    let contract = gen_core::MemoryProviderContract::compatibility_default(
+        "krea_2_turbo",
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: true,
+            host_to_device_block_materialization: false,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    let budget = gen_core::MemoryBudget {
+        total_bytes: 100,
+        committed_bytes: 25,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 0,
+    };
+    let (base_plan, refine_plan) = prepared.passes();
+    let context = |plan| {
+        candle_hires_context(
+            &contract,
+            None,
+            plan,
+            gen_core::MemoryCacheState::Warm,
+            budget,
+            75,
+        )
+    };
+    let base = context(base_plan);
+    let refine = context(refine_plan);
+    assert_eq!(base.mode, gen_core::MemoryMode::TextToImage);
+    assert_eq!(refine.mode, gen_core::MemoryMode::ImageToImage);
+    assert_eq!(refine.geometry.reference_count, 1);
+    assert_eq!((refine.geometry.width, refine.geometry.height), (512, 512));
+    assert!(refine.budget.fits(refine.predicted_peak_bytes));
+    let result = prepared.generate(
+        &generator,
+        loaded_policy,
+        None,
+        [&base, &refine],
+        Default::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(result, Err(WorkerError::Engine(message)) if message.contains("planned refinement failed"))
+    );
+    assert_eq!(*generator.contexts.lock().unwrap(), [base, refine]);
+    let outcomes = generator.scope_outcomes.lock().unwrap();
+    assert!(matches!(
+        outcomes.as_slice(),
+        [
+            gen_core::MemoryRunOutcome::Complete,
+            gen_core::MemoryRunOutcome::Error { .. },
+        ]
+    ));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {

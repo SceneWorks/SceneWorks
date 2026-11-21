@@ -55,6 +55,7 @@ use super::mlx_model;
 #[cfg(not(target_os = "macos"))]
 use super::prepare_cached_candle_base_floor;
 use super::render::drive_hires_passes;
+#[cfg(target_os = "macos")]
 use super::render::hires_first_pass_context;
 use super::render::resolve_hires_fix_plan;
 use super::render::HiresFixPlan;
@@ -1986,13 +1987,15 @@ impl PreparedKreaHires {
         })
     }
 
-    fn passes(&self) -> (&gen_core::RenderPlan, &gen_core::RenderPlan) {
+    pub(super) fn passes(&self) -> (&gen_core::RenderPlan, &gen_core::RenderPlan) {
         (&self.plan.passes()[0], &self.plan.passes()[1])
     }
 
     pub(super) fn memory(
         &self,
         pag_capability: Option<&gen_core::PagCapability>,
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        config: &runtime_cuda::providers::krea::Krea2Config,
     ) -> WorkerResult<KreaHiresMemory> {
         let (first, refine) = self.passes();
         let base = first.output_size();
@@ -2018,6 +2021,31 @@ impl PreparedKreaHires {
         } else {
             gen_core::MemoryBudgetDomain::DeviceVram
         };
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let (reference_encode, forward_base, forward_refine, decode_base, decode_refine) = {
+            let workspace = |size, plan: &gen_core::RenderPlan| {
+                crate::execution_planner::krea_hires_cuda_workspace(
+                    size,
+                    plan.executed_steps(),
+                    config.hidden_size as u64,
+                    config.intermediate_size as u64,
+                    config.num_attention_heads as u64,
+                    runtime_cuda::providers::krea::KREA_HIRES_ATTENTION_SCORE_BUDGET,
+                )
+            };
+            let base = workspace(base, first);
+            let refine = workspace(target, refine);
+            (
+                refine.encode_bytes,
+                base.forward_bytes,
+                refine.forward_bytes,
+                base.decode_bytes,
+                refine.decode_bytes,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let (reference_encode, forward_base, forward_refine, decode_base, decode_refine) =
+            (0, 0, 0, 0, 0);
         let pricing = crate::execution_planner::price_eng2_hires_fix_request_live_set_plan(
             "krea_2_turbo",
             domain,
@@ -2035,12 +2063,12 @@ impl PreparedKreaHires {
             0,
             0,
             0,
+            reference_encode,
             0,
-            0,
-            0,
-            0,
-            0,
-            0,
+            forward_base,
+            forward_refine,
+            decode_base,
+            decode_refine,
         )?;
         Ok(KreaHiresMemory {
             #[cfg(target_os = "macos")]
@@ -2051,7 +2079,7 @@ impl PreparedKreaHires {
             // MLX already prices the final single-reference render at target geometry. The
             // discrete imported route starts with a pinned source-only floor.
             workspace_bytes: if domain == gen_core::MemoryBudgetDomain::UnifiedMemory {
-                pricing.incremental_workspace_bytes_over_pass1_baseline(0, 0)
+                pricing.transition_peak_bytes
             } else {
                 pricing.priced_domain_peak.request_peak_bytes
             },
@@ -2060,11 +2088,38 @@ impl PreparedKreaHires {
         })
     }
 
-    fn generate(
+    #[cfg(target_os = "macos")]
+    fn generate_mlx(
         self,
         generator: &dyn Generator,
         loaded_policy: crate::generator_cache::ExecutionPolicy,
-        memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+        evaluation: &crate::mlx_fit_gate::MlxRequestEvaluation,
+        preview: gen_core::PreviewSink,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<KreaImportedOutput> {
+        let (base, _) = self.passes();
+        let (width, height) = base.output_size();
+        let base_context =
+            hires_first_pass_context(&evaluation.context, width, height, base.reference_count());
+        self.generate(
+            generator,
+            loaded_policy,
+            Some(evaluation.memory),
+            [&base_context, &evaluation.context],
+            preview,
+            cancel,
+            on_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn generate(
+        self,
+        generator: &dyn Generator,
+        loaded_policy: crate::generator_cache::ExecutionPolicy,
+        request_memory: Option<gen_core::GenerationMemory>,
+        contexts: [&gen_core::MemoryRunContext; 2],
         preview: gen_core::PreviewSink,
         cancel: &CancelFlag,
         on_progress: &mut dyn FnMut(Progress),
@@ -2086,21 +2141,13 @@ impl PreparedKreaHires {
         let refine_plan = &plan.passes()[1];
         let mut requests = requests;
         for request in &mut requests {
-            request.memory = memory_evaluation.map(|evaluation| evaluation.memory);
+            request.memory = request_memory;
             request.preview = preview.clone();
             request.cancel = cancel.clone();
         }
         let [first, mut refine] = requests;
+        let [first_context, refine_context] = contexts;
         let steps = first.steps.unwrap_or(0);
-        let (width, height) = first_plan.output_size();
-        let first_context = memory_evaluation.map(|evaluation| {
-            hires_first_pass_context(
-                &evaluation.context,
-                width,
-                height,
-                first_plan.reference_count(),
-            )
-        });
         let (_, output) = drive_hires_passes(
             steps,
             &hires,
@@ -2112,7 +2159,7 @@ impl PreparedKreaHires {
                     generator,
                     first,
                     Some(first_plan),
-                    first_context.as_ref(),
+                    Some(first_context),
                     progress,
                 )?;
                 Ok((
@@ -2136,13 +2183,92 @@ impl PreparedKreaHires {
                     generator,
                     refine,
                     Some(refine_plan),
-                    memory_evaluation.map(|evaluation| &evaluation.context),
+                    Some(refine_context),
                     progress,
                 )
             },
         )?;
         Ok(output)
     }
+}
+
+/// Candle's imported checkpoint uses the source floor and explicit workspaces. Scope geometry
+/// comes from each compiled pass and runtime identity from the loaded contract.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(super) fn candle_hires_context(
+    contract: &gen_core::MemoryProviderContract,
+    quant: Option<gen_core::Quant>,
+    plan: &gen_core::RenderPlan,
+    cache_state: gen_core::MemoryCacheState,
+    budget: gen_core::MemoryBudget,
+    predicted_peak_bytes: u64,
+) -> gen_core::MemoryRunContext {
+    let (width, height) = plan.output_size();
+    let reference_count = plan.reference_count();
+    let (calibration_abi, calibration_fingerprint) = contract
+        .calibration
+        .as_ref()
+        .map_or((0, String::new()), |id| (id.abi, id.fingerprint.clone()));
+    gen_core::MemoryRunContext {
+        selection: gen_core::MemorySelection {
+            strategy: gen_core::MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: gen_core::MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            },
+        },
+        optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
+        calibration_abi,
+        calibration_fingerprint,
+        load_shape: contract.load_shape,
+        mode: if reference_count == 0 {
+            gen_core::MemoryMode::TextToImage
+        } else {
+            gen_core::MemoryMode::ImageToImage
+        },
+        has_reference: reference_count > 0,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count,
+        },
+        reference_resources: None,
+        overlay: None,
+        budget,
+        predicted_peak_bytes,
+        cache_state,
+        evidence_revision: "imported-krea-hires-floor".into(),
+        low_res_start: None,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_hires_admitted_budget(
+    gpu_id: &str,
+    cache_state: gen_core::MemoryCacheState,
+) -> WorkerResult<gen_core::MemoryBudget> {
+    let raw = crate::vram_gate::live_capped_budget_fresh_blocking(gpu_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Imported Krea Hires.fix could not qualify live VRAM on GPU {gpu_id}."
+        ))
+    })?;
+    let bytes = |gib: f64| (gib * crate::fit_gate::BYTES_PER_GIB) as u64;
+    Ok(gen_core::MemoryBudget {
+        total_bytes: bytes(raw.total_gb),
+        committed_bytes: bytes((raw.total_gb - raw.free_gb).max(0.0)),
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: if cache_state == gen_core::MemoryCacheState::Cold {
+            bytes(crate::vram_gate::HEADROOM_GB)
+        } else {
+            0
+        },
+    })
 }
 
 pub(super) enum KreaImportedItem {
@@ -2263,10 +2389,10 @@ where
                         on_progress,
                     )
                 }
-                KreaImportedItem::Hires(render) => render.generate(
+                KreaImportedItem::Hires(render) => render.generate_mlx(
                     generator,
                     loaded_policy,
-                    Some(&memory_evaluation),
+                    &memory_evaluation,
                     preview,
                     &cancel,
                     on_progress,
@@ -2533,13 +2659,22 @@ pub(super) async fn generate_krea_imported_stream(
                 .collect();
             (work, None)
         };
-    let hires_memory = work
-        .iter()
-        .find_map(|(_, item)| match item {
-            KreaImportedItem::Hires(render) => {
-                Some(render.memory(descriptor.capabilities.pag.as_ref()))
-            }
-            _ => None,
+    let first_hires = work.iter().find_map(|(_, item)| match item {
+        KreaImportedItem::Hires(render) => Some(render),
+        _ => None,
+    });
+    let hires_memory = first_hires
+        .map(|render| {
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let config = runtime_cuda::providers::krea::Krea2Config::from_snapshot(&base_dir)
+                .map_err(|error| {
+                    crate::generation_error("read Krea Hires.fix architecture", error)
+                })?;
+            render.memory(
+                descriptor.capabilities.pag.as_ref(),
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                &config,
+            )
         })
         .transpose()?;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -2556,6 +2691,16 @@ pub(super) async fn generate_krea_imported_stream(
         hires.workspace_bytes
     } else {
         0
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let hires_encoder = if hires_memory.is_some() {
+        let encoder = runtime_cuda::providers::krea::hires_encoder_weights(&spec)
+            .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
+        let quant = runtime_cuda::providers::krea::actual_quant_tier(&spec, engine_id)
+            .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
+        Some((encoder, quant))
+    } else {
+        None
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
@@ -2583,7 +2728,11 @@ pub(super) async fn generate_krea_imported_stream(
                     .or_else(|| hires_memory.as_ref().map(|hires| hires.pag_workspace_bytes))
                     .unwrap_or(0),
             )
-            .with_hires_workspace(hires_workspace_bytes)
+            .with_hires_workspace(hires_workspace_bytes.saturating_add(
+                hires_encoder.as_ref().map_or(0, |(encoder, _)| {
+                    encoder.device_bytes.saturating_sub(encoder.source_bytes)
+                }),
+            ))
     };
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
@@ -2664,23 +2813,16 @@ pub(super) async fn generate_krea_imported_stream(
             },
         ),
         move |model, cache_state, loaded_policy, tx, cancel| {
-            if !cancel.is_cancelled() && cache_state == gen_core::MemoryCacheState::Warm {
+            if !cancel.is_cancelled()
+                && hires_memory.is_none()
+                && cache_state == gen_core::MemoryCacheState::Warm
+            {
                 workspace_runtime.block_on(admit_warm_candle_krea_workspace(
-                    if hires_memory.is_some() {
-                        "Krea Hires.fix"
-                    } else {
-                        "Krea multi-phase"
-                    },
+                    "Krea multi-phase",
                     &gpu_id,
-                    if let Some(hires) = &hires_memory {
-                        hires
-                            .workspace_bytes
-                            .saturating_add(hires.pag_workspace_bytes)
-                    } else {
-                        adapter_phase_bound
-                            .request_device_bytes
-                            .saturating_add(phase_pag_workspace.unwrap_or(0))
-                    },
+                    adapter_phase_bound
+                        .request_device_bytes
+                        .saturating_add(phase_pag_workspace.unwrap_or(0)),
                 ))?;
             }
             let facts_tx = tx.clone();
@@ -2695,14 +2837,66 @@ pub(super) async fn generate_krea_imported_stream(
                         KreaImportedItem::Multiphase(render) => render
                             .with_loaded_placement(loaded_policy)?
                             .generate(model, None, None, preview, &cancel, on_progress),
-                        KreaImportedItem::Hires(render) => render.generate(
-                            model,
-                            loaded_policy,
-                            None,
-                            preview,
-                            &cancel,
-                            on_progress,
-                        ),
+                        KreaImportedItem::Hires(render) => (|| {
+                            let (memory, (encoder, quant)) = hires_memory
+                                .as_ref()
+                                .zip(hires_encoder.as_ref())
+                                .ok_or_else(|| {
+                                    WorkerError::Engine(
+                                        "Krea Hires.fix has no admitted workspace".into(),
+                                    )
+                                })?;
+                            let cache_state = if index == 0 {
+                                cache_state
+                            } else {
+                                gen_core::MemoryCacheState::Warm
+                            };
+                            let budget = candle_hires_admitted_budget(&gpu_id, cache_state)?;
+                            let source_bytes = if cache_state == gen_core::MemoryCacheState::Cold {
+                                incoming_reclaimable_weight_bytes.saturating_add(
+                                    encoder.device_bytes.saturating_sub(encoder.source_bytes),
+                                )
+                            } else {
+                                // Cache identity alone does not prove the lazy encoder is resident.
+                                encoder.device_bytes
+                            };
+                            let needed_bytes = source_bytes
+                                .saturating_add(memory.workspace_bytes)
+                                .saturating_add(memory.pag_workspace_bytes);
+                            if !budget.fits(needed_bytes) {
+                                return Err(WorkerError::InvalidPayload(format!(
+                                    "Krea Hires.fix needs {needed_bytes} additional device bytes on GPU {gpu_id}, but only {} are available",
+                                    budget.effective_bytes()
+                                )));
+                            }
+                            let contract = model.memory_strategy_contract().ok_or_else(|| {
+                                WorkerError::Engine(
+                                    "Candle Krea Hires.fix has no loaded memory contract".into(),
+                                )
+                            })?;
+                            let (base, refine) = render.passes();
+                            let context = |pass| {
+                                candle_hires_context(
+                                    contract,
+                                    *quant,
+                                    pass,
+                                    cache_state,
+                                    budget,
+                                    needed_bytes,
+                                )
+                            };
+                            let base_context = context(base);
+                            let refine_context = context(refine);
+                            render.generate(
+                                model,
+                                loaded_policy,
+                                None,
+                                [&base_context, &refine_context],
+                                preview,
+                                &cancel,
+                                on_progress,
+                            )
+                        })(),
                         KreaImportedItem::Ordinary(prompt) => krea_imported_generate_one(
                             model,
                             &prompt,
