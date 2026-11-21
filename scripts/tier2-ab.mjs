@@ -49,10 +49,15 @@ export const SHA = /^[0-9a-f]{40}$/;
 export const BACKENDS = Object.freeze(["mlx", "cuda"]);
 export const RUN_LABELS = Object.freeze(["base#1", "head", "base#2"]);
 export const VERDICTS = Object.freeze(["equal", "nondeterministic_on_runner", "head_differs", "error", "skipped"]);
-// The physical CUDA card every existing real-weight CUDA acceptance lane uses (load-progress,
-// catalog walk): logical CUDA 0 masked to physical GPU1. The workflow sets the masks; preflight
-// refuses anything else.
+// The existing proof lanes default to physical GPU1. GPU0 is an explicit SW-F334 target.
 export const CUDA_PHYSICAL_GPU = "1";
+const FEATURE_GPU0_UUID = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0";
+function physicalGpu(index, backend, routes) {
+  if (index === undefined || index === "1") return CUDA_PHYSICAL_GPU;
+  fact(index === "0" && backend === "cuda" && routes.length > 0 && routes.every((r) => r.scailCandidate || ["cuda-wan22-a14b-t2v-uni_pc", "cuda-wan22-a14b-i2v-uni_pc"].includes(r.id)),
+    "physical GPU0 requires explicit CUDA SCAIL or Wan A14B routes");
+  return index;
+}
 export const MLX_RUNNER = "nax-macos-2";
 export const CUDA_RUNNERS = Object.freeze(["cuda-windows", "cuda-windows-2"]);
 
@@ -188,13 +193,13 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes, hubs: hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
+  return { backend, physicalGpu: physicalGpu(env.TIER2_AB_PHYSICAL_GPU, backend, routes), baseSha, headSha, inferenceSha, baseDir, headDir, work, routes, hubs: hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
 // Pure selector for the registered dispatcher (memory-catalog-campaign.yml, profile tier2-ab).
 // It cannot build, start or load anything. moss_options_json carries the profile's options
 // because the dispatcher is at GitHub's 25-input ceiling (same convention as load-progress).
-export const DISPATCH_OPTION_KEYS = Object.freeze(["base_sha", "head_sha", "routes", "hubs", "preflight_only"]);
+export const DISPATCH_OPTION_KEYS = Object.freeze(["base_sha", "head_sha", "routes", "hubs", "preflight_only", "cuda_physical_index"]);
 export function dispatchOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, "tier2-ab");
   fact(SHA.test(dispatchedSha ?? "") && inputs.ref === dispatchedSha, "ref must equal the exact dispatched source SHA (the driver's own commit)");
@@ -216,7 +221,7 @@ export function dispatchOptions(inputs, dispatchedSha) {
     fact(options.preflight_only === false, "metadata-only preflight cannot stage weights");
   }
   if (options.hubs) fact(options.hubs.length > 0 && options.hubs.every((hub) => absoluteFor(backend === "mlx" ? "darwin" : "win32", hub)), "hubs must be absolute paths for the selected backend's OS");
-  return { base_sha: options.base_sha, head_sha: options.head_sha, backend, routes: options.routes ? JSON.stringify(routes) : "", hubs: options.hubs ? JSON.stringify(options.hubs) : "", preflight_only: options.preflight_only ?? true, inference_sha: inputs.inference_sha || "" };
+  return { cuda_physical_index: physicalGpu(options.cuda_physical_index, backend, routes.map((id) => ROUTES[id])), base_sha: options.base_sha, head_sha: options.head_sha, backend, routes: options.routes ? JSON.stringify(routes) : "", hubs: options.hubs ? JSON.stringify(options.hubs) : "", preflight_only: options.preflight_only ?? true, inference_sha: inputs.inference_sha || "" };
 }
 
 // ---- trusted-ref rule ----------------------------------------------------------------------------
@@ -864,9 +869,9 @@ async function sampleWindowsProcess(pid) {
 export function nvidiaSmiPath(env = process.env, platform = process.platform) {
   return platform === "win32" ? path.win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe") : "nvidia-smi";
 }
-async function sampleGpu(smi) {
-  const out = (await execFile(smi, ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { timeout: 10_000, windowsHide: true })).stdout.trim().split(",").map((v) => v.trim());
-  fact(out.length === 4 && out[0] === CUDA_PHYSICAL_GPU && /^GPU-/.test(out[1]) && /^\d+$/.test(out[2]), "physical GPU1 telemetry unavailable");
+async function sampleGpu(smi, index) {
+  const out = (await execFile(smi, ["-i", index === "0" ? FEATURE_GPU0_UUID : index, "--query-gpu=index,uuid,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { timeout: 10_000, windowsHide: true })).stdout.trim().split(",").map((v) => v.trim());
+  fact(out.length === 4 && out[0] === index && (index === "0" ? out[1] === FEATURE_GPU0_UUID : /^GPU-/.test(out[1])) && /^\d+$/.test(out[2]), `physical GPU${index} telemetry unavailable`);
   return { uuid: out[1], usedBytes: Number(out[2]) * 1024 ** 2, utilization: Number(out[3]) };
 }
 
@@ -966,11 +971,21 @@ async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: tru
 export async function scailHostIdentity(backend, env, run = execFile) {
   const mlx = backend === "mlx";
   const [command, args] = mlx ? ["/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string", "kern.osversion"]]
-    : [nvidiaSmiPath(env, "win32"), [`--id=${CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"]];
+    : [nvidiaSmiPath(env, "win32"), [`--id=${env.TIER2_AB_PHYSICAL_GPU ?? CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version,uuid", "--format=csv,noheader,nounits"]];
   const { stdout } = await run(command, args, { timeout: 3_000, windowsHide: true });
   const fields = stdout.trim().split(mlx ? /\r?\n/ : ",").map((s) => s.trim());
-  fact(fields.length === 2 && fields.every((s) => s && !/[,\r\n]/.test(s)), "SCAIL device and runtime identity unavailable");
-  return { device: fields[0], runtime: fields[1] };
+  fact(fields.length === (mlx ? 2 : 3) && fields.every((s) => s && !/[,\r\n]/.test(s)), "SCAIL device and runtime identity unavailable");
+  const identity = { device: fields[0], runtime: fields[1] };
+  if (mlx) return identity;
+  const script = fileURLToPath(new URL("./ci/windows_cuda_metadata.py", import.meta.url));
+  const probe = await run("python", ["-I", script, "--wddm-adapter"], { timeout: 10_000, windowsHide: true, env });
+  const packet = JSON.parse(probe.stdout), [adapter] = packet.devices;
+  fact(packet.context_created === false && packet.devices.length === 1 && adapter.ordinal === 0
+    && adapter.uuid === fields[2] && /^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(adapter.uuid)
+    && /^luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}$/.test(adapter.luid) && adapter.luid !== "luid_0x00000000_0x00000000"
+    && Number.isInteger(adapter.node_mask) && adapter.node_mask > 0 && adapter.node_mask <= 2 ** 31
+    && (adapter.node_mask & (adapter.node_mask - 1)) === 0, "SCAIL logical CUDA 0 and selected physical adapter differ");
+  return { ...identity, captureAdapter: { cuda_uuid: adapter.uuid, luid: adapter.luid, node_mask: adapter.node_mask } };
 }
 
 async function preflight(env, cfg, report) {
@@ -981,7 +996,7 @@ async function preflight(env, cfg, report) {
     if (cfg.backend === "mlx") fact(env.RUNNER_NAME === MLX_RUNNER, `mlx A/B must run on ${MLX_RUNNER} (rw-mage), not ${env.RUNNER_NAME}`);
     else fact(CUDA_RUNNERS.includes(env.RUNNER_NAME), `cuda A/B must run on a real-weights CUDA listener (${CUDA_RUNNERS.join(", ")}), not ${env.RUNNER_NAME}`);
   }
-  if (cfg.backend === "cuda") for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) fact(env[key] === CUDA_PHYSICAL_GPU, `${key}=${CUDA_PHYSICAL_GPU} required (physical GPU1)`);
+  if (cfg.backend === "cuda") for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) fact(env[key] === cfg.physicalGpu, `${key} must match physical GPU${cfg.physicalGpu}`);
   if (cfg.backend === "cuda") fact(env.CUDA_DEVICE_ORDER === "PCI_BUS_ID", "CUDA_DEVICE_ORDER=PCI_BUS_ID required");
   report.base = { ...report.base, ...(await sideIdentity("base", cfg.baseDir, cfg.baseSha)) };
   report.head = { ...report.head, ...(await sideIdentity("head", cfg.headDir, cfg.headSha)) };
@@ -991,15 +1006,20 @@ async function preflight(env, cfg, report) {
   report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, ffprobe: { command: ffprobePath(ffmpeg), ...(await tool(ffprobePath(ffmpeg), ["-version"])) }, git: await tool("git", ["--version"]) };
   if (cfg.backend === "mlx") report.tools.python312 = await tool("python3.12", ["--version"]);
   if (cfg.backend === "cuda") {
-    report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, "nvidia-smi cannot query physical GPU1");
+    report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", cfg.physicalGpu, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, `nvidia-smi cannot query physical GPU${cfg.physicalGpu}`);
     // Every GPU's identity, so one preflight answers which card the lease and the worker use.
     try {
       const smi = nvidiaSmiPath(env);
       const csv = (await execFile(smi, ["--query-gpu=index,uuid,pci.bus_id,name", "--format=csv,noheader"], { timeout: 30_000, windowsHide: true })).stdout;
       const xml = (await execFile(smi, ["-q", "-x"], { timeout: 30_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })).stdout;
       report.gpus = gpuInventory(csv, xml);
-      report.gpuBinding = { leasedPhysicalIndex: CUDA_PHYSICAL_GPU, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES, cudaDeviceOrder: env.CUDA_DEVICE_ORDER, note: "nvidia-smi index is PCI bus order; with CUDA_DEVICE_ORDER=PCI_BUS_ID, CUDA_VISIBLE_DEVICES=1 exposes that same card as the worker's logical CUDA 0", policy: env.TIER2_AB_GPU_POLICY || "strict-idle" };
+      report.gpuBinding = { leasedPhysicalIndex: cfg.physicalGpu, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES, cudaDeviceOrder: env.CUDA_DEVICE_ORDER, note: `CUDA_VISIBLE_DEVICES=${cfg.physicalGpu} exposes the leased PCI_BUS_ID device as worker ordinal 0`, policy: env.TIER2_AB_GPU_POLICY || "strict-idle" };
     } catch (error) { report.gpus = { error: error.message.slice(0, 300) }; }
+    if (cfg.physicalGpu === "0") {
+      const gpu = Array.isArray(report.gpus) && report.gpus.find((row) => row.index === 0);
+      fact(gpu?.uuid === FEATURE_GPU0_UUID && gpu.pciBusId.toUpperCase() === "00000000:21:00.0",
+        "physical index 0 does not identify the authorized GPU0 PCI address and UUID");
+    }
   }
   if (cfg.backend === "mlx") fact(report.tools.python312.available, "python3.12 is required by the shared Metal execution lock");
   await mkdir(cfg.work, { recursive: true });
@@ -1021,8 +1041,8 @@ async function preflight(env, cfg, report) {
     if (standalone) {
       const approvals = await readFile(path.join(cfg.headDir, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8");
       packageDigests = scailPackageDigests(index, coverage, approvals);
-      host = await scailHostIdentity(cfg.backend, env);
     }
+    if (standalone || cfg.backend === "cuda") host = await scailHostIdentity(cfg.backend, env);
     const evidence = scailFitEvidence(JSON.parse(index), cfg.backend, { compiledPin: report.head.inferencePin,
       coverage: JSON.parse(coverage), closures: JSON.parse(closures), host: host && { ...host, env } });
     for (const item of report.routes.filter((r) => ROUTES[r.id].scailCandidate)) item.nativeFitEvidence = evidence;
@@ -1195,11 +1215,11 @@ export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/
 // and SCENEWORKS_FFMPEG_TIMEOUT_SECONDS bounds that ffmpeg. The product reads no ffprobe variable.
 export const FORWARDED_SCENEWORKS_ENV = Object.freeze(["SCENEWORKS_FFMPEG", "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS"]);
 export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
-export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib }) {
+export function childEnvironments(env, { backend, physicalGpu = CUDA_PHYSICAL_GPU, state, hub, xet, workerId, metallib }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
   if (backend === "cuda") {
-    base = { ...base, SCENEWORKS_GPU_ID: CUDA_PHYSICAL_GPU, SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" };
+    base = { ...base, SCENEWORKS_GPU_ID: physicalGpu, SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" };
     delete base.SCENEWORKS_MLX_REQUIRED; delete base.SCENEWORKS_MLX_UNSUPPORTED_MODE;
   }
   if (metallib) base.PMETAL_METALLIB_PATH = metallib;
@@ -1226,7 +1246,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   // run.json is rewritten at every phase transition, so a cancelled job still leaves evidence.
   const persist = () => writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets)).catch(() => {});
   const phase = async (name, fields = {}) => { record.phase = name; progress({ route: route.id, run: label, phase: name, ...fields }); await persist(); };
-  const envs = childEnvironments(env, { backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path });
+  const envs = childEnvironments(env, { backend: cfg.backend, physicalGpu: cfg.physicalGpu, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path });
   const children = [], handles = [], controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason ?? new Error("A/B interrupted"));
   signal.addEventListener("abort", onAbort, { once: true });
@@ -1278,7 +1298,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       if (row?.status === "offline") { offlineSince ??= Date.now(); if (Date.now() - offlineSince > 15_000) { record.failureClass = "worker_registration"; throw new Error("owned worker registered but reports offline (it requested its own shutdown)"); } } else offlineSince = null;
       return row?.status === "idle" && row;
     }, 300, "owned worker registration").catch((error) => { record.failureClass ??= "worker_registration"; throw error; });
-    const expectedGpu = cfg.backend === "mlx" ? "mlx" : CUDA_PHYSICAL_GPU;
+    const expectedGpu = cfg.backend === "mlx" ? "mlx" : cfg.physicalGpu;
     fact(registration.gpuId === expectedGpu, `owned worker registered gpuId ${registration.gpuId}, expected ${expectedGpu}`);
     record.identity.worker = { id: registration.id, gpuId: registration.gpuId, gpuName: registration.gpuName, capabilities: registration.capabilities };
     record.timing.startupSeconds = (Date.now() - runStarted) / 1000;
@@ -1309,12 +1329,16 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const cap = Math.min(route.scailCandidate ? 64 * GIB : Infinity, Math.floor(os.totalmem() * 0.75)); record.watchdog.capBytes = cap;
       if (route.scailCandidate) record.watchdog.gpuCapBytes = 84 * GIB;
       const smi = nvidiaSmiPath(env);
-      const baseline = []; for (let i = 0; i < 5; i++) { baseline.push((await sampleGpu(smi)).usedBytes); await delay(200); }
-      memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
+      const baseline = []; for (let i = 0; i < 5; i++) { baseline.push((await sampleGpu(smi, cfg.physicalGpu)).usedBytes); await delay(200); }
+      memory.method = `nvidia-smi memory.used on physical GPU${cfg.physicalGpu} sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s`;
       memory.gpuBaselineBytes = Math.max(...baseline);
-      if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
-        if (route.scailCandidate && s.usedBytes > record.watchdog.gpuCapBytes) watchdog("physical GPU1 exceeded the 84 GiB SCAIL device memory cap"); } catch { memory.errors++; } await delay(500); } })());
+      if (["shared-display", "shared-compute"].includes(env.TIER2_AB_GPU_POLICY)) {
+        memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`;
+        record.timing.sharedGpu = env.TIER2_AB_GPU_POLICY === "shared-display"
+          ? "times taken on the host's display GPU, alongside display work" : "times taken on the shared compute GPU";
+      }
+      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi, cfg.physicalGpu); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
+        if (route.scailCandidate && s.usedBytes > record.watchdog.gpuCapBytes) watchdog(`physical GPU${cfg.physicalGpu} exceeded the 84 GiB SCAIL device memory cap`); } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     const posted = Date.now();
@@ -1597,7 +1621,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const cfg = resolveConfig(env);
   if (mode === "cleanup") return cleanup(env, cfg);
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
-  const report = { schemaVersion: 1, kind: "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
+  const report = { schemaVersion: 1, kind: "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : `physical GPU${cfg.physicalGpu} nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM`, routes: [] };
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("A/B interrupted by signal"));
   process.once("SIGTERM", interrupt); process.once("SIGINT", interrupt);

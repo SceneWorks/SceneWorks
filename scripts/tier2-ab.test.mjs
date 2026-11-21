@@ -35,6 +35,30 @@ test("inputs: exact 40-hex SHAs, distinct sides, absolute paths, known backend-m
   assert.deepEqual(selectRoutes("cuda", "").map((route) => route.id), DEFAULT_ROUTE_IDS.cuda);
 });
 
+test("physical GPU0 requires explicit SCAIL or CUDA Wan A14B routes at dispatch and on the runner", () => {
+  const select = (backend, routes, cuda_physical_index) => dispatchOptions({ profile: "tier2-ab", backend, ref: BASE,
+    moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes, cuda_physical_index }) }, BASE);
+  const worker = (routes, index) => resolveConfig(env({ TIER2_AB_BACKEND: "cuda", TIER2_AB_HUBS: "/hub",
+    TIER2_AB_ROUTES: JSON.stringify(routes), TIER2_AB_PHYSICAL_GPU: index }), { platform: "darwin" });
+  for (const id of Object.keys(ROUTES).filter((id) => id.startsWith("cuda-"))) {
+    if (ROUTES[id].scailCandidate || ROUTES[id].wanA14b) {
+      assert.equal(select("candle", [id], "0").cuda_physical_index, "0");
+      assert.equal(worker([id], "0").physicalGpu, "0");
+    } else {
+      assert.throws(() => select("candle", [id], "0"), /physical GPU0/);
+      assert.throws(() => worker([id], "0"), /physical GPU0/);
+    }
+    assert.equal(select("candle", [id]).cuda_physical_index, "1");
+  }
+  for (const value of [0, "all", [0], "2", null]) assert.throws(() => select("candle", ["cuda-scail2-q4-animate-2"], value));
+  assert.throws(() => select("mlx", ["mlx-scail2-q4-animate-2"], "0"));
+  assert.throws(() => select("candle", undefined, "0"));
+  const envs = childEnvironments({CUDA_VISIBLE_DEVICES:"0", NVIDIA_VISIBLE_DEVICES:"0"}, {
+    backend: "cuda", physicalGpu:"0", state:"/s", hub:"/h", xet:"/x", workerId:"w" });
+  for (const child of [envs.api, envs.worker("http://127.0.0.1")])
+    for (const key of ["SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"]) assert.equal(child[key], "0");
+});
+
 test("default routes send one fixed request per route and the same JSON to both sides", () => {
   for (const ids of Object.values(DEFAULT_ROUTE_IDS)) for (const id of ids) {
     const route = ROUTES[id], template = requestTemplate(route);
@@ -49,7 +73,7 @@ test("default routes send one fixed request per route and the same JSON to both 
 
 test("dispatch selector maps catalog inputs, defaults to preflight, refuses mismatches", () => {
   const inputs = { profile: "tier2-ab", ref: "a".repeat(40), backend: "candle", inference_sha: "", moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD }) };
-  assert.deepEqual(dispatchOptions(inputs, inputs.ref), { base_sha: BASE, head_sha: HEAD, backend: "cuda", routes: "", hubs: "", preflight_only: true, inference_sha: "" });
+  assert.deepEqual(dispatchOptions(inputs, inputs.ref), { base_sha: BASE, head_sha: HEAD, backend: "cuda", cuda_physical_index: "1", routes: "", hubs: "", preflight_only: true, inference_sha: "" });
   const custom = dispatchOptions({ ...inputs, backend: "mlx", moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes: ["mlx-moss-image-t2i"], hubs: ["/Volumes/X/hub"], preflight_only: false }) }, inputs.ref);
   assert.equal(custom.preflight_only, false); assert.equal(custom.routes, '["mlx-moss-image-t2i"]'); assert.equal(custom.hubs, '["/Volumes/X/hub"]');
   for (const bad of [{ ref: "b".repeat(40) }, { backend: "cpu" }, { download_missing: true }, { moss_options_json: "[]" }, { moss_options_json: "{" }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, case: "x" }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: BASE }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes: ["mlx-moss-image-t2i"] }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, hubs: ["/posix/hub"] }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, preflight_only: "no" }) }, { inference_sha: "x" }]) {
@@ -938,7 +962,7 @@ test("tier2-ab is reachable only as a dispatched campaign profile and keeps the 
   assert.match(reusable, /permissions:\n  contents: read/);
 });
 
-test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal lock and cleanup", async () => {
+test("tier2-ab jobs bind the selected physical index through lease and worker masks", async () => {
   const reusable = await workflowText("tier2-ab.yml");
   const mlx = job(reusable, "mlx"), cuda = job(reusable, "cuda");
   assert.match(mlx, /runs-on: \[self-hosted, macOS, ARM64, rw-mage\]/);
@@ -955,10 +979,11 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(mlx, /metal_execution_entry [0-9]+ node tier2-ab-driver\/scripts\/tier2-ab\.mjs --run/);
   assert.match(mlx, /node tier2-ab-driver\/scripts\/tier2-ab\.mjs --cleanup/); assert.match(cuda, /node tier2-ab-driver\\scripts\\tier2-ab\.mjs --cleanup/);
   assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
-  assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu1_lease/);
-  for (const [key, value] of [["CUDA_VISIBLE_DEVICES", '"1"'], ["NVIDIA_VISIBLE_DEVICES", '"1"'], ["SCENEWORKS_GPU_ID", '"1"'], ["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
-  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- node scripts\/tier2-ab\.mjs --run/);
-  assert.match(cuda, /\n      TIER2_AB_GPU_POLICY: shared-display\n/);
+  assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu_lease/);
+  for (const [key, value] of [["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
+  for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID", "TIER2_AB_PHYSICAL_GPU"]) assert.ok(cuda.includes(`${key}: \${{ inputs.cuda_physical_index }}`));
+  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index \$env:TIER2_AB_PHYSICAL_GPU -- node scripts\/tier2-ab\.mjs --run/);
+  assert.match(cuda, /TIER2_AB_GPU_POLICY: .*inputs\.cuda_physical_index == '0' && 'shared-compute' \|\| 'shared-display'/);
   // The TIER2_AB_GPU_POLICY label is this profile's alone (its report wording); admission itself is the
   // wrapper's one rule for every actor.
   for (const name of ["windows-candle.yml", "memory-catalog-campaign.yml", "load-progress-acceptance.yml"]) assert.doesNotMatch(await workflowText(name), /shared-display/);
@@ -1150,17 +1175,25 @@ test("standalone SCAIL refusal authenticates both compiled candidate digests and
   assert.throws(() => scailPackageDigests(index, coverage, ""), /missing or ambiguous/);
   for (const backend of ["mlx", "cuda"]) {
     const mlx = backend === "mlx";
-    const identity = await scailHostIdentity(backend, {}, async (cmd, args) => {
+    const uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid = "luid_0x00000000_0x00000002";
+    const identity = await scailHostIdentity(backend, { TIER2_AB_PHYSICAL_GPU: "0" }, async (cmd, args) => {
       if (mlx) {
         assert.equal(cmd, "/usr/sbin/sysctl");
         assert.deepEqual(args, ["-n", "machdep.cpu.brand_string", "kern.osversion"]);
-      } else {
-        assert.equal(cmd, "C:\\Windows\\System32\\nvidia-smi.exe");
-        assert.deepEqual(args, ["--id=1", "--query-gpu=name,driver_version", "--format=csv,noheader,nounits"]);
+        return { stdout: "board\nruntime\n" };
       }
-      return { stdout: mlx ? "board\nruntime\n" : "board, runtime\r\n" };
+      if (cmd === "python") {
+        assert.equal(args.at(-1), "--wddm-adapter");
+        return { stdout: JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid, luid, node_mask: 1 }] }) };
+      }
+      assert.equal(cmd, "C:\\Windows\\System32\\nvidia-smi.exe");
+      assert.deepEqual(args, ["--id=0", "--query-gpu=name,driver_version,uuid", "--format=csv,noheader,nounits"]);
+      return { stdout: `board, runtime, ${uuid}` };
     });
-    assert.deepEqual(identity, { device: "board", runtime: "runtime" });
+    assert.deepEqual(identity, { device: "board", runtime: "runtime", ...(!mlx ? { captureAdapter: { cuda_uuid: uuid, luid, node_mask: 1 } } : {}) });
+    if (!mlx) await assert.rejects(scailHostIdentity(backend, {}, async (cmd) => ({ stdout: cmd === "python"
+      ? JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", luid, node_mask: 1 }] })
+      : `board, runtime, ${uuid}` })), /logical CUDA 0 and selected physical adapter differ/);
     for (const stdout of ["", "board", "board,runtime\nother,driver"]) {
       await assert.rejects(scailHostIdentity(backend, {}, async () => ({ stdout })), /identity unavailable/);
     }
@@ -1180,6 +1213,7 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const contract = { compiledPin: revision, coverage: [], closures: {} };
     const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
       hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
+    if (!mlx) receipt.hardware.uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
     if (!mlx) receipt.adapter = { cuda_uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", counter: String.raw`\GPU Process Memory(*)\Dedicated Usage`,
       luid: "luid_0x00000000_0x0001e266", physical_node: 0, node_mask: 1 };
     for (const n of counts) {
@@ -1229,8 +1263,11 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
     const rows = read(projected);
     assert.deepEqual(rows.map((r) => r.references), counts);
-    const host = { device: "board", runtime: "runtime", env: {} };
+    const host = { device: "board", runtime: "runtime", env: {}, captureAdapter: projected[0].bounds.capture_adapter };
     const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
+    if (!mlx) for (const mismatch of [{cuda_uuid:"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"}, {luid:"luid_0x00000000_0x000000fe"}, {node_mask:2}]) {
+      assert.throws(() => scoped(projected, {...host, captureAdapter:{...host.captureAdapter, ...mismatch}}), /no packaged native/);
+    }
     const competing = structuredClone(projected.at(-1));
     competing.artifact_id = 782;
     const envelope = mlx ? competing.bounds.unified : competing.bounds.device;

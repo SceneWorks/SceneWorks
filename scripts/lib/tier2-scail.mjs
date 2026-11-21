@@ -125,6 +125,9 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
       !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
     const b = row.bounds;
     assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
+    const adapter = b.capture_adapter;
+    if (!mlx && host && (!adapter || !host.captureAdapter || adapter.cuda_uuid !== host.captureAdapter.cuda_uuid
+      || adapter.luid !== host.captureAdapter.luid || adapter.node_mask !== host.captureAdapter.node_mask)) continue;
     if (mlx) assert.ok(byteCount(b.mlx_decode_budget_bytes) > 0, "missing decoder budget");
     const price = {
       grossHostBytes: mlx ? 0 : physicalPrice(b.host, a.floor_host_bytes),
@@ -133,9 +136,9 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     };
     if (mlx) assert.ok(b.mlx_decode_budget_bytes <= price.grossUnifiedBytes, "decoder budget exceeds unified price");
     // The worker authenticates the index, hardware and compatible compiled pin before quoting.
-    const nativePolicy = JSON.stringify([row.device, row.runtime, a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
+    const nativePolicy = JSON.stringify([row.device, row.runtime, ...(!mlx ? [adapter.cuda_uuid, adapter.luid, adapter.node_mask] : []), a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
     const campaign = JSON.stringify([nativePolicy, row.inference_revision, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null]);
-    rows.push({ device: row.device, runtime: row.runtime, nativePolicy, campaign, references: a.references,
+    rows.push({ device: row.device, runtime: row.runtime, ...(!mlx ? { captureAdapter: adapter } : {}), nativePolicy, campaign, references: a.references,
       sha256: row.receipt_sha256, artifactId: row.artifact_id, price, acceleratorBytes: mlx ? price.grossUnifiedBytes : price.grossDeviceBytes });
   }
   const complete = rows.filter((row) => counts.every((n) => rows.some((r) => r.campaign === row.campaign && r.references === n)));

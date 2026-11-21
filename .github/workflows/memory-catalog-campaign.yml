@@ -554,7 +554,8 @@ jobs:
       contents: read
     # SW-7033: base/head A/B over the production API/worker path. options come from
     # moss_options_json ({"base_sha","head_sha","routes","hubs","preflight_only"}; preflight_only
-    # defaults to true). No catalog walk, measurement publication, branch, push or PR.
+    # defaults to true). Optional cuda_physical_index "0" targets the registered GPU0 for explicit
+    # SCAIL and Wan A14B CUDA routes. All other runs keep their default physical device.
     # Passes no credentials: the compared builds come from operator-chosen commits and need none.
     uses: ./.github/workflows/tier2-ab.yml
     with:
@@ -562,6 +563,7 @@ jobs:
       base_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).base_sha }}
       head_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).head_sha }}
       backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).backend }}
+      cuda_physical_index: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).cuda_physical_index }}
       routes: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).routes }}
       hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).hubs }}
       inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).inference_sha }}

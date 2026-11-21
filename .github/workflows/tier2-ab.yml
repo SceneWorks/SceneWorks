@@ -29,9 +29,14 @@ on:
         required: true
         type: string
       backend:
-        description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, physical GPU1)"
+        description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, GPU1 by default)"
         required: true
         type: string
+      cuda_physical_index:
+        description: "Physical Windows GPU index, 0 only for explicit SCAIL and Wan A14B routes"
+        required: false
+        type: string
+        default: "1"
       routes:
         description: "JSON array of route ids; empty selects the backend's default routes"
         required: false
@@ -195,13 +200,13 @@ jobs:
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
-      # Native sm_120 and the physical GPU1 binding every real-weight CUDA acceptance lane uses.
+      TIER2_AB_PHYSICAL_GPU: ${{ inputs.cuda_physical_index }}
       CUDA_COMPUTE_CAP: "120"
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "1"
-      NVIDIA_VISIBLE_DEVICES: "1"
-      SCENEWORKS_GPU_ID: "1"
-      TIER2_AB_GPU_POLICY: shared-display
+      CUDA_VISIBLE_DEVICES: ${{ inputs.cuda_physical_index }}
+      NVIDIA_VISIBLE_DEVICES: ${{ inputs.cuda_physical_index }}
+      SCENEWORKS_GPU_ID: ${{ inputs.cuda_physical_index }}
+      TIER2_AB_GPU_POLICY: ${{ inputs.cuda_physical_index == '0' && 'shared-compute' || 'shared-display' }}
       # Heavy candle lane: no sccache wrapper (windows-candle.yml / catalog walk, os error 10054).
       RUSTC_WRAPPER: ""
       CARGO_INCREMENTAL: "0"
@@ -283,7 +288,7 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           node tier2-ab-driver\scripts\tier2-ab.mjs --build-only
           if errorlevel 1 exit /b 1
-      - name: Run base#1, head and (if needed) base#2 per route under the physical GPU1 lease
+      - name: Run base#1, head and (if needed) base#2 per route under the selected physical GPU lease
         if: ${{ !inputs.preflight_only }}
         working-directory: tier2-ab-driver
         run: |
@@ -293,8 +298,8 @@ jobs:
           # peak of run 43287955401 rounded up, + 8 GiB margin) and stable memory.used and
           # utilization. The wrapper logs each refusal reason while it waits; the driver prints
           # "phase=driver_started" once admitted.
-          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=540"
-          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
+          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu_lease physical_index=$env:TIER2_AB_PHYSICAL_GPU policy=$env:TIER2_AB_GPU_POLICY min_free_mib=75776 budget_min=540"
+          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 --require-physical-index $env:TIER2_AB_PHYSICAL_GPU -- node scripts/tier2-ab.mjs --run
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
         if: ${{ always() }}

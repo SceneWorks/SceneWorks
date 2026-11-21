@@ -507,9 +507,39 @@ def project(receipt_path, review_path):
         require(
             row["platform"] == "windows"
             and (row["device"], row["runtime"]) == (hw["name"], hw["driver_version"])
-            and native["axes"]["backend"] == "cuda",
+            and native["axes"]["backend"] == "cuda"
+            and hw["uuid"] == receipt["adapter"]["cuda_uuid"]
+            and re.fullmatch(r"GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", hw["uuid"])
+            and re.fullmatch(r"luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}", receipt["adapter"]["luid"])
+            and receipt["adapter"]["luid"] != "luid_0x00000000_0x00000000"
+            and type(receipt["adapter"]["physical_node"]) is int
+            and 0 <= receipt["adapter"]["physical_node"] < 32
+            and type(receipt["adapter"]["node_mask"]) is int
+            and receipt["adapter"]["node_mask"] == 1 << receipt["adapter"]["physical_node"],
             "crossed CUDA identity",
         )
+        if str(hw.get("index")) == "0" or hw["uuid"] == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0":
+            adapter = receipt["adapter"]
+            require(
+                str(hw["index"]) == "0"
+                and hw["uuid"] == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+                and isinstance(native.get("cuda_device"), dict)
+                and all(
+                    type(native["cuda_device"].get(k)) is int
+                    for k in ("ordinal", "visible_count", "node_mask")
+                )
+                and hw["pci.bus_id"].upper() == "00000000:21:00.0"
+                and native.get("cuda_device")
+                == {
+                    "ordinal": 0,
+                    "visible_count": 1,
+                    "uuid": hw["uuid"],
+                    "pci_bus_id": "00000000:21:00.0",
+                    "luid": adapter["luid"],
+                    "node_mask": adapter["node_mask"],
+                },
+                "GPU0 capture lacks the matching native execution adapter",
+            )
         native_pool = None
         end = guard["fit_observation"].get("cuda_render_end", {})
         if "rejected_growth" in end:
@@ -553,7 +583,12 @@ def project(receipt_path, review_path):
                 admission["childGpuCapBytes"],
             ),
         }
-        bounds = {"measurement": "windows_job_and_wddm"}
+        bounds = {
+            "measurement": "windows_job_and_wddm",
+            "capture_adapter": {
+                k: receipt["adapter"][k] for k in ("cuda_uuid", "luid", "node_mask")
+            },
+        }
     require(set(review["domains"]) == set(pools), "review is missing a physical domain")
     for domain, (observed, classified, ceiling) in pools.items():
         bounds[domain] = envelope(

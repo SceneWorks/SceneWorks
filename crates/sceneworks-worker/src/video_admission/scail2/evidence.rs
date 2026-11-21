@@ -34,9 +34,40 @@ enum PhysicalBounds {
         mlx_decode_budget_bytes: u64,
     },
     WindowsJobAndWddm {
+        // Identifies the measuring adapter in the signed-off package for product proof.
+        // Deployed workers match its hardware class, driver and native execution axes.
+        capture_adapter: CaptureAdapter,
         host: Envelope,
         device: Envelope,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureAdapter {
+    cuda_uuid: String,
+    luid: String,
+    node_mask: u32,
+}
+
+impl CaptureAdapter {
+    fn valid(&self) -> bool {
+        let Some(uuid) = self.cuda_uuid.strip_prefix("GPU-") else {
+            return false;
+        };
+        let Some((high, low)) = self
+            .luid
+            .strip_prefix("luid_0x")
+            .and_then(|v| v.split_once("_0x"))
+        else {
+            return false;
+        };
+        uuid::Uuid::try_parse(uuid).is_ok_and(|id| id.hyphenated().to_string() == uuid)
+            && valid_hex(high, 8)
+            && valid_hex(low, 8)
+            && (high != "00000000" || low != "00000000")
+            && self.node_mask.is_power_of_two()
+    }
 }
 
 #[derive(Deserialize)]
@@ -251,8 +282,12 @@ impl Capture {
                 (
                     "windows",
                     Scail2FitBackend::Cuda,
-                    PhysicalBounds::WindowsJobAndWddm { host, device },
-                ) => (
+                    PhysicalBounds::WindowsJobAndWddm {
+                        host,
+                        device,
+                        capture_adapter,
+                    },
+                ) if capture_adapter.valid() => (
                     host.price(self.axes.floor_host_bytes)?,
                     device.price(self.axes.floor_device_bytes)?,
                     0,

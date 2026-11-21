@@ -184,7 +184,7 @@ def with_rejected_reads(guard):
     return scope, pool
 
 
-@pytest.mark.parametrize("case", ["mlx", "cuda", "cuda_render_scope", "cuda_rejected"])
+@pytest.mark.parametrize("case", ["mlx", "cuda", "cuda_gpu0", "cuda_render_scope", "cuda_rejected"])
 def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path, case):
     mlx = case == "mlx"
     backend = "mlx" if mlx else "cuda"
@@ -205,6 +205,11 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
     }
     if not mlx:
         adapter, cuda = windows_guard()
+        if case == "cuda_gpu0":
+            uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+            adapter["cuda_uuid"] = uuid
+            cuda["admission"]["cudaDeviceUuid"] = uuid
+            cuda["samples"][0]["cudaDeviceUuid"] = uuid
         guard["admission"].update(cuda.pop("admission"))
         guard.update(cuda)
         axes["floor_device_bytes"] = 70
@@ -263,9 +268,20 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
             "name": "board",
             "os_build": "version",
             "driver_version": "version",
+            "uuid": None if mlx else adapter["cuda_uuid"],
         },
         "logs": {guard_name: {"sha256": tool["sha256"](guard_file.read_bytes())}},
     }
+    if case == "cuda_gpu0":
+        receipt["hardware"].update(index="0", **{"pci.bus_id": "00000000:21:00.0"})
+        native["cuda_device"] = {
+            "ordinal": 0,
+            "visible_count": 1,
+            "uuid": adapter["cuda_uuid"],
+            "pci_bus_id": "00000000:21:00.0",
+            "luid": adapter["luid"],
+            "node_mask": 1,
+        }
     if native_pool:
         receipt["request"] = {"policy": policy}
         receipt["contract"]["request"] = {"policy": policy}
@@ -319,6 +335,26 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
             117 if native_pool else 110 if scope else 100
         )
         assert measured["bounds"]["host"]["classified_peak_bytes"] == 145
+    if case == "cuda_gpu0":
+        for key, wrong in (
+            ("ordinal", 1),
+            ("visible_count", 2),
+            ("luid", "luid_0x00000000_0x00000001"),
+            ("uuid", "other"),
+            ("pci_bus_id", "00000000:C1:00.0"),
+            ("node_mask", 2),
+        ):
+            actual = native["cuda_device"][key]
+            native["cuda_device"][key] = wrong
+            receipt_file.write_text(json.dumps(receipt))
+            review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
+            review_file.write_text(json.dumps(review))
+            with pytest.raises(ValueError, match="GPU0 capture lacks"):
+                project()
+            native["cuda_device"][key] = actual
+        receipt_file.write_text(json.dumps(receipt))
+        review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
+        review_file.write_text(json.dumps(review))
     if native_pool:
         original = guard_file.read_bytes()
         guard["admission"]["gpuFreeReserveBytes"] -= 1
