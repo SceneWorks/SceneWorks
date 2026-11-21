@@ -2485,7 +2485,7 @@ mod tests {
     #[test]
     fn sw_6946_resolved_low_res_start_spec_admits_plain_img2img_reference_asset_and_rejects_identity_or_ip_adapter(
     ) {
-        for model in ["sd3_5_medium", "flux2_dev"] {
+        for model in ["sd3_5_medium", "flux2_klein_9b"] {
             let valid = payload(json!({
                 "projectId": "p",
                 "model": model,
@@ -2578,7 +2578,7 @@ mod tests {
             );
         }
 
-        for forbidden_model in ["flux_dev", "kolors"] {
+        for forbidden_model in ["flux_dev", "flux2_dev", "kolors", "sdxl"] {
             let payload = payload(json!({
                 "projectId": "p",
                 "model": forbidden_model,
