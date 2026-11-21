@@ -19,7 +19,6 @@ one newline. Each projection retains the original campaign and count verdicts.
 
 import argparse
 import hashlib
-import itertools
 import json
 import re
 from pathlib import Path
@@ -329,8 +328,8 @@ def validate_rejected_growth(
             == list(range(mark["card_index"], zero["card_index"]))
             and all(v["next_card_index"] == zero["card_index"] for v in events)
             and all(
-                a["child_growth_bytes"] >= b["child_growth_bytes"]
-                for a, b in itertools.pairwise(events)
+                v["child_growth_bytes"] <= events[i]["child_growth_bytes"]
+                for i, v in enumerate(events[1:])
             )
             and mark["at_ns"] < events[-2]["at_ns"] < final["read_ns"] == last_used
             and 0 < final["child_growth_bytes"] < reserved
