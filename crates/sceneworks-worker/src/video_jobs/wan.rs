@@ -1427,16 +1427,11 @@ pub(super) struct VideoGenInput {
     /// MLX (macOS) path and the resident-only LTX candle engine. SVD-XT also selects Sequential in
     /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
-    /// Per-request memory-rung knobs selected by the video memory gate (sc-18814), or `None` for
-    /// the provider's own defaults. Set ONLY by [`generate_video_using`], from
-    /// `crate::video_admission::admit_video_generation`; every handler leaves it at the
-    /// `Default` so a route the gate makes no decision on is byte-identical to before the gate
-    /// existed. The image lane's equivalent is `mlx_fit_gate::evaluate_request`'s
-    /// `MlxRequestEvaluation::memory`.
+    // Standalone provider fixtures can supply a preselected scope. Production admission
+    // attaches the result directly to the owned GenerationRequest and its execution call.
+    #[cfg(test)]
     pub(super) memory: Option<gen_core::GenerationMemory>,
-    /// Contract/evidence handshake for provider safety and the request-scoped lifecycle. Kept
-    /// separate from `memory`: a Resident selection still carries context while preserving the
-    /// provider's request defaults with `memory == None`.
+    #[cfg(test)]
     pub(super) memory_context: Option<gen_core::MemoryRunContext>,
     /// Imported H3 plan/source identity. The shared load handoff seals the actual native component
     /// closure before deriving the warm key. This is not an executed-tensor attestation.
@@ -1461,7 +1456,9 @@ pub(super) struct VideoGenInput {
 impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
             memory: None,
+            #[cfg(test)]
             memory_context: None,
             imported_h3_identity: None,
             imported_h3_authority: None,
@@ -1611,8 +1608,9 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
 /// `no_audio` is the live case), so the resolved provider mode must not borrow the ordinary
 /// no-overlay curve until a receipt names this exact carrier.
 #[cfg(native_lane)]
-pub(super) fn video_admission_overlay(
+pub(super) fn video_admission_overlay_for_carrier(
     input: &VideoGenInput,
+    conditioning: &[Conditioning],
     mode: &str,
     contract: Option<&gen_core::MemoryProviderContract>,
 ) -> WorkerResult<Option<String>> {
@@ -1678,7 +1676,7 @@ pub(super) fn video_admission_overlay(
                 crate::video_admission::LANE,
                 input.width,
                 input.height,
-                &input.conditioning,
+                conditioning,
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
@@ -1689,7 +1687,7 @@ pub(super) fn video_admission_overlay(
                 crate::video_admission::LANE,
                 input.width,
                 input.height,
-                &input.conditioning,
+                conditioning,
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
@@ -1700,7 +1698,7 @@ pub(super) fn video_admission_overlay(
                 crate::video_admission::LANE,
                 input.width,
                 input.height,
-                &input.conditioning,
+                conditioning,
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
@@ -1716,12 +1714,12 @@ pub(super) fn video_admission_overlay(
                 mode,
                 input.width,
                 input.height,
-                &input.conditioning,
+                conditioning,
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
     } else if mode == "replace_person"
-        && !input.conditioning.is_empty()
+        && !conditioning.is_empty()
         && !matches!(
             input.engine_id,
             "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
@@ -1732,7 +1730,7 @@ pub(super) fn video_admission_overlay(
                 crate::video_admission::LANE,
                 input.width,
                 input.height,
-                &input.conditioning,
+                conditioning,
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
@@ -1742,7 +1740,7 @@ pub(super) fn video_admission_overlay(
                 crate::video_admission::LANE,
                 input.width,
                 input.height,
-                &input.conditioning,
+                conditioning,
             )
             .map_err(WorkerError::InvalidPayload)?,
         );
@@ -1751,7 +1749,7 @@ pub(super) fn video_admission_overlay(
         input.engine_id,
         "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled"
     ) {
-        let mut references = input.conditioning.iter().filter_map(|conditioning| {
+        let mut references = conditioning.iter().filter_map(|conditioning| {
             let Conditioning::Reference { image, strength } = conditioning else {
                 return None;
             };
@@ -1769,8 +1767,7 @@ pub(super) fn video_admission_overlay(
         // `ControlClip + MultiReference` request becomes a deterministic ordered contact sheet at
         // frame zero plus masked IC-LoRA clip tokens. Include every observable request fact in the
         // admission key so it cannot borrow an I2V/clip curve or silently erase a reference order.
-        let controls = input
-            .conditioning
+        let controls = conditioning
             .iter()
             .filter_map(|conditioning| match conditioning {
                 Conditioning::ControlClip {
@@ -1789,8 +1786,7 @@ pub(super) fn video_admission_overlay(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let multi_references = input
-            .conditioning
+        let multi_references = conditioning
             .iter()
             .filter_map(|conditioning| match conditioning {
                 Conditioning::MultiReference { images } => Some(images.as_slice()),
@@ -1841,8 +1837,7 @@ pub(super) fn video_admission_overlay(
                 ));
             }
         }
-        let keyframes = input
-            .conditioning
+        let keyframes = conditioning
             .iter()
             .filter_map(|conditioning| {
                 let Conditioning::Keyframe {
@@ -1870,8 +1865,7 @@ pub(super) fn video_admission_overlay(
                 last_strength.to_bits()
             ));
         }
-        let clips = input
-            .conditioning
+        let clips = conditioning
             .iter()
             .filter_map(|conditioning| {
                 let Conditioning::VideoClip {
@@ -2121,42 +2115,32 @@ pub(super) fn video_admission_reference_count(
         .fold(0_u32, u32::saturating_add)
 }
 
-/// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
-/// This check runs before the live-budget probe and before contract selection, so unsupported
-/// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
-/// historical direct-generate path instead of reaching provider safety with invented coverage.
-#[cfg(native_lane)]
 /// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
 /// lifecycle context in one operation makes it impossible for the generation request to carry an
 /// optimized rung while silently bypassing its safety/begin/configure/finish contract.
 #[cfg(native_lane)]
 pub(super) fn apply_video_admission_outcome(
-    input: &mut VideoGenInput,
+    request: &mut GenerationRequest,
     outcome: crate::video_admission::VideoAdmissionOutcome,
-) -> WorkerResult<()> {
+) -> WorkerResult<Option<gen_core::MemoryRunContext>> {
     if let Some(refusal) = outcome.refusal {
         return Err(WorkerError::InvalidPayload(refusal));
     }
-    input.memory = outcome.memory;
-    input.memory_context = outcome.context;
-    Ok(())
+    request.memory = outcome.memory;
+    Ok(outcome.context)
 }
 
-/// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
-/// loaded video generator, streaming denoise progress via `on_progress` and honoring `cancel`.
-/// The engine fills the audio track (LTX) or leaves it `None` (Wan).
+/// Move the resolved carrier into its final request before the cache can start a load.
+/// Admission and execution borrow these same images, including full temporal clips.
 #[cfg(native_lane)]
-pub(super) fn run_loaded_video_generation(
-    generator: &dyn Generator,
-    input: VideoGenInput,
+pub(super) fn take_video_request(
+    input: &mut VideoGenInput,
     cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<DecodedVideo> {
-    let memory_context = input.memory_context;
-    let mut req = GenerationRequest {
-        veda: input.veda,
-        prompt: input.prompt,
-        negative_prompt: input.negative_prompt,
+) -> GenerationRequest {
+    GenerationRequest {
+        veda: input.veda.take(),
+        prompt: std::mem::take(&mut input.prompt),
+        negative_prompt: input.negative_prompt.take(),
         width: input.width,
         height: input.height,
         // An explicit frame count wins over auto-duration in gen-core. Leave it absent only for an
@@ -2177,12 +2161,12 @@ pub(super) fn run_loaded_video_generation(
         // Per-generation sampler / scheduler (sc-7127), already N3-guarded against the engine's
         // advertised surface in `generate_video`, so an unsupported name was dropped to `None` (the
         // engine default) before reaching here — `validate_request` only ever sees an advertised name.
-        sampler: input.sampler,
-        scheduler: input.scheduler,
+        sampler: input.sampler.take(),
+        scheduler: input.scheduler.take(),
         seed: Some(input.seed),
-        conditioning: input.conditioning,
+        conditioning: std::mem::take(&mut input.conditioning),
         control_scale: input.control_scale,
-        video_mode: input.video_mode,
+        video_mode: input.video_mode.clone(),
         enhance_prompt: input.enhance_prompt,
         use_uncensored_enhancer: input.use_uncensored_enhancer,
         enhance_max_tokens: input.enhance_max_tokens,
@@ -2192,18 +2176,79 @@ pub(super) fn run_loaded_video_generation(
         decode_chunk_size: input.decode_chunk_size,
         conditioning_fps: input.conditioning_fps,
         softness: input.softness,
-        // The video memory gate's selection (sc-18814). `None` — every route the gate does not
-        // decide, plus a selected resident rung — leaves the provider's own defaults in place.
+        #[cfg(test)]
         memory: input.memory,
         cancel: cancel.clone(),
         ..Default::default()
+    }
+}
+
+#[cfg(native_lane)]
+pub(super) fn prepare_video_reservation(
+    spec: &LoadSpec,
+    input: &VideoGenInput,
+    request: &GenerationRequest,
+    model: &str,
+    mode: &str,
+) -> WorkerResult<Option<crate::video_admission::PlannedVideoReservation>> {
+    let Some(plan) = crate::inference_runtime::media()
+        .compile_video_plan(input.engine_id, spec, request)
+        .map_err(|error| crate::classify_engine_error("video plan rejected", error))?
+    else {
+        return Ok(None);
     };
-    let completed = crate::memory_strategy::generate_with_scope_execution_report(
+    let overlay = video_admission_overlay_for_carrier(input, &request.conditioning, mode, None)?;
+    crate::video_admission::PlannedVideoReservation::new(
+        plan,
+        model,
+        crate::video_admission::LANE,
+        overlay,
+    )
+    .map(Some)
+    .map_err(|error| crate::classify_engine_error("video reservation rejected", error))
+}
+
+#[cfg(all(test, native_lane))]
+pub(super) fn run_loaded_video_generation(
+    generator: &dyn Generator,
+    mut input: VideoGenInput,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<DecodedVideo> {
+    let mut request = take_video_request(&mut input, cancel);
+    run_prepared_video_generation(
         generator,
-        &mut req,
-        memory_context.as_ref(),
+        &mut request,
+        input.memory_context.as_ref(),
+        None,
         on_progress,
     )
+}
+
+#[cfg(native_lane)]
+pub(super) fn run_prepared_video_generation(
+    generator: &dyn Generator,
+    request: &mut GenerationRequest,
+    context: Option<&gen_core::MemoryRunContext>,
+    plan: Option<(&gen_core::VideoRenderPlan, &LoadSpec)>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<DecodedVideo> {
+    let completed = match plan {
+        Some((plan, spec)) => crate::memory_strategy::generate_video_with_scope_execution_report(
+            generator,
+            request,
+            context,
+            plan,
+            spec,
+            on_progress,
+        ),
+        None => crate::memory_strategy::generate_with_scope_execution_report(
+            generator,
+            request,
+            context,
+            on_progress,
+        ),
+    }
     .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     let output = completed
         .generation
@@ -2828,18 +2873,6 @@ pub(super) async fn generate_video_using(
                 e.i2v,
             )
         });
-        // The admission tier/headroom read the model DIRECTORY (`spec_component_bytes` sums the
-        // snapshot's safetensors and asks the registry for a footprint), so they are filesystem
-        // work and must not run on a reactor thread. The clone is cheap (`LoadSpec` is `Clone`;
-        // `spec` itself moves into the loader) and lets both derivations happen inside `run`, which
-        // executes on the generator cache thread — the same position the image lane derives its
-        // own from, inside the blocking closure.
-        let admission_geometry = (
-            input.width,
-            input.height,
-            input.frames,
-            input.decode_chunk_size,
-        );
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let host_probe_runtime = tokio::runtime::Handle::current();
         crate::load_progress::spawn(async move {
@@ -2946,6 +2979,25 @@ pub(super) async fn generate_video_using(
                     "Video generation canceled before H3 native load.".into(),
                 ));
             }
+            // A plan may seal full RGB clips or inspect snapshot metadata. Keep that work off
+            // the async runtime and ahead of any cache eviction or provider factory call.
+            let prepare_cancel = cancel.clone();
+            let prepare_model = admission_model_id.clone();
+            let prepare_mode = admission_mode.clone();
+            let (input, mut request, plan, spec) =
+                crate::load_progress::spawn_blocking(move || {
+                    let request = take_video_request(&mut input, &prepare_cancel);
+                    let plan = prepare_video_reservation(
+                        &spec,
+                        &input,
+                        &request,
+                        &prepare_model,
+                        &prepare_mode,
+                    )?;
+                    Ok::<_, WorkerError>((input, request, plan, spec))
+                })
+                .await
+                .map_err(|error| WorkerError::Engine(error.to_string()))??;
             let cold_h3_receipt = h3_receipt.clone();
             let load_generator = move |id: &str, spec: &LoadSpec| {
                 if let Some(receipt) = &cold_h3_receipt {
@@ -2976,7 +3028,13 @@ pub(super) async fn generate_video_using(
                     crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
                 );
                 let load_policy = loaded_policy.offload_policy;
-                let mut input = input;
+                let mut admission_spec = admission_spec;
+                if plan.is_some() {
+                    admission_spec = admission_spec.with_load_shape(loaded_policy.load_shape);
+                    admission_spec.offload_policy = load_policy;
+                    admission_spec.load_shape_declaration_result =
+                        loaded_policy.load_shape_declaration_result;
+                }
                 let execution_span = if let Some(identity) = &input.imported_h3_identity {
                     tracing::info_span!("h3_import_execution", jobId = %receipt_job_id,
                         checkpointId = %identity["checkpointId"], semanticDigest = %identity["semanticDigest"])
@@ -3011,14 +3069,40 @@ pub(super) async fn generate_video_using(
                         "Imported H3 acquired a generator with its sealed file closure; not an executed-tensor or peak-memory receipt"
                     );
                 }
-                let admission_tier =
-                    crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
+                let planned = plan
+                    .as_ref()
+                    .map(|reservation| {
+                        let provider_tier =
+                            generator.video_memory_evidence_tier(&reservation.plan, &request)?;
+                        Ok::<_, gen_core::Error>(crate::video_admission::PlannedVideoRequest {
+                            reservation,
+                            request: &request,
+                            provider_tier,
+                        })
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        crate::classify_engine_error("video admission evidence rejected", error)
+                    })?;
+                let admission_tier = match planned.and_then(|planned| planned.provider_tier) {
+                    Some(tier) => tier,
+                    None => crate::mlx_fit_gate::resolved_video_numeric_tier(
+                        engine_id,
+                        &admission_spec,
+                    )?,
+                };
                 let spec_headroom_bytes =
                     crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
-                let reference_count = video_admission_reference_count(
-                    &admission_model_id,
-                    &admission_mode,
-                    &input.conditioning,
+                let geometry = planned.map(|planned| planned.reservation.plan.geometry());
+                let reference_count = geometry.map_or_else(
+                    || {
+                        video_admission_reference_count(
+                            &admission_model_id,
+                            &admission_mode,
+                            &request.conditioning,
+                        )
+                    },
+                    |geometry| geometry.reference_count,
                 );
                 // This is the provider-facing carrier, not a synonym for the user-visible mode:
                 // Wan turns clip extension/bridging into pinned keyframes, while I2V reaches the
@@ -3027,22 +3111,29 @@ pub(super) async fn generate_video_using(
                 let admission_reference_shape = video_admission_reference_shape(
                     &admission_model_id,
                     &admission_mode,
-                    &input.conditioning,
+                    &request.conditioning,
                 );
-                let admission_overlay = video_admission_overlay(
-                    &input,
-                    &admission_mode,
-                    generator.memory_strategy_contract(),
-                )?;
+                let unplanned_overlay;
+                let admission_overlay = if let Some(reservation) = &plan {
+                    reservation.overlay.as_deref()
+                } else {
+                    unplanned_overlay = video_admission_overlay_for_carrier(
+                        &input,
+                        &request.conditioning,
+                        &admission_mode,
+                        generator.memory_strategy_contract(),
+                    )?;
+                    unplanned_overlay.as_deref()
+                };
                 let sparse_bound = generator
                     .veda_workspace_bound(gen_core_h3::veda::workspace::Request {
-                        veda: input.veda.as_ref(),
+                        veda: request.veda.as_ref(),
                         width: input.width,
                         height: input.height,
                         frames: input.frames,
                         count: 1,
-                        prompt: &input.prompt,
-                        conditioning: &input.conditioning,
+                        prompt: &request.prompt,
+                        conditioning: &request.conditioning,
                         reference_image_short_edge: input.reference_image_short_edge,
                         reference_image_resize_mode: input.reference_image_resize_mode,
                     })
@@ -3055,19 +3146,20 @@ pub(super) async fn generate_video_using(
                     .and_then(|phase| phase.native_quant.as_ref())
                     .map(|_| crate::video_admission::NativeQuantRequest {
                         shape: gen_core_h3::veda::workspace::Request {
-                            veda: input.veda.as_ref(),
+                            veda: request.veda.as_ref(),
                             width: input.width,
                             height: input.height,
                             frames: input.frames,
                             count: 1,
-                            prompt: &input.prompt,
-                            conditioning: &input.conditioning,
+                            prompt: &request.prompt,
+                            conditioning: &request.conditioning,
                             reference_image_short_edge: input.reference_image_short_edge,
                             reference_image_resize_mode: input.reference_image_resize_mode,
                         },
                         evaluations: input.steps,
                     });
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    planned,
                     native_quant_request,
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,
@@ -3075,15 +3167,15 @@ pub(super) async fn generate_video_using(
                     mode: &admission_mode,
                     reference_count,
                     reference_shape: admission_reference_shape,
-                    overlay: admission_overlay.as_deref(),
+                    overlay: admission_overlay,
                     lane: crate::video_admission::LANE,
                     tier: admission_tier,
                     transformer_variant: input.memory_transformer_variant,
                     decoder: input.memory_decoder,
-                    width: admission_geometry.0,
-                    height: admission_geometry.1,
-                    frames: admission_geometry.2,
-                    decode_chunk_size: admission_geometry.3,
+                    width: geometry.map_or(input.width, |g| g.width),
+                    height: geometry.map_or(input.height, |g| g.height),
+                    frames: geometry.map_or(input.frames, |g| g.frames),
+                    decode_chunk_size: request.decode_chunk_size,
                     fps: input.fps,
                     runtime: None,
                     headroom_bytes: spec_headroom_bytes,
@@ -3139,13 +3231,13 @@ pub(super) async fn generate_video_using(
                         runtime_cuda::providers::minimax_h3::memory_strategy::host_peak_bytes(
                             &admission_spec,
                             gen_core_h3::veda::workspace::Request {
-                                veda: input.veda.as_ref(),
+                                veda: request.veda.as_ref(),
                                 width: input.width,
                                 height: input.height,
                                 frames: input.frames,
                                 count: 1,
-                                prompt: &input.prompt,
-                                conditioning: &input.conditioning,
+                                prompt: &request.prompt,
+                                conditioning: &request.conditioning,
                                 reference_image_short_edge: input.reference_image_short_edge,
                                 reference_image_resize_mode: input.reference_image_resize_mode,
                             },
@@ -3163,7 +3255,20 @@ pub(super) async fn generate_video_using(
                         host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
                     )?;
                 }
-                apply_video_admission_outcome(&mut input, outcome)?;
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                if let Some(planned) = planned.filter(|_| outcome.context.is_some()) {
+                    let needed = planned.reservation.additional_host_bytes;
+                    if needed > 0 {
+                        let available = host_probe_runtime
+                            .block_on(crate::yue2_admission::host_available_bytes());
+                        if let Some(available) = available.filter(|&available| needed > available) {
+                            return Err(WorkerError::InvalidPayload(format!(
+                                "{engine_id} planned video output requires {needed} additional host bytes; only {available} are available"
+                            )));
+                        }
+                    }
+                }
+                let context = apply_video_admission_outcome(&mut request, outcome)?;
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 let proof_observation_error = std::cell::RefCell::new(None);
                 let mut on_progress = |progress: Progress| {
@@ -3197,8 +3302,14 @@ pub(super) async fn generate_video_using(
                 if engine_id == "minimax_h3" {
                     super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "before")?;
                 }
-                let result =
-                    run_loaded_video_generation(generator, input, &cancel, &mut on_progress);
+                let result = run_prepared_video_generation(
+                    generator,
+                    &mut request,
+                    context.as_ref(),
+                    plan.as_ref()
+                        .map(|reservation| (&reservation.plan, &admission_spec)),
+                    &mut on_progress,
+                );
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 if engine_id == "minimax_h3" {
                     // Scope cleanup has already run, including cancellation and failed forwards.

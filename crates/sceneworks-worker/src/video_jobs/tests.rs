@@ -9,34 +9,384 @@ use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::AdapterKind;
 
-/// Admission must see the exact temporal chunk already resolved onto the engine input. Re-reading
-/// the sparse payload or dropping this field would turn the real 25-frame/chunk-8 SVD execution
-/// into a fictional 25-frame VAE invocation.
-#[test]
-fn video_admission_captures_the_resolved_decode_chunk_from_the_engine_input() {
-    const WAN: &str = include_str!("wan.rs");
-    let capture = WAN
-        .split_once("let admission_geometry = (")
-        .expect("shared video funnel captures its admission geometry")
-        .1
-        .split_once(");")
-        .expect("admission geometry tuple closes")
-        .0;
-    assert!(
-        capture.contains("input.decode_chunk_size"),
-        "the admission shape must capture the provider-resolved decode chunk: {capture}"
-    );
+#[cfg(native_lane)]
+fn video_admission_overlay(
+    input: &VideoGenInput,
+    mode: &str,
+    contract: Option<&gen_core::MemoryProviderContract>,
+) -> WorkerResult<Option<String>> {
+    video_admission_overlay_for_carrier(input, &input.conditioning, mode, contract)
+}
 
-    let inputs = WAN
-        .split_once("let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {")
-        .expect("shared video funnel invokes admission")
-        .1
-        .split_once("};")
-        .expect("admission inputs close")
-        .0;
+#[cfg(native_lane)]
+fn admit_video_fixture(
+    generator: &VideoLifecycleGenerator,
+    reservation: &crate::video_admission::PlannedVideoReservation,
+    request: &GenerationRequest,
+    input: &VideoGenInput,
+    model: &str,
+    mode: &str,
+    warm: bool,
+) -> crate::video_admission::VideoAdmissionOutcome {
+    use crate::video_admission::*;
+    let geometry = reservation.plan.geometry();
+    let tier = video_lifecycle_context(gen_core::MemoryStrategy::Resident)
+        .selection
+        .tier;
+    let resident = generator
+        .contract
+        .as_ref()
+        .filter(|_| warm)
+        .map_or(0, |contract| contract.total_resident_bytes());
+    admit_video_generation(
+        generator,
+        VideoAdmissionInputs {
+            planned: Some(PlannedVideoRequest {
+                reservation,
+                request,
+                provider_tier: generator
+                    .video_memory_evidence_tier(&reservation.plan, request)
+                    .unwrap(),
+            }),
+            native_quant_request: None,
+            model_id: model,
+            model_family: model,
+            route: input.engine_id,
+            mode,
+            reference_count: geometry.reference_count,
+            reference_shape: video_admission_reference_shape(model, mode, &request.conditioning),
+            overlay: reservation.overlay.as_deref(),
+            lane: LANE,
+            tier,
+            transformer_variant: None,
+            decoder: None,
+            width: geometry.width,
+            height: geometry.height,
+            frames: geometry.frames,
+            decode_chunk_size: request.decode_chunk_size,
+            fps: input.fps,
+            runtime: Some(VideoRuntimeMemoryState {
+                budget: gen_core::MemoryBudget {
+                    total_bytes: 128 << 30,
+                    committed_bytes: resident,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                cache_state: if warm {
+                    gen_core::MemoryCacheState::Warm
+                } else {
+                    gen_core::MemoryCacheState::Cold
+                },
+                load_policy: gen_core::OffloadPolicy::Resident,
+                provider_resident_bytes: resident,
+            }),
+            headroom_bytes: 0,
+        },
+    )
+}
+
+#[cfg(native_lane)]
+fn resident_video_fixture(engine_id: &str) -> VideoLifecycleGenerator {
+    let mut generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
+    let realization = match crate::video_admission::LANE {
+        sceneworks_core::video_request::VideoLane::Mlx => {
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: false,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: false,
+                cache_eviction: true,
+            }
+        }
+        sceneworks_core::video_request::VideoLane::Candle => {
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: false,
+                host_to_device_block_materialization: false,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            }
+        }
+    };
+    let mut contract =
+        gen_core::MemoryProviderContract::compatibility_default(engine_id, realization);
+    contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+        "worker-video-fixture-v1",
+        contract.load_shape,
+    ));
+    contract.asset_facts.base_bytes = 1 << 30;
+    contract.asset_facts.transformer_bytes = 1 << 30;
     assert!(
-        inputs.contains("decode_chunk_size: admission_geometry.3"),
-        "the captured chunk must reach VideoAdmissionInputs: {inputs}"
+        contract.conformance_errors().is_empty(),
+        "{:?}",
+        contract.conformance_errors()
+    );
+    generator.contract = Some(contract);
+    generator
+}
+
+/// An unsealed SVD request still carries the actual reference canvas, denoise clip and
+/// temporal decode chunk through the pre-load reservation. No weights or cache are involved.
+#[cfg(native_lane)]
+#[test]
+fn svd_reservation_preserves_geometry_and_the_unpriced_encoder_refusal() {
+    let mut input = VideoGenInput {
+        engine_id: "svd_xt",
+        model_dir: PathBuf::from("svd-metadata-fixture"),
+        width: 1024,
+        height: 576,
+        frames: 25,
+        decode_chunk_size: Some(8),
+        fps: 7,
+        steps: Some(2),
+        conditioning: vec![Conditioning::Reference {
+            image: gen_core::Image {
+                width: 3,
+                height: 2,
+                pixels: vec![17; 18],
+            },
+            strength: None,
+        }],
+        ..Default::default()
+    };
+    let spec = video_load_spec(&input);
+    let request = take_video_request(&mut input, &CancelFlag::new());
+    let reservation = prepare_video_reservation(&spec, &input, &request, "svd", "image_to_video")
+        .expect("SVD geometry is metadata only")
+        .expect("registered SVD plan");
+    let plan = &reservation.plan;
+    let geometry = plan.geometry();
+    assert_eq!(
+        (
+            geometry.width,
+            geometry.height,
+            geometry.frames,
+            geometry.reference_count
+        ),
+        (1024, 576, 25, 1)
+    );
+    let reference = &plan.layout().references[0];
+    assert_eq!((reference.width, reference.height), (3, 2));
+    let candidate = reservation.geometries()[0];
+    assert_eq!((candidate.frames, candidate.decode_pass_frames), (25, 8));
+
+    let generator = resident_video_fixture(input.engine_id);
+    let outcome = admit_video_fixture(
+        &generator,
+        &reservation,
+        &request,
+        &input,
+        "svd",
+        "image_to_video",
+        true,
+    );
+    assert!(outcome.refusal.unwrap().contains("encodes conditioning"));
+    assert!(outcome.context.is_none());
+    assert_eq!(generator.record.lock().unwrap().begin_calls, 0);
+}
+
+#[cfg(native_lane)]
+#[test]
+fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding() {
+    let image = |pixel| gen_core::Image {
+        width: 32,
+        height: 32,
+        pixels: vec![pixel; 32 * 32 * 3],
+    };
+    let mut input = VideoGenInput {
+        engine_id: "scail2_14b",
+        width: 32,
+        height: 32,
+        frames: 61,
+        fps: 16,
+        steps: Some(2),
+        video_mode: Some("animation".into()),
+        model_dir: PathBuf::from("scail-metadata-fixture"),
+        ..Default::default()
+    };
+    for ordinal in 1..=6 {
+        input.conditioning.push(Conditioning::Reference {
+            image: image(ordinal),
+            strength: None,
+        });
+        input.conditioning.push(Conditioning::Mask {
+            image: image(ordinal + 10),
+        });
+    }
+    // The assembled driving clip, rather than the sparse payload's duration, controls execution.
+    input.conditioning.push(Conditioning::ControlClip {
+        frames: vec![image(3); 45],
+        mask: vec![image(4); 45],
+        masking_strength: 1.,
+        start_frame: 0,
+        mode: gen_core::ReplacementMode::default(),
+    });
+    let spec = video_load_spec(&input);
+    let mut request = take_video_request(&mut input, &CancelFlag::new());
+    let reserve = |request: &GenerationRequest| {
+        prepare_video_reservation(&spec, &input, request, "scail2_14b", "animate_character")
+    };
+    let reservation = reserve(&request).unwrap().unwrap();
+    assert_eq!(reservation.plan.geometry().reference_count, 6);
+    assert_eq!(
+        (request.frames, reservation.plan.geometry().frames),
+        (Some(61), 45)
+    );
+    let candidate = reservation.geometries()[0];
+    let phase = &reservation.plan.layout().phases[0];
+    assert_eq!(
+        (candidate.frames, candidate.decode_pass_frames),
+        (45, phase.decode_chunk_frames)
+    );
+    assert_eq!(
+        phase.decoded_frames,
+        if cfg!(target_os = "macos") { 48 } else { 45 }
+    );
+    let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
+    let outcome = admit_video_fixture(
+        &generator,
+        &reservation,
+        &request,
+        &input,
+        "scail2_14b",
+        "animate_character",
+        false,
+    );
+    assert_eq!(
+        outcome,
+        crate::video_admission::VideoAdmissionOutcome::default()
+    );
+    assert_eq!(generator.record.lock().unwrap().begin_calls, 0);
+    let mut long_request = request.clone();
+    let Some(Conditioning::ControlClip { frames, mask, .. }) = long_request.conditioning.last_mut()
+    else {
+        panic!("missing driving clip")
+    };
+    frames.resize(161, image(7));
+    mask.resize(161, image(8));
+    let long = reserve(&long_request).unwrap().unwrap();
+    assert!(long.plan.layout().phases.len() > 1);
+    assert!(long.plan.layout().phases[1].history_frames > 0);
+    assert_eq!(
+        admit_video_fixture(
+            &generator,
+            &long,
+            &long_request,
+            &input,
+            "scail2_14b",
+            "animate_character",
+            false
+        ),
+        crate::video_admission::VideoAdmissionOutcome::default(),
+    );
+    let original = reservation.overlay.unwrap();
+    // Keep each pair valid but reorder two equal-sized character images and masks.
+    request.conditioning.swap(0, 2);
+    request.conditioning.swap(1, 3);
+    let reordered = reserve(&request).unwrap().unwrap().overlay.unwrap();
+    assert_ne!(original, reordered);
+    assert_eq!(
+        crate::video_admission::video_curve_overlay_for_test(Some(&original)),
+        crate::video_admission::video_curve_overlay_for_test(Some(&reordered))
+    );
+    let missing = request.conditioning.remove(1);
+    assert!(matches!(
+        reserve(&request),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    request.conditioning.insert(1, missing);
+
+    // A calibrated one-character contract reaches the ordinary ladder. The fixture substitutes
+    // only the loaded provider's source evidence and completion, so no weights are opened.
+    request.conditioning.drain(2..12);
+    let reservation = reserve(&request).unwrap().unwrap();
+    let plan = &reservation.plan;
+    let geometry = plan.geometry();
+    let generator = resident_video_fixture(input.engine_id);
+    let admit = |warm| {
+        admit_video_fixture(
+            &generator,
+            &reservation,
+            &request,
+            &input,
+            "scail2_14b",
+            "animate_character",
+            warm,
+        )
+    };
+    let cold = admit(false);
+    assert!(cold.refusal.is_none(), "{:?}", cold.refusal);
+    let warm = admit(true);
+    assert!(warm.refusal.is_none(), "{:?}", warm.refusal);
+    let mut context = warm
+        .context
+        .expect("the existing ladder selected a resident scope");
+    assert_eq!(
+        context.selection.strategy,
+        gen_core::MemoryStrategy::Resident
+    );
+    assert_eq!(context.geometry, geometry);
+    assert_eq!(
+        cold.context.unwrap().predicted_peak_bytes - context.predicted_peak_bytes,
+        1 << 30,
+        "warm admission credits exactly its attributable resident bytes"
+    );
+    run_prepared_video_generation(
+        &generator,
+        &mut request,
+        Some(&context),
+        Some((plan, &spec)),
+        &mut |_| {},
+    )
+    .unwrap();
+    {
+        let calls = generator.record.lock().unwrap();
+        assert_eq!(
+            (
+                calls.begin_calls,
+                calls.configure_calls,
+                calls.generate_calls
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            calls.phase_geometries.as_slice(),
+            &[(geometry, plan.layout().phases[0].latent_frames)]
+        );
+        assert_eq!(calls.finishes, [gen_core::MemoryRunOutcome::Complete]);
+    }
+
+    // Crossing a priced geometry, or replacing a same-size reference in the carrier, refuses
+    // before the provider's generation method. The same mutable scope owns failure cleanup.
+    context.geometry.frames -= 1;
+    assert!(run_prepared_video_generation(
+        &generator,
+        &mut request,
+        Some(&context),
+        Some((plan, &spec)),
+        &mut |_| {}
+    )
+    .is_err());
+    context.geometry = geometry;
+    let Conditioning::Reference { image, .. } = &mut request.conditioning[0] else {
+        panic!("lost character reference")
+    };
+    image.pixels[0] ^= 1;
+    assert!(run_prepared_video_generation(
+        &generator,
+        &mut request,
+        Some(&context),
+        Some((plan, &spec)),
+        &mut |_| {}
+    )
+    .is_err());
+    let calls = generator.record.lock().unwrap();
+    assert_eq!(
+        (
+            calls.begin_calls,
+            calls.configure_calls,
+            calls.generate_calls,
+            calls.finishes.len()
+        ),
+        (3, 3, 1, 3)
     );
 }
 
@@ -420,7 +770,7 @@ fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
     let replacement = overlay_for("scail2_14b", "replace_person", scail2(1))
         .unwrap()
         .expect("sealed SCAIL-2 carrier");
-    assert!(animation.contains(crate::video_admission::SCAIL2_CARRIER_RECEIPT_DOMAIN));
+    assert!(animation.contains("scail2-carrier-v1:"));
     assert_ne!(
         animation, replacement,
         "the two SCAIL-2 tasks must not share one admission identity"
@@ -981,6 +1331,7 @@ struct VideoLifecycleRecord {
     configure_calls: usize,
     generate_calls: usize,
     generated_memory: Vec<Option<gen_core::GenerationMemory>>,
+    phase_geometries: Vec<(gen_core::MemoryGeometry, u32)>,
     finishes: Vec<gen_core::MemoryRunOutcome>,
 }
 
@@ -1003,6 +1354,19 @@ impl gen_core::MemoryRequestScope for VideoLifecycleScope {
         } else {
             Ok(())
         }
+    }
+
+    fn enter_video_phase(
+        &mut self,
+        identity: &gen_core::render::RenderPhaseIdentity,
+        latent_frames: u32,
+    ) -> gen_core::Result<()> {
+        self.record
+            .lock()
+            .unwrap()
+            .phase_geometries
+            .push((identity.geometry, latent_frames));
+        Ok(())
     }
 
     fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
@@ -1043,6 +1407,7 @@ impl gen_core::MemoryRequestScope for VideoLifecycleScope {
 #[cfg(native_lane)]
 struct VideoLifecycleGenerator {
     descriptor: gen_core::ModelDescriptor,
+    contract: Option<gen_core::MemoryProviderContract>,
     behavior: VideoLifecycleBehavior,
     record: std::sync::Arc<std::sync::Mutex<VideoLifecycleRecord>>,
 }
@@ -1062,6 +1427,7 @@ impl VideoLifecycleGenerator {
                 encoder_contract: None,
                 denoiser_output_latent_space: None,
             },
+            contract: None,
             behavior,
             record: Default::default(),
         }
@@ -1072,6 +1438,32 @@ impl VideoLifecycleGenerator {
 impl Generator for VideoLifecycleGenerator {
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         &self.descriptor
+    }
+
+    fn memory_strategy_contract(&self) -> Option<&gen_core::MemoryProviderContract> {
+        self.contract.as_ref()
+    }
+
+    fn video_memory_evidence_tier(
+        &self,
+        _plan: &gen_core::VideoRenderPlan,
+        _request: &GenerationRequest,
+    ) -> gen_core::Result<Option<gen_core::MemoryNumericTier>> {
+        Ok(self.contract.as_ref().map(|_| {
+            video_lifecycle_context(gen_core::MemoryStrategy::Resident)
+                .selection
+                .tier
+        }))
+    }
+
+    fn project_video_memory_context(
+        &self,
+        plan: &gen_core::VideoRenderPlan,
+        _request: &GenerationRequest,
+        context: &mut gen_core::MemoryRunContext,
+    ) -> gen_core::Result<bool> {
+        assert_eq!(context.geometry, plan.geometry());
+        Ok(self.contract.is_some())
     }
 
     fn validate(&self, _request: &GenerationRequest) -> gen_core::Result<()> {
@@ -1101,6 +1493,22 @@ impl Generator for VideoLifecycleGenerator {
             record: self.record.clone(),
             configure_error: self.behavior == VideoLifecycleBehavior::ConfigureError,
         })))
+    }
+
+    fn generate_video_planned_with_execution_report(
+        &self,
+        request: &GenerationRequest,
+        plan: &gen_core::VideoRenderPlan,
+        scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+        let scope =
+            scope.expect("the worker forwards the configured scope to the planned provider");
+        for phase in &plan.layout().phases {
+            scope.enter_video_phase(&phase.identity, phase.latent_frames)?;
+            scope.leave_phase(gen_core::MemoryPhase::Denoise)?;
+        }
+        self.generate_with_execution_report(request, progress)
     }
 
     fn generate(
@@ -1330,8 +1738,9 @@ fn production_admission_handoff_drives_provider_safety_and_lifecycle() {
         decode_overlap: Some(32),
         ..Default::default()
     };
-    apply_video_admission_outcome(
-        &mut input,
+    let mut request = take_video_request(&mut input, &CancelFlag::new());
+    let context = apply_video_admission_outcome(
+        &mut request,
         crate::video_admission::VideoAdmissionOutcome {
             memory: Some(selected_memory),
             context: Some(video_lifecycle_context(
@@ -1341,8 +1750,14 @@ fn production_admission_handoff_drives_provider_safety_and_lifecycle() {
         },
     )
     .expect("selected admission reaches the loaded input");
-    run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
-        .expect("production handoff generates");
+    run_prepared_video_generation(
+        &generator,
+        &mut request,
+        context.as_ref(),
+        None,
+        &mut |_| {},
+    )
+    .expect("production handoff generates");
     let record = generator.record.lock().unwrap();
     assert_eq!(record.safety_checks, 1);
     assert_eq!(record.begin_calls, 1);
@@ -1430,7 +1845,7 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         "the uncached Candle load may not forge a zero-byte provider attribution"
     );
     assert!(
-        funnel.contains("apply_video_admission_outcome(&mut input, outcome)?;"),
+        funnel.contains("apply_video_admission_outcome(&mut request, outcome)?;"),
         "the production callback must pass both selected memory and lifecycle context through the \
          same handoff exercised by production_admission_handoff_drives_provider_safety_and_lifecycle"
     );
@@ -4586,6 +5001,20 @@ impl Generator for ProbeGenerator {
 
     fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
         self.adapter_reports.lock().unwrap().clone()
+    }
+
+    fn generate_video_planned_with_execution_report(
+        &self,
+        request: &GenerationRequest,
+        _plan: &gen_core::VideoRenderPlan,
+        scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+        assert!(
+            scope.is_none(),
+            "this recording factory has no memory contract"
+        );
+        self.generate_with_execution_report(request, progress)
     }
 
     fn generate(

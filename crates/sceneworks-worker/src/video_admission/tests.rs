@@ -872,6 +872,7 @@ fn inputs<'a>(
     headroom_bytes: u64,
 ) -> VideoAdmissionInputs<'a> {
     VideoAdmissionInputs {
+        planned: None,
         native_quant_request: None,
         model_id: "ltx_2_3",
         model_family: "ltx-video",
