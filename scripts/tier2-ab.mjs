@@ -891,6 +891,33 @@ export function scailCudaMemoryViolation(sample, beforeRequest = false) {
   return null;
 }
 
+// SCAIL runs its CUDA model in this exact worker. The ChildProcess handle is
+// owned by startWorker; a PID lookup could select a different process at exit.
+export function scailCudaSampler(read, worker, record, controller, physicalGpu) {
+  return async (beforeRequest = false) => {
+    let sample, violation;
+    try {
+      sample = await read();
+      violation = scailCudaMemoryViolation(sample, beforeRequest);
+    } catch (error) {
+      violation = `SCAIL telemetry unavailable: ${error.message}`;
+    }
+    if (!violation) return sample;
+    const stop = { pid: worker.pid, usedBytes: sample?.usedBytes ?? null, freeBytes: sample?.freeBytes ?? null };
+    if (!record.watchdog.gpuStop) {
+      record.watchdog.gpuStop = stop;
+      record.watchdog.tripped = `physical GPU${physicalGpu} ${violation}`;
+      try { stop.killIssued = processState(worker).alive && worker.kill("SIGKILL"); }
+      catch (error) { stop.killIssued = false; stop.error = error.message; }
+    }
+    const error = new Error(`watchdog: ${record.watchdog.tripped}`);
+    record.error = error.message;
+    record.status = "error";
+    controller.abort(error);
+    throw error;
+  };
+}
+
 // Every GPU's identity from nvidia-smi CSV (index, bus id) joined with the driver XML (display,
 // memory, utilization and processes with C/G/C+G type). On Windows WDDM per-process memory is N/A.
 export function gpuInventory(csv, xml) {
@@ -1350,18 +1377,13 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         record.watchdog.gpuFreeReserveBytes = SCAIL_CUDA_RESERVE;
       }
       const smi = nvidiaSmiPath(env);
+      const readCard = () => sampleGpu(smi, cfg.physicalGpu);
+      const readGpu = route.scailCandidate ? scailCudaSampler(readCard, worker, record, controller, cfg.physicalGpu) : readCard;
       const baseline = [];
       for (let i = 0; i < 5; i++) {
-        const sample = await sampleGpu(smi, cfg.physicalGpu);
+        const sample = await readGpu(i === 4);
         baseline.push(sample.usedBytes);
-        if (route.scailCandidate) {
-          const violation = scailCudaMemoryViolation(sample, i === 4);
-          memory.preRequestGpuFreeBytes = sample.freeBytes;
-          if (violation) {
-            watchdog(`physical GPU${cfg.physicalGpu} ${violation}`);
-            alive();
-          }
-        }
+        if (route.scailCandidate) memory.preRequestGpuFreeBytes = sample.freeBytes;
         if (i < 4 || !route.scailCandidate) await delay(200);
       }
       memory.method = `nvidia-smi memory.used on physical GPU${cfg.physicalGpu} sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s`;
@@ -1371,15 +1393,11 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         record.timing.sharedGpu = env.TIER2_AB_GPU_POLICY === "shared-display"
           ? "times taken on the host's display GPU, alongside display work" : "times taken on the shared compute GPU";
       }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi, cfg.physicalGpu); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
-        if (route.scailCandidate) {
-          const violation = scailCudaMemoryViolation(s);
-          if (Number.isSafeInteger(s.freeBytes)) memory.minGpuFreeBytes = Math.min(memory.minGpuFreeBytes ?? s.freeBytes, s.freeBytes);
-          if (violation) watchdog(`physical GPU${cfg.physicalGpu} ${violation}`);
-        }
-      } catch (error) {
+      samplers.push((async () => { while (sampling) { try { const s = await readGpu(); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
+        if (route.scailCandidate) memory.minGpuFreeBytes = Math.min(memory.minGpuFreeBytes ?? s.freeBytes, s.freeBytes);
+      } catch {
         memory.errors++;
-        if (route.scailCandidate) watchdog(`physical GPU${cfg.physicalGpu} SCAIL telemetry unavailable: ${error.message}`);
+        if (record.watchdog.gpuStop) return;
       } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
@@ -1488,6 +1506,11 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   } finally {
     clearTimeout(timer); signal.removeEventListener("abort", onAbort);
     sampling = false; await Promise.all(samplers);
+    // A final in-flight physical read can finish after a typed refusal.
+    if (record.watchdog.gpuStop) {
+      record.status = "error";
+      record.error = `watchdog: ${record.watchdog.tripped}`;
+    }
     if (record.status !== "completed" && record.status !== "refused" && apiUrl) {
       // What the API serves right now about this job and the owned worker (direct requests: the
       // owned-endpoint gate refuses everything once the run has been aborted).
@@ -1502,7 +1525,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     if (accepted?.id && record.status !== "completed" && record.status !== "refused" && apiUrl) {
       record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
       // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
-      for (let i = 0; i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
+      for (let i = 0; !record.watchdog.gpuStop && i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
     }
     record.cleanup = await teardown(children);
     endpoint?.close();

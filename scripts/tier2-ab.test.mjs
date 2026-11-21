@@ -6,12 +6,13 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { deflateSync } from "node:zlib";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  cudaLeaseMinFreeMiB, scailCudaMemoryViolation, childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  cudaLeaseMinFreeMiB, scailCudaMemoryViolation, scailCudaSampler, childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe, wanExecutionFacts,
 } from "./tier2-ab.mjs";
@@ -72,6 +73,49 @@ test("CUDA SCAIL leases and requests preserve the child cap and physical free re
   assert.match(scailCudaMemoryViolation({ usedBytes: 84 * gib + 1, freeBytes: 7 * gib }), /84 GiB/);
   assert.match(scailCudaMemoryViolation({ usedBytes: 50 * gib, freeBytes: 6 * gib - 1 }), /6 GiB/);
   assert.match(scailCudaMemoryViolation({ usedBytes: 50 * gib, freeBytes: null }), /measure free/);
+});
+
+test("a final SCAIL CUDA guard breach stops the owned worker before cooperative cleanup", { timeout: 5000 }, async (t) => {
+  const child = spawn(process.execPath, ["-e", 'process.on("SIGTERM", () => {}); process.stdin.resume(); process.send("ready"); setInterval(() => {}, 60000);'],
+    { stdio: ["pipe", "ignore", "ignore", "ipc"] });
+  t.after(() => { if (processState(child).alive) child.kill("SIGKILL"); });
+  const exit = once(child, "exit");
+  await once(child, "message");
+  const finalRead = Promise.withResolvers();
+  const controller = new AbortController(), record = { status: "running", watchdog: {} };
+  const read = scailCudaSampler(() => finalRead.promise, child, record, controller, "0");
+  const pending = read();
+  record.status = "refused"; // The typed job result returned while nvidia-smi was still running.
+  finalRead.resolve({ usedBytes: 50 * 1024 ** 3, freeBytes: 5 * 1024 ** 3 });
+  await assert.rejects(pending, /6 GiB/);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(record.status, "error");
+  assert.equal(record.watchdog.gpuStop.pid, child.pid);
+  assert.equal(record.watchdog.gpuStop.killIssued, true);
+  await exit; // No cancellation POST, sentinel exit or normal 60-second teardown grace.
+  assert.equal(processState(child).alive, false);
+});
+
+test("SCAIL GPU telemetry failure and insufficient final baseline stop before submission", async () => {
+  let kills = 0;
+  const worker = { label: "worker", pid: 42, exitCode: null, signalCode: null,
+    kill(signal) { assert.equal(signal, "SIGKILL"); kills++; return true; } };
+  const gib = 1024 ** 3;
+  const baseline = { usedBytes: 5 * gib, freeBytes: 90 * gib };
+  for (const [read, expected] of [
+    [() => Promise.reject(new Error("device query failed")), /telemetry unavailable/],
+    [() => ({ ...baseline, freeBytes: baseline.freeBytes - 1 }), /90 GiB/],
+    [() => ({ ...baseline, usedBytes: 84 * gib + 1 }), /84 GiB/],
+  ]) {
+    const record = { watchdog: {}, status: "running" }, controller = new AbortController();
+    assert.deepEqual(await scailCudaSampler(() => baseline, worker, record, controller, "0")(true), baseline);
+    const before = kills, fault = scailCudaSampler(read, worker, record, controller, "0");
+    await assert.rejects(fault(true), expected);
+    await assert.rejects(fault(true), expected);
+    assert.equal(kills, before + 1);
+    assert.equal(record.status, "error");
+    assert.equal(controller.signal.aborted, true);
+  }
 });
 
 test("default routes send one fixed request per route and the same JSON to both sides", () => {
