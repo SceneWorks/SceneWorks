@@ -282,6 +282,7 @@ async fn worker_source_challenges_require_a_distinct_worker_key_and_route_scope(
             files: vec![file],
             expires_at: Some(Instant::now() + Duration::from_secs(30)),
             proved_worker_ids: BTreeSet::new(),
+            answered_worker_ids: BTreeSet::new(),
             allowed_worker_ids: BTreeSet::from(["proof-worker".to_owned()]),
         },
     );
@@ -335,6 +336,11 @@ async fn worker_source_challenges_require_a_distinct_worker_key_and_route_scope(
     assert!(state.portable_source_challenges.lock()["probe-1"]
         .proved_worker_ids
         .is_empty());
+    // A wrong ledger proves nothing, but it does end this worker's attempt: an admission waiting
+    // on the challenge stops once every asked worker has answered.
+    assert!(state.portable_source_challenges.lock()["probe-1"]
+        .answered_worker_ids
+        .contains("proof-worker"));
     assert_eq!(
         request_with_headers(
             app.clone(),

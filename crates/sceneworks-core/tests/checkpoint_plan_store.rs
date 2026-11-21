@@ -715,6 +715,54 @@ fn same_size_replacement_inside_verification_window_refuses_without_persistence(
     assert!(!resolved.layers[0].rehashed);
 }
 
+/// `resolve_hashing_only` resolves a trusted layer without reading it, and refuses, without reading
+/// a byte or refreshing the stamp, a layer that would need a hash the caller does not permit. A
+/// permitted hash then refreshes the stamp exactly as `resolve` does.
+#[test]
+fn resolve_hashing_only_never_reads_a_layer_it_may_not_hash() {
+    let fx = fixture("hashing-only");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x3c);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let settled_store = settled(&fx.store);
+    let compiled = settled_store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    let never = |_: &Path| false;
+
+    // Trusted stamp: resolves with no hash, even though no hash is permitted.
+    let trusted = settled_store
+        .resolve_hashing_only(&compiled.checkpoint_id, &never)
+        .unwrap();
+    assert!(!trusted.layers[0].rehashed);
+
+    // A new entry with the same bytes (a re-copy) moves the stamp. Not permitted: refused, nothing
+    // read, nothing refreshed — a second refusal proves the stamp was not quietly re-blessed.
+    let bytes = fs::read(&file).unwrap();
+    let staging = fx.library_dir.join("kreamania.safetensors.staging");
+    fs::write(&staging, &bytes).unwrap();
+    fs::rename(&staging, &file).unwrap();
+    for _ in 0..2 {
+        assert!(settled_store
+            .resolve_hashing_only(&compiled.checkpoint_id, &never)
+            .is_err());
+    }
+
+    // Permitted for exactly this file: hashed once, stamp refreshed, then trusted again.
+    let only_this = |path: &Path| path == file;
+    let rehashed = settled_store
+        .resolve_hashing_only(&compiled.checkpoint_id, &only_this)
+        .unwrap();
+    assert!(rehashed.layers[0].rehashed);
+    let again = settled_store
+        .resolve_hashing_only(&compiled.checkpoint_id, &never)
+        .unwrap();
+    assert!(
+        !again.layers[0].rehashed,
+        "the permitted hash refreshed the stamp"
+    );
+}
+
 #[test]
 fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
     let fx = fixture("resolve");
