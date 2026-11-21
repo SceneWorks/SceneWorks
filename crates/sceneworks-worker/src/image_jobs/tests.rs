@@ -480,6 +480,8 @@ use super::krea_imported::resolve_krea_imported_control_overlay;
 #[cfg(native_lane)]
 use super::krea_imported::resolve_krea_imported_edit_conditioning;
 #[cfg(target_os = "macos")]
+use super::krea_imported::KreaImportedItem;
+#[cfg(target_os = "macos")]
 use super::krea_imported::PreparedKreaImportedControlSources;
 #[cfg(native_lane)]
 use super::krea_imported::PreparedKreaImportedSources;
@@ -495,12 +497,12 @@ use super::krea_imported::KREA_IMPORTED_ENGINE;
 use super::krea_multiphase::build_generation_phases;
 #[cfg(native_lane)]
 use super::krea_multiphase::ensure_multiphase_job_shape;
-#[cfg(target_os = "macos")]
-use super::krea_multiphase::krea_multiphase_generate_one;
 #[cfg(native_lane)]
 use super::krea_multiphase::multiphase_load_quant;
 #[cfg(target_os = "macos")]
 use super::krea_multiphase::parse_multiphase_specs;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::prepare_multiphase_work;
 #[cfg(target_os = "macos")]
 use super::krea_multiphase::request_has_multiphase;
 #[cfg(target_os = "macos")]
@@ -1666,6 +1668,7 @@ struct HiresProbeGenerator {
     /// DECLARED geometry of every pass against the request that pass actually sent — the exact
     /// agreement the backend request scopes enforce.
     contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
+    planned_seeds: std::sync::Mutex<Vec<u64>>,
 }
 
 #[cfg(native_lane)]
@@ -1728,7 +1731,19 @@ impl HiresProbeGenerator {
             },
             requests: Default::default(),
             contexts: Default::default(),
+            planned_seeds: Default::default(),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn krea_raw() -> Self {
+        let mut generator = Self::new();
+        generator.descriptor = crate::inference_runtime::media()
+            .generators()
+            .map(|entry| (entry.descriptor)())
+            .find(|descriptor| descriptor.id == "krea_2_raw")
+            .expect("the linked runtime includes Krea Raw");
+        generator
     }
 }
 
@@ -1783,6 +1798,23 @@ impl Generator for HiresProbeGenerator {
             height: req.height,
             pixels: vec![pass; (req.width * req.height * 3) as usize],
         }]))
+    }
+
+    fn generate_planned(
+        &self,
+        request: &GenerationRequest,
+        plan: &gen_core::RenderPlan,
+        scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::GenerationReport> {
+        assert!(
+            scope.is_some(),
+            "the same admitted scope must reach the runner"
+        );
+        plan.check_request(self.descriptor(), request)?;
+        self.planned_seeds.lock().unwrap().push(plan.base_seed());
+        self.generate(request, progress)
+            .map(gen_core::GenerationReport::from_output)
     }
 }
 
@@ -2292,7 +2324,8 @@ fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() 
 /// Production-seam regression for the normal imported-Krea lane. This invokes the exact driver
 /// installed in `start_cached_gen_stream_with_request_state`, with only the heavyweight live-budget
 /// evaluator substituted. It proves that every sequential t2i/img2img/edit image is evaluated and
-/// that every resulting provider pass opens the admitted request scope, including both hires passes.
+/// that every provider pass opens the admitted request scope, including both hires passes.
+/// Phased requests must deliver both their compiled seed and the admitted scope to the runner.
 #[cfg(target_os = "macos")]
 #[test]
 fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
@@ -2324,6 +2357,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
         mode: &'static str,
         conditioning: Vec<Conditioning>,
         hires_fix: Option<HiresFixPlan>,
+        phase_steps: Option<u32>,
         item_count: usize,
         expected_pass_references: &'static [u32],
     }
@@ -2333,6 +2367,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             mode: "image_generation",
             conditioning: vec![],
             hires_fix: None,
+            phase_steps: None,
             // Two sequential outputs prove that the production driver evaluates each request and
             // advances only its cache identity from Cold to Warm.
             item_count: 2,
@@ -2346,6 +2381,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 strength: Some(0.55),
             }],
             hires_fix: None,
+            phase_steps: None,
             item_count: 1,
             expected_pass_references: &[1],
         },
@@ -2356,6 +2392,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 images: vec![image(1), image(2)],
             }],
             hires_fix: None,
+            phase_steps: None,
             item_count: 1,
             expected_pass_references: &[2],
         },
@@ -2366,14 +2403,28 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 images: vec![image(1), image(2)],
             }],
             hires_fix: Some(hires),
+            phase_steps: None,
             item_count: 1,
             // First pass retains the edit sources; the refinement consumes its generated image.
             expected_pass_references: &[2, 1],
         },
+        Case {
+            name: "multi-phase",
+            mode: "image_generation",
+            conditioning: vec![],
+            hires_fix: None,
+            phase_steps: Some(4),
+            item_count: 2,
+            expected_pass_references: &[0, 0],
+        },
     ];
 
     for case in cases {
-        let generator = HiresProbeGenerator::new();
+        let generator = if case.phase_steps.is_some() {
+            HiresProbeGenerator::krea_raw()
+        } else {
+            HiresProbeGenerator::new()
+        };
         let mut req = request(json!({
             "projectId": "p",
             "model": "community_krea",
@@ -2384,24 +2435,73 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             "modelManifestEntry": { "family": "krea_2" }
         }));
         req.mode = case.mode.to_owned();
-        let memory_inputs =
-            krea_imported_memory_inputs(&req, &case.conditioning, case.hires_fix, 1);
+        if case.phase_steps.is_some() {
+            req.width = 512;
+            req.height = 512;
+        }
+        let memory_inputs = krea_imported_memory_inputs(
+            &req,
+            &case.conditioning,
+            case.hires_fix,
+            1,
+            case.phase_steps,
+        );
+        let spec = LoadSpec::new(WeightsSource::File(PathBuf::from(
+            "/nonexistent/imported-krea-test.safetensors",
+        )))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir("/nonexistent/krea-test-base".into()),
+        );
+        let engine_id = if case.phase_steps.is_some() {
+            "krea_2_raw"
+        } else if case.mode == "edit_image" {
+            "krea_2_turbo_edit"
+        } else {
+            "krea_2_turbo"
+        };
         let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
-            if case.mode == "edit_image" {
-                "krea_2_turbo_edit"
-            } else {
-                "krea_2_turbo"
-            },
+            engine_id,
             &req.model,
-            &LoadSpec::new(WeightsSource::File(PathBuf::from(
-                "/nonexistent/imported-krea-test.safetensors",
-            ))),
+            &spec,
             Some(&req.model_manifest_entry),
             None,
         );
         let work = (0..case.item_count)
             .map(|index| (42 + index as i64, format!("{} prompt {index}", case.name)))
             .collect();
+        let work = if let Some(steps) = case.phase_steps {
+            prepare_multiphase_work(
+                engine_id,
+                &spec,
+                GenerationRequest {
+                    width: req.width,
+                    height: req.height,
+                    phases: Some(vec![
+                        gen_core::GenerationPhase {
+                            steps: 1,
+                            guidance: Some(0.0),
+                            adapters: vec![],
+                        },
+                        gen_core::GenerationPhase {
+                            steps: steps - 1,
+                            guidance: Some(3.0),
+                            adapters: vec![],
+                        },
+                    ]),
+                    ..Default::default()
+                },
+                work,
+            )
+            .expect("compile imported Krea phases without loading its file")
+            .into_iter()
+            .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
+            .collect()
+        } else {
+            work.into_iter()
+                .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
+                .collect()
+        };
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
         let mut evaluated_states = Vec::new();
 
@@ -2411,7 +2511,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 &memory_plan,
                 &memory_inputs,
                 gen_core::MemoryCacheState::Cold,
-                gen_core::OffloadPolicy::Resident,
+                crate::generator_cache::ExecutionPolicy::from_load_spec(&spec),
                 crate::execution_planner::WarmPolicyProposal::inert("krea_2_turbo"),
                 17,
                 work,
@@ -2420,8 +2520,6 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 1,
                 gen_core::GenerationRequest::default(),
                 case.conditioning,
-                None,
-                None,
                 Some(1.2),
                 case.hires_fix,
                 tx,
@@ -2455,6 +2553,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                     context.geometry.width = inputs.width;
                     context.geometry.height = inputs.height;
                     context.geometry.reference_count = inputs.reference_count;
+                    context.has_phases = inputs.has_phases;
                     context.cache_state = cache_state;
                     Ok(crate::mlx_fit_gate::MlxRequestEvaluation {
                         memory: gen_core::GenerationMemory::default(),
@@ -2478,6 +2577,15 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             evaluated_states, expected_states,
             "{} must evaluate every sequential image",
             case.name
+        );
+        let expected_planned_seeds: &[u64] = if case.phase_steps.is_some() {
+            &[42, 43]
+        } else {
+            &[]
+        };
+        assert_eq!(
+            *generator.planned_seeds.lock().unwrap(),
+            expected_planned_seeds
         );
         let requests = generator.requests.lock().unwrap();
         let contexts = generator.contexts.lock().unwrap();
@@ -2520,6 +2628,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 case.name,
                 pass + 1
             );
+            assert_eq!(context.has_phases, request.phases.is_some());
             assert!(
                 request.memory.is_some(),
                 "{} pass {} must carry admitted memory",
@@ -2623,30 +2732,39 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         .is_some_and(|memory| memory.stream_transformer_blocks));
     drop(edit_request);
 
-    let phase_generator = HiresProbeGenerator::new();
-    let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
-    krea_multiphase_generate_one(
-        &phase_generator,
-        &sampling_controls,
-        "phases",
-        None,
-        4,
-        4,
-        9,
-        None,
-        None,
-        vec![gen_core::GenerationPhase {
-            steps: 2,
-            guidance: None,
-            adapters: vec![],
-        }],
-        Some(phase.memory),
-        Some(&phase.context),
-        gen_core::PreviewSink::default(),
-        &CancelFlag::new(),
-        &mut |_| {},
+    let phase_generator = HiresProbeGenerator::krea_raw();
+    let mut phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
+    phase.context.geometry.width = 512;
+    phase.context.geometry.height = 512;
+    let (_, render) = prepare_multiphase_work(
+        "krea_2_raw",
+        &LoadSpec::new(WeightsSource::Dir("krea-test".into())),
+        GenerationRequest {
+            width: 512,
+            height: 512,
+            phases: Some(vec![gen_core::GenerationPhase {
+                steps: 2,
+                guidance: None,
+                adapters: vec![],
+            }]),
+            ..sampling_controls
+        },
+        vec![(9, "phases".into())],
     )
+    .unwrap()
+    .pop()
     .unwrap();
+    render
+        .generate(
+            &phase_generator,
+            Some(phase.memory),
+            Some(&phase.context),
+            gen_core::PreviewSink::default(),
+            &CancelFlag::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(*phase_generator.planned_seeds.lock().unwrap(), [9]);
     assert_eq!(
         phase_generator.contexts.lock().unwrap().as_slice(),
         &[phase.context]
@@ -2673,12 +2791,14 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
         "count": 3,
         "modelManifestEntry": { "family": "krea_2" }
     }));
-    let plain = krea_imported_memory_inputs(&req, &[], None, 0);
+    let plain = krea_imported_memory_inputs(&req, &[], None, 0, None);
     assert_eq!(
         (plain.width, plain.height, plain.reference_count),
         (512, 768, 0)
     );
     assert_eq!(plain.overlay, None);
+    assert!(!plain.has_phases);
+    assert!(krea_imported_memory_inputs(&req, &[], None, 0, Some(6)).has_phases);
 
     let reference = Conditioning::Reference {
         image: Image {
@@ -2688,7 +2808,8 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
         },
         strength: Some(0.5),
     };
-    let img2img = krea_imported_memory_inputs(&req, std::slice::from_ref(&reference), None, 1);
+    let img2img =
+        krea_imported_memory_inputs(&req, std::slice::from_ref(&reference), None, 1, None);
     assert_eq!(img2img.reference_count, 1);
     assert_eq!(img2img.overlay.as_deref(), Some("references:1+adapters:1"));
 
@@ -2711,6 +2832,7 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
         }],
         None,
         2,
+        None,
     );
     assert_eq!(edit.mode, "edit_image");
     assert_eq!(edit.reference_count, 2);
@@ -2741,6 +2863,7 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
             provider_reference_strength: 0.4,
         }),
         2,
+        None,
     );
     assert_eq!(
         (hires.width, hires.height, hires.reference_count),
@@ -2761,6 +2884,7 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
             provider_reference_strength: 0.4,
         }),
         0,
+        None,
     );
     assert_eq!(t2i_hires.reference_count, 1);
     assert!(t2i_hires.has_reference);
@@ -23487,6 +23611,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
+            "start_cached_gen_stream_after_cold_admission_with_placement(",
             "start_cached_gen_stream_with_request_state_using(",
             "start_cached_gen_stream_with_request_state_using_owned(",
             "start_cached_gen_stream_with_request_state_using_prepared(",
@@ -25958,7 +26083,7 @@ fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
 
     // The legacy lane's inputs for a plain txt2img job: no conditioning, no hires, no adapters —
     // which is the only shape `prepare_checkpoint_plan_sources` lets onto this route.
-    let legacy = krea_imported_memory_inputs(&request, &[], None, 0);
+    let legacy = krea_imported_memory_inputs(&request, &[], None, 0, None);
     let plan = checkpoint_plan_memory_inputs(
         &request,
         "krea_2_raw",
@@ -28699,7 +28824,7 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
         "legacy_krea_imported",
         legacy_spec,
         legacy_request.clone(),
-        krea_imported_memory_inputs(&legacy_request, &[], None, 0),
+        krea_imported_memory_inputs(&legacy_request, &[], None, 0, None),
     )
     .await;
     let (plan_image, plan_sha) = render(

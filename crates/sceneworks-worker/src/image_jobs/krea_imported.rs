@@ -37,7 +37,9 @@ use super::krea_control::KREA_CONTROL_ENGINE_ID;
 use super::krea_control_candle;
 use super::krea_multiphase::build_generation_phases;
 use super::krea_multiphase::ensure_multiphase_job_shape;
+use super::krea_multiphase::prepare_multiphase_work;
 use super::krea_multiphase::request_has_multiphase;
+use super::krea_multiphase::PreparedKreaMultiphase;
 use super::load_spec::attach_selected_decoder_unprepared;
 use super::load_spec::prepare_manifest_text_encoder_with_file_pins;
 use super::load_spec::selected_decoder_component_pin;
@@ -57,7 +59,7 @@ use super::sampling::resolved_option_or_manifest_u32;
 use super::stream::drive_gen_items;
 use super::stream::drive_gen_items_scored;
 #[cfg(not(target_os = "macos"))]
-use super::stream::start_cached_gen_stream_after_cold_admission;
+use super::stream::start_cached_gen_stream_after_cold_admission_with_placement;
 #[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state;
 #[cfg(not(target_os = "macos"))]
@@ -1795,6 +1797,7 @@ pub(super) fn krea_imported_memory_inputs(
     conditioning: &[Conditioning],
     hires_fix: Option<HiresFixPlan>,
     adapter_count: usize,
+    phase_steps: Option<u32>,
 ) -> crate::mlx_fit_gate::MlxRequestInputs {
     let request_reference_count = krea_imported_reference_count(conditioning);
     let reference_count =
@@ -1812,8 +1815,9 @@ pub(super) fn krea_imported_memory_inputs(
     if adapter_count > 0 {
         overlays.push(format!("adapters:{adapter_count}"));
     }
-    let base_steps =
-        resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100);
+    let base_steps = phase_steps.unwrap_or_else(|| {
+        resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100)
+    });
     crate::mlx_fit_gate::MlxRequestInputs {
         native_batch: 1,
         width,
@@ -1825,7 +1829,7 @@ pub(super) fn krea_imported_memory_inputs(
         has_reference: reference_count > 0,
         reference_count,
         use_pid: false,
-        has_phases: false,
+        has_phases: phase_steps.is_some(),
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
@@ -1905,64 +1909,9 @@ fn krea_imported_generate_pass(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn krea_imported_generate_multiphase(
-    generator: &dyn Generator,
-    prompt: &str,
-    negative_prompt: Option<String>,
-    width: u32,
-    height: u32,
-    seed: i64,
-    phases: Vec<gen_core::GenerationPhase>,
-    sampling: &GenerationRequest,
-    text_style_gain: Option<f32>,
-    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
-    preview: gen_core::PreviewSink,
-    cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
-    let mut request = GenerationRequest {
-        prompt: prompt.to_owned(),
-        negative_prompt,
-        width,
-        height,
-        count: 1,
-        seed: Some(seed as u64),
-        phases: Some(phases),
-        sampler: sampling.sampler.clone(),
-        scheduler: sampling.scheduler.clone(),
-        scheduler_shift: sampling.scheduler_shift,
-        guidance: sampling.guidance,
-        pag: sampling.pag.clone(),
-        text_style_gain,
-        memory: memory_evaluation.map(|evaluation| evaluation.memory),
-        preview,
-        cancel: cancel.clone(),
-        ..Default::default()
-    };
-    let report = crate::memory_strategy::generate_with_scope_report(
-        generator,
-        &mut request,
-        memory_evaluation.map(|evaluation| &evaluation.context),
-        on_progress,
-    )
-    .map_err(|error| {
-        crate::generation_error("Krea 2 imported multi-phase generation failed", error)
-    })?;
-    let pag = report.pag;
-    match report.output {
-        Some(GenerationOutput::Images(mut images)) => {
-            let image = images.pop().ok_or_else(|| {
-                WorkerError::Engine(
-                    "Krea 2 imported multi-phase request produced no image".to_owned(),
-                )
-            })?;
-            Ok((image.width, image.height, image.pixels, pag))
-        }
-        _ => Err(WorkerError::Engine(
-            "Krea 2 imported multi-phase request returned non-image output".to_owned(),
-        )),
-    }
+pub(super) enum KreaImportedItem {
+    Ordinary(String),
+    Multiphase(Box<PreparedKreaMultiphase>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2105,17 +2054,15 @@ pub(super) fn drive_krea_imported_mlx_items<E>(
     memory_plan: &crate::mlx_fit_gate::MlxRequestPlan,
     memory_inputs: &crate::mlx_fit_gate::MlxRequestInputs,
     initial_cache_state: gen_core::MemoryCacheState,
-    loaded_offload_policy: gen_core::OffloadPolicy,
+    loaded_policy: crate::generator_cache::ExecutionPolicy,
     warm_policy: crate::execution_planner::WarmPolicyProposal,
     external_committed_bytes: u64,
-    work: Vec<(i64, String)>,
+    work: Vec<(i64, KreaImportedItem)>,
     width: u32,
     height: u32,
     steps: u32,
     sampling: GenerationRequest,
     conditioning: Vec<Conditioning>,
-    negative_prompt: Option<String>,
-    phases: Option<Vec<gen_core::GenerationPhase>>,
     text_style_gain: Option<f32>,
     hires_fix: Option<HiresFixPlan>,
     tx: tokio::sync::mpsc::Sender<GenEvent>,
@@ -2141,7 +2088,7 @@ where
     drive_gen_items(
         tx,
         work,
-        move |index, (seed, prompt), preview, on_progress| {
+        move |index, (seed, item), preview, on_progress| {
             if cancel.is_cancelled() {
                 return Ok(None);
             }
@@ -2150,7 +2097,7 @@ where
                 memory_plan,
                 memory_inputs,
                 cache_state,
-                loaded_offload_policy,
+                loaded_policy.offload_policy,
                 warm_policy.take(),
                 external_committed_bytes,
             )?;
@@ -2158,24 +2105,18 @@ where
             let _request_memory_limit = memory_evaluation
                 .process_limit_bytes
                 .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-            let generated = if let Some(phases) = phases.clone() {
-                krea_imported_generate_multiphase(
-                    generator,
-                    &prompt,
-                    negative_prompt.clone(),
-                    width,
-                    height,
-                    seed,
-                    phases,
-                    &sampling,
-                    text_style_gain,
-                    Some(&memory_evaluation),
-                    preview,
-                    &cancel,
-                    on_progress,
-                )
-            } else {
-                krea_imported_generate_one(
+            let generated = match item {
+                KreaImportedItem::Multiphase(render) => {
+                    render.with_loaded_placement(loaded_policy).generate(
+                        generator,
+                        Some(memory_evaluation.memory),
+                        Some(&memory_evaluation.context),
+                        preview,
+                        &cancel,
+                        on_progress,
+                    )
+                }
+                KreaImportedItem::Ordinary(prompt) => krea_imported_generate_one(
                     generator,
                     &prompt,
                     width,
@@ -2190,7 +2131,7 @@ where
                     preview,
                     &cancel,
                     on_progress,
-                )
+                ),
             };
             let (out_width, out_height, pixels, pag) = match generated {
                 Ok(image) => image,
@@ -2398,11 +2339,38 @@ pub(super) async fn generate_krea_imported_stream(
         None,
     )?;
     #[cfg(target_os = "macos")]
-    let memory_inputs =
-        krea_imported_memory_inputs(request, &conditioning, hires_fix, adapter_count);
+    let memory_inputs = krea_imported_memory_inputs(
+        request,
+        &conditioning,
+        hires_fix,
+        adapter_count,
+        phases.as_ref().map(|_| steps),
+    );
 
     let mut sampling = super::sampling::explicit_sampling_request(request);
     sampling.pag = resolved_pag;
+    let work = if let Some(phases) = phases {
+        prepare_multiphase_work(
+            engine_id,
+            &spec,
+            GenerationRequest {
+                negative_prompt,
+                width,
+                height,
+                text_style_gain,
+                phases: Some(phases),
+                ..sampling.clone()
+            },
+            work,
+        )?
+        .into_iter()
+        .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
+        .collect()
+    } else {
+        work.into_iter()
+            .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
+            .collect()
+    };
     #[cfg(target_os = "macos")]
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
@@ -2422,7 +2390,7 @@ pub(super) async fn generate_krea_imported_stream(
                 &memory_plan,
                 &memory_inputs,
                 initial_cache_state,
-                loaded_policy.offload_policy,
+                loaded_policy,
                 warm_policy,
                 external_committed_bytes,
                 work,
@@ -2431,8 +2399,6 @@ pub(super) async fn generate_krea_imported_stream(
                 steps,
                 sampling.clone(),
                 conditioning,
-                negative_prompt,
-                phases,
                 text_style_gain,
                 hires_fix,
                 tx,
@@ -2445,7 +2411,7 @@ pub(super) async fn generate_krea_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission_with_placement(
         job.id.clone(),
         engine_id,
         adapter_count,
@@ -2457,33 +2423,20 @@ pub(super) async fn generate_krea_imported_stream(
                 cold_admission.admit(resident_reclaimable_weight_bytes)
             },
         ),
-        move |model, tx, cancel| {
+        move |model, loaded_policy, tx, cancel| {
             let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, item), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let generated = if let Some(phases) = phases.clone() {
-                        krea_imported_generate_multiphase(
-                            model,
-                            &prompt,
-                            negative_prompt.clone(),
-                            width,
-                            height,
-                            seed,
-                            phases,
-                            &sampling,
-                            text_style_gain,
-                            None,
-                            preview,
-                            &cancel,
-                            on_progress,
-                        )
-                    } else {
-                        krea_imported_generate_one(
+                    let generated = match item {
+                        KreaImportedItem::Multiphase(render) => render
+                            .with_loaded_placement(loaded_policy)
+                            .generate(model, None, None, preview, &cancel, on_progress),
+                        KreaImportedItem::Ordinary(prompt) => krea_imported_generate_one(
                             model,
                             &prompt,
                             width,
@@ -2498,7 +2451,7 @@ pub(super) async fn generate_krea_imported_stream(
                             preview,
                             &cancel,
                             on_progress,
-                        )
+                        ),
                     };
                     let (out_width, out_height, pixels, pag) = match generated {
                         Ok(image) => image,

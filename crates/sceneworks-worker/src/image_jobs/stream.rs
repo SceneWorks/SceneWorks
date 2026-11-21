@@ -740,6 +740,44 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_after_cold_admission_with_placement(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        cold_admission,
+        move |generator, _, tx, cancel| drive(generator, tx, cancel),
+    )
+}
+
+/// The same cached cold-admission transaction, exposing the generator's loaded placement to a
+/// planned render.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn start_cached_gen_stream_after_cold_admission_with_placement<A, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    cold_admission: ColdLoadAdmission<A>,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    A: FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    D: FnOnce(
+            &dyn Generator,
+            crate::generator_cache::ExecutionPolicy,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let ColdLoadAdmission {
         incoming_reclaimable_weight_bytes,
         admit: cold_admission,
@@ -762,7 +800,7 @@ where
             cold_admission,
             move |generator,
                   _cache_state,
-                  _loaded_policy,
+                  loaded_policy,
                   warm_policy: crate::execution_planner::WarmPolicyProposal,
                   _external_committed_bytes,
                   _provider_resident_bytes| {
@@ -775,7 +813,7 @@ where
                     engine_id,
                     adapter_count,
                 );
-                drive(generator, tx, blocking_cancel)
+                drive(generator, loaded_policy, tx, blocking_cancel)
             },
         )
         .await

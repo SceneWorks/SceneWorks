@@ -27,9 +27,6 @@ use super::quantization::resolve_quant;
 use super::resolve_seed;
 use super::sampling::resolve_guidance;
 use super::stream::drive_gen_items;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::stream::start_cached_gen_stream;
-#[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state;
 use super::CancelFlag;
 #[cfg(not(target_os = "macos"))]
@@ -440,67 +437,142 @@ fn krea_multiphase_raw_settings(
     raw
 }
 
-/// Generate one multi-phase image (plain t2i, no reference/edit conditioning). The `phases` drive the
-/// engine's multi-phase driver: ONE global schedule for the total step budget, each phase a contiguous
-/// slice with its own guidance (CFG on/off) + its own active LoRA subset (indices into the loaded
-/// stack). The flat `steps` is left `None` (ignored under `phases`); `guidance` is the request-level
-/// default a `None`-guidance phase inherits.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn krea_multiphase_generate_one(
-    generator: &dyn Generator,
-    sampling_controls: &GenerationRequest,
-    prompt: &str,
-    negative_prompt: Option<String>,
-    width: u32,
-    height: u32,
-    seed: i64,
-    guidance: Option<f32>,
-    text_style_gain: Option<f32>,
-    phases: Vec<gen_core::GenerationPhase>,
-    memory: Option<gen_core::GenerationMemory>,
-    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
-    preview: gen_core::PreviewSink,
-    cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
-    let mut request = GenerationRequest {
-        prompt: prompt.to_owned(),
-        // Raw supports a negative prompt for the true-CFG phases; forwarded when the job carries one.
-        negative_prompt,
-        width,
-        height,
-        count: 1,
-        seed: Some(seed as u64),
-        // Ignored when `phases` is present — the engine sums the phases' steps for the ONE schedule.
-        steps: None,
-        // Request-level default guidance a phase with `guidance: None` inherits (per-phase guidance
-        // overrides it). Matches the single-phase Raw default (`resolve_guidance`).
-        guidance,
-        text_style_gain,
-        phases: Some(phases),
-        memory,
-        preview,
-        cancel: cancel.clone(),
-        ..sampling_controls.clone()
+/// A single image's phased trajectory, compiled against the selected load specification before
+/// either native lane can materialize the generator.
+pub(super) struct PreparedKreaMultiphase {
+    request: GenerationRequest,
+    plan: gen_core::RenderPlan,
+    spec: std::sync::Arc<gen_core::LoadSpec>,
+}
+
+pub(super) fn prepare_multiphase_work(
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    template: GenerationRequest,
+    work: Vec<(i64, String)>,
+) -> WorkerResult<Vec<(i64, PreparedKreaMultiphase)>> {
+    let registry = crate::inference_runtime::media();
+    let spec = std::sync::Arc::new(spec.clone());
+    work.into_iter()
+        .map(|(seed, prompt)| {
+            let request = GenerationRequest {
+                prompt,
+                count: 1,
+                seed: Some(seed as u64),
+                ..template.clone()
+            };
+            let plan =
+                super::render::compile_required_render_plan(registry, engine_id, &spec, &request)?;
+            Ok((
+                seed,
+                PreparedKreaMultiphase {
+                    request,
+                    plan,
+                    spec: spec.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Reflect the placement selected by the cold loader or observed on a warm hit. These fields
+/// change where the same model is held; the request and every source remain those compiled before
+/// loading. A proposed request policy cannot change the plan's load binding.
+fn loaded_multiphase_spec(
+    spec: &gen_core::LoadSpec,
+    placement: crate::generator_cache::ExecutionPolicy,
+) -> Option<gen_core::LoadSpec> {
+    if crate::generator_cache::ExecutionPolicy::from_load_spec(spec) == placement {
+        return None;
+    }
+    let mut spec = spec.clone();
+    spec.offload_policy = placement.offload_policy;
+    spec.load_shape = placement.load_shape;
+    spec.load_shape_declaration_result = placement.load_shape_declaration_result;
+    Some(spec)
+}
+
+#[cfg(test)]
+#[test]
+fn multiphase_load_binding_preserves_sources_when_cache_placement_changes() {
+    use gen_core::render::RenderLoadBinding;
+    use gen_core::{AdapterKind, AdapterSpec, LoadShape, LoadShapeDeclarationResult, LoadSpec};
+    use gen_core::{OffloadPolicy, WeightsSource};
+
+    let requested = LoadSpec::new(WeightsSource::File("imported.safetensors".into()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir("base".into()),
+        )
+        .with_adapters(vec![AdapterSpec::new(
+            "adapter.safetensors".into(),
+            0.25,
+            AdapterKind::Lora,
+        )]);
+    let requested_placement = crate::generator_cache::ExecutionPolicy::from_load_spec(&requested);
+    assert!(loaded_multiphase_spec(&requested, requested_placement).is_none());
+
+    let loaded_placement = crate::generator_cache::ExecutionPolicy {
+        offload_policy: OffloadPolicy::Sequential,
+        load_shape: LoadShape::DeferredMaterialization,
+        load_shape_declaration_result: LoadShapeDeclarationResult::Eligible,
     };
-    let report = crate::memory_strategy::generate_with_scope_report(
-        generator,
-        &mut request,
-        memory_strategy_context,
-        on_progress,
-    )
-    .map_err(|error| crate::generation_error("Krea multi-phase generation failed", error))?;
-    let pag = report.pag;
-    match report.output {
-        Some(GenerationOutput::Images(mut images)) => {
-            let image = images.pop().ok_or_else(|| {
-                WorkerError::Engine("Krea multi-phase generator produced no image".to_owned())
-            })?;
-            Ok((image.width, image.height, image.pixels, pag))
+    let actual = loaded_multiphase_spec(&requested, loaded_placement).unwrap();
+    assert_eq!(
+        crate::generator_cache::ExecutionPolicy::from_load_spec(&actual),
+        loaded_placement
+    );
+
+    let restored = loaded_multiphase_spec(&actual, requested_placement).unwrap();
+    assert_eq!(
+        RenderLoadBinding::from_spec(&restored),
+        RenderLoadBinding::from_spec(&requested)
+    );
+}
+
+impl PreparedKreaMultiphase {
+    pub(super) fn with_loaded_placement(
+        mut self,
+        placement: crate::generator_cache::ExecutionPolicy,
+    ) -> Self {
+        if let Some(spec) = loaded_multiphase_spec(&self.spec, placement) {
+            self.plan = self.plan.bind_load(&spec);
         }
-        _ => Err(WorkerError::Engine(
-            "Krea multi-phase generator returned non-image output".to_owned(),
-        )),
+        self
+    }
+
+    pub(super) fn generate(
+        mut self,
+        generator: &dyn Generator,
+        memory: Option<gen_core::GenerationMemory>,
+        memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+        preview: gen_core::PreviewSink,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<(u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>)> {
+        self.request.memory = memory;
+        self.request.preview = preview;
+        self.request.cancel = cancel.clone();
+        let report = crate::memory_strategy::generate_with_scope_report_planned(
+            generator,
+            &mut self.request,
+            &self.plan,
+            memory_strategy_context,
+            on_progress,
+        )
+        .map_err(|error| crate::generation_error("Krea multi-phase generation failed", error))?;
+        let pag = report.pag;
+        match report.output {
+            Some(GenerationOutput::Images(mut images)) => {
+                let image = images.pop().ok_or_else(|| {
+                    WorkerError::Engine("Krea multi-phase generator produced no image".to_owned())
+                })?;
+                Ok((image.width, image.height, image.pixels, pag))
+            }
+            _ => Err(WorkerError::Engine(
+                "Krea multi-phase generator returned non-image output".to_owned(),
+            )),
+        }
     }
 }
 
@@ -676,6 +748,21 @@ pub(super) async fn generate_krea_multiphase_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 
+    let work = prepare_multiphase_work(
+        engine_id,
+        &spec,
+        GenerationRequest {
+            negative_prompt,
+            width,
+            height,
+            guidance,
+            text_style_gain,
+            phases: Some(phases),
+            ..sampling_controls
+        },
+        work,
+    )?;
+
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (generation_memory, memory_strategy_context) = {
         let tier = candle_resolved_tier_key(request, &weights_dir, false);
@@ -766,38 +853,32 @@ pub(super) async fn generate_krea_multiphase_stream(
     };
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
-        move |generator, tx, cancel| {
+        move |generator, _, loaded_policy, warm_policy, _, tx, cancel| {
+            warm_policy
+                .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
             let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
-                move |index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, render), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let (out_w, out_h, pixels, pag) = krea_multiphase_generate_one(
-                        generator,
-                        &sampling_controls,
-                        &prompt,
-                        negative_prompt.clone(),
-                        width,
-                        height,
-                        seed,
-                        guidance,
-                        text_style_gain,
-                        phases.clone(),
-                        generation_memory,
-                        memory_strategy_context.as_ref(),
-                        preview,
-                        &cancel,
-                        on_progress,
-                    )?;
+                    let (out_w, out_h, pixels, pag) =
+                        render.with_loaded_placement(loaded_policy).generate(
+                            generator,
+                            generation_memory,
+                            memory_strategy_context.as_ref(),
+                            preview,
+                            &cancel,
+                            on_progress,
+                        )?;
                     let mut facts = crate::JsonObject::new();
                     super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     if !facts.is_empty() {
@@ -832,7 +913,7 @@ pub(super) async fn generate_krea_multiphase_stream(
             drive_gen_items(
                 tx,
                 work,
-                move |index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, render), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -849,23 +930,15 @@ pub(super) async fn generate_krea_multiphase_stream(
                     let _request_memory_limit = memory_evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                    let (out_w, out_h, pixels, pag) = krea_multiphase_generate_one(
-                        generator,
-                        &sampling_controls,
-                        &prompt,
-                        negative_prompt.clone(),
-                        width,
-                        height,
-                        seed,
-                        guidance,
-                        text_style_gain,
-                        phases.clone(),
-                        Some(memory_evaluation.memory),
-                        Some(&memory_evaluation.context),
-                        preview,
-                        &cancel,
-                        on_progress,
-                    )?;
+                    let (out_w, out_h, pixels, pag) =
+                        render.with_loaded_placement(loaded_policy).generate(
+                            generator,
+                            Some(memory_evaluation.memory),
+                            Some(&memory_evaluation.context),
+                            preview,
+                            &cancel,
+                            on_progress,
+                        )?;
                     let mut facts = crate::JsonObject::new();
                     super::lane_controls::record_pag_execution_report(&mut facts, pag.as_ref());
                     if !facts.is_empty() {
