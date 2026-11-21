@@ -190,7 +190,7 @@ test("Wan validates each provider's decoded frame count and actual solver from i
   }
 });
 
-test("only explicit MLX Wan stages pinned rows before comparison and refuses mismatched sources", async () => {
+test("explicit MLX Wan stages pinned rows before comparison and refuses mismatched sources", async () => {
   const route = ROUTES["mlx-wan22-a14b-t2v-uni_pc"];
   const cfg = { backend: "mlx", routes: [route], hubs: ["/owned/hub"] };
   const input = { profile: "tier2-ab", backend: "mlx", ref: BASE, download_missing: true };
@@ -212,6 +212,52 @@ test("only explicit MLX Wan stages pinned rows before comparison and refuses mis
   const drifted = { ...model, downloads: model.downloads.map((d) => ({ ...d, revision: "b".repeat(40) })) };
   const incompatible = await planRoutes({ ...paths, baseCatalog: [drifted], fs });
   await assert.rejects(stageWanSnapshots({}, cfg, { routes: incompatible }, null, () => assert.fail()), /differ between base and head/);
+});
+
+test("CUDA Wan staging fills only absent literal q4 members from the selected Windows hub and rechecks both routes", async () => {
+  const routes = Object.values(ROUTES).filter((route) => route.wanA14b && route.backend === "cuda");
+  const hubs = [String.raw`E:\local models\hub`];
+  const input = { profile: "tier2-ab", backend: "candle", ref: BASE, download_missing: true };
+  const options = { base_sha: BASE, head_sha: HEAD, routes: routes.map((r) => r.id), hubs, preflight_only: false };
+  const select = (changes = {}) => dispatchOptions({ ...input, moss_options_json: JSON.stringify({ ...options, ...changes }) }, BASE);
+  assert.equal(select().hubs, JSON.stringify(hubs));
+  assert.equal(select().backend, "cuda");
+  for (const bad of [{ preflight_only: true }, { routes: undefined }, { routes: DEFAULT_ROUTE_IDS.cuda },
+    { routes: ["cuda-wan22-a14b-i2v-heun"] }, { hubs: ["/posix/hub"] }]) assert.throws(() => select(bad));
+
+  const cfg = { backend: "cuda", routes, hubs, baseDir: root, headDir: root };
+  const catalog = await readCatalog(root), evidence = await readPatternEvidence(root);
+  const absent = new Set(["q4/.gitattributes", "q4/transformer_2/model.safetensors"]);
+  const present = new Set();
+  const fileKey = (repo, file) => `${repo}/${file}`;
+  const fs = { stat: async (file) => {
+    const normalized = file.replaceAll("\\", "/");
+    const [, repo, member] = normalized.match(/models--SceneWorks--([^/]+)\/snapshots\/[a-f0-9]{40}\/(q4\/.+)$/) ?? [];
+    assert.ok(member, file);
+    if (absent.has(member) && !present.has(fileKey(repo, member))) throw Object.assign(Error("missing"), { code: "ENOENT" });
+    return { isFile: () => true, size: 42 };
+  } };
+  fs.lstat = fs.stat;
+  const plan = () => planRoutes({ routes, hubs, baseCatalog: catalog, headCatalog: catalog, platform: "win32", fs, evidence });
+  const before = await plan();
+  assert.ok(before.every((row) => row.status === "skipped"));
+  const calls = [];
+  await stageWanSnapshots({}, cfg, { routes: before }, null, (args) => {
+    const [command, repo, ...rest] = args;
+    const row = before.find((route) => route.rows.required[0].repo === repo).rows.required[0];
+    assert.deepEqual([command, ...rest], ["download", ...absent, "--revision", row.revision, "--cache-dir", hubs[0]]);
+    for (const file of absent) present.add(fileKey(repo.split("/")[1], file));
+    calls.push(repo);
+  }, fs);
+  assert.equal(new Set(calls).size, 2);
+  const after = await plan();
+  assert.ok(after.every((row) => row.status === "ready" && row.hub === hubs[0]));
+  await stageWanSnapshots({}, cfg, { routes: after }, null, () => assert.fail("already complete"), fs);
+  present.clear();
+  await assert.rejects(stageWanSnapshots({}, cfg, { routes: before }, null, () => assert.fail(),
+    { ...fs, lstat: async () => ({ isSymbolicLink: () => true }) }), /refusing to overwrite/);
+  await assert.rejects(stageWanSnapshots({}, { ...cfg, baseDir: path.join(root, "absent") }, { routes: before }, null,
+    () => assert.fail(), fs), /missing or divergent pinned q4 file listings/);
 });
 
 const run = (sha, status = "completed") => ({ status, output: { content: { sha256: sha } }, error: status === "completed" ? undefined : "boom" });
@@ -920,6 +966,9 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(cuda, /vcvars64\.bat/);
   assert.match(mlx, /if: \$\{\{ inputs\.download_missing && !inputs\.preflight_only \}\}/);
   assert.match(mlx, /--stage-wan/);
-  assert.doesNotMatch(cuda, /download_missing|--stage-wan|huggingface-cli/);
+  assert.match(cuda, /if: \$\{\{ inputs\.download_missing && !inputs\.preflight_only \}\}/);
+  assert.match(cuda, /Join-Path \$env:TIER2_AB_WORK 'hf-cli'/);
+  assert.match(cuda, /-r \.github\/requirements-hf\.txt/);
+  assert.match(cuda, /--stage-wan[\s\S]+--preflight-only[\s\S]+--build-only[\s\S]+--run\b/);
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
 });

@@ -13,11 +13,11 @@
 // runs); base#1 == base#2 -> `head_differs` (non-zero exit, payload diff printed). Time and memory
 // are observations and never fail the job. A route whose weights are absent from every hub root is
 // `skipped` with its reason. Explicit Wan A14B witnesses require an equal verdict for every chosen route. An opt-in
-// --stage-wan pass may populate their MLX cache before the read-only comparison. Each fresh
+// --stage-wan pass may populate their selected cache before the read-only comparison. Each fresh
 // API data directory still needs the public Hugging Face metadata for its pinned source ledger.
 //
 // Modes: --preflight-only (inputs, both checkouts, pins, tools, hub presence; no build, no model)
-//        --stage-wan      (opt-in pinned public MLX Wan download before the comparison)
+//        --stage-wan      (opt-in pinned public Wan download before the comparison)
 //        --build-only     (release API/worker for base then head into one shared scratch target)
 //        --run            (the comparison; requires --build-only output from the same work dir)
 // Configuration is environment-only so the same invocation works from bash, cmd and PowerShell:
@@ -205,7 +205,7 @@ export function dispatchOptions(inputs, dispatchedSha) {
   for (const key of ["routes", "hubs"]) fact(options[key] === undefined || (Array.isArray(options[key]) && options[key].every((item) => typeof item === "string" && item.trim())), `${key} must be an array of strings`);
   const routes = selectRoutes(backend, options.routes ? JSON.stringify(options.routes) : "").map((route) => route.id);
   if (inputs.download_missing) {
-    fact(backend === "mlx" && routes.every((id) => ROUTES[id].wanA14b), "download_missing requires explicit MLX Wan A14B routes");
+    fact(options.routes && routes.every((id) => ROUTES[id].wanA14b), "download_missing requires explicit Wan A14B routes");
     fact(options.preflight_only === false, "metadata-only preflight cannot stage weights");
   }
   if (options.hubs) fact(options.hubs.length > 0 && options.hubs.every((hub) => absoluteFor(backend === "mlx" ? "darwin" : "win32", hub)), "hubs must be absolute paths for the selected backend's OS");
@@ -976,20 +976,47 @@ async function preflight(env, cfg, report) {
   }
 }
 
+// Both CUDA q4 revisions contain q4/.gitattributes. Product admission binds it along with
+// the weights. The catalog walk deliberately excludes dotfiles, so use the CLI's literal
+// filenames for this exact checked-in closure, retaining its normal cache/resume semantics.
+async function wanCudaDownloadArgs(row, hub, evidence, fs) {
+  fact(row.variant === "q4" && row.files.length === 1 && row.files[0] === "q4/*", "CUDA Wan staging requires the q4/* manifest row");
+  const key = `${row.repo}@${row.revision}`;
+  const [base, head] = evidence.map((listing) => expandSelector("q4/*", listing.get(key) ?? []).sort());
+  fact(head.length && JSON.stringify(base) === JSON.stringify(head), `missing or divergent pinned q4 file listings for ${key}`);
+  fact(head.every((file) => file.split("/").every((part) => /^[A-Za-z0-9_.-]+$/.test(part) && part !== "." && part !== "..")),
+    `invalid q4 snapshot member in ${key}`);
+  const snapshot = snapshotDir(hub, row.repo, row.revision);
+  const missing = await selectorProblems(snapshot, "q4/*", { fs, evidenceFiles: head });
+  for (const file of missing) {
+    // A partial or dangling destination is evidence of a damaged cache. Never overwrite it.
+    try { await fs.lstat(path.join(snapshot, ...file.split("/"))); }
+    catch (error) { if (error.code === "ENOENT") continue; throw error; }
+    throw new Error(`refusing to overwrite an existing unusable Wan snapshot member: ${key}/${file}`);
+  }
+  return missing.length ? [["download", row.repo, ...missing, "--revision", row.revision, "--cache-dir", hub]] : [];
+}
+
 // Stage once before either compared binary starts, using the catalog campaign's HF CLI and its
 // manifest-pinned per-selector downloads. HF_HUB_OFFLINE restricts the Hugging Face client.
 // Production admission separately fetches the pinned repository file metadata over HTTPS
 // into each fresh API data directory, using its empty credentials directory.
-export async function stageWanSnapshots(env, cfg, report, signal, runDownload = null) {
-  fact(cfg.backend === "mlx" && cfg.routes.every((route) => route.wanA14b), "staging requires explicit MLX Wan A14B routes");
+export async function stageWanSnapshots(env, cfg, report, signal, runDownload = null, fs = { stat, lstat }) {
+  fact(cfg.routes.length && cfg.routes.every((route) => route.wanA14b && route.backend === cfg.backend), "staging requires explicit Wan A14B routes");
   const { firstAvailableHfCli, hfDownloadArgvs } = await import("./measure-memory-catalog.mjs");
   const downloadEnv = { ...scrubSecrets(env), HF_ENDPOINT: "https://huggingface.co", HF_HUB_OFFLINE: "0", HF_HUB_DISABLE_IMPLICIT_TOKEN: "1" };
   const needed = new Map();
-  for (const route of report.routes.filter((item) => item.status !== "ready")) {
+  const evidence = cfg.backend === "cuda"
+    ? await Promise.all([readPatternEvidence(cfg.baseDir), readPatternEvidence(cfg.headDir)]) : null;
+  for (const route of report.routes) {
+    if (route.status === "ready" && !evidence) continue;
     fact(route.presence?.length && route.rows?.required, `cannot stage ${route.id}: ${route.skipReason}`);
     for (const row of route.rows.required) {
       fact(SHA.test(row.revision) && row.files.length > 0, "staging requires pinned files");
-      for (const args of hfDownloadArgvs({ repo: row.repo, revision: row.revision, include: row.files }, cfg.hubs[0])) {
+      const hub = route.hub ?? cfg.hubs[0];
+      const commands = evidence ? await wanCudaDownloadArgs(row, hub, evidence, fs)
+        : hfDownloadArgvs({ repo: row.repo, revision: row.revision, include: row.files }, hub);
+      for (const args of commands) {
         needed.set(JSON.stringify(args), args);
       }
     }
@@ -998,7 +1025,7 @@ export async function stageWanSnapshots(env, cfg, report, signal, runDownload = 
   const cli = runDownload ? null : await firstAvailableHfCli({ env: downloadEnv });
   fact(runDownload || cli, "Hugging Face CLI missing for Wan snapshot staging");
   for (const args of needed.values()) {
-    progress({ phase: "stage_wan_snapshot", repo: args[1], revision: args[3] });
+    progress({ phase: "stage_wan_snapshot", repo: args[1], revision: args[args.indexOf("--revision") + 1] });
     if (runDownload) await runDownload(args);
     else await execFile(cli, args, { env: downloadEnv, signal, timeout: 60 * 60_000, maxBuffer: 16 * 1024 * 1024 });
   }

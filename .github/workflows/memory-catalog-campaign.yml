@@ -198,7 +198,7 @@ on:
           Fetch the pinned snapshots of anchors that would otherwise plan as weights_missing
           (--download-missing). They land in the FIRST hub root above through the Hugging Face CLI
           at the manifest's pinned revision, one at a time; a gated repo needs $HF_TOKEN on the
-          runner. Tier 2 A/B accepts this only for explicit MLX Wan A14B routes, staging into
+          runner. Tier 2 A/B accepts this only for explicit Wan A14B routes, staging into
           the first moss_options_json.hubs entry (or the default hub) before the comparison.
         required: false
         type: boolean

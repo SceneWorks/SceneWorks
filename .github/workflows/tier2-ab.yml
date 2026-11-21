@@ -8,7 +8,7 @@
 # same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
 # The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
 # comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
-# the end of the job. Optional MLX Wan staging fetches pinned files before the read-only comparison.
+# the end of the job. Optional Wan staging fetches pinned files before the read-only comparison.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
 # selector's trusted-ref rule), and their builds and processes receive no credential. Both fresh
@@ -43,7 +43,7 @@ on:
         type: string
         default: ""
       download_missing:
-        description: "Stage missing public, manifest-pinned files only for explicitly selected MLX Wan A14B routes"
+        description: "Stage missing public, manifest-pinned files only for explicitly selected Wan A14B routes"
         required: false
         type: boolean
         default: false
@@ -234,6 +234,26 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Stage selected Wan snapshots from their manifest pins
+        if: ${{ inputs.download_missing && !inputs.preflight_only }}
+        working-directory: tier2-ab-driver
+        run: |
+          if (!(Get-Command hf,huggingface-cli -CommandType Application -ErrorAction SilentlyContinue)) {
+            $version = python --version
+            if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.' -or [int]$Matches.minor -lt 12) {
+              throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+            }
+            $venv = Join-Path $env:TIER2_AB_WORK 'hf-cli'
+            python -m venv $venv
+            if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local provisioning venv' }
+            $scripts = Join-Path $venv 'Scripts'
+            $python = Join-Path $scripts 'python.exe'
+            & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+            if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned Hugging Face client' }
+            $env:Path = "$scripts;$env:Path"
+          }
+          node scripts/tier2-ab.mjs --stage-wan
+          if ($LASTEXITCODE -ne 0) { throw 'tier2-ab Wan staging failed' }
       - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
         run: |
           node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
