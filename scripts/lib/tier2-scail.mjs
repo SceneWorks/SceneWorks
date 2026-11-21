@@ -126,8 +126,9 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     const b = row.bounds;
     assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
     const adapter = b.capture_adapter;
-    if (!mlx && host && (!adapter || !host.captureAdapter || adapter.cuda_uuid !== host.captureAdapter.cuda_uuid
-      || adapter.luid !== host.captureAdapter.luid || adapter.node_mask !== host.captureAdapter.node_mask)) continue;
+    if (!mlx && host) assert.ok(adapter && host.captureAdapter && adapter.cuda_uuid === host.captureAdapter.cuda_uuid
+      && adapter.luid === host.captureAdapter.luid && adapter.node_mask === host.captureAdapter.node_mask,
+      "no packaged native proof on a single worker-eligible CUDA adapter");
     if (mlx) assert.ok(byteCount(b.mlx_decode_budget_bytes) > 0, "missing decoder budget");
     const price = {
       grossHostBytes: mlx ? 0 : physicalPrice(b.host, a.floor_host_bytes),

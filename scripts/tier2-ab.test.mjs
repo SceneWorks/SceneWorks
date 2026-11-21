@@ -1267,6 +1267,10 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
     if (!mlx) for (const mismatch of [{cuda_uuid:"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"}, {luid:"luid_0x00000000_0x000000fe"}, {node_mask:2}]) {
       assert.throws(() => scoped(projected, {...host, captureAdapter:{...host.captureAdapter, ...mismatch}}), /no packaged native/);
+      const other = structuredClone(projected.at(-1));
+      Object.assign(other.bounds.capture_adapter, mismatch);
+      other.bounds.device.unsampled_overshoot_upper_bytes -= 1;
+      assert.throws(() => scoped([...projected, other]), /single worker-eligible CUDA adapter/);
     }
     const competing = structuredClone(projected.at(-1));
     competing.artifact_id = 782;
