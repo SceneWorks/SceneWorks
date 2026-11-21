@@ -900,6 +900,7 @@ pub(super) async fn generate_sdxl_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     admit_candle_load_spec_floor(&request.model, "SDXL imported", settings, &spec).await?;
 
+    let manifest_entry_for_facts = request.model_manifest_entry.clone();
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         descriptor.id,
@@ -914,6 +915,16 @@ pub(super) async fn generate_sdxl_imported_stream(
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
+                    let publish_facts = |facts| {
+                        let _ =
+                            tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                        super::stream::publish_checkpoint_weight_facts(
+                            &tx,
+                            &manifest_entry_for_facts,
+                            Some(file.as_path()),
+                            model.checkpoint_weight_facts(),
+                        );
+                    };
                     if let Some(hires_fix) = hires_fix {
                         let execution_report = std::cell::RefCell::new(None);
                         let (out_width, out_height, pixels) = generate_one_with_hires_on_surface(
@@ -958,8 +969,7 @@ pub(super) async fn generate_sdxl_imported_stream(
                         })?;
                         let mut facts = crate::JsonObject::new();
                         report.insert_image_facts(&mut facts)?;
-                        let _ =
-                            tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
+                        publish_facts(facts);
                         return Ok(Some((seed, out_width, out_height, pixels)));
                     }
                     let request = GenerationRequest {
@@ -1002,10 +1012,7 @@ pub(super) async fn generate_sdxl_imported_stream(
                                 serde_json::to_value(completed.execution)
                                     .map_err(WorkerError::Json)?,
                             );
-                            let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts {
-                                index,
-                                facts,
-                            });
+                            publish_facts(facts);
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(
