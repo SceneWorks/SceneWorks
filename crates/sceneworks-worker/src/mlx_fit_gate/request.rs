@@ -1739,6 +1739,7 @@ pub(super) fn select_request_with_budget_using_bundle(
             use_pid: inputs.use_pid,
             has_phases: inputs.has_phases,
             geometry,
+            low_res_start: None,
             reference_resources: inputs.reference_resources.clone(),
             overlay: inputs.overlay.clone(),
             budget,

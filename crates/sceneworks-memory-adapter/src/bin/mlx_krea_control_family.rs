@@ -77,6 +77,7 @@ pub(super) fn krea_context(
             frames: 1,
             reference_count: 1,
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: Some("control:1".to_owned()),
         budget: MemoryBudget {

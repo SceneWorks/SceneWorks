@@ -587,6 +587,7 @@ fn context(
             frames: geometry.frames,
             reference_count: arm.carrier.reference_count(),
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: evidence.adapter_identity.clone(),
         budget: MemoryBudget {

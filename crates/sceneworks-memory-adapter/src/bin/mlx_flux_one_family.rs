@@ -258,6 +258,7 @@ pub(super) fn flux_one_context(
             frames: 1,
             reference_count: u32::from(arm.identity),
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: arm.identity.then(|| "identity".to_owned()),
         budget: MemoryBudget {

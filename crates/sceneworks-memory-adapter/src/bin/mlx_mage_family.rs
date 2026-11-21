@@ -348,6 +348,7 @@ pub(super) fn run_z_image_reference_loaded(
             frames: 1,
             reference_count: u32::from(arm.edit),
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
@@ -1295,6 +1296,7 @@ pub(super) fn mage_run_context(
             frames: 1,
             reference_count: u32::from(arm.edit),
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: None,
         // The generator is already loaded when this context is built, so its resident bytes are

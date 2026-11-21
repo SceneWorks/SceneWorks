@@ -176,6 +176,7 @@ pub(super) fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
             frames: target.frames,
             reference_count: 0,
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: adapter_stack_identity(&adapters),
         budget: MemoryBudget {

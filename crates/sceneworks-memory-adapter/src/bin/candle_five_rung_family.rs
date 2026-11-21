@@ -816,6 +816,7 @@ pub(super) fn run_five_rung_reference_loaded(
             frames: 1,
             reference_count: u32::from(edit),
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {

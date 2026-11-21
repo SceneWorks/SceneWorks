@@ -238,6 +238,7 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 1,
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: Some(overlay.clone()),
         budget: MemoryBudget {

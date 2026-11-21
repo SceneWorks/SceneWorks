@@ -393,6 +393,7 @@ pub(super) fn minimax_context(
             frames: geometry.frames,
             reference_count: member.reference_count,
         },
+        low_res_start: None,
         reference_resources: None,
         overlay: None,
         budget: MemoryBudget {

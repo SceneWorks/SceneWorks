@@ -235,6 +235,7 @@ pub(super) fn run_qwen_edit(request: &Value) -> Result<Value, String> {
         },
         // `validate_edit_route` requires this to be exactly `Some("lora")` when the load carries
         // adapters and `None` when it does not — so it is derived from the spec's own stack.
+        low_res_start: None,
         reference_resources: None,
         overlay: (loaded_adapters > 0).then(|| "lora".to_owned()),
         budget: MemoryBudget {
