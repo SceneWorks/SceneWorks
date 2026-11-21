@@ -1764,7 +1764,7 @@ fn request_plan() -> MlxRequestPlan {
         asset_bytes: gib_to_bytes(6.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
         // sitting exactly on the reserve would model resolution-blind and silently stop
         // exercising the sc-16195 scaling at all.
@@ -2296,7 +2296,7 @@ fn fixture_plan() -> MlxRequestPlan {
         asset_bytes: gib_to_bytes(3.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
         // sitting exactly on the reserve would model resolution-blind and silently stop
         // exercising the sc-16195 scaling at all.
@@ -2788,7 +2788,7 @@ fn packaged_krea_plan() -> Option<MlxRequestPlan> {
         asset_bytes: gib_to_bytes(30.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(2.0),
         fixed_reserve_bytes: 0,
         calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
@@ -4660,7 +4660,7 @@ fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admiss
         asset_bytes: gib_to_bytes(40.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(6.0),
         fixed_reserve_bytes: gib_to_bytes(2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -4872,7 +4872,7 @@ impl SdxlSelectorFixture {
             asset_bytes: gib_to_bytes(40.0),
             folded_control_bytes: 0,
             folded_adapter_bytes: 0,
-            phase_adapter_workspace_bytes: 0,
+            request_workspace_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
@@ -5219,7 +5219,7 @@ fn shipped_plain_sdxl_without_a_binding_preserves_the_four_rung_estimate_path() 
         asset_bytes: gib_to_bytes(40.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(6.0),
         fixed_reserve_bytes: gib_to_bytes(2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -10720,7 +10720,7 @@ fn generic_request_peak_is_invariant_in_the_job_image_count() {
         asset_bytes: 35_666_644_396,
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
         fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -10842,7 +10842,7 @@ fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
         asset_bytes: gib_to_bytes(asset_gb),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
         fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -10918,7 +10918,7 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
             asset_bytes: gib_to_bytes(asset_gb),
             folded_control_bytes: 0,
             folded_adapter_bytes: 0,
-            phase_adapter_workspace_bytes: 0,
+            request_workspace_bytes: 0,
             activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),
             fixed_reserve_bytes,
             calibration: MlxCalibrationConfig::Absent,
@@ -11012,7 +11012,7 @@ fn legacy_provider_credits_only_the_known_generator_assets_on_a_warm_run() {
         asset_bytes: gib_to_bytes(6.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
         // sitting exactly on the reserve would model resolution-blind and silently stop
         // exercising the sc-16195 scaling at all.
@@ -16304,7 +16304,7 @@ fn phase_adapter_workspace_is_charged_to_measured_and_estimated_peaks() {
             None,
         )
     };
-    let staged = plan.clone().with_phase_adapter_workspace(workspace);
+    let staged = plan.clone().with_request_workspace(workspace);
     assert!(evaluate(&plan, 8.0, Some(&bundle)).is_ok());
     assert!(evaluate(&staged, 8.0, Some(&bundle)).is_err());
     let measured = evaluate(&plan, 16.0, Some(&bundle)).unwrap();
@@ -16320,7 +16320,7 @@ fn phase_adapter_workspace_is_charged_to_measured_and_estimated_peaks() {
     };
     let estimated = evaluate(&legacy, 16.0, None).unwrap();
     let estimated_with_workspace =
-        evaluate(&legacy.with_phase_adapter_workspace(workspace), 16.0, None).unwrap();
+        evaluate(&legacy.with_request_workspace(workspace), 16.0, None).unwrap();
     assert_eq!(
         estimated_with_workspace.context.predicted_peak_bytes,
         estimated.context.predicted_peak_bytes + workspace

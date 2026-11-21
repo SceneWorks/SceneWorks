@@ -753,6 +753,30 @@ pub(super) fn compile_optional_hires_render_plans(
     refine: &GenerationRequest,
     hires: &HiresFixPlan,
 ) -> WorkerResult<Option<(gen_core::RenderPlan, gen_core::RenderPlan)>> {
+    let Some(plan) =
+        compile_hires_multi_pass_plan(registry, engine_id, spec, first, refine, hires)?
+    else {
+        return Ok(None);
+    };
+    match plan.passes() {
+        [first, refine] => Ok(Some((first.clone(), refine.clone()))),
+        passes => Err(WorkerError::Engine(format!(
+            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
+            passes.len()
+        ))),
+    }
+}
+
+/// Compile the same two Hires.fix passes as an owned plan for lanes that carry them together.
+#[cfg(native_lane)]
+pub(super) fn compile_hires_multi_pass_plan(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    first: &GenerationRequest,
+    refine: &GenerationRequest,
+    hires: &HiresFixPlan,
+) -> WorkerResult<Option<gen_core::MultiPassRenderPlan>> {
     let passes = [
         gen_core::PlannedPassRequest {
             request: first,
@@ -768,19 +792,9 @@ pub(super) fn compile_optional_hires_render_plans(
             }),
         },
     ];
-    let Some(plan) = registry
+    registry
         .compile_multi_pass_render_plan(engine_id, spec, &passes)
-        .map_err(|error| preload_plan_error(engine_id, error))?
-    else {
-        return Ok(None);
-    };
-    match plan.passes() {
-        [first, refine] => Ok(Some((first.clone(), refine.clone()))),
-        passes => Err(WorkerError::Engine(format!(
-            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
-            passes.len()
-        ))),
-    }
+        .map_err(|error| preload_plan_error(engine_id, error))
 }
 
 /// Compile the single-pass or two-pass [`PreparedRender`] for an `ENG-2` route before loading
@@ -1246,23 +1260,6 @@ pub(super) fn generate_one_with_hires_on_surface(
             )
         })
     });
-    let combined_steps = steps.saturating_add(hires.steps);
-    let mut first_progress = |progress| match progress {
-        Progress::Step { current, .. } => on_progress(Progress::Step {
-            current,
-            total: combined_steps,
-        }),
-        // The first decode is an internal hand-off. The user-visible decode is the final one.
-        Progress::Decoding => {}
-        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        Progress::PostProcessing => on_progress(Progress::PostProcessing),
-        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
-        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
-        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => {
-            on_progress(Progress::Upsampling { tokens, max_tokens })
-        }
-    };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
     let base_execution_report = std::cell::RefCell::new(None);
@@ -1284,69 +1281,6 @@ pub(super) fn generate_one_with_hires_on_surface(
         render_plan: surface.render_plan,
         hires_render_plan: None,
     };
-    let (base_width, base_height, base_pixels) = generate_one_on_surface(
-        generator,
-        prompt,
-        width,
-        height,
-        seed,
-        steps,
-        guidance,
-        negative_prompt.clone(),
-        reference,
-        multi_references,
-        edit_mask,
-        true_cfg,
-        sampler,
-        scheduler,
-        scheduler_shift,
-        guidance_method,
-        use_pid,
-        text_style_gain,
-        hires_first_pass_memory.or(memory),
-        first_pass_context.as_ref(),
-        &PromptEnhance::default(),
-        gen_core::PromptEnhancementSink::default(),
-        preview.clone(),
-        &base_surface,
-        cancel,
-        &mut first_progress,
-    )?;
-    let base_execution = base_execution_report.take().ok_or_else(|| {
-        WorkerError::Engine("hires-fix base pass returned no completed execution report".into())
-    })?;
-    if cancel.is_cancelled() {
-        return Err(WorkerError::Engine("generation cancelled".to_owned()));
-    }
-    let high_res_reference = fit_engine_image(
-        Image {
-            width: base_width,
-            height: base_height,
-            pixels: base_pixels,
-        },
-        hires.width,
-        hires.height,
-        "stretch",
-    )?;
-    if let Some(plan) = surface.hires_render_plan {
-        check_produced_reference(plan, &high_res_reference)?;
-    }
-    let reference = (high_res_reference, hires.provider_reference_strength);
-    let mut second_progress = |progress| match progress {
-        Progress::Step { current, .. } => on_progress(Progress::Step {
-            current: steps.saturating_add(current),
-            total: combined_steps,
-        }),
-        Progress::Decoding => on_progress(Progress::Decoding),
-        Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        Progress::PostProcessing => on_progress(Progress::PostProcessing),
-        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
-        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
-        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => {
-            on_progress(Progress::Upsampling { tokens, max_tokens })
-        }
-    };
     let mut refine_controls = surface.controls.clone();
     refine_controls.low_res_start = None;
     let refine_execution_report = std::cell::RefCell::new(None);
@@ -1367,32 +1301,87 @@ pub(super) fn generate_one_with_hires_on_surface(
         render_plan: surface.hires_render_plan,
         hires_render_plan: None,
     };
-    let request = build_hires_refinement_request(
-        prompt,
-        seed,
+    let base_negative_prompt = negative_prompt.clone();
+    let base_preview = preview.clone();
+    let (base_execution, final_image) = drive_hires_passes(
+        steps,
         &hires,
-        negative_prompt,
-        Some(&reference),
-        sampler,
-        scheduler,
-        scheduler_shift,
-        guidance_method,
-        text_style_gain,
-        memory,
-        enhance,
-        prompt_enhancement,
-        preview,
-        &refine_surface,
+        surface.hires_render_plan,
         cancel,
+        on_progress,
+        |progress| {
+            let (width, height, pixels) = generate_one_on_surface(
+                generator,
+                prompt,
+                width,
+                height,
+                seed,
+                steps,
+                guidance,
+                base_negative_prompt,
+                reference,
+                multi_references,
+                edit_mask,
+                true_cfg,
+                sampler,
+                scheduler,
+                scheduler_shift,
+                guidance_method,
+                use_pid,
+                text_style_gain,
+                hires_first_pass_memory.or(memory),
+                first_pass_context.as_ref(),
+                &PromptEnhance::default(),
+                gen_core::PromptEnhancementSink::default(),
+                base_preview,
+                &base_surface,
+                cancel,
+                progress,
+            )?;
+            let base_execution = base_execution_report.take().ok_or_else(|| {
+                WorkerError::Engine(
+                    "hires-fix base pass returned no completed execution report".into(),
+                )
+            })?;
+            Ok((
+                Image {
+                    width,
+                    height,
+                    pixels,
+                },
+                base_execution,
+            ))
+        },
+        |high_res_reference, progress| {
+            let reference = (high_res_reference, hires.provider_reference_strength);
+            let request = build_hires_refinement_request(
+                prompt,
+                seed,
+                &hires,
+                negative_prompt,
+                Some(&reference),
+                sampler,
+                scheduler,
+                scheduler_shift,
+                guidance_method,
+                text_style_gain,
+                memory,
+                enhance,
+                prompt_enhancement,
+                preview,
+                &refine_surface,
+                cancel,
+            )?;
+            let images = render_request_on_surface(
+                generator,
+                request,
+                memory_strategy_context,
+                &refine_surface,
+                progress,
+            )?;
+            exactly_one_image(images)
+        },
     )?;
-    let images = render_request_on_surface(
-        generator,
-        request,
-        memory_strategy_context,
-        &refine_surface,
-        &mut second_progress,
-    )?;
-    let final_image = exactly_one_image(images)?;
     let refine_execution = refine_execution_report.take().ok_or_else(|| {
         WorkerError::Engine("hires-fix refine pass returned no completed execution report".into())
     })?;
@@ -1405,6 +1394,39 @@ pub(super) fn generate_one_with_hires_on_surface(
         *sink.borrow_mut() = base_low_res_report.take();
     }
     Ok(final_image)
+}
+
+/// Drive the common RGB handoff, keeping authored progress and exposing only the final decode.
+pub(super) fn drive_hires_passes<Base, Final>(
+    base_steps: u32,
+    hires: &HiresFixPlan,
+    refinement_plan: Option<&gen_core::RenderPlan>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+    first: impl FnOnce(&mut dyn FnMut(Progress)) -> WorkerResult<(Image, Base)>,
+    refine: impl FnOnce(Image, &mut dyn FnMut(Progress)) -> WorkerResult<Final>,
+) -> WorkerResult<(Base, Final)> {
+    let total = base_steps.saturating_add(hires.steps);
+    let (image, base) = first(&mut |event| match event {
+        Progress::Step { current, .. } => on_progress(Progress::Step { current, total }),
+        Progress::Decoding => {}
+        other => on_progress(other),
+    })?;
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Engine("generation cancelled".to_owned()));
+    }
+    let reference = fit_engine_image(image, hires.width, hires.height, "stretch")?;
+    if let Some(plan) = refinement_plan {
+        check_produced_reference(plan, &reference)?;
+    }
+    let final_image = refine(reference, &mut |event| match event {
+        Progress::Step { current, .. } => on_progress(Progress::Step {
+            current: base_steps.saturating_add(current),
+            total,
+        }),
+        other => on_progress(other),
+    })?;
+    Ok((base, final_image))
 }
 
 /// Within-image step fraction mapped into the 0.10..0.95 generation band.
@@ -3527,7 +3549,7 @@ mod hires_report_tests {
     }
 
     #[test]
-    fn sw_6948_b5_legacy_hires_fix_plan_helpers_retained_for_later_cohorts() {
+    fn b5_imported_krea_uses_the_shared_planned_hires_driver() {
         assert_eq!(hires_fix_reference_count(), 1);
         let payload = serde_json::json!({
             "projectId": "p",
@@ -3554,7 +3576,10 @@ mod hires_report_tests {
         let sdxl_imported = include_str!("sdxl_imported.rs");
         let memory_src = include_str!("memory.rs");
         assert!(krea_imported.contains("resolve_hires_fix_plan("));
-        assert!(krea_imported.contains("hires_fix_reference_count()"));
+        assert!(!krea_imported.contains("hires_fix_reference_count()"));
+        assert!(krea_imported.contains("compile_hires_multi_pass_plan("));
+        assert!(krea_imported.contains("drive_hires_passes("));
+        assert!(krea_imported.contains("generate_with_scope_report_planned("));
         assert!(sdxl_imported.contains("resolve_hires_fix_plan("));
         assert!(sdxl_imported.contains("generate_one_with_hires_on_surface("));
         assert!(memory_src.contains("hires_fix_reference_count()"));

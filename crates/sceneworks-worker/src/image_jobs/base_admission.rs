@@ -333,6 +333,8 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     source_weight_bytes: u64,
     phase_adapter_extra_bytes: u64,
     pag_workspace_bytes: u64,
+    hires_workspace_bytes: u64,
+    materialized_hires_weight_bytes: Option<u64>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -342,10 +344,22 @@ impl CachedCandleBaseFloorAdmission {
         self
     }
 
+    pub(super) fn with_hires_workspace(
+        mut self,
+        materialized_weights: u64,
+        workspace: u64,
+    ) -> Self {
+        self.materialized_hires_weight_bytes = Some(materialized_weights);
+        self.hires_workspace_bytes = workspace;
+        self
+    }
+
     fn request_peak_floor_bytes(&self) -> u64 {
-        self.source_weight_bytes
+        self.materialized_hires_weight_bytes
+            .unwrap_or(self.source_weight_bytes)
             .saturating_add(self.phase_adapter_extra_bytes)
             .saturating_add(self.pag_workspace_bytes)
+            .saturating_add(self.hires_workspace_bytes)
     }
 
     /// The source floor already counts each adapter file once. Charge any additional resident
@@ -356,24 +370,7 @@ impl CachedCandleBaseFloorAdmission {
         spec: &LoadSpec,
         peak: u64,
     ) -> WorkerResult<Self> {
-        let mut adapter_sources = std::collections::BTreeMap::new();
-        for adapter in &spec.adapters {
-            let pin = spec
-                .prepared_file_pin_for(&adapter.path)
-                .map_err(|error| {
-                    crate::classify_engine_error("Krea adapter admission failed", error)
-                })?
-                .ok_or_else(|| {
-                    WorkerError::Engine(
-                        "Krea adapter admission requires a prepared source".to_owned(),
-                    )
-                })?;
-            adapter_sources.insert(pin.loader_path(), pin.target_fingerprint().size);
-        }
-        let source_bytes = adapter_sources
-            .into_values()
-            .fold(0_u64, u64::saturating_add);
-        self.phase_adapter_extra_bytes = peak.saturating_sub(source_bytes);
+        self.phase_adapter_extra_bytes = peak.saturating_sub(prepared_adapter_source_bytes(spec)?);
         Ok(self)
     }
 
@@ -432,6 +429,7 @@ impl CachedCandleBaseFloorAdmission {
                     floor_gb,
                     phase_adapter_extra_bytes = self.phase_adapter_extra_bytes,
                     pag_workspace_bytes = self.pag_workspace_bytes,
+                    hires_workspace_bytes = self.hires_workspace_bytes,
                     replacing_resident = resident_reclaimable_weight_bytes > 0,
                     reclaimable_gb,
                     "candle cached-base admission: cold external checkpoint admitted on its on-disk \
@@ -455,6 +453,22 @@ impl CachedCandleBaseFloorAdmission {
     }
 }
 
+pub(super) fn prepared_adapter_source_bytes(spec: &LoadSpec) -> WorkerResult<u64> {
+    let mut adapter_sources = std::collections::BTreeMap::new();
+    for adapter in &spec.adapters {
+        let pin = spec
+            .prepared_file_pin_for(&adapter.path)
+            .map_err(|error| crate::classify_engine_error("Krea adapter admission failed", error))?
+            .ok_or_else(|| {
+                WorkerError::Engine("Krea adapter admission requires a prepared source".to_owned())
+            })?;
+        adapter_sources.insert(pin.loader_path(), pin.target_fingerprint().size);
+    }
+    Ok(adapter_sources
+        .into_values()
+        .fold(0_u64, u64::saturating_add))
+}
+
 /// Prepare the cheap, immutable portion of a cached imported/ComfyUI floor. No GPU query or gate is
 /// performed here; those happen only from the cache's cold-load hook.
 pub(super) fn prepare_cached_candle_base_floor(
@@ -472,6 +486,8 @@ pub(super) fn prepare_cached_candle_base_floor(
         source_weight_bytes: bytes,
         phase_adapter_extra_bytes: 0,
         pag_workspace_bytes: 0,
+        hires_workspace_bytes: 0,
+        materialized_hires_weight_bytes: None,
         runtime: tokio::runtime::Handle::current(),
     })
 }
@@ -647,13 +663,16 @@ mod tests {
             source_weight_bytes: 1_000,
             phase_adapter_extra_bytes: 0,
             pag_workspace_bytes: 0,
+            hires_workspace_bytes: 0,
+            materialized_hires_weight_bytes: None,
             runtime: runtime.handle().clone(),
         }
         .with_phase_adapter_peak(&spec, 100)
         .unwrap()
-        .with_pag_workspace(25);
+        .with_pag_workspace(25)
+        .with_hires_workspace(1_200, 15);
         assert_eq!(floor.phase_adapter_extra_bytes, 87);
-        assert_eq!(floor.request_peak_floor_bytes(), 1_112);
+        assert_eq!(floor.request_peak_floor_bytes(), 1_327);
         assert_eq!(floor.reclaimable_weight_bytes(), 1_000);
     }
 
@@ -678,6 +697,8 @@ mod tests {
             source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
             phase_adapter_extra_bytes: (1.0 * BYTES_PER_GIB) as u64,
             pag_workspace_bytes: 0,
+            hires_workspace_bytes: 0,
+            materialized_hires_weight_bytes: None,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("floor admission admits");
@@ -696,6 +717,8 @@ mod tests {
             source_weight_bytes: 0,
             phase_adapter_extra_bytes: 0,
             pag_workspace_bytes: 0,
+            hires_workspace_bytes: 0,
+            materialized_hires_weight_bytes: None,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("un-gateable admission admits");

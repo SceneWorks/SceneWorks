@@ -68,7 +68,7 @@ fn synthetic_plan(route: &'static str, assets_gib: f64, headroom_gib: f64) -> Ml
         asset_bytes: gib_to_bytes(assets_gib),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
-        phase_adapter_workspace_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(headroom_gib),
         fixed_reserve_bytes: gib_to_bytes(2.0),
         calibration: MlxCalibrationConfig::Absent,
