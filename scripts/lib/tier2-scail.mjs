@@ -177,8 +177,11 @@ export function verifyScailRefusal(fit, capBytes, message) {
   assert.ok(fit.length && fit.every((e) => e.availableAcceleratorBytes <= capBytes), "worker refusal did not use the selected accelerator ceiling");
   // The worker returns the last refused quotation when all candidate donors fail.
   const last = fit.at(-1);
+  // On Candle the cold gate returns Unsupported through the provider cache's load boundary.
+  // scailFitEvents has already bound the logged backend to the selected route.
+  const prefix = last.backend === "candle" ? "video load failed: unsupported: " : "";
   assert.ok(last.requiredAcceleratorBytes > last.availableAcceleratorBytes &&
-    message === `SCAIL-2 plural fit requires ${last.requiredAcceleratorBytes} accelerator bytes, only ${last.availableAcceleratorBytes} are available`,
+    message === `${prefix}SCAIL-2 plural fit requires ${last.requiredAcceleratorBytes} accelerator bytes, only ${last.availableAcceleratorBytes} are available`,
     "missing SCAIL budget refusal for the observed byte counts");
 }
 

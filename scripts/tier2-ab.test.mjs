@@ -1066,11 +1066,15 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
       }
       const denied = { ...cold, admitted: false, availableAcceleratorBytes: 99 };
       const refused = verify([denied], false);
-      const message = "SCAIL-2 plural fit requires 100 accelerator bytes, only 99 are available";
+      const detail = "SCAIL-2 plural fit requires 100 accelerator bytes, only 99 are available";
+      const wrapped = "video load failed: unsupported: " + detail;
+      const message = backend === "mlx" ? detail : wrapped;
       verifyScailRefusal(refused, 99, message);
       assert.throws(() => verifyScailRefusal([...refused, { ...denied, requiredAcceleratorBytes: 102 }], 99, message), /observed byte counts/);
       assert.throws(() => verifyScailRefusal(refused, 98, message), /ceiling/);
-      for (const wrong of [undefined, "video load failed: " + message, message.replace("100", "101"), message.replace("99", "98"), "video load failed: prepared source or placement changed"]) {
+      for (const wrong of [undefined, backend === "mlx" ? wrapped : detail, "video load failed: " + detail,
+        "unsupported: " + detail, message + ".", message.replace("100", "101"), message.replace("99", "98"),
+        "video load failed: prepared source or placement changed"]) {
         assert.throws(() => verifyScailRefusal(refused, 99, wrong), /observed byte counts/);
       }
       assert.throws(() => verify([denied, execution], false));
