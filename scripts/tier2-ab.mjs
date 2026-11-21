@@ -1001,8 +1001,11 @@ async function preflight(env, cfg, report) {
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
   if (cfg.routes.some((route) => route.scailCandidate)) {
-    const pool = JSON.parse(await readFile(path.join(cfg.headDir, "config", "scail2-plural-memory.json"), "utf8"));
-    const evidence = scailFitEvidence(pool, cfg.backend);
+    const config = (name) => readFile(path.join(cfg.headDir, "config", name), "utf8").then(JSON.parse);
+    const [pool, coverage, closures] = await Promise.all([config("scail2-plural-memory.json"),
+      config("scail2-memory-pin-coverage.json").catch((error) => { if (error.code === "ENOENT") return []; throw error; }),
+      config("inference-provider-closures.json")]);
+    const evidence = scailFitEvidence(pool, cfg.backend, { compiledPin: report.head.inferencePin, coverage, closures });
     for (const item of report.routes.filter((r) => ROUTES[r.id].scailCandidate)) item.nativeFitEvidence = evidence;
   }
   if (cfg.routes.some((route) => route.wanA14b || route.scailCandidate)) {

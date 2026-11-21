@@ -1014,7 +1014,7 @@ test("SCAIL requires an enabled candidate catalog and both pinned product compon
 });
 
 test("SCAIL workers must observe the exact file seal, ordered RGB inputs and live cold and execution budgets", async () => {
-  const { scailFitEvents, scailArtifactSha256 } = await import("./lib/tier2-scail.mjs");
+  const { scailFitEvents, scailArtifactSha256, scailRefusalCapGiB } = await import("./lib/tier2-scail.mjs");
   for (const backend of ["mlx", "cuda"]) {
     for (const n of [2, 3, 4, 5, 6]) {
       const route = ROUTES[`${backend}-scail2-q4-animate-${n}`];
@@ -1023,21 +1023,34 @@ test("SCAIL workers must observe the exact file seal, ordered RGB inputs and liv
       const pairs = sources.references.map((_, i) => `reference-${i}-1:0:832x480:reference-mask-${i}-1:0:832x480`).join(":");
       const frames = Array.from({ length: 45 }, (_, i) => `${i}:832x480`).join(",");
       const carrier = `scail2-carrier-v2:backend-${lane}:task-animation:composite-832x480:characters-${n}:${pairs}:driving-frames-45:${frames}:driving-mask-45:${frames}:strength-3f800000:mode-FaceOnly:frame-0+scail2-carrier-request-seal-v2-${sha256("carrier")}`;
-      const cold = { event: "scail2_plural_fit", evidenceSha256: sha256("native"), jobId: "owned", stage: "cold_load", backend: lane, tier: "q4", artifactTier: "q4",
+      const price = { grossHostBytes: backend === "mlx" ? 0 : 100, grossDeviceBytes: backend === "mlx" ? 0 : 100,
+        grossUnifiedBytes: backend === "mlx" ? 100 : 0 };
+      const cold = { ...price, event: "scail2_plural_fit", evidenceSha256: sha256("shared-receipt"), evidenceArtifactId: 781, evidenceReferences: n, jobId: "owned", stage: "cold_load", backend: lane, tier: "q4", artifactTier: "q4",
         width: 832, height: 480, frames: 45, referenceCount: n, artifactSha256: scailArtifactSha256, carrierReceipt: carrier,
         referenceRgbSha256: sources.references.map((r) => r.rgbSha256).join(","), requiredAcceleratorBytes: 100,
         availableAcceleratorBytes: 100, requiredPhysicalHostBytes: 100, availablePhysicalHostBytes: 100, providerCreditBytes: 0, admitted: true };
       const execution = { ...cold, stage: "execution" };
-      const pool = [
-        { sha256: sha256("native"), references: n }, { sha256: sha256("two"), references: 2 }, { sha256: sha256("six"), references: 6 },
-      ];
+      const pool = [...new Set([2, n, 6])].map((references) => ({ sha256: cold.evidenceSha256, artifactId: 781,
+        device: "board", runtime: "runtime", nativePolicy:"native-policy", references, price, acceleratorBytes: 100 }));
       const verify = (entries, admitted = true) => scailFitEvents(entries.map((e) => JSON.stringify(e)).join("\n"), route, "owned", admitted, sources, pool);
       assert.equal(verify([cold, execution]).length, 2);
-      const usingCapture = (digest) => [cold, execution].map((event) => ({ ...event, evidenceSha256: digest }));
-      if (n === 6) assert.throws(() => verify(usingCapture(sha256("two"))), /covering the requested reference count/);
-      if (backend === "mlx" && n < 6) assert.equal(verify(usingCapture(sha256("six"))).length, 2);
+      const usingCapture = (references) => [cold, execution].map((event) => ({ ...event, evidenceReferences: references }));
+      if (n === 6) {
+        assert.throws(() => verify(usingCapture(2)), /covering the requested reference count/);
+        assert.equal(scailRefusalCapGiB([cold], pool), 99 / 1024 ** 3);
+        const six = pool.find((row) => row.references === 6);
+        assert.equal(scailRefusalCapGiB([cold], [...pool, { ...six, artifactId:782, acceleratorBytes:75 },
+          { ...six, artifactId:783, nativePolicy:"other", acceleratorBytes:5 }]), 74 / 1024 ** 3);
+        assert.throws(() => scailRefusalCapGiB([cold], [...pool, six]), /one physical capture/);
+        assert.throws(() => scailRefusalCapGiB(usingCapture(2), pool), /covering the requested reference count/);
+        assert.throws(() => scailRefusalCapGiB([{ ...cold, evidenceArtifactId: 780 }], pool));
+      }
+      if (backend === "mlx" && n < 6) {
+        assert.equal(verify(usingCapture(6)).length, 2);
+        assert.throws(() => verify([cold, { ...execution, evidenceReferences: 6 }]), /changed its admitted physical evidence/);
+      }
       for (const change of [{ referenceRgbSha256: cold.referenceRgbSha256.split(",").reverse().join(",") },
-        { stage: "cold_load" }, { artifactSha256: sha256("wrong") }, { evidenceSha256: sha256("other") }, { carrierReceipt: carrier.replace("reference-mask-1", "reference-mask-0") },
+        { stage: "cold_load" }, { artifactSha256: sha256("wrong") }, { evidenceSha256: sha256("other") }, { evidenceArtifactId: 17 }, { grossHostBytes: 95 }, { requiredAcceleratorBytes: 99 }, { carrierReceipt: carrier.replace("reference-mask-1", "reference-mask-0") },
         { jobId: "another" }, { carrierReceipt: carrier.replace(sha256("carrier"), sha256("another")) },
         { availablePhysicalHostBytes: null }, { availableAcceleratorBytes: 99 }, { tier: "bf16" }]) {
         assert.throws(() => verify([cold, { ...execution, ...change }]));
@@ -1105,17 +1118,66 @@ test("SCAIL imports ordered files through project multipart and verifies the ser
   await assert.rejects(uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng), /served input differs/);
 });
 
-test("SCAIL product preflight requires the calibrated count rows from the candidate package", async () => {
+test("SCAIL product reads the actual projector output, including shared receipt IDs and reviewed prices", async (t) => {
   const { scailFitEvidence, scailArtifactSha256 } = await import("./lib/tier2-scail.mjs");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "scail-project-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const put = async (name, data) => {
+    const bytes = JSON.stringify(data); await writeFile(path.join(dir, name), bytes); return sha256(bytes);
+  };
   for (const backend of ["mlx", "cuda"]) {
-    const counts = backend === "mlx" ? [2, 6] : [2, 3, 4, 5, 6];
-    const pool = counts.map((references) => ({ platform: backend === "mlx" ? "macos" : "windows",
-      device: "fixture-device", runtime: "fixture-runtime", evidence_sha256: sha256(String(references)), witness: { gross_device_bytes: 700, gross_unified_bytes: 800, axes: {
-        backend, artifact_sha256: scailArtifactSha256, artifact_tier: "q4", effective_tier: "q4", width: 832, height: 480, references } } }));
-    assert.deepEqual(scailFitEvidence(pool, backend).map((r) => r.references), counts);
-    assert.throws(() => scailFitEvidence(pool.slice(1), backend), /no packaged native/);
-    pool[0].evidence_sha256 = "undefined";
-    assert.throws(() => scailFitEvidence(pool, backend), /no packaged native/);
+    const mlx = backend === "mlx", counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
+    const revision = "1".repeat(40);
+    const contract = { compiledPin: revision, coverage: [], closures: {} };
+    const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
+      hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
+    for (const n of counts) {
+      const tokens = (15 + n) * 1560;
+      const window = {latent_frames:12, history_frames:0, decoded_frames:mlx?48:45, tokens, mlx_unsplit_ffn:mlx,
+        mlx_ffn_chunks:Math.ceil(tokens/8192), mlx_ffn_tail:tokens%8192, self_attention_query_rows:mlx?0:64,
+        self_attention_score_elements:mlx?0:64*tokens};
+      const axes = { backend, artifact_sha256: scailArtifactSha256, artifact_tier:"q4", effective_tier:"q4", width:832, height:480,
+        references:n, history_order:4, classifier_free_guidance:true, mlx_dpmpp:false, windows:[window],
+        source_bytes:(2*n+90)*832*480*3, driving_stack_bytes:45*832*480*24, schedule_bytes:320, source_resize_bytes:0,
+        source_shape_sha256:sha256("fixture shape "+n), load_policy:(mlx?"None":"Some(Q4)")+"/Bf16/Resident/EagerMaterialization",
+        execution_policy:[{name:mlx?"SCAIL2_COMPUTE_BF16":"CANDLE_DEQUANTIZE_ALL",value:null}], floor_host_bytes:0, floor_device_bytes:0, floor_unified_bytes:0 };
+      const name = `count-${n}.supervisor.json`;
+      receipt.logs[name] = { sha256:await put(name, { returncode:0, pid:n+100, lifetime_peak_host_bytes:90, peak_host_bytes:95,
+        admission:{ childFootprintCapBytes:200, childGpuCapBytes:160, policySha256:sha256("policy") } }) };
+      receipt.counts[n] = { accepted:true, claim:{post_execution_verified:true}, native: {axes, pid:n+100, prompt_tokens:[512,512], allocator_peak:80},
+        candidate_row_pending_physical_review:{ platform:mlx?"macos":"windows", device:"board", runtime:"runtime", inference_revision:revision,
+          witness:{ axes, text_tokens:512, gross_host_bytes:145, gross_unified_bytes:140, gross_device_bytes:120, mlx_decode_budget_bytes:16 } } };
+    }
+    const digest = await put("receipt.json", receipt), projected = [];
+    const aggregate = { basis:"measured_aggregate", co_live_extra_bytes:5, uncertainty_allowance_bytes:8 };
+    for (const n of counts) {
+      await put("review.json", { artifact_id:781, run_id:4321, run_attempt:1, receipt_sha256:digest, references:n, rationale:"metadata fixture",
+        domains:mlx ? {unified:aggregate} : {host:aggregate, device:{basis:"guarded_ceiling", unsampled_overshoot_upper_bytes:15}} });
+      const produced = spawnSync(process.platform === "win32" ? "python" : "python3", [path.join(root, "scripts/project-scail2-memory.py"),
+        path.join(dir, "receipt.json"), path.join(dir, "review.json")], { encoding:"utf8" });
+      assert.equal(produced.status, 0, produced.stderr); projected.push(JSON.parse(produced.stdout));
+    }
+    const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
+    const rows = read(projected);
+    assert.deepEqual(rows.map((r) => r.references), counts);
+    assert.ok(rows.every((r) => r.artifactId === 781 && r.sha256 === digest));
+    assert.deepEqual(rows[0].price, mlx ? {grossHostBytes:0,grossDeviceBytes:0,grossUnifiedBytes:153}
+      : {grossHostBytes:158,grossDeviceBytes:175,grossUnifiedBytes:0});
+    assert.throws(() => read(projected.slice(1)), /no packaged native/);
+    const wrong = (mutate) => { const copy = structuredClone(projected); mutate(copy[0]); assert.throws(() => read(copy)); };
+    wrong((r) => { r.guard_policy_sha256 = sha256("different policy"); });
+    wrong((r) => { r.post_execution_verified = false; });
+    wrong((r) => { if (mlx) r.bounds.mlx_decode_budget_bytes=154; else r.axes.load_policy="unpriced policy"; });
+    wrong((r) => { (mlx ? r.bounds.unified : r.bounds.host).classified_peak_bytes = 2; });
+    wrong((r) => { if (mlx) r.axes.floor_unified_bytes=154; else r.axes.floor_device_bytes=176; });
+    wrong((r) => { (mlx ? r.bounds.unified : r.bounds.host).co_live_extra_bytes = Number.MAX_SAFE_INTEGER; });
+    const target = "2".repeat(40), closure = {digest:sha256("provider"),sharedContractDigest:sha256("shared")};
+    const coverage = {capture_revision:revision,target_revision:target,backend, provider_digest:closure.digest,
+      shared_contract_digest:closure.sharedContractDigest, tree_diff_sha256:sha256("diff")};
+    const changed = { compiledPin:target, coverage:[coverage], closures:{inferenceRevision:target,providers:{[(mlx?"mlx":"candle")+":scail2_14b"]:closure}} };
+    assert.deepEqual(read(projected, changed), rows);
+    assert.throws(() => read(projected, { ...changed, coverage:[] }), /no packaged native/);
+    assert.throws(() => read(projected, { ...changed, coverage:[{ ...coverage, provider_digest:sha256("wrong") }] }), /no packaged native/);
   }
 });
 

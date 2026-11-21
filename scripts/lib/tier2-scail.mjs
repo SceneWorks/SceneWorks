@@ -38,32 +38,96 @@ export function verifyScailClaim(files) {
 export const SAM3 = { repo: "SceneWorks/sam3-mlx", revision: "3ed10b164a755c00b1a4d671dde95719c127e1a7",
   files: { "model.safetensors": "6d06f0a5f84e435071fe6603e61d0b4cc7b40e0d39d487cfd4d67d8cc11cc14a",
     "tokenizer.json": "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35" } };
-// The two native MLX boundaries and the five native CUDA counts qualify these product witnesses.
-export function scailFitEvidence(pool, backend) {
-  const platform = backend === "mlx" ? "macos" : "windows";
-  assert.ok(Array.isArray(pool), "invalid packaged SCAIL fit rows");
-  const rows = pool.filter((row) => row.platform === platform && row.witness?.axes?.backend === backend
-    && row.witness.axes.artifact_sha256 === scailArtifactSha256 && row.witness.axes.effective_tier === "q4"
-    && row.witness.axes.artifact_tier === "q4" && row.witness.axes.width === 832 && row.witness.axes.height === 480
-    && row.device && row.runtime && /^[a-f0-9]{64}$/.test(row.evidence_sha256));
-  const counts = backend === "mlx" ? [2, 6] : [2, 3, 4, 5, 6];
-  const complete = rows.filter((row) => counts.every((count) => rows.some((other) =>
-    other.device === row.device && other.runtime === row.runtime && other.witness.axes.references === count)));
-  assert.ok(complete.length, `no packaged native SCAIL q4 evidence covering the required counts on the same ${platform} host configuration`);
-  return complete.map((row) => {
-    const acceleratorBytes = backend === "mlx" ? row.witness.gross_unified_bytes : row.witness.gross_device_bytes;
-    assert.ok(Number.isSafeInteger(acceleratorBytes) && acceleratorBytes > 0, "native SCAIL device measurement missing");
-    return { device: row.device, runtime: row.runtime, references: row.witness.axes.references, sha256: row.evidence_sha256, acceleratorBytes };
-  });
+const digestPattern = /^[a-f0-9]{64}$/;
+function byteCount(value) {
+  assert.ok(Number.isSafeInteger(value) && value >= 0, "invalid physical byte count");
+  return value;
 }
-// A cold worker has zero provider credit. Cap below every qualifying six-reference capture on
-// its device/runtime so an alternative, smaller quotation cannot admit the negative request.
+
+// Mirrors the worker's evidence::Envelope::price. Product fixtures use the captured geometry,
+// four steps and uniformly sized inputs, so their native price has no resize or schedule delta.
+function physicalPrice(envelope, floor) {
+  const observed = byteCount(envelope.observed_peak_bytes);
+  assert.ok(observed > 0, "missing physical observation");
+  let price;
+  if (envelope.basis === "guarded_ceiling") {
+    const ceiling = byteCount(envelope.guard_ceiling_bytes);
+    assert.ok(ceiling >= observed, "guard ceiling below observation");
+    price = byteCount(ceiling + byteCount(envelope.unsampled_overshoot_upper_bytes));
+  } else {
+    assert.equal(envelope.basis, "measured_aggregate");
+    const classified = byteCount(envelope.classified_peak_bytes);
+    assert.ok(classified >= observed && digestPattern.test(envelope.review_sha256), "invalid reviewed aggregate");
+    price = byteCount(classified + byteCount(envelope.co_live_extra_bytes) + byteCount(envelope.uncertainty_allowance_bytes));
+  }
+  assert.ok(price >= byteCount(floor), "physical price below native floor");
+  return price;
+}
+
+export function scailFitEvidence(pool, backend, { compiledPin, coverage, closures }) {
+  const mlx = backend === "mlx", platform = mlx ? "macos" : "windows";
+  const counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
+  assert.match(compiledPin, /^[a-f0-9]{40}$/);
+  assert.ok(Array.isArray(pool) && Array.isArray(coverage), "invalid packaged SCAIL fit rows");
+  const closure = closures?.providers?.[(mlx ? "mlx" : "candle") + ":scail2_14b"];
+  const rows = [];
+  for (const row of pool) {
+    if (row.platform !== platform) continue;
+    if (row.inference_revision !== compiledPin && !coverage.some((c) =>
+      c.capture_revision === row.inference_revision && c.target_revision === compiledPin && c.backend === backend
+      && closures?.inferenceRevision === compiledPin && digestPattern.test(c.tree_diff_sha256)
+      && digestPattern.test(c.provider_digest) && c.provider_digest === closure?.digest
+      && digestPattern.test(c.shared_contract_digest) && c.shared_contract_digest === closure?.sharedContractDigest)) continue;
+    const a = row.axes;
+    if (a?.backend !== backend || a.artifact_sha256 !== scailArtifactSha256 || a.effective_tier !== "q4"
+      || a.artifact_tier !== "q4" || a.width !== 832 || a.height !== 480 || !Number.isInteger(a.references) || a.references < 2 || a.references > 6) continue;
+    assert.ok(row.accepted === true && row.post_execution_verified === true && row.guard_exit_code === 0
+      && Number.isSafeInteger(row.artifact_id) && row.artifact_id > 0 && digestPattern.test(row.receipt_sha256)
+      && digestPattern.test(row.guard_policy_sha256) && /^[a-f0-9]{40}$/.test(row.inference_revision)
+      && row.device?.trim() && row.runtime?.trim(), "invalid projected physical capture");
+    assert.deepEqual(row.prompt_tokens, [512, 512]);
+    assert.ok(a.classifier_free_guidance === true && a.history_order === 4 && a.mlx_dpmpp === false
+      && a.windows?.length === 1 && a.source_bytes === (2 * a.references + 90) * 832 * 480 * 3
+      && a.driving_stack_bytes === 45 * 832 * 480 * 24 && a.source_resize_bytes === 0 && a.schedule_bytes === 5 * 64
+      && a.load_policy === (mlx ? "None" : "Some(Q4)") + "/Bf16/Resident/EagerMaterialization"
+      && Array.isArray(a.execution_policy), "capture does not cover the fixed product inputs");
+    const b = row.bounds;
+    assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
+    if (mlx) assert.ok(byteCount(b.mlx_decode_budget_bytes) > 0, "missing decoder budget");
+    const price = {
+      grossHostBytes: mlx ? 0 : physicalPrice(b.host, a.floor_host_bytes),
+      grossDeviceBytes: mlx ? 0 : physicalPrice(b.device, a.floor_device_bytes),
+      grossUnifiedBytes: mlx ? physicalPrice(b.unified, a.floor_unified_bytes) : 0,
+    };
+    if (mlx) assert.ok(b.mlx_decode_budget_bytes <= price.grossUnifiedBytes, "decoder budget exceeds unified price");
+    // The worker authenticates the index, hardware and compatible compiled pin before quoting.
+    const nativePolicy = JSON.stringify([row.device, row.runtime, a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
+    const campaign = JSON.stringify([nativePolicy, row.inference_revision, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null]);
+    rows.push({ device: row.device, runtime: row.runtime, nativePolicy, campaign, references: a.references,
+      sha256: row.receipt_sha256, artifactId: row.artifact_id, price, acceleratorBytes: mlx ? price.grossUnifiedBytes : price.grossDeviceBytes });
+  }
+  const complete = rows.filter((row) => counts.every((n) => rows.some((r) => r.campaign === row.campaign && r.references === n)));
+  assert.ok(complete.length, `no packaged native SCAIL q4 evidence covering the required counts on the same ${platform} policy`);
+  // The worker can also try an independently reviewed, cheaper quotation for this native policy.
+  // Keep such rows available for exact donor matching and the isolated negative budget.
+  return rows.filter((row) => complete.some((r) => r.nativePolicy === row.nativePolicy));
+}
+
+function donor(event, evidence, references) {
+  const matched = evidence.filter((row) => row.artifactId === event.evidenceArtifactId && row.sha256 === event.evidenceSha256
+    && row.references === event.evidenceReferences && row.references >= references);
+  assert.equal(matched.length, 1, "worker must identify one physical capture covering the requested reference count");
+  const [row] = matched;
+  for (const [key, price] of Object.entries(row.price)) assert.equal(event[key], price, `worker ${key} differs from the projected price`);
+  return row;
+}
+
+// An insufficient run starts cold. Its budget must also refuse a smaller eligible quotation.
 export function scailRefusalCapGiB(events, evidence) {
   const cold = events.find((e) => e.stage === "cold_load" && e.admitted);
-  const bound = evidence.find((row) => row.sha256 === cold?.evidenceSha256);
-  assert.ok(bound && cold.providerCreditBytes === 0, "no accepted cold physical capture");
-  const alternatives = evidence.filter((row) => row.device === bound.device && row.runtime === bound.runtime && row.references >= 6);
-  assert.ok(alternatives.length, "missing six-reference physical capture");
+  assert.ok(cold?.providerCreditBytes === 0 && cold.referenceCount === 6, "no admitted cold six-reference capture");
+  const bound = donor(cold, evidence, 6);
+  const alternatives = evidence.filter((row) => row.nativePolicy === bound.nativePolicy && row.references === 6);
   return (Math.min(cold.requiredAcceleratorBytes, ...alternatives.map((row) => row.acceleratorBytes)) - 1) / (1024 ** 3);
 }
 export async function verifySam3(dir) {
@@ -148,8 +212,7 @@ export function scailFitEvents(text, route, jobId, admitted, sources, evidence) 
     assert.equal(fields.tier, "q4");
     assert.equal(fields.artifactTier, "q4");
     assert.equal(fields.artifactSha256, scailArtifactSha256);
-    assert.ok(evidence.some((row) => row.sha256 === fields.evidenceSha256 && row.references >= route.references),
-      "worker fit has no packaged physical capture covering the requested reference count");
+    const measured = donor(fields, evidence, route.references);
     for (const [key, expected] of Object.entries({ width: 832, height: 480, frames: 45, referenceCount: route.references }))
       assert.equal(Number(fields[key]), expected, key);
     const receipt = fields.carrierReceipt;
@@ -163,13 +226,16 @@ export function scailFitEvents(text, route, jobId, admitted, sources, evidence) 
     }
     assert.ok(Number.isSafeInteger(fields.providerCreditBytes) && fields.providerCreditBytes >= 0, "provider credit unavailable");
     if (fields.stage === "cold_load") assert.equal(fields.providerCreditBytes, 0);
+    assert.ok(fields.requiredAcceleratorBytes >= measured.acceleratorBytes - fields.providerCreditBytes, "worker underpriced accelerator allocation");
+    const physical = backend === "mlx" ? measured.price.grossUnifiedBytes - fields.providerCreditBytes : measured.price.grossHostBytes;
+    assert.ok(fields.requiredPhysicalHostBytes >= physical - (2 * route.references + 90) * 832 * 480 * 3, "worker underpriced physical host allocation");
     const fits = fields.requiredAcceleratorBytes <= fields.availableAcceleratorBytes && fields.requiredPhysicalHostBytes <= fields.availablePhysicalHostBytes;
     assert.equal(fields.admitted, fits);
     events.push(fields);
   }
   if (admitted) {
     assert.ok(events.some((e) => e.stage === "cold_load" && e.admitted === true) && events.some((e) => e.stage === "execution" && e.admitted === true), "missing positive cold-load or execution budget evidence");
-    assert.equal(new Set(events.filter((e) => e.admitted).map((e) => e.evidenceSha256)).size, 1, "worker changed its admitted physical evidence");
+    assert.equal(new Set(events.filter((e) => e.admitted).map((e) => JSON.stringify([e.evidenceArtifactId, e.evidenceSha256, e.evidenceReferences]))).size, 1, "worker changed its admitted physical evidence");
     assert.equal(new Set(events.map((e) => e.carrierReceipt)).size, 1, "admission and execution received different carriers");
   } else {
     assert.ok(events.length && events.every((e) => e.stage === "cold_load" && e.admitted === false) && events.some((e) => e.requiredAcceleratorBytes > e.availableAcceleratorBytes), "no observed accelerator-domain refusal");
