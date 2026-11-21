@@ -68725,7 +68725,8 @@
         },
         "recommendedFor": [
           "animate_character"
-        ]
+        ],
+        "scail2MultiReference": true
       }
     },
     "routes": {},

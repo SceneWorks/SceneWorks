@@ -222,24 +222,106 @@ fn scail_plural_reservation_input() -> VideoGenInput {
 }
 
 #[cfg(native_lane)]
-#[tokio::test]
-async fn scail_plural_reservation_refuses_unverified_fit_before_cache_or_factory() {
+fn scail_fit_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["config.json", "tokenizer.json"] {
+        std::fs::write(root.path().join(name), b"{}").unwrap();
+    }
+    for name in [
+        "dit.safetensors",
+        "t5_encoder.safetensors",
+        "clip.safetensors",
+        "vae.safetensors",
+    ] {
+        write_tiny_safetensors(&root.path().join(name));
+    }
+    root
+}
+
+#[cfg(native_lane)]
+fn scail_fit_input(root: &Path, count: usize) -> VideoGenInput {
+    let mut input = scail_plural_reservation_input();
+    input.model_dir = root.to_owned();
+    input.conditioning.drain(2 * count..12);
+    input
+}
+
+#[cfg(native_lane)]
+async fn drive_scail_fit(input: VideoGenInput, probe: &ArmProbe) -> WorkerResult<DecodedVideo> {
     let settings = offline_settings();
     let mut job = mochi_job_snapshot();
     job.payload.insert("model".into(), json!("scail2_14b"));
     job.payload
         .insert("mode".into(), json!("animate_character"));
-    let probe = ArmProbe::default();
-    let result = generate_video_using(
+    generate_video_using(
         &ApiClient::new(&settings),
         &settings,
         &job,
         crate::video_admission::LANE.as_key(),
         (&Default::default(), &Default::default()),
-        scail_plural_reservation_input(),
+        input,
         probe.loader(),
     )
-    .await;
+    .await
+}
+
+#[cfg(native_lane)]
+fn scail_fit_witness(
+    root: &Path,
+    count: usize,
+) -> gen_core::generator::scail2_fit::Scail2FitWitness {
+    use gen_core::generator::scail2_fit::{Scail2FitProfile, Scail2FitWitness};
+    let mut input = scail_fit_input(root, count);
+    let mut spec = video_load_spec(&input);
+    let request = take_video_request(&mut input, &CancelFlag::new());
+    Scail2FitProfile::prepare_load(&mut spec, &request).unwrap();
+    let plan =
+        prepare_video_reservation(&spec, &input, &request, "scail2_14b", "animate_character")
+            .unwrap()
+            .unwrap()
+            .plan;
+    let profile = Scail2FitProfile::from_plan(&spec, &plan, &request)
+        .unwrap()
+        .unwrap();
+    let axes = profile.axes().clone();
+    let unified = plan.layout().domain == gen_core::MemoryBudgetDomain::UnifiedMemory;
+    let gross = 64 << 20;
+    Scail2FitWitness {
+        axes,
+        text_tokens: 512,
+        gross_unified_bytes: if unified { gross } else { 0 },
+        gross_device_bytes: if unified { 0 } else { gross },
+        gross_host_bytes: if unified { 0 } else { gross },
+        mlx_decode_budget_bytes: unified.then_some(gross),
+    }
+}
+
+#[cfg(native_lane)]
+fn scail_fit_budgets(
+    rows: Vec<gen_core::generator::scail2_fit::Scail2FitWitness>,
+    free: u64,
+    host: Option<u64>,
+) -> crate::video_admission::Scail2FitFixture {
+    crate::video_admission::Scail2FitFixture {
+        rows,
+        budget: gen_core::MemoryBudget {
+            total_bytes: free,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        physical_host: host,
+    }
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_reservation_refuses_unverified_fit_before_cache_or_factory() {
+    let root = scail_fit_root();
+    let mut input = scail_fit_input(root.path(), 6);
+    input.scail2_fit_fixture = Some(scail_fit_budgets(vec![], u64::MAX, Some(u64::MAX)));
+    let probe = ArmProbe::default();
+    let result = drive_scail_fit(input, &probe).await;
     let Err(WorkerError::InvalidPayload(reason)) = result else {
         panic!("unproven plural fit must return a typed refusal before load");
     };
@@ -250,6 +332,126 @@ async fn scail_plural_reservation_refuses_unverified_fit_before_cache_or_factory
         "{reason}"
     );
     assert!(!probe.loaded());
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_fit_admits_each_ordered_count_within_its_physical_budgets() {
+    let gross = 64 << 20;
+    for count in 2..=6 {
+        let root = scail_fit_root();
+        let witness = scail_fit_witness(root.path(), count);
+        let host = gross - witness.axes.source_bytes;
+        let mut input = scail_fit_input(root.path(), count);
+        // Source values and prompt do not change native memory topology.
+        input.prompt = format!("A new prompt with {count} characters.");
+        input.conditioning.swap(0, 2);
+        input.conditioning.swap(1, 3);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness], gross, Some(host)));
+        let probe = ArmProbe::default();
+        drive_scail_fit(input, &probe).await.unwrap();
+        let record = probe.request.lock().unwrap();
+        let actual = record.as_ref().unwrap();
+        let refs: Vec<_> = actual
+            .conditioning
+            .iter()
+            .filter_map(|c| match c {
+                Conditioning::Reference { image, .. } => Some(image.pixels[0]),
+                _ => None,
+            })
+            .collect();
+        let mut expected: Vec<_> = (1..=count as u8).collect();
+        expected.swap(0, 1);
+        assert_eq!(refs, expected);
+    }
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_fit_refuses_short_unknown_or_stale_evidence_before_factory() {
+    let gross = 64 << 20;
+    let root = scail_fit_root();
+    let witness = scail_fit_witness(root.path(), 2);
+    let host = gross - witness.axes.source_bytes;
+    for (free, physical, expected) in [
+        (gross - 1, Some(host), "accelerator bytes"),
+        (gross, Some(host - 1), "physical host bytes"),
+        (gross, None, "could not be verified"),
+    ] {
+        let mut input = scail_fit_input(root.path(), 2);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness.clone()], free, physical));
+        let probe = ArmProbe::default();
+        let Err(WorkerError::InvalidPayload(reason)) = drive_scail_fit(input, &probe).await else {
+            panic!("short or missing budget must refuse")
+        };
+        assert!(reason.contains(expected), "{reason}");
+        assert!(!probe.loaded());
+    }
+    std::fs::write(root.path().join("config.json"), br#"{"num_heads":16}"#).unwrap();
+    let mut input = scail_fit_input(root.path(), 2);
+    input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness], gross, Some(host)));
+    let probe = ArmProbe::default();
+    let Err(WorkerError::InvalidPayload(reason)) = drive_scail_fit(input, &probe).await else {
+        panic!("crossed source must refuse")
+    };
+    assert!(reason.contains("no completed measurement"), "{reason}");
+    assert!(!probe.loaded());
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_warm_fit_credits_only_committed_provider_weights_and_rejects_replaced_members(
+) {
+    use crate::generator_cache::LoadIdentity;
+    use crate::video_admission::{Scail2FitProbe, Scail2PluralFit};
+    use gen_core::{generator::scail2_fit::Scail2FitProfile, MemoryCacheState};
+    let root = scail_fit_root();
+    let mut input = scail_fit_input(root.path(), 2);
+    let request = take_video_request(&mut input, &CancelFlag::new());
+    let mut spec = video_load_spec(&input);
+    Scail2FitProfile::prepare_load(&mut spec, &request).unwrap();
+    let key = LoadIdentity::try_from_load_spec("scail2_14b", &spec).unwrap();
+    let plan =
+        prepare_video_reservation(&spec, &input, &request, "scail2_14b", "animate_character")
+            .unwrap()
+            .unwrap();
+    let row = scail_fit_witness(root.path(), 2);
+    let gross = 64 << 20;
+    let resident = 16 << 20;
+    let mut fixture = scail_fit_budgets(vec![row], gross, Some(gross));
+    fixture.budget.committed_bytes = resident;
+    let probe = Scail2FitProbe {
+        runtime: tokio::runtime::Handle::current(),
+        gpu: "fixture".into(),
+        fixture: Some(fixture),
+    };
+    let rows = probe.witnesses().unwrap();
+    let fit = Scail2PluralFit::prepare(&plan, &spec, &request, "warm", probe, &rows).unwrap();
+    assert!(matches!(
+        fit.with_execution(|| Ok(1)),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    for credit in [0, resident - 1] {
+        assert!(matches!(
+            fit.check_live(&spec, MemoryCacheState::Warm, "execution", credit),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+    }
+    fit.check_live(&spec, MemoryCacheState::Warm, "execution", resident)
+        .unwrap();
+    assert_eq!(fit.with_execution(|| Ok(7)).unwrap(), 7);
+
+    std::fs::write(root.path().join("tokenizer.json"), b"{ }").unwrap();
+    assert!(matches!(
+        fit.check_live(&spec, MemoryCacheState::Warm, "execution", resident),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    let mut changed = video_load_spec(&input);
+    Scail2FitProfile::prepare_load(&mut changed, &request).unwrap();
+    assert_ne!(
+        key,
+        LoadIdentity::try_from_load_spec("scail2_14b", &changed).unwrap()
+    );
 }
 
 #[cfg(native_lane)]

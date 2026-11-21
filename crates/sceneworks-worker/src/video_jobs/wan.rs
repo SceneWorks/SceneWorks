@@ -1443,6 +1443,8 @@ pub(super) struct VideoGenInput {
     /// whose staged assembly already exposes the companion as the DiT's sibling.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     pub(super) imported_h3_companion_dir: Option<PathBuf>,
+    #[cfg(test)]
+    pub(super) scail2_fit_fixture: Option<crate::video_admission::Scail2FitFixture>,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
     /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
     /// it `None`. It is deliberately outside
@@ -1507,6 +1509,8 @@ impl Default for VideoGenInput {
             dit_component_dir: None,
             text_encoder_component_dir: None,
             offload_policy: OffloadPolicy::Resident,
+            #[cfg(test)]
+            scail2_fit_fixture: None,
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             cold_load_admission: None,
         }
@@ -2873,7 +2877,7 @@ pub(super) async fn generate_video_using(
                 e.i2v,
             )
         });
-        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let fit_gpu = settings.gpu_id.clone();
         let host_probe_runtime = tokio::runtime::Handle::current();
         crate::load_progress::spawn(async move {
             let mut spec = video_load_spec(&input);
@@ -2981,11 +2985,46 @@ pub(super) async fn generate_video_using(
             }
             // A plan may seal full RGB clips or inspect snapshot metadata. Keep that work off
             // the async runtime and ahead of any cache eviction or provider factory call.
+            let fit_runtime = host_probe_runtime.clone();
+            let fit_job = receipt_job_id.clone();
             let prepare_cancel = cancel.clone();
             let prepare_model = admission_model_id.clone();
             let prepare_mode = admission_mode.clone();
             let prepared = crate::load_progress::spawn_blocking(move || {
                 let request = take_video_request(&mut input, &prepare_cancel);
+                let evidence = if engine_id == "scail2_14b"
+                    && gen_core::generator::Scail2CharacterReferences::from_request(
+                        engine_id, &request,
+                    )
+                    .map_err(|e| {
+                        crate::classify_engine_error("SCAIL-2 reference carrier rejected", e)
+                    })?
+                    .reference_count()
+                        > 1
+                {
+                    let probe = crate::video_admission::Scail2FitProbe {
+                        runtime: fit_runtime,
+                        gpu: fit_gpu,
+                        #[cfg(test)]
+                        fixture: input.scail2_fit_fixture.take(),
+                    };
+                    let rows = probe.witnesses()?;
+                    if !rows.is_empty() {
+                        // The existing cache key includes the actual snapshot members. Avoid
+                        // acquiring any large files when this hardware has no measured row.
+                        gen_core::generator::scail2_fit::Scail2FitProfile::prepare_load(
+                            &mut spec, &request,
+                        )
+                        .map_err(|e| {
+                            WorkerError::InvalidPayload(format!(
+                                "SCAIL-2 plural memory source could not be verified: {e}"
+                            ))
+                        })?;
+                    }
+                    Some((probe, rows))
+                } else {
+                    None
+                };
                 let plan = prepare_video_reservation(
                     &spec,
                     &input,
@@ -2993,18 +3032,23 @@ pub(super) async fn generate_video_using(
                     &prepare_model,
                     &prepare_mode,
                 )?;
-                if let Some(geometry) = plan.as_ref().map(|p| p.plan.geometry()).filter(|g| {
-                    engine_id == "scail2_14b" && g.reference_count > 1
-                }) {
-                    // Neither native provider has a verified full-render accelerator and
-                    // host fit for the extra packed character tokens.
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "SCAIL-2 has no verified accelerator and host memory fit for {} ordered character references at {}x{} across {} frames on {}",
-                        geometry.reference_count, geometry.width, geometry.height, geometry.frames,
-                        crate::video_admission::LANE.as_key(),
-                    )));
-                }
-                Ok::<_, WorkerError>((input, request, plan, spec))
+                let plural_fit = match evidence {
+                    Some((probe, rows)) => {
+                        let p = plan.as_ref().ok_or_else(|| {
+                            WorkerError::InvalidPayload(
+                                "SCAIL-2 plural fit requires its registered native render plan"
+                                    .into(),
+                            )
+                        })?;
+                        Some(std::sync::Arc::new(
+                            crate::video_admission::Scail2PluralFit::prepare(
+                                p, &spec, &request, &fit_job, probe, &rows,
+                            )?,
+                        ))
+                    }
+                    None => None,
+                };
+                Ok::<_, WorkerError>((input, request, plan, spec, plural_fit))
             })
             .await
             .map_err(|error| WorkerError::Engine(error.to_string()))?;
@@ -3013,9 +3057,24 @@ pub(super) async fn generate_video_using(
                     "Video generation canceled during reservation preparation.".into(),
                 ));
             }
-            let (input, mut request, plan, spec) = prepared?;
+            let (input, mut request, plan, spec, plural_fit) = prepared?;
+            let cold_fit = plural_fit.clone();
+            let fit_cancel = cancel.clone();
             let cold_h3_receipt = h3_receipt.clone();
             let load_generator = move |id: &str, spec: &LoadSpec| {
+                if let Some(fit) = &cold_fit {
+                    fit.check_live(spec, gen_core::MemoryCacheState::Cold, "cold_load", 0)
+                        .map_err(|error| match error {
+                            WorkerError::ProcessPoisoned(detail) => {
+                                gen_core::Error::ProcessPoisoned(detail)
+                            }
+                            WorkerError::Canceled(_) => gen_core::Error::Canceled,
+                            other => gen_core::Error::Unsupported(other.to_string()),
+                        })?;
+                    if fit_cancel.is_cancelled() {
+                        return Err(gen_core::Error::Canceled);
+                    }
+                }
                 if let Some(receipt) = &cold_h3_receipt {
                     receipt
                         .validate(spec)
@@ -3050,6 +3109,21 @@ pub(super) async fn generate_video_using(
                     admission_spec.offload_policy = load_policy;
                     admission_spec.load_shape_declaration_result =
                         loaded_policy.load_shape_declaration_result;
+                }
+                if let (Some(fit), Some(plan)) = (&plural_fit, &plan) {
+                    fit.check_live(
+                        &admission_spec,
+                        cache_state,
+                        "execution",
+                        generator
+                            .video_plan_resident_weight_bytes(&plan.plan)
+                            .unwrap_or(0),
+                    )?;
+                    if cancel.is_cancelled() {
+                        return Err(WorkerError::Canceled(
+                            "Video generation canceled during SCAIL-2 fit verification.".into(),
+                        ));
+                    }
                 }
                 let execution_span = if let Some(identity) = &input.imported_h3_identity {
                     tracing::info_span!("h3_import_execution", jobId = %receipt_job_id,
@@ -3314,14 +3388,20 @@ pub(super) async fn generate_video_using(
                 if engine_id == "minimax_h3" {
                     super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "before")?;
                 }
-                let result = run_prepared_video_generation(
-                    generator,
-                    &mut request,
-                    context.as_ref(),
-                    plan.as_ref()
-                        .map(|reservation| (&reservation.plan, &admission_spec)),
-                    &mut on_progress,
-                );
+                let mut generate = || {
+                    run_prepared_video_generation(
+                        generator,
+                        &mut request,
+                        context.as_ref(),
+                        plan.as_ref()
+                            .map(|reservation| (&reservation.plan, &admission_spec)),
+                        &mut on_progress,
+                    )
+                };
+                let result = match &plural_fit {
+                    Some(fit) => fit.with_execution(generate),
+                    None => generate(),
+                };
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 if engine_id == "minimax_h3" {
                     // Scope cleanup has already run, including cancellation and failed forwards.
