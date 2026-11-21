@@ -15,8 +15,8 @@
 //! - `SCENEWORKS_IMPORTED_MXFP8_CHECKPOINT` — ComfyUI Kitchen **MXFP8**: `F8_E4M3` weights with a
 //!   `U8` block-scale companion, declared file-level.
 //!
-//! Both decode to dense bf16 on every host (this workspace ships no fp8/MXFP8 GEMM), so the
-//! expected execution representation is `dense-fallback` — the SOURCE codec is what differs.
+//! Native-format acceptance requires a measured packed execution row from the generated request.
+//! Muse additionally runs twice with the same additive adapter to exercise resident reuse.
 //!
 //! The smoke is intentionally fail-loud. The environment variable and all pinned files must be
 //! present; an absent runner cache is a failure, never a skip-and-pass.
@@ -43,6 +43,7 @@ type ProgressPosts = Arc<Mutex<Vec<(String, Value)>>>;
 #[derive(Clone)]
 struct WorkerApiStubState {
     progress_posts: ProgressPosts,
+    metrics: ProgressPosts,
 }
 
 fn required_env_path(key: &str) -> PathBuf {
@@ -123,17 +124,28 @@ async fn stub_heartbeat(AxumPath(worker_id): AxumPath<String>) -> Json<Value> {
     Json(stub_worker_snapshot(&worker_id))
 }
 
-async fn stub_metrics(Json(payload): Json<Value>) -> Json<Value> {
+async fn stub_metrics(
+    State(state): State<WorkerApiStubState>,
+    AxumPath(job_id): AxumPath<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    state
+        .metrics
+        .lock()
+        .expect("metrics lock")
+        .push((job_id, payload.clone()));
     Json(payload)
 }
 
-async fn spawn_worker_api_stub() -> (String, ProgressPosts) {
+async fn spawn_worker_api_stub() -> (String, ProgressPosts, ProgressPosts) {
     let progress_posts = Arc::new(Mutex::new(Vec::new()));
+    let metrics = Arc::new(Mutex::new(Vec::new()));
     let app = crate::test_api_stub::job_progress_routes(stub_job, stub_progress)
         .route("/api/v1/jobs/:job_id/metrics", post(stub_metrics))
         .route("/api/v1/workers/:worker_id/heartbeat", post(stub_heartbeat))
         .with_state(WorkerApiStubState {
             progress_posts: progress_posts.clone(),
+            metrics: metrics.clone(),
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -144,7 +156,7 @@ async fn spawn_worker_api_stub() -> (String, ProgressPosts) {
             .await
             .expect("worker API stub serves");
     });
-    (format!("http://{address}"), progress_posts)
+    (format!("http://{address}"), progress_posts, metrics)
 }
 
 fn smoke_job(job_id: &str, job_type: &str, payload: Value) -> JobSnapshot {
@@ -193,12 +205,32 @@ fn completed_result(posts: &ProgressPosts, job_id: &str) -> Value {
 
 /// The one body both encodings run: import the linked checkpoint, render from it, and assert the
 /// manifest's classification and the asset's measured facts.
-async fn run_imported_comfy_quant_smoke(
-    checkpoint_env: &str,
-    model_id: &str,
-    expected_quant_format: &str,
-    expected_codec_id: &str,
-) {
+struct SmokeCase {
+    checkpoint_env: &'static str,
+    model_id: &'static str,
+    expected_quant_format: &'static str,
+    expected_codec_id: &'static str,
+    family: &'static str,
+    provider: &'static str,
+    companion_repo: &'static str,
+    with_adapter_and_reuse: bool,
+}
+
+async fn run_imported_comfy_quant_smoke(case: SmokeCase) {
+    let SmokeCase {
+        checkpoint_env,
+        model_id,
+        expected_quant_format,
+        expected_codec_id,
+        family,
+        provider,
+        companion_repo,
+        with_adapter_and_reuse,
+    } = case;
+    let _ = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter("info")
+        .try_init();
     let checkpoint = required_env_path(checkpoint_env);
     assert!(
         checkpoint.is_file(),
@@ -213,7 +245,7 @@ async fn run_imported_comfy_quant_smoke(
     );
 
     let temp = tempfile::tempdir().expect("smoke tempdir creates");
-    let (api_url, progress_posts) = spawn_worker_api_stub().await;
+    let (api_url, progress_posts, metrics) = spawn_worker_api_stub().await;
     let mut settings = Settings::for_test(temp.path().join("data"));
     settings.api_url = api_url;
     settings.config_dir = temp.path().join("config");
@@ -222,16 +254,13 @@ async fn run_imported_comfy_quant_smoke(
     settings.backend_candle_enabled = true;
     settings.heartbeat_seconds = 30;
 
-    let base = crate::model_jobs::huggingface_snapshot_dir(
-        &settings.data_dir,
-        "SceneWorks/krea-2-turbo-mlx",
-    )
-    .expect("HF_HUB_CACHE must contain SceneWorks/krea-2-turbo-mlx")
-    .join("bf16");
+    let base = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, companion_repo)
+        .expect("HF_HUB_CACHE must contain the model's companion snapshot")
+        .join("bf16");
     assert!(
         base.join("transformer/config.json").is_file()
             && base.join("tokenizer/tokenizer.json").is_file(),
-        "the cached Krea 2 Turbo bf16 companion snapshot is incomplete: {}",
+        "the cached bf16 companion snapshot is incomplete: {}",
         base.display()
     );
 
@@ -264,7 +293,7 @@ async fn run_imported_comfy_quant_smoke(
             "ownershipMode": "linked",
             "manifestEntry": {
                 "id": model_id,
-                "name": "Krea 2 ComfyUI-quantized worker smoke",
+                "name": "Shared-format worker acceptance",
                 "type": "image",
                 "catalogScope": "user",
                 "source": {
@@ -283,8 +312,8 @@ async fn run_imported_comfy_quant_smoke(
     let imported = imported_manifest_entry(&manifest_path, model_id);
     assert_eq!(
         imported.get("family").and_then(Value::as_str),
-        Some("krea_2"),
-        "the checkpoint compiler determines the Krea family"
+        Some(family),
+        "the checkpoint compiler determines the architecture from the source"
     );
     assert_eq!(
         imported.get("importSourceShape").and_then(Value::as_str),
@@ -315,119 +344,209 @@ async fn run_imported_comfy_quant_smoke(
     let project = ProjectStore::new(settings.data_dir.clone(), "comfy-quant-smoke")
         .create_project("Imported ComfyUI-quantized worker smoke")
         .expect("smoke project creates");
-    let image_job = smoke_job(
-        "comfy-quant-image-generate",
-        "image_generate",
-        json!({
-            "projectId": project.id,
-            "model": model_id,
-            "mode": "text_to_image",
-            "prompt": "a red fox in a sunlit autumn forest, sharp focus",
-            "negativePrompt": "",
-            "width": 256,
-            "height": 256,
-            "count": 1,
-            "seed": 42,
-            "advanced": { "steps": 1 },
-            "modelManifestEntry": imported
-        }),
-    );
-    crate::image_jobs::run_image_generate_job(&api, &settings, &image_job, &Default::default())
-        .await
-        .expect("the linked ComfyUI-quantized worker generation completes");
-
-    let image_result = completed_result(&progress_posts, "comfy-quant-image-generate");
-    let asset = image_result
-        .get("assetWrites")
-        .and_then(Value::as_array)
-        .and_then(|assets| assets.first())
-        .expect("the completed worker result carries one image asset");
-    let raw = asset
-        .get("rawAdapterSettings")
-        .and_then(Value::as_object)
-        .expect("the image asset carries worker-resolved settings");
-    assert_eq!(
-        raw.get("engine").and_then(Value::as_str),
-        Some("candle_checkpoint_plan"),
-        "the render must run through the worker checkpoint-plan route"
-    );
-    assert_eq!(
-        raw.get("importPlanProvider").and_then(Value::as_str),
-        Some("krea_2_turbo"),
-        "the plan must dispatch to the imported Krea provider"
-    );
-
-    let facts: CheckpointWeightFactsV1 = serde_json::from_value(
-        raw.get(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY)
-            .cloned()
-            .expect("the asset carries checkpointWeightFacts"),
-    )
-    .expect("checkpointWeightFacts is a valid correlated fact set");
-    assert!(
-        facts.declares(expected_codec_id),
-        "the asset must report source codec {expected_codec_id}"
-    );
-    // Neither encoding has a packed-native leg in this workspace: the rows decode to dense bf16
-    // and execute dense. The SOURCE codec is the fact that differs between the two encodings.
-    let representation = facts
-        .representation_label(expected_codec_id)
-        .expect("the runtime receipt reports the execution representation");
-    assert_eq!(
-        representation, "dense-fallback",
-        "expected a dense-fallback receipt for {expected_codec_id}, got {representation:?}"
-    );
-
-    let media_path = asset
-        .get("mediaPath")
-        .and_then(Value::as_str)
-        .expect("the asset carries its media path");
-    let rendered_path = PathBuf::from(&project.path).join(media_path);
-    let decoded = image::open(&rendered_path)
-        .unwrap_or_else(|error| panic!("open rendered asset {}: {error}", rendered_path.display()))
-        .to_rgb8();
-    let rendered = gen_core::Image {
-        width: decoded.width(),
-        height: decoded.height(),
-        pixels: decoded.into_raw(),
+    let mut adapters = Vec::new();
+    if with_adapter_and_reuse {
+        let source = required_env_path("SCENEWORKS_IMPORTED_FP8_ADAPTER");
+        assert!(source.is_file(), "required additive adapter must exist");
+        let directory = settings.data_dir.join("loras").join("acceptance");
+        std::fs::create_dir_all(&directory).expect("owned adapter directory creates");
+        let selected = directory.join("adapter.safetensors");
+        std::fs::copy(&source, &selected).expect("stage the actual additive adapter in owned data");
+        adapters.push(json!({"path":selected,"weight":1.0}));
+    }
+    // Match the reported Muse load's geometry, step count, PAG and adapter scale. Content and seed
+    // are fixed here for repeatability; the historical timing is a load baseline, not a pixel oracle.
+    let (width, height, steps) = if with_adapter_and_reuse {
+        (1408, 2048, 8)
+    } else {
+        (256, 256, 1)
     };
-    let std = crate::smoke_support::image_std(&rendered);
-    assert_eq!((rendered.width, rendered.height), (256, 256));
-    assert!(
-        std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT,
-        "the worker render looks degenerate (RGB std {std:.2})"
+    let mut advanced = json!({"steps":steps});
+    if with_adapter_and_reuse {
+        advanced["pag"] = json!({"scale":1.2});
+    }
+    for iteration in 0..if with_adapter_and_reuse { 2 } else { 1 } {
+        let image_job_id = format!("comfy-quant-image-generate-{iteration}");
+        let image_job = smoke_job(
+            &image_job_id,
+            "image_generate",
+            json!({
+                "projectId": project.id,
+                "model": model_id,
+                "mode": "text_to_image",
+                "prompt": "a red fox in a sunlit autumn forest, sharp focus",
+                "negativePrompt": "",
+                "width": width,
+                "height": height,
+                "count": 1,
+                "seed": 42,
+                "advanced": advanced,
+                "loras": adapters,
+                "modelManifestEntry": imported
+            }),
+        );
+        let physical_gpu = std::env::var("SCENEWORKS_GPU_ID")
+            .expect("manual proof must name its reserved physical GPU for hardware metrics");
+        let hardware = crate::job_metrics::JobMetricsProbe::start(&physical_gpu);
+        crate::image_jobs::run_image_generate_job(&api, &settings, &image_job, &Default::default())
+            .await
+            .expect("the linked ComfyUI-quantized worker generation completes");
+        let hardware = hardware.finish().await;
+
+        let image_result = completed_result(&progress_posts, &image_job_id);
+        let asset = image_result
+            .get("assetWrites")
+            .and_then(Value::as_array)
+            .and_then(|assets| assets.first())
+            .expect("the completed worker result carries one image asset");
+        let raw = asset
+            .get("rawAdapterSettings")
+            .and_then(Value::as_object)
+            .expect("the image asset carries worker-resolved settings");
+        assert_eq!(
+            raw.get("engine").and_then(Value::as_str),
+            Some("candle_checkpoint_plan"),
+            "the render must run through the worker checkpoint-plan route"
+        );
+        assert_eq!(
+            raw.get("importPlanProvider").and_then(Value::as_str),
+            Some(provider),
+            "the plan must dispatch to the source architecture's provider"
+        );
+
+        let facts: CheckpointWeightFactsV1 = serde_json::from_value(
+            raw.get(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY)
+                .cloned()
+                .expect("the asset carries checkpointWeightFacts"),
+        )
+        .expect("checkpointWeightFacts is a valid correlated fact set");
+        assert!(
+            facts.declares(expected_codec_id),
+            "the asset must report source codec {expected_codec_id}"
+        );
+        let representation = facts
+            .representation_label(expected_codec_id)
+            .expect("the runtime receipt reports the execution representation");
+        assert_eq!(
+        facts.executes_natively(expected_codec_id), Some(true),
+        "expected measured native materialization for {expected_codec_id}, got {representation:?}"
     );
-    eprintln!(
-        "RESULT status=pass route=candle_checkpoint_plan provider=krea_2_turbo source_codec={} \
+
+        let media_path = asset
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .expect("the asset carries its media path");
+        let rendered_path = PathBuf::from(&project.path).join(media_path);
+        let decoded = image::open(&rendered_path)
+            .unwrap_or_else(|error| {
+                panic!("open rendered asset {}: {error}", rendered_path.display())
+            })
+            .to_rgb8();
+        let rendered = gen_core::Image {
+            width: decoded.width(),
+            height: decoded.height(),
+            pixels: decoded.into_raw(),
+        };
+        let std = crate::smoke_support::image_std(&rendered);
+        assert_eq!((rendered.width, rendered.height), (width, height));
+        assert!(
+            std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT,
+            "the worker render looks degenerate (RGB std {std:.2})"
+        );
+        eprintln!(
+            "RESULT status=pass route=candle_checkpoint_plan provider={provider} source_codec={} \
          execution_representation={} geometry={}x{} rgb_std={std:.3} checkpoint={} output={}",
-        expected_codec_id,
-        representation,
-        rendered.width,
-        rendered.height,
-        checkpoint.display(),
-        rendered_path.display(),
-    );
+            expected_codec_id,
+            representation,
+            rendered.width,
+            rendered.height,
+            checkpoint.display(),
+            rendered_path.display(),
+        );
+        if let Some(output) = std::env::var_os("MODEL_PROOF_OUTPUT_DIR") {
+            let output = PathBuf::from(output);
+            assert!(output.is_absolute() && output.is_dir());
+            let image_name = format!("{model_id}-{iteration}.png");
+            std::fs::copy(&rendered_path, output.join(&image_name))
+                .expect("retain generated image");
+            let packet = json!({
+                "schemaVersion":1, "modelId":model_id, "provider":provider,
+                "iteration":iteration, "sourceCodec":expected_codec_id,
+                "runtimeFacts":facts, "adapterCount":adapters.len(),
+                "physicalGpu":physical_gpu,"hardwareMetrics":hardware,
+                "seed":42,"steps":steps,"width":width,"height":height,"output":image_name,
+                "metrics":metrics.lock().expect("metrics lock").iter()
+                    .filter(|(id, _)| id == &image_job_id).map(|(_,value)|value).collect::<Vec<_>>()
+            });
+            std::fs::write(
+                output.join(format!("{model_id}-{iteration}.json")),
+                serde_json::to_vec_pretty(&packet).unwrap(),
+            )
+            .expect("retain native execution receipt");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight worker GPU smoke; needs a ComfyUI scalar-fp8 Krea 2 checkpoint, the Krea bf16 companion snapshot, and a CUDA device"]
 async fn imported_scalar_fp8_worker_gpu_smoke() {
-    run_imported_comfy_quant_smoke(
-        "SCENEWORKS_IMPORTED_FP8_CHECKPOINT",
-        "linked_krea2_scalar_fp8",
-        "fp8_e4m3_scalar",
-        sceneworks_core::checkpoint_weight_facts::FP8_E4M3_SCALAR_CODEC_ID,
-    )
+    run_imported_comfy_quant_smoke(SmokeCase {
+        checkpoint_env: "SCENEWORKS_IMPORTED_FP8_CHECKPOINT",
+        model_id: "linked_krea2_scalar_fp8",
+        expected_quant_format: "fp8_e4m3_scalar",
+        expected_codec_id: sceneworks_core::checkpoint_weight_facts::FP8_E4M3_SCALAR_CODEC_ID,
+        family: "krea_2",
+        provider: "krea_2_turbo",
+        companion_repo: "SceneWorks/krea-2-turbo-mlx",
+        with_adapter_and_reuse: true,
+    })
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "real-weight worker GPU smoke; needs a ComfyUI Kitchen MXFP8 Krea 2 checkpoint, the Krea bf16 companion snapshot, and a CUDA device"]
 async fn imported_mxfp8_worker_gpu_smoke() {
-    run_imported_comfy_quant_smoke(
-        "SCENEWORKS_IMPORTED_MXFP8_CHECKPOINT",
-        "linked_krea2_mxfp8",
-        "mxfp8",
-        sceneworks_core::checkpoint_weight_facts::MXFP8_CODEC_ID,
-    )
+    run_imported_comfy_quant_smoke(SmokeCase {
+        checkpoint_env: "SCENEWORKS_IMPORTED_MXFP8_CHECKPOINT",
+        model_id: "linked_krea2_mxfp8",
+        expected_quant_format: "mxfp8",
+        expected_codec_id: sceneworks_core::checkpoint_weight_facts::MXFP8_CODEC_ID,
+        family: "krea_2",
+        provider: "krea_2_turbo",
+        companion_repo: "SceneWorks/krea-2-turbo-mlx",
+        with_adapter_and_reuse: false,
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual native ConvRot product validation; real Muse checkpoint and companion snapshot"]
+async fn imported_convrot_worker_gpu_smoke() {
+    run_imported_comfy_quant_smoke(SmokeCase {
+        checkpoint_env: "SCENEWORKS_IMPORTED_CONVROT_CHECKPOINT",
+        model_id: "linked_krea2_convrot",
+        expected_quant_format: "convrot_int8",
+        expected_codec_id: "convrot-int8-native",
+        family: "krea_2",
+        provider: "krea_2_turbo",
+        companion_repo: "SceneWorks/krea-2-turbo-mlx",
+        with_adapter_and_reuse: false,
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual second-architecture native FP8 product validation; real FLUX.2 Dev source and companions"]
+async fn imported_flux2_dev_fp8_worker_gpu_smoke() {
+    run_imported_comfy_quant_smoke(SmokeCase {
+        checkpoint_env: "SCENEWORKS_IMPORTED_FLUX2_FP8_CHECKPOINT",
+        model_id: "linked_flux2_dev_fp8",
+        expected_quant_format: "fp8_e4m3_scalar",
+        expected_codec_id: sceneworks_core::checkpoint_weight_facts::FP8_E4M3_SCALAR_CODEC_ID,
+        family: "flux2-dev",
+        provider: "flux2_dev",
+        companion_repo: "SceneWorks/flux2-dev-mlx",
+        with_adapter_and_reuse: false,
+    })
     .await;
 }
