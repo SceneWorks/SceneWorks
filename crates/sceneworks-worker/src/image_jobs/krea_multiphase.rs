@@ -445,16 +445,22 @@ pub(super) async fn candle_phase_adapter_memory(
     let bound = runtime_cuda::providers::krea::phase_adapter_memory(spec, phases)
         .map_err(|error| super::render::preload_plan_error(KREA_RAW_MODEL_ID, error))?;
     if bound.host_bytes > 0 {
-        if let Some(available) = crate::yue2_admission::host_available_bytes().await {
-            if bound.host_bytes > available {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "Krea multi-phase adapters need {} host bytes, but only {available} are available",
-                    bound.host_bytes,
-                )));
-            }
-        }
+        check_candle_phase_host_memory(
+            bound.host_bytes,
+            crate::yue2_admission::host_available_bytes().await,
+        )?;
     }
     Ok(bound)
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn check_candle_phase_host_memory(needed_bytes: u64, available: Option<u64>) -> WorkerResult<()> {
+    if let Some(available) = available.filter(|&bytes| bytes < needed_bytes) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Krea multi-phase adapters need {needed_bytes} host bytes, but only {available} are available"
+        )));
+    }
+    Ok(())
 }
 
 /// An imported generator may be a warm hit, where its resident factors are already paid for but
@@ -469,15 +475,44 @@ pub(super) async fn admit_warm_candle_phase_workspace(
         return Ok(());
     }
     let budget = crate::vram_gate::live_capped_budget(gpu_id).await;
+    check_warm_candle_phase_budget(gpu_id, needed_bytes, budget)
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn check_warm_candle_phase_budget(
+    gpu_id: &str,
+    needed_bytes: u64,
+    budget: Option<crate::fit_gate::VramBudget>,
+) -> WorkerResult<()> {
     let needed_gib = needed_bytes as f64 / crate::fit_gate::BYTES_PER_GIB;
-    if crate::vram_gate::load_plan(Some(needed_gib), None, budget, false)
-        == crate::vram_gate::LoadPlan::Reject
-    {
+    if budget.is_some_and(|budget| crate::fit_gate::exceeds_budget(needed_gib, budget.free_gb)) {
         return Err(WorkerError::InvalidPayload(format!(
-            "Krea multi-phase adapters need {needed_bytes} additional device bytes on GPU {gpu_id}"
+            "Krea multi-phase workspace needs {needed_bytes} additional device bytes on GPU {gpu_id}"
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn phased_candle_host_and_warm_device_allowances_use_available_bytes() {
+    assert!(check_candle_phase_host_memory(1024, Some(1024)).is_ok());
+    assert!(matches!(
+        check_candle_phase_host_memory(1024, Some(1023)),
+        Err(WorkerError::InvalidPayload(message)) if message.contains("host bytes")
+    ));
+    assert!(check_candle_phase_host_memory(1024, None).is_ok());
+
+    let budget = Some(crate::fit_gate::VramBudget {
+        total_gb: 16.0,
+        free_gb: 2.0,
+    });
+    let available = 2_u64 << 30;
+    assert!(check_warm_candle_phase_budget("gpu", available, budget).is_ok());
+    assert!(matches!(
+        check_warm_candle_phase_budget("gpu", available + 1, budget),
+        Err(WorkerError::InvalidPayload(message)) if message.contains("device bytes")
+    ));
 }
 
 #[cfg(target_os = "macos")]
@@ -525,6 +560,27 @@ pub(super) fn prepare_multiphase_work(
             ))
         })
         .collect()
+}
+
+pub(super) fn multiphase_pag_workspace(
+    work: &[(i64, PreparedKreaMultiphase)],
+    capability: Option<&gen_core::PagCapability>,
+) -> u64 {
+    work.iter()
+        .map(|(_, item)| {
+            let (width, height) = item.plan.output_size();
+            crate::execution_planner::pag_workspace_bytes_for_prefix(
+                width,
+                height,
+                1,
+                item.plan.executed_steps() as u32,
+                (item.plan.sigmas().len() - 1) as u32,
+                capability,
+                item.request.pag.as_ref(),
+            )
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Reflect the placement selected by the cold loader or observed on a warm hit. These fields
@@ -586,11 +642,16 @@ impl PreparedKreaMultiphase {
     pub(super) fn with_loaded_placement(
         mut self,
         placement: crate::generator_cache::ExecutionPolicy,
-    ) -> Self {
+    ) -> WorkerResult<Self> {
         if let Some(spec) = loaded_multiphase_spec(&self.spec, placement) {
-            self.plan = self.plan.bind_load(&spec);
+            self.plan = self.plan.rebind_load_placement(&spec).map_err(|error| {
+                crate::generation_error(
+                    "Krea multi-phase load placement did not match the plan",
+                    error,
+                )
+            })?;
         }
-        self
+        Ok(self)
     }
 
     pub(super) fn generate(
@@ -712,15 +773,6 @@ pub(super) async fn generate_krea_multiphase_stream(
     let adapters = resolve_adapters(request, settings)?;
     let phases = build_generation_phases(&specs);
     let total_steps: u32 = specs.iter().map(|phase| phase.steps).sum();
-    let pag_workspace_bytes = crate::execution_planner::pag_workspace_bytes(
-        request.width,
-        request.height,
-        1,
-        total_steps,
-        raw_model.descriptor.capabilities.pag.as_ref(),
-        sampling_controls.pag.as_ref(),
-    );
-
     let repo = model_repo(request, &raw_model);
     let adapter_label = raw_model.adapter_label();
     let text_style_gain = resolve_text_style_gain(request);
@@ -790,19 +842,6 @@ pub(super) async fn generate_krea_multiphase_stream(
     let adapter_device_bytes = candle_phase_adapter_memory(&spec, &phases)
         .await?
         .device_bytes;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let offload_policy = admit_candle_base(
-        request,
-        settings,
-        &weights_dir,
-        "Krea multi-phase",
-        CandleBaseEvidence::Catalog,
-        adapter_device_bytes.saturating_add(pag_workspace_bytes),
-        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
-    )
-    .await?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let spec = spec.with_offload_policy(offload_policy);
 
     let phase_request = GenerationRequest {
         negative_prompt,
@@ -816,6 +855,22 @@ pub(super) async fn generate_krea_multiphase_stream(
     #[cfg(target_os = "macos")]
     let phase_adapter_workspace = mlx_phase_adapter_workspace(&spec, &phase_request)?;
     let work = prepare_multiphase_work(engine_id, &spec, phase_request, work)?;
+    let pag_workspace_bytes =
+        multiphase_pag_workspace(&work, raw_model.descriptor.capabilities.pag.as_ref());
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let offload_policy = admit_candle_base(
+        request,
+        settings,
+        &weights_dir,
+        "Krea multi-phase",
+        CandleBaseEvidence::Catalog,
+        adapter_device_bytes.saturating_add(pag_workspace_bytes),
+        crate::mlx_fit_gate::engine_supports_sequential(engine_id),
+    )
+    .await?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let spec = spec.with_offload_policy(offload_policy);
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (generation_memory, memory_strategy_context) = {
@@ -926,7 +981,7 @@ pub(super) async fn generate_krea_multiphase_stream(
                         return Ok(None);
                     }
                     let (out_w, out_h, pixels, pag) =
-                        render.with_loaded_placement(loaded_policy).generate(
+                        render.with_loaded_placement(loaded_policy)?.generate(
                             generator,
                             generation_memory,
                             memory_strategy_context.as_ref(),
@@ -986,7 +1041,7 @@ pub(super) async fn generate_krea_multiphase_stream(
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let (out_w, out_h, pixels, pag) =
-                        render.with_loaded_placement(loaded_policy).generate(
+                        render.with_loaded_placement(loaded_policy)?.generate(
                             generator,
                             Some(memory_evaluation.memory),
                             Some(&memory_evaluation.context),

@@ -2444,7 +2444,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             &case.conditioning,
             case.hires_fix,
             1,
-            case.phase_steps,
+            case.phase_steps.map(|_| 0),
         );
         let spec = LoadSpec::new(WeightsSource::File(PathBuf::from(
             "/nonexistent/imported-krea-test.safetensors",
@@ -2798,7 +2798,9 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
     );
     assert_eq!(plain.overlay, None);
     assert!(!plain.has_phases);
-    assert!(krea_imported_memory_inputs(&req, &[], None, 0, Some(6)).has_phases);
+    let phased = krea_imported_memory_inputs(&req, &[], None, 0, Some(6));
+    assert!(phased.has_phases);
+    assert_eq!(phased.pag_workspace_bytes, 6);
 
     let reference = Conditioning::Reference {
         image: Image {

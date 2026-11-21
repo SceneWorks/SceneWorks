@@ -1075,10 +1075,23 @@ pub(crate) fn pag_workspace_bytes(
     capability: Option<&gen_core::PagCapability>,
     pag: Option<&gen_core::PagConfig>,
 ) -> u64 {
+    pag_workspace_bytes_for_prefix(width, height, batch, steps, steps, capability, pag)
+}
+
+/// Price the same buffers when denoise executes only a prefix of the resolved schedule.
+pub(crate) fn pag_workspace_bytes_for_prefix(
+    width: u32,
+    height: u32,
+    batch: u32,
+    executed_steps: u32,
+    schedule_steps: u32,
+    capability: Option<&gen_core::PagCapability>,
+    pag: Option<&gen_core::PagConfig>,
+) -> u64 {
     let Some(pag) = pag else {
         return 0;
     };
-    if !pag.scale.is_finite() || pag.scale <= 0.0 || steps == 0 {
+    if !pag.scale.is_finite() || pag.scale <= 0.0 || executed_steps == 0 {
         return 0;
     }
     let resolved = match capability {
@@ -1104,7 +1117,7 @@ pub(crate) fn pag_workspace_bytes(
             }
         }
     };
-    if resolved.active_steps(steps) == 0 {
+    if resolved.active_steps_for_prefix(executed_steps, schedule_steps) == 0 {
         return 0;
     }
     let tokens =
@@ -3138,6 +3151,33 @@ mod corpus_replay_tests {
             "no linked provider declares an execution surface; sc-18317's planner has no reachable \
              input on this backend"
         );
+    }
+
+    #[test]
+    fn pag_workspace_prices_the_executed_schedule_prefix() {
+        let mut pag = gen_core::PagConfig {
+            scale: 1.5,
+            layers: Some(vec![2]),
+            start: Some(0.9375),
+            stop: Some(0.95),
+            adaptive_scale: None,
+        };
+        let active = pag_workspace_bytes_for_prefix(512, 512, 1, 31, 32, None, Some(&pag));
+        assert!(active > 0, "step 30/32 lies in the active range");
+        assert_eq!(
+            active,
+            pag_workspace_bytes(512, 512, 1, 32, None, Some(&pag))
+        );
+        assert_eq!(pag_workspace_bytes(512, 512, 1, 31, None, Some(&pag)), 0);
+
+        pag.start = Some(0.96);
+        pag.stop = Some(1.0);
+        assert_eq!(
+            pag_workspace_bytes_for_prefix(512, 512, 1, 31, 32, None, Some(&pag)),
+            0,
+            "step 31/32 is outside the executed prefix"
+        );
+        assert!(pag_workspace_bytes(512, 512, 1, 31, None, Some(&pag)) > 0);
     }
 
     #[test]

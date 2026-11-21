@@ -332,10 +332,22 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     gpu_id: String,
     source_weight_bytes: u64,
     phase_adapter_extra_bytes: u64,
+    pag_workspace_bytes: u64,
     runtime: tokio::runtime::Handle,
 }
 
 impl CachedCandleBaseFloorAdmission {
+    pub(super) fn with_pag_workspace(mut self, bytes: u64) -> Self {
+        self.pag_workspace_bytes = bytes;
+        self
+    }
+
+    fn request_peak_floor_bytes(&self) -> u64 {
+        self.source_weight_bytes
+            .saturating_add(self.phase_adapter_extra_bytes)
+            .saturating_add(self.pag_workspace_bytes)
+    }
+
     /// The source floor already counts each adapter file once. Charge any additional resident
     /// factors and phase workspace to this load, without turning the extra bound into eviction
     /// credit for a future cache entry.
@@ -381,9 +393,7 @@ impl CachedCandleBaseFloorAdmission {
     /// `free + reclaimable_pool` must not stay blind to an evictable resident that arrived through
     /// this lane.
     pub(super) fn admit(self, resident_reclaimable_weight_bytes: u64) -> WorkerResult<()> {
-        let floor_bytes = self
-            .source_weight_bytes
-            .saturating_add(self.phase_adapter_extra_bytes);
+        let floor_bytes = self.request_peak_floor_bytes();
         let Some(floor_gb) = (floor_bytes > 0)
             .then(|| floor_bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB)
         else {
@@ -421,6 +431,7 @@ impl CachedCandleBaseFloorAdmission {
                     lane = self.lane,
                     floor_gb,
                     phase_adapter_extra_bytes = self.phase_adapter_extra_bytes,
+                    pag_workspace_bytes = self.pag_workspace_bytes,
                     replacing_resident = resident_reclaimable_weight_bytes > 0,
                     reclaimable_gb,
                     "candle cached-base admission: cold external checkpoint admitted on its on-disk \
@@ -460,6 +471,7 @@ pub(super) fn prepare_cached_candle_base_floor(
         gpu_id: settings.gpu_id.clone(),
         source_weight_bytes: bytes,
         phase_adapter_extra_bytes: 0,
+        pag_workspace_bytes: 0,
         runtime: tokio::runtime::Handle::current(),
     })
 }
@@ -634,11 +646,14 @@ mod tests {
             gpu_id: "unused".into(),
             source_weight_bytes: 1_000,
             phase_adapter_extra_bytes: 0,
+            pag_workspace_bytes: 0,
             runtime: runtime.handle().clone(),
         }
         .with_phase_adapter_peak(&spec, 100)
-        .unwrap();
+        .unwrap()
+        .with_pag_workspace(25);
         assert_eq!(floor.phase_adapter_extra_bytes, 87);
+        assert_eq!(floor.request_peak_floor_bytes(), 1_112);
         assert_eq!(floor.reclaimable_weight_bytes(), 1_000);
     }
 
@@ -662,6 +677,7 @@ mod tests {
             gpu_id: gpu_id.to_owned(),
             source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
             phase_adapter_extra_bytes: (1.0 * BYTES_PER_GIB) as u64,
+            pag_workspace_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("floor admission admits");
@@ -679,6 +695,7 @@ mod tests {
             gpu_id: empty_gpu.to_owned(),
             source_weight_bytes: 0,
             phase_adapter_extra_bytes: 0,
+            pag_workspace_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("un-gateable admission admits");
