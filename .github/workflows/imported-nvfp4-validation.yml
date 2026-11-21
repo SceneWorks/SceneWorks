@@ -22,7 +22,7 @@ jobs:
         working-directory: sceneworks
     env:
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_VISIBLE_DEVICES: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
       SCENEWORKS_GPU_ID: "1"
       CUDA_COMPUTE_CAP: "120"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -104,7 +104,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format-h3 --budget-minutes 150 --physical-indices 1 --require-physical-index 1 --min-free-mib 65536 -- node scripts/ci/imported-shared-format-h3-proof.mjs
+          python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format-h3 --budget-minutes 150 --physical-indices 1 --require-physical-index 1 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-h3-proof.mjs
       - name: Retain bounded generated outputs, receipts and physical resource evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
