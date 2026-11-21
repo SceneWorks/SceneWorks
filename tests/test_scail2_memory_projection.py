@@ -631,6 +631,7 @@ def completed_job_fixture():
     observation = guard["fit_observation"]
     end = observation["cuda_render_end"]
     guard["returncode"] = 0
+    guard["admission"]["pollMillis"] = 250
     completion = {
         "scope": "supervisor-owned-windows-job",
         "root_pid": 41,
@@ -722,6 +723,9 @@ def test_completed_job_proves_output_interval_with_all_raw_tail_readings():
         "marker",
         "missing-counter",
         "gauge-order",
+        "reversed-filetime",
+        "overlong-filetime",
+        "untyped-clock",
     ],
 )
 def test_completed_job_fails_on_unproven_terminal_evidence(change):
@@ -745,6 +749,13 @@ def test_completed_job_fails_on_unproven_terminal_evidence(change):
         guard["fit_observation"]["wddm_retry"]["dedicated"]["events"][0]["start_ns"] = 235
     elif change == "missing-counter":
         guard["fit_observation"]["wddm_shared"]["samples"].pop(0)
+    elif change in {"reversed-filetime", "overlong-filetime", "untyped-clock"}:
+        gap = guard["fit_observation"]["wddm_retry"]["shared"]["events"][0]
+        gap["local_filetime_after"] = {
+            "reversed-filetime": 0,
+            "overlong-filetime": 3_000_000,
+            "untyped-clock": 907.0,
+        }[change]
     elif change == "gauge-order":
         guard["fit_observation"]["wddm_retry"]["shared"]["events"][0]["start_ns"] = 281
     else:
@@ -772,7 +783,7 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
     }
     policy = {
         k: guard["admission"][k]
-        for k in ("cudaDeviceUuid", "childGpuCapBytes", "gpuFreeReserveBytes")
+        for k in ("cudaDeviceUuid", "childGpuCapBytes", "gpuFreeReserveBytes", "pollMillis")
     }
     guard["admission"].update(
         childFootprintCapBytes=200,

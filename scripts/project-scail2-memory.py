@@ -423,6 +423,7 @@ def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool
         "terminal_rejected_attempts": len(final),
     }
     observation = guard["fit_observation"]
+    tick_ns = byte_count(guard["admission"]["pollMillis"]) * 1_000_000
     terminal_gaps = []
     for name, series in (
         ("dedicated", guard["cuda_attribution"]["wddm_dedicated"]),
@@ -437,8 +438,13 @@ def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool
         )
         for gap in gaps:
             terminal_gaps.append(gap)
+            start, finish = gap["start_ns"], gap["end_ns"]
+            lower, upper = gap["local_filetime_before"], gap["local_filetime_after"]
             require(
-                final[-2]["at_ns"]
+                all(type(v) is int and v > 0 for v in (start, finish, lower, upper))
+                and 0 <= finish - start <= tick_ns
+                and 0 <= (upper - lower) * 100 <= tick_ns
+                and final[-2]["at_ns"]
                 < final[-1]["read_ns"]
                 <= gap["start_ns"]
                 <= gap["end_ns"]
@@ -773,6 +779,13 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             require(
                 review["domains"]["device"]["basis"] == "measured_aggregate",
                 "the completed RGB device interval requires an empirical review",
+            )
+            require(
+                type(guard["admission"]["pollMillis"]) is int
+                and guard["admission"]["pollMillis"]
+                == receipt["request"]["policy"]["pollMillis"]
+                == 250,
+                "completed Job polling interval differs from the signed policy",
             )
             completion = (record["claim"], summary, basis)
             counters = guard["fit_observation"]["windows_peak"]
