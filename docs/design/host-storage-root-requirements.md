@@ -285,7 +285,9 @@ The system drive holds only source code, apps, toolchains, personal files
     launched by hand today, so this is a documented rule rather than code.
 - **E6 Runner, Docker and Xcode state on the root.**
   - Each in-scope runner's work folder moves to
-    `runner/<runner-name>/_work`.
+    `hosts/<host>/runner/<runner-name>/_work`, except the signing runner's
+    (`nax-macos`, label `signing`): its work folder, and so its checkouts
+    and installed dependencies, stays on its local disk (E15).
   - Docker Desktop's disk image location moves to `docker/`.
   - Xcode DerivedData for CI and agent builds goes to
     `hosts/<host>/cache/<project>/DerivedData` (per host, r5), via
@@ -434,7 +436,9 @@ The system drive holds only source code, apps, toolchains, personal files
     npm code and builds while the Apple and Tauri signing secrets are set,
     so a writable-by-anyone checkout or build folder would let any machine
     on the network get its own code signed and notarized.
-  - **Signing never uses state on the share.** Authenticated accounts stop
+  - **Signing never uses state on the share.** The signing runner's work
+    folder stays local (E6), so `release.yml`'s checkout and its
+    `npm`/cargo dependency installs are never on the share. Authenticated accounts stop
     strangers, but `nax-macos-2`'s account can still write the whole
     share, including `hosts/nax-macos/` and the shared caches, and the
     NAS may not support per-folder permissions. So `release.yml`'s signing

@@ -385,7 +385,8 @@ No two items share both a mechanism and a repo.
     - the `cargo` shim is on `PATH` and the host-level Codex config runs
       `dev-host env`;
     - runners are re-registered with `workFolder` under
-      `runner/<name>/_work`;
+      `hosts/<host>/runner/<name>/_work`, except the signing runner
+      (`nax-macos`), whose work folder stays on its local disk (E15);
     - Docker's disk image is in `docker/`.
 
     Main CI stays green afterwards.
