@@ -630,8 +630,8 @@ pub fn minimax_h3_import_primary(source: &Path) -> Option<PathBuf> {
         .or_else(|| Some(source.join("config.json")))
 }
 
-/// Classify an H3 directory through its COMPLETE tensor inventory, not the first shard's subset.
-/// Every other family retains its existing single-file gate.
+/// Classify an H3 directory through its complete tensor inventory. For single files, check the
+/// import route's architecture before verifying the source encoding.
 pub fn detect_import_source_weights(
     source: &Path,
     primary: &Path,
@@ -698,7 +698,7 @@ pub fn detect_import_source_weights(
             },
         );
     }
-    let mut detection = detect_base_weight_file(primary)?;
+    let mut detection = detect_base_weight_file_for(primary, flux2_import_layout_refusal)?;
     if let BaseWeightDetection::Recognized(verdict) = &mut detection {
         if verdict.family.as_deref() == Some(crate::model_family::MINIMAX_H3) {
             let header = read_safetensors_header(primary)?;
@@ -724,6 +724,45 @@ pub fn detect_import_source_weights(
         }
     }
     Ok(detection)
+}
+
+fn flux2_import_layout_refusal(verdict: &BaseWeightVerdict, header: &Value) -> Option<String> {
+    use gen_core::{ImportedModelSource, FLUX2_CHECKPOINT_ADAPTER};
+
+    if verdict.family.as_deref() != Some(crate::model_family::FLUX2)
+        || verdict.component != ComponentRole::Transformer
+    {
+        return None;
+    }
+
+    let tensors = header.as_object()?;
+    if tensors.keys().any(|name| {
+        name.strip_prefix("model.diffusion_model.")
+            .unwrap_or(name)
+            .starts_with("guidance_in.")
+    }) {
+        return Some(
+            "The FLUX.2 Dev guidance embedder requires the Dev ComfyUI route. \
+             Single-file FLUX.2 import requires a Klein transformer."
+                .to_owned(),
+        );
+    }
+
+    let adapter = &FLUX2_CHECKPOINT_ADAPTER;
+    let matches_import_signature = adapter.dialects.iter().any(|dialect| {
+        dialect.source == ImportedModelSource::TransformerFile
+            && adapter.signatures.iter().any(|signature| {
+                signature.dialect == dialect.id
+                    && signature
+                        .required_tensor_names
+                        .iter()
+                        .all(|name| tensors.contains_key(*name))
+            })
+    });
+    (!matches_import_signature).then(|| {
+        "Single-file FLUX.2 import requires a Klein transformer with the registered bare BFL tensor names."
+            .to_owned()
+    })
 }
 
 /// Resolve the one weight file carried by a user-import source without guessing across a model
@@ -793,9 +832,9 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// with no loader fails closed with a reason (the sc-10509 posture), never a best-effort load that
 /// would decode to noise.
 ///
-/// Architecture and component roles select an existing loader. The verified numeric encoding
-/// is validated by the shared projection source plan, independently of the model family. The
-/// H3 assembly additionally validates its complete task topology and all inherited components.
+/// [`detect_import_source_weights`] checks the required FLUX.2 dialect before this predicate.
+/// The shared projection source plan verifies numeric encoding independently of family. The H3
+/// assembly additionally validates its complete task topology and all inherited components.
 /// Unknown scaling, containers without an importer and heterogeneous conventions without one
 /// truthful persisted codec identity remain explicit refusals.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
@@ -2736,7 +2775,7 @@ mod tests {
             let path =
                 PathBuf::from(std::env::var(variable).unwrap_or_else(|_| panic!("set {variable}")));
             let verdict =
-                recognized(detect_base_weight_file(&path).expect("read safetensors header"));
+                recognized(detect_import_source_weights(&path, &path).expect("read import source"));
             assert_eq!(verdict.family.as_deref(), Some(family), "{variable}");
             assert_eq!(verdict.component, ComponentRole::Transformer, "{variable}");
             assert_eq!(verdict.quant, QuantFormat::Nvfp4, "{variable}");
@@ -2948,6 +2987,127 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("flux2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+    }
+
+    fn write_flux2_import_fixture(
+        path: &Path,
+        prefix: &str,
+        extra_keys: &[&str],
+        scalar_fp8: bool,
+    ) {
+        let mut header = serde_json::Map::new();
+        let mut data = Vec::new();
+        let mut add = |key: &str, dtype: &str, shape: &[usize], bytes: &[u8]| {
+            let start = data.len();
+            data.extend_from_slice(bytes);
+            header.insert(
+                format!("{prefix}{key}"),
+                json!({"dtype": dtype, "shape": shape, "data_offsets": [start, data.len()]}),
+            );
+        };
+        for key in [
+            "double_stream_modulation_img.lin.weight",
+            "double_blocks.0.img_attn.qkv.weight",
+            "final_layer.adaLN_modulation.1.weight",
+        ]
+        .into_iter()
+        .chain(extra_keys.iter().copied())
+        {
+            add(key, "BF16", &[1, 1], &[0, 0]);
+        }
+        if scalar_fp8 {
+            let descriptor = br#"{"format":"float8_e4m3fn"}"#;
+            add("single_blocks.0.linear1.weight", "F8_E4M3", &[1, 1], &[0]);
+            add(
+                "single_blocks.0.linear1.weight_scale",
+                "F32",
+                &[],
+                &1.0_f32.to_le_bytes(),
+            );
+            add(
+                "single_blocks.0.linear1.comfy_quant",
+                "U8",
+                &[descriptor.len()],
+                descriptor,
+            );
+        }
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut file = (header.len() as u64).to_le_bytes().to_vec();
+        file.extend(header);
+        file.extend(data);
+        fs::write(path, file).unwrap();
+    }
+
+    #[test]
+    fn flux2_klein_single_file_import_accepts_dense_and_verified_scalar_fp8() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("community.safetensors");
+        for (scalar_fp8, expected) in [
+            (false, QuantFormat::Bf16),
+            (true, QuantFormat::Fp8E4M3Scalar),
+        ] {
+            write_flux2_import_fixture(
+                &file,
+                "",
+                &["double_blocks.0.img_attn.norm.query_norm.weight"],
+                scalar_fp8,
+            );
+            for source in [file.as_path(), dir.path()] {
+                let primary = imported_model_primary_weight_file(source).unwrap();
+                let detection = detect_import_source_weights(source, &primary).unwrap();
+                import_detection_supported(&detection).unwrap();
+                assert_eq!(recognized(detection).quant, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn flux2_single_file_import_refuses_dev_and_requires_klein_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("community.safetensors");
+        for (prefix, extra_keys, scalar_fp8, reason) in [
+            (
+                "",
+                &[
+                    "double_blocks.0.img_attn.norm.query_norm.scale",
+                    "guidance_in.in_layer.weight",
+                    "guidance_in.out_layer.weight",
+                ][..],
+                false,
+                "Dev ComfyUI route",
+            ),
+            (
+                "",
+                &[
+                    "double_blocks.0.img_attn.norm.query_norm.weight",
+                    "guidance_in.in_layer.weight",
+                ][..],
+                true,
+                "Dev ComfyUI route",
+            ),
+            (
+                "model.diffusion_model.",
+                &["double_blocks.0.img_attn.norm.query_norm.weight"][..],
+                false,
+                "registered bare BFL tensor names",
+            ),
+            ("", &[][..], false, "registered bare BFL tensor names"),
+        ] {
+            write_flux2_import_fixture(&file, prefix, extra_keys, scalar_fp8);
+            let general = recognized(detect_base_weight_file(&file).unwrap());
+            assert_eq!(general.family.as_deref(), Some("flux2"));
+            assert_eq!(
+                general.quant,
+                if scalar_fp8 {
+                    QuantFormat::Fp8E4M3Scalar
+                } else {
+                    QuantFormat::Bf16
+                }
+            );
+            let import = detect_import_source_weights(&file, &file).unwrap();
+            let refusal = import_detection_supported(&import).unwrap_err();
+            assert!(refusal.contains(reason), "{refusal}");
+        }
     }
 
     /// SW-7100 (AC3): a MiniMax-H3-Image DiT — H3's refiner and `adaln_proj` blocks, NO audio
