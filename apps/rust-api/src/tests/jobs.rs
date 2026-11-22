@@ -7884,6 +7884,239 @@ async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
 }
 
 #[tokio::test]
+async fn historical_convrot_retry_and_duplicate_refresh_only_verified_plan_precision() {
+    use sceneworks_core::checkpoint_plan_store::{CheckpointPlanStore, CompiledCheckpointV1};
+    use sceneworks_core::contracts::{JobType, WorkerCapability};
+    use sceneworks_core::jobs_store::{CreateJob, RegisterWorker};
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableSourceClaim, PortableSourceProvenance,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.candle_required = true;
+    let sources = settings.data_dir.join("models/incoming");
+    std::fs::create_dir_all(&sources).unwrap();
+    let file = sources.join("original.safetensors");
+    let desc =
+        br#"{"format":"int8_tensorwise","convrot":true,"convrot_groupsize":64,"per_row":true}"#;
+    let end = 262 + desc.len();
+    let mut header = serde_json::to_vec(&json!({
+        "model.diffusion_model.blocks.0.mod.lin": {"dtype":"BF16","shape":[1],"data_offsets":[0,2]},
+        "model.diffusion_model.txtfusion.projector.weight": {"dtype":"F32","shape":[1,1],"data_offsets":[2,6]},
+        "model.diffusion_model.blocks.0.attn.wq.weight": {"dtype":"I8","shape":[1,256],"data_offsets":[6,262]},
+        "model.diffusion_model.blocks.0.attn.wq.comfy_quant": {"dtype":"U8","shape":[desc.len()],"data_offsets":[262,end]},
+        "model.diffusion_model.blocks.0.attn.wq.weight_scale": {"dtype":"F32","shape":[1,1],"data_offsets":[end,end+4]},
+    })).unwrap();
+    header.resize(header.len().next_multiple_of(8), b' ');
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(header);
+    let changed_byte = bytes.len() + 6;
+    bytes.extend([0; 262]);
+    bytes.extend(desc);
+    bytes.extend(1_f32.to_le_bytes());
+    std::fs::write(&file, &bytes).unwrap();
+
+    // Catalog backfill consumes an already verified stamp. Date this fixture's stamp outside
+    // the racy write window without making the regression depend on filesystem timing.
+    let store = CheckpointPlanStore::open(&settings.data_dir).with_clock_skew_nanos(5_000_000_000);
+    let root = store.approve_root(&sources).unwrap();
+    let original = store
+        .compile_linked(&root.root_id, "original.safetensors")
+        .unwrap();
+    let manifest_dir = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&manifest_dir);
+    let id = "legacy_convrot";
+    let write_manifest = |relative_path: &str, compiled: &CompiledCheckpointV1| {
+        let entry = json!({
+            "id": id, "name": "Legacy ConvRot", "type": "image", "family": "krea_2", "catalogScope": "user",
+            "importSourceShape": "transformer_file", "importQuantFormat": "int8_tensorwise_per_row",
+            "source": {"provider":"linked-library", "rootId":root.root_id, "relativePath":relative_path},
+            "importPlan": {"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,
+                "semanticDigest":compiled.record.plan.semantic_digest},
+        });
+        std::fs::write(
+            manifest_dir.join("user.models.jsonc"),
+            json!({"schemaVersion":1,"models":[entry]}).to_string(),
+        )
+        .unwrap();
+        entry
+    };
+    let declared = write_manifest("original.safetensors", &original);
+    let (app, state) = create_app_with_state(settings).unwrap();
+    let current = crate::resolve_model_manifest_entry(&state, id)
+        .await
+        .unwrap();
+    assert_eq!(current["importPlan"], declared["importPlan"]);
+    assert_eq!(current["importQuantFormat"], "convrot_int8");
+    let mut legacy = current.clone();
+    legacy["importQuantFormat"] = declared["importQuantFormat"].clone();
+    legacy.as_object_mut().unwrap().remove("sourcePrecision");
+    let members = crate::portable_admission::capture_local_model_entry(
+        &state,
+        &current,
+        "modelManifestEntry",
+    )
+    .unwrap();
+    assert_eq!(members.len(), 1);
+    let primary = &members[0];
+    let claim = PortableSourceClaim::new(
+        sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model-bytes",
+            id,
+            None,
+            &portable_file_ledger_sha256(&primary.files).unwrap(),
+        )
+        .unwrap(),
+        PortableSourceProvenance::OperatorOverride,
+        primary.files.clone(),
+    )
+    .unwrap();
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "legacy-convrot-worker".into(),
+                gpu_id: "cuda:0".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    WorkerCapability::Gpu,
+                    WorkerCapability::ImageGenerate,
+                    WorkerCapability::Unknown("candle".into()),
+                ],
+                loaded_models: Vec::new(),
+                utilization: None,
+            },
+            Some("windows"),
+            Some(&[claim]),
+        )
+        .unwrap();
+    let (_, project) = create_project(app.clone(), &"Historical ConvRot replay").await;
+    let project_id = project["id"].as_str().unwrap();
+    let payload = json!({"projectId":project_id, "model":id, "mode":"text_to_image", "prompt":"a fox",
+        "modelManifestEntry":legacy, "advanced":{"quant":"q4","steps":12},"variant":"q4"});
+    let job = state
+        .jobs_store
+        .create_job(CreateJob {
+            job_type: JobType::ImageGenerate,
+            project_id: Some(project_id.to_owned()),
+            project_name: None,
+            payload: payload.as_object().unwrap().clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 0,
+            initial_status: None,
+        })
+        .unwrap();
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&job.id)
+        .unwrap()
+        .is_none());
+
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/{operation}", job.id),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        let replay_id = replay["id"].as_str().unwrap();
+        let row = state.jobs_store.get_job(replay_id).unwrap();
+        assert_eq!(
+            row.payload["modelManifestEntry"]["importPlan"],
+            legacy["importPlan"]
+        );
+        assert_eq!(
+            row.payload["modelManifestEntry"]["importQuantFormat"],
+            "convrot_int8"
+        );
+        assert_eq!(row.payload["advanced"], json!({"steps":12}));
+        assert!(row.payload["variant"].is_null());
+        let binding = state
+            .jobs_store
+            .portable_model_binding(replay_id)
+            .unwrap()
+            .unwrap();
+        let bound = &binding["routes"]["candle:windows"]["models"][0];
+        assert_eq!(
+            bound["checkpointPlan"]["semanticDigest"],
+            original.record.plan.semantic_digest,
+        );
+        assert_eq!(bound["members"][0], serde_json::to_value(primary).unwrap());
+    }
+
+    let mut spoofed = job.payload.clone();
+    spoofed.get_mut("modelManifestEntry").unwrap()["importQuantFormat"] = json!("fp8_e4m3_scalar");
+    let error = crate::portable_admission::validate_historical_source_carrier(
+        &state,
+        &job.payload,
+        &spoofed,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .detail
+            .contains("precision differs from the verified plan bytes"),
+        "{}",
+        error.detail
+    );
+
+    bytes[changed_byte] ^= 1;
+    std::fs::write(&file, &bytes).unwrap();
+    let (status, stale) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/retry", job.id),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert!(
+        stale["detail"]
+            .as_str()
+            .unwrap()
+            .contains("historical import bytes are invalid"),
+        "{stale}"
+    );
+
+    std::fs::write(sources.join("replacement.safetensors"), bytes).unwrap();
+    let replacement = store
+        .compile_linked(&root.root_id, "replacement.safetensors")
+        .unwrap();
+    assert_ne!(
+        replacement.record.plan.semantic_digest,
+        original.record.plan.semantic_digest
+    );
+    write_manifest("replacement.safetensors", &replacement);
+    let (status, stale) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{}/duplicate", job.id),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+    assert!(
+        stale["detail"]
+            .as_str()
+            .unwrap()
+            .contains("differs from its original declaration"),
+        "{stale}"
+    );
+}
+
+#[tokio::test]
 async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() {
     use sceneworks_worker::minimax_h3_import_fixture as fixture;
     let _env = isolate_hf_cache();

@@ -2076,7 +2076,7 @@ pub(super) fn stamp_legacy_import_source_shape(
     );
 }
 
-fn needs_legacy_import_inspection(object: &JsonObject) -> bool {
+pub(crate) fn needs_legacy_import_inspection(object: &JsonObject) -> bool {
     !object.contains_key("importSourceShape")
         || (matches!(
             object.get("importSourceShape").and_then(Value::as_str),
@@ -2102,21 +2102,28 @@ fn legacy_import_primary_weight_file(object: &JsonObject, data_dir: &FsPath) -> 
         // A trusted source stamp can authorize a bounded descriptor read. Rescans and admission
         // own full-file hashing when it expires.
         let resolved = store.resolve_hashing_only(id, &|_| false).ok()?;
-        let role = if object.get("importSourceShape").and_then(Value::as_str)
-            == Some("fused_checkpoint")
-        {
-            "checkpoint"
-        } else {
-            "transformer"
-        };
-        let mut layers = resolved.layers_with_role(role);
-        let primary = layers.next()?;
-        return (layers.next().is_none()
-            && primary.layer.container
-                == sceneworks_core::checkpoint_import::CheckpointContainerV1::Safetensors)
-            .then(|| primary.path.clone());
+        return legacy_import_plan_primary_weight_file(object, &resolved)
+            .map(|(path, _)| path.to_path_buf());
     }
     confined_primary_weight_file(&legacy_import_installed_path(object, data_dir)?)
+}
+
+pub(crate) fn legacy_import_plan_primary_weight_file<'a>(
+    object: &JsonObject,
+    resolved: &'a sceneworks_core::checkpoint_plan_store::ResolvedCheckpointV1,
+) -> Option<(&'a FsPath, ComponentRole)> {
+    let (role, component) =
+        if object.get("importSourceShape").and_then(Value::as_str) == Some("fused_checkpoint") {
+            ("checkpoint", ComponentRole::Checkpoint)
+        } else {
+            ("transformer", ComponentRole::Transformer)
+        };
+    let mut layers = resolved.layers_with_role(role);
+    let primary = layers.next()?;
+    (layers.next().is_none()
+        && primary.layer.container
+            == sceneworks_core::checkpoint_import::CheckpointContainerV1::Safetensors)
+        .then_some((primary.path.as_path(), component))
 }
 
 fn confined_primary_weight_file(path: &FsPath) -> Option<PathBuf> {
