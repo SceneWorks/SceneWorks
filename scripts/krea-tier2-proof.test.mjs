@@ -168,6 +168,41 @@ test("owned SSE opens before the request and keeps only scoped job events across
   await events.close();
 });
 
+test("owned SSE shutdown stays bounded if the reader never acknowledges abort", { timeout: 6000 }, async () => {
+  const stalled = new Promise(() => {});
+  const ready = new TextEncoder().encode("event: ready\ndata: {}\n\n");
+  let started = false, cancels = 0;
+  const reader = {
+    read() {
+      if (started) return stalled;
+      started = true;
+      return Promise.resolve({ done: false, value: ready });
+    },
+    cancel() { cancels++; return stalled; },
+    releaseLock() {},
+  };
+  const endpoint = { async call() { return { ticket: "owned-test-ticket" }; } };
+  const fetchImpl = async () => ({ ok: true, body: { getReader: () => reader } });
+  const events = await openKreaEvents(endpoint, "http://127.0.0.1:1234", new AbortController().signal, fetchImpl);
+  await events.close();
+  assert.equal(cancels, 1);
+});
+
+test("owned SSE startup rejects at its deadline even if the reader never becomes ready", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const stalled = new Promise(() => {});
+  let cancels = 0;
+  const reader = { read: () => stalled, cancel() { cancels++; return stalled; }, releaseLock() {} };
+  const endpoint = { async call() { return { ticket: "owned-test-ticket" }; } };
+  const fetchImpl = async () => ({ ok: true, body: { getReader: () => reader } });
+  const events = openKreaEvents(endpoint, "http://127.0.0.1:1234", new AbortController().signal, fetchImpl);
+  const rejected = assert.rejects(events, /job event stream did not become ready/);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(30_000);
+  await rejected;
+  assert.equal(cancels, 1);
+});
+
 test("the linked stamp and sole final output bind the actual authored request and saved recipe", () => {
   const stamp = { id: LINKED_MODEL, family: "krea_2", importSourceShape: "transformer_file", importQuantFormat: "bf16", importPlan: { checkpointId: "checkpoint" }, source: { provider: "linked-library", rootId: "root", relativePath: "krea2_turbo_bf16.safetensors" } };
   const importJob = { id: "import", workerId: "worker", result: { checkpointId: "checkpoint" } };

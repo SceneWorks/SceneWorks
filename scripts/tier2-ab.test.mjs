@@ -537,6 +537,7 @@ setInterval(() => { try { process.kill(parent, 0); } catch { process.exit(0); } 
 const childStdinShutdown = (onEnd) => { if (env.SCENEWORKS_WORKER_CHILD === "1") { process.stdin.on("end", onEnd); process.stdin.on("error", onEnd); process.stdin.resume(); } };
 if (env.SCENEWORKS_WORKER_ONLY === "1") {
   if (mode.workerExit) process.exit(mode.workerExit);
+  if (mode.fail) console.log("fake worker failure detail");
   childStdinShutdown(() => { const req = http.request(env.SCENEWORKS_API_URL + "/fake/offline", { method: "POST" }, (res) => { res.resume(); res.on("end", () => process.exit(0)); }); req.on("error", () => process.exit(0)); req.end(env.SCENEWORKS_WORKER_ID); });
   const register = () => { const req = http.request(env.SCENEWORKS_API_URL + "/fake/register", { method: "POST" }, (res) => res.resume()); req.on("error", () => setTimeout(register, 100)); req.end(env.SCENEWORKS_WORKER_ID); };
   register(); return;
@@ -681,7 +682,16 @@ test("--run drives fake base/head services through the stop rule and writes evid
   assert.ok(blobRoute.runs[1].hubMutation.diff.entries.some((item) => item.path.includes("linked.bin#entry/target/")));
   // A failed job stops immediately with the served error.
   const failed = await scenario("failed", 0, { fail: true });
-  assert.match(failed.report.routes[0].runs.find((run) => run.label === "head").error, /^job failed: model_artifact_incomplete: fake refusal/);
+  const failedHead = failed.report.routes[0].runs.find((run) => run.label === "head");
+  assert.equal(failed.status, 1);
+  assert.equal(failedHead.status, "error");
+  assert.match(failedHead.error, /^job failed: model_artifact_incomplete: fake refusal/);
+  assert.equal(failedHead.diagnostics.lastJob.status, "failed");
+  assert.equal(failedHead.diagnostics.lastJob.error, "model_artifact_incomplete: fake refusal");
+  assert.ok(failedHead.diagnostics.workerLogTail.includes("fake worker failure detail"));
+  assert.equal(failedHead.cancelRequested, undefined);
+  assert.ok(failedHead.cleanup.every((child) => child.exited));
+  assert.match(failed.stdout, /run=head phase=run_error_pending_cleanup .*last_status=failed/);
   // Cleanup restores write permission only inside scratch, never through a link, then removes it.
   const cleanupEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: sides.base.sha, TIER2_AB_HEAD_SHA: sides.head.sha, TIER2_AB_BASE_DIR: sides.base.repo, TIER2_AB_HEAD_DIR: sides.head.repo, TIER2_AB_WORK: equal.work, TIER2_AB_HUBS: hub, RUNNER_TEMP: dir, GITHUB_WORKSPACE: dir };
   const blocked = spawnSync("rm", ["-rf", equal.work], { encoding: "utf8" });

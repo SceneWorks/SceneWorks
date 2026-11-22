@@ -575,11 +575,12 @@ export function exitCodeFor(report) {
 // bounds per route: claimMinutes from submission until the claim, timeoutMinutes from the claim
 // until completion. Either stops the run early with a specific reason instead of a long ceiling.
 const UNCLAIMED = new Set(["queued", "pending_caption", "pending_workflow"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "canceled", "interrupted"]);
 export const jobClaimed = (job) => Boolean(job?.workerId) || (job?.status !== undefined && !UNCLAIMED.has(job.status));
 export function jobProgressDecision({ job, postedMs, claimedAtMs = null, nowMs, claimMinutes, timeoutMinutes }) {
   const where = `${job?.status ?? "?"}/${job?.stage ?? "?"}${job?.message ? ` (${String(job.message).slice(0, 200)})` : ""}`;
-  if (["failed", "canceled", "interrupted"].includes(job?.status)) return { state: "stop", reason: `job ${job.status}: ${job.error ?? job.message ?? "no error served"}` };
   if (job?.status === "completed") return { state: "completed" };
+  if (TERMINAL_JOB_STATUSES.has(job?.status)) return { state: "stop", reason: `job ${job.status}: ${job.error ?? job.message ?? "no error served"}` };
   if (!jobClaimed(job)) {
     if (nowMs - postedMs > claimMinutes * 60_000) return { state: "stop", reason: `unclaimed: job stayed ${where} for more than ${claimMinutes} min after submission` };
     return { state: "waiting_claim" };
@@ -905,7 +906,18 @@ async function runLogged(command, args, { cwd, env, log }) {
     return result;
   } finally { await handle.close(); }
 }
-async function tail(file, bytes = 8000) { try { const text = await readFile(file, "utf8"); return text.slice(-bytes); } catch { return ""; } }
+async function tail(file, bytes = 8000) {
+  let handle;
+  try {
+    handle = await open(file, "r");
+    const { size } = await handle.stat();
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, size - length);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch { return ""; }
+  finally { await handle?.close().catch(() => {}); }
+}
 async function build(env, cfg, report) {
   const scratch = path.join(cfg.work, "scratch"), target = path.join(scratch, "target"), evidence = path.join(cfg.work, "evidence");
   await mkdir(target, { recursive: true }); await mkdir(evidence, { recursive: true });
@@ -1057,6 +1069,31 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const watchdog = (reason) => { if (!controller.signal.aborted) { record.watchdog.tripped = reason; controller.abort(new Error(`watchdog: ${reason}`)); } };
   const timer = setTimeout(() => watchdog(`per-run backstop ${runMinutes} min`), runMinutes * 60_000);
   let lastJob = null;
+  const ownedProcesses = () => Object.fromEntries(children.filter((child) => child.label !== "sentinel").map((child) => [child.label, processState(child)]));
+  const retainServiceLogs = async () => {
+    for (const name of ["api", "worker"]) {
+      const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
+      if (name === "worker" && route.proof && text) {
+        record.scopePolicyEvents = text.split(/\r?\n/).flatMap((line) => {
+          try {
+            const { fields } = JSON.parse(line);
+            if (fields?.event !== "generation_memory_policy_applied" || !String(fields.engine).startsWith("krea_2")) return [];
+            const { engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component } = fields;
+            return [{ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }];
+          } catch { return []; }
+        });
+      }
+      const redacted = redactSensitiveText(text, secrets);
+      if (record.status !== "completed") {
+        const diagnostics = (record.diagnostics ??= {});
+        const key = `${name}LogTail`;
+        if (redacted || !Object.hasOwn(diagnostics, key)) diagnostics[key] = lastLines(redacted, 50);
+      }
+      if (redacted) await writeFile(path.join(evidence, `${name}.log`), redacted).catch((error) => {
+        (record.logRetentionErrors ??= {})[name] = error.message;
+      });
+    }
+  };
   const alive = () => { if (controller.signal.aborted) throw controller.signal.reason; };
   const wait = async (probe, seconds, what) => { const end = Math.min(Date.now() + seconds * 1000, deadline); while (Date.now() < end) { alive(); const value = await probe(); if (value) return value; await delay(500); } throw new Error(`${what} timed out`); };
   try {
@@ -1276,44 +1313,45 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.status = "completed";
   } catch (error) {
     record.status = "error"; record.error = error.message;
+    record.diagnostics = { processes: ownedProcesses(), lastJob: jobDiagnostics(lastJob) };
+    await phase("run_error_pending_cleanup", { side, job: accepted?.id, last_status: lastJob?.status });
+    // Preserve the first terminal error and service tails while the failed worker still exists.
+    await retainServiceLogs().catch(() => {});
+    await persist();
   } finally {
-    await events?.close().catch(() => {});
     clearTimeout(timer); signal.removeEventListener("abort", onAbort);
-    sampling = false; await Promise.all(samplers);
-    if (record.status !== "completed" && apiUrl) {
-      // What the API serves right now about this job and the owned worker (direct requests: the
-      // owned-endpoint gate refuses everything once the run has been aborted).
-      const direct = (route) => fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) }).then((response) => response.json(), () => null);
-      if (accepted?.id) lastJob = (await direct(`/api/v1/jobs/${encodeURIComponent(accepted.id)}`)) ?? lastJob;
-      const workers = await direct("/api/v1/workers");
-      // Process state BEFORE teardown: is each child alive, and how did it exit if not.
-      const processes = Object.fromEntries(children.filter((child) => child.label !== "sentinel").map((child) => [child.label, processState(child)]));
-      record.diagnostics = { processes, workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: jobDiagnostics(lastJob), ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
-    }
-    // Direct request: the owned-endpoint gate refuses every call once the watchdog has aborted.
-    if (accepted?.id && record.status !== "completed" && apiUrl) {
-      record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
-      // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
-      for (let i = 0; i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
-    }
-    record.cleanup = await teardown(children);
-    endpoint?.close();
-    await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
-    for (const name of ["api", "worker"]) {
-      const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
-      if (name === "worker" && route.proof) {
-        record.scopePolicyEvents = text.split(/\r?\n/).flatMap((line) => {
+    sampling = false;
+    try {
+      await events?.close().catch(() => {});
+      await Promise.all(samplers);
+      if (record.status !== "completed" && apiUrl) {
+        // The owned endpoint gate refuses requests once the watchdog has aborted.
+        const direct = async (route) => {
           try {
-            const { fields } = JSON.parse(line);
-            if (fields?.event !== "generation_memory_policy_applied" || !String(fields.engine).startsWith("krea_2")) return [];
-            const { engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component } = fields;
-            return [{ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }];
-          } catch { return []; }
-        });
+            const response = await fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) });
+            return response.ok ? await response.json() : null;
+          } catch { return null; }
+        };
+        if (accepted?.id) {
+          const refreshed = await direct(`/api/v1/jobs/${encodeURIComponent(accepted.id)}`);
+          if (refreshed?.id === accepted.id && typeof refreshed.status === "string") lastJob = refreshed;
+        }
+        const workers = await direct("/api/v1/workers");
+        const originalJob = record.diagnostics?.lastJob;
+        const diagnosedJob = TERMINAL_JOB_STATUSES.has(originalJob?.status) ? originalJob : jobDiagnostics(lastJob) ?? originalJob;
+        record.diagnostics = { ...record.diagnostics, processes: ownedProcesses(), workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: diagnosedJob, ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
       }
-      if (text) await writeFile(path.join(evidence, `${name}.log`), redactSensitiveText(text, secrets));
-      if (record.status !== "completed") (record.diagnostics ??= {})[`${name}LogTail`] = lastLines(redactSensitiveText(text, secrets), 50);
+      if (accepted?.id && record.status !== "completed" && apiUrl && !TERMINAL_JOB_STATUSES.has(record.diagnostics?.lastJob?.status ?? lastJob?.status)) {
+        record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
+        // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
+        for (let i = 0; i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
+      }
+    } finally {
+      record.cleanup = await teardown(children);
+      endpoint?.close();
+      await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
     }
+    await retainServiceLogs();
     record.finishedAt = new Date().toISOString();
     await phase(record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
   }

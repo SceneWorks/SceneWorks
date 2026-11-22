@@ -246,42 +246,64 @@ export async function openKreaEvents(endpoint, url, signal, fetchImpl = fetch) {
   assert.ok(ticket, "owned API did not issue a job event ticket");
   const controller = new AbortController();
   const streamSignal = AbortSignal.any([signal, controller.signal]);
-  const timer = setTimeout(() => controller.abort(new Error("job event stream did not become ready")), 30_000);
-  let ready;
+  let ready, readyTimer;
+  let activeReader;
+  const stopReader = (reason) => {
+    controller.abort(reason);
+    void activeReader?.cancel().catch(() => {});
+  };
   const started = new Promise((resolve) => { ready = resolve; });
+  const readyDeadline = new Promise((_, reject) => {
+    readyTimer = setTimeout(() => reject(new Error("job event stream did not become ready")), 30_000);
+  });
   const updates = [];
   const finished = (async () => {
     const response = await fetchImpl(`${url}/api/v1/jobs/events?ticket=${encodeURIComponent(ticket)}`, { redirect: "error", signal: streamSignal });
     assert.ok(response.ok && response.body, "owned job event stream refused");
     const decoder = new TextDecoder();
     let pending = "";
-    for await (const chunk of response.body) {
-      pending += decoder.decode(chunk, { stream: true });
-      for (let end; (end = pending.search(/\r?\n\r?\n/)) >= 0;) {
-        const frame = pending.slice(0, end);
-        pending = pending.slice(end).replace(/^\r?\n\r?\n/, "");
-        const fields = frame.split(/\r?\n/);
-        const event = fields.find((line) => line.startsWith("event: "))?.slice(7);
-        if (event === "ready") ready();
-        if (event !== "job.updated") continue;
-        const value = JSON.parse(fields.filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n"));
-        updates.push({ id: value.id, stage: value.stage, status: value.status, message: value.message, backend: value.backend, workerId: value.workerId, publishedAssets: value.result?.assets?.length ?? 0, receivedMonotonicMs: performance.now() });
+    const reader = response.body.getReader();
+    activeReader = reader;
+    try {
+      while (!streamSignal.aborted) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+        pending += decoder.decode(chunk, { stream: true });
+        for (let end; (end = pending.search(/\r?\n\r?\n/)) >= 0;) {
+          const frame = pending.slice(0, end);
+          pending = pending.slice(end).replace(/^\r?\n\r?\n/, "");
+          const fields = frame.split(/\r?\n/);
+          const event = fields.find((line) => line.startsWith("event: "))?.slice(7);
+          if (event === "ready") ready();
+          if (event !== "job.updated") continue;
+          const value = JSON.parse(fields.filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n"));
+          updates.push({ id: value.id, stage: value.stage, status: value.status, message: value.message, backend: value.backend, workerId: value.workerId, publishedAssets: value.result?.assets?.length ?? 0, receivedMonotonicMs: performance.now() });
+        }
+        assert.ok(pending.length < 16 * 1024 * 1024 && updates.length < 1024, "owned job event stream exceeded the evidence limit");
       }
-      assert.ok(pending.length < 16 * 1024 * 1024 && updates.length < 1024, "owned job event stream exceeded the evidence limit");
+      if (!streamSignal.aborted) throw new Error("owned job event stream ended early");
+    } finally {
+      activeReader = null;
+      reader.releaseLock();
     }
-    if (!streamSignal.aborted) throw new Error("owned job event stream ended early");
   })().catch((error) => {
     if (!streamSignal.aborted || (controller.signal.aborted && controller.signal.reason?.message !== "Krea event collection complete")) throw new Error(`owned job event stream failed: ${error.name}`);
   });
-  try { await Promise.race([started, finished]); } finally { clearTimeout(timer); }
+  try { await Promise.race([started, finished, readyDeadline]); }
+  catch (error) { stopReader(error); throw error; }
+  finally { clearTimeout(readyTimer); }
   return {
     async collect(id, wait) {
       await Promise.race([finished, wait(async () => updates.some((event) => event.id === id && event.status === "completed" && event.publishedAssets === 1), 15, "completed event")]);
       return updates.filter((event) => event.id === id);
     },
     async close() {
-      controller.abort(new Error("Krea event collection complete"));
-      await finished;
+      stopReader(new Error("Krea event collection complete"));
+      let closeTimer;
+      try {
+        // The owned API teardown also closes the socket if the fetch reader never settles.
+        await Promise.race([finished, new Promise((resolve) => { closeTimer = setTimeout(resolve, 2000); })]);
+      } finally { clearTimeout(closeTimer); }
     },
   };
 }
