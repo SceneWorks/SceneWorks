@@ -23,7 +23,11 @@ function fixture(spec) {
         planId: `checkpoint-plan-${'a'.repeat(64)}`, semanticDigest: `sha256:${'b'.repeat(64)}` },
       adapterCount: spec.adapters, width: spec.width, height: spec.height, steps: spec.steps, seed: 42, output: `${spec.model}-${iteration}.png`,
       runtimeFacts: { materialization: { status: 'reported', rows: [{ codecId: spec.codec, representation: 'native-packed', tensorCount: 3 }] } },
-      metrics: [{ loadMs: 1234 }], hardwareMetrics: { peakMemoryBytes: 1234567 },
+      metrics: [{
+        loadMs: 1234, sourceCodec: spec.codec,
+        ...(spec.phaseExecution && { executionRepresentation: spec.phaseExecution }),
+        ...(spec.group === 'nvfp4' && { quantLabel: 'nvfp4' }),
+      }], hardwareMetrics: { peakMemoryBytes: 1234567 },
     })),
   };
 }
@@ -62,4 +66,32 @@ test('receipt identity, adapter, physical device and metrics stay bound', () => 
     f => { f.packets[0].importPlan.checkpointId = 'another-source'; },
     f => { f.packets[0].importPlan.planId = 'not-a-compiled-plan'; },
   ]) { const f = fixture(spec); change(f); assert.throws(() => validateResult(spec, f.log, 0, f.packets)); }
+});
+
+test('FP8 phase metrics report source-owned precision and measured Muse execution', () => {
+  for (const spec of CASES.filter(spec => spec.group === 'fp8')) {
+    for (const [key, value, error] of [
+      ['sourceCodec', 'int8-per-row-v1', /FP8 source codec/],
+      ['quantLabel', 'q8', /no requested quant tier/],
+      ['quantBits', 8, /no requested quant bits/],
+    ]) {
+      const f = fixture(spec);
+      f.packets[0].metrics[0][key] = value;
+      assert.throws(() => validateResult(spec, f.log, 0, f.packets), error);
+    }
+  }
+
+  const muse = CASES.find(spec => spec.model === 'linked_krea2_scalar_fp8');
+  for (const executionRepresentation of [undefined, 'dense-fallback', 'mixed:2/1']) {
+    const f = fixture(muse);
+    f.packets[1].metrics[0].executionRepresentation = executionRepresentation;
+    assert.throws(() => validateResult(muse, f.log, 0, f.packets), /report measured execution/);
+  }
+
+  const sdxl = CASES.find(spec => spec.model === 'linked_sdxl_fp8');
+  const f = fixture(sdxl);
+  Object.assign(f.packets[0].metrics[0], {
+    quantLabel: null, quantBits: null, executionRepresentation: 'mixed:2/1',
+  });
+  validateResult(sdxl, f.log, 0, f.packets);
 });

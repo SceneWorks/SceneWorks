@@ -9,7 +9,7 @@ import { lockedInferenceRevision } from '../select-windows-cargo-cache.mjs';
 import { redact } from './imported-nvfp4-proof.mjs';
 
 export const CASES = Object.freeze([
-  { group: 'fp8', test: 'imported_scalar_fp8_worker_gpu_smoke', model: 'linked_krea2_scalar_fp8', codec: 'fp8-e4m3-scalar-v1', route: 'candle_krea_imported', provider: 'krea_2_turbo', count: 2, width: 1408, height: 2048, steps: 8, adapters: 1 },
+  { group: 'fp8', test: 'imported_scalar_fp8_worker_gpu_smoke', model: 'linked_krea2_scalar_fp8', codec: 'fp8-e4m3-scalar-v1', route: 'candle_krea_imported', provider: 'krea_2_turbo', count: 2, width: 1408, height: 2048, steps: 8, adapters: 1, phaseExecution: 'native-packed' },
   { group: 'fp8', test: 'imported_sdxl_fp8_worker_gpu_smoke', model: 'linked_sdxl_fp8', codec: 'fp8-e5m2-scalar-v1', route: 'candle_checkpoint_plan', provider: 'sdxl', count: 1, width: 512, height: 512, steps: 20, adapters: 0 },
   { group: 'convrot', test: 'imported_convrot_worker_gpu_smoke', model: 'linked_krea2_convrot', codec: 'convrot-int8-native', route: 'candle_checkpoint_plan', provider: 'krea_2_turbo', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
   { group: 'nvfp4', test: 'imported_native_nvfp4_worker_gpu_smoke', model: 'linked_krea2_native_nvfp4', codec: 'nvfp4-v1', route: 'candle_checkpoint_plan', provider: 'krea_2_turbo', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
@@ -54,7 +54,20 @@ export function validateResult(spec, log, code, packets) {
     assert.equal(packet.runtimeFacts?.materialization?.status, 'reported');
     assert(packet.runtimeFacts.materialization.rows.some(row => row.codecId === spec.codec
       && row.representation === 'native-packed' && row.tensorCount > 0), 'measured native materialization required');
-    assert(packet.metrics.some(row => Number.isFinite(row.loadMs)), 'request load timing required');
+    const phase = packet.metrics.find(row => Number.isFinite(row.loadMs));
+    assert(phase, 'request load timing required');
+    if (spec.group === 'fp8') {
+      assert.equal(phase.sourceCodec, spec.codec, 'phase metrics must identify the FP8 source codec');
+      assert.equal(phase.quantLabel ?? null, null, 'FP8 source must have no requested quant tier');
+      assert.equal(phase.quantBits ?? null, null, 'FP8 source must have no requested quant bits');
+    }
+    if (spec.phaseExecution) {
+      assert.equal(phase.executionRepresentation, spec.phaseExecution, 'phase metrics must report measured execution');
+    }
+    if (spec.group === 'nvfp4') {
+      assert.equal(phase.quantLabel, 'nvfp4', 'phase metrics must retain the NVFP4 tier identity');
+      assert.equal(phase.quantBits ?? null, null, 'NVFP4 has no integral quant width');
+    }
     assert(Number.isFinite(packet.hardwareMetrics?.peakMemoryBytes) && packet.hardwareMetrics.peakMemoryBytes > 0,
       'positive sampled physical memory required');
   }
