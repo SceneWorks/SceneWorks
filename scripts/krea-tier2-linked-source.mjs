@@ -6,6 +6,9 @@ import { sha256 } from "./lib/file-sha256.mjs";
 
 export const KREA_LINKED_SOURCE_REPAIR_REVISION = "5b2c605c9371f7ecdf11dcbd6e76ac5e3d52d957";
 export const KREA_LINKED_SOURCE_REPAIR_CHECKOUT = "tier2-ab-krea-repair";
+const WINDOWS_RAW_ROUTING_FILE = "crates/sceneworks-core/src/jobs_store/routing/candle.rs";
+const WINDOWS_RAW_ROUTING_BASE_SHA256 = "dabba99e040d63659cec71cb84067431cc2bd2f1c1f89a018eea750ad7e038c7";
+const WINDOWS_RAW_ROUTING_REPAIR_SHA256 = "596a7690cf9f166fbcecef2e1b34bb223838069081140c232683dfbcc8225a4d";
 const SOURCES = [
   ["apps/rust-api/src/portable_admission.rs",
     "41409a5904443d20b710e1d17c4f5f1ef8851b67777d9f9a032820db8cd4f9a5",
@@ -52,7 +55,7 @@ export function reviewedKreaLinkedSourceCandidate(hashes) {
   return candidate[0];
 }
 
-export async function bindKreaLinkedSourceBuild(baseDir, headDir, repairDir) {
+export async function bindKreaLinkedSourceBuild(baseDir, headDir, repairDir, { windowsRawRoutingRevision } = {}) {
   const [base, head, repair] = await Promise.all([realpath(baseDir), realpath(headDir), realpath(repairDir)]);
   assert.equal(new Set([base, head, repair]).size, 3, "Krea linked-source builds require distinct checkouts");
   const replacements = [];
@@ -66,8 +69,21 @@ export async function bindKreaLinkedSourceBuild(baseDir, headDir, repairDir) {
       baseCheckoutSha256: sha256(original), baseBuildSha256: sha256(repaired), candidateCheckoutSha256: sha256(candidate) });
   }
   const candidateReviewRevision = reviewedKreaLinkedSourceCandidate(files.map(({ candidateGitSha256 }) => candidateGitSha256));
-  return { base, repair, replacements, receipt: { repairRevision: KREA_LINKED_SOURCE_REPAIR_REVISION,
-    candidateReviewRevision, appliesTo: "base build only", files } };
+  const receipt = { repairRevision: KREA_LINKED_SOURCE_REPAIR_REVISION,
+    candidateReviewRevision, appliesTo: "base build only", files };
+  if (windowsRawRoutingRevision !== undefined) {
+    assert.match(windowsRawRoutingRevision, /^[a-f0-9]{40}$/);
+    const file = WINDOWS_RAW_ROUTING_FILE;
+    const [original, repaired] = await Promise.all([readSource(base, file), readSource(head, file)]);
+    const baseGitSha256 = gitBytesSha256(original, "base Windows Raw routing");
+    const sharedGitSha256 = gitBytesSha256(repaired, "candidate Windows Raw routing");
+    assert.equal(baseGitSha256, WINDOWS_RAW_ROUTING_BASE_SHA256, "unexpected frozen Windows Raw routing source");
+    assert.equal(sharedGitSha256, WINDOWS_RAW_ROUTING_REPAIR_SHA256, "candidate Windows Raw routing source is unreviewed");
+    replacements.push({ file, original, repaired });
+    receipt.windowsRawRouting = { file, repairRevision: windowsRawRoutingRevision, baseGitSha256, sharedGitSha256,
+      baseCheckoutSha256: sha256(original), sharedBuildSha256: sha256(repaired) };
+  }
+  return { base, repair, replacements, receipt };
 }
 
 // Only the frozen proof checkout changes. Restore every attempted write before publishing a binary receipt.

@@ -785,6 +785,7 @@ const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–
 export function renderMarkdown(report) {
   const lines = [`# Tier 2 A/B (${report.backend}) — ${report.mode}`, "", `- status: **${report.status}** (exit ${report.exitCode})`, `- base: \`${report.base.sha}\` (inference ${report.base.inferencePin ?? "?"}, binary ${report.base.binarySha256 ?? "not built"})`, `- head: \`${report.head.sha}\` (inference ${report.head.inferencePin ?? "?"}, binary ${report.head.binarySha256 ?? "not built"})`, `- runner: ${report.runner.name ?? "local"} (${report.runner.platform}/${report.runner.arch}, ${gib(report.runner.totalMemoryBytes)} RAM)`, `- window: ${report.startedAt} → ${report.finishedAt ?? "running"}`, `- memory method: ${report.memoryMethod}`, `- fidelity method: decoded content (PNG→RGBA8, WAV→PCM samples, video→ffmpeg RGBA frames + s16le audio); file sha256 recorded separately`, ""];
   if (report.kreaLinkedSourceBuild) lines.push(`- The frozen Krea baseline build uses four files from repair \`${report.kreaLinkedSourceBuild.repairRevision}\`. The candidate uses its own files, verified against the source set reviewed at \`${report.kreaLinkedSourceBuild.candidateReviewRevision}\`. The unmodified baseline refuses the linked checkpoint before generation. Exact source hashes are in the JSON receipt.`, "");
+  if (report.kreaLinkedSourceBuild?.windowsRawRouting) lines.push(`- Both Windows builds use the same built-in Raw phase routing repair from candidate \`${report.kreaLinkedSourceBuild.windowsRawRouting.repairRevision}\`. The original frozen server routed that request only to Mac workers. The JSON receipt records both source fingerprints.`, "");
   if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Device-wide diagnostic peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. NVIDIA device-wide readings and process types still govern the device lease.", "");
   if (Array.isArray(report.gpus)) {
     lines.push("| nvidia-smi index | PCI bus | UUID | display attached | used / total | util | processes (C, G, C+G) |", "|---|---|---|---|---|---|---|");
@@ -845,7 +846,9 @@ async function tool(command, args) { try { const { stdout, stderr } = await exec
 async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: true }); return Number(fs.bavail * fs.bsize); } catch { return null; } }
 
 async function readKreaLinkedSourceBuild(cfg) {
-  const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir, cfg.repairDir);
+  const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir, cfg.repairDir, {
+    windowsRawRoutingRevision: cfg.backend === "cuda" && !cfg.allocation ? cfg.headSha : undefined,
+  });
   const [checkout, revision] = await Promise.all([
     git(binding.repair, "rev-parse", "--show-toplevel"),
     git(binding.repair, "rev-parse", "HEAD"),
