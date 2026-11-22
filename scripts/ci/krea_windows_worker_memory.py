@@ -217,16 +217,20 @@ def _worker(pid, executable):
         close(handle)
 
 
-def _local_filetime():
+def _local_filetime_clock():
     # PDH_RAW_COUNTER.TimeStamp is a local FILETIME, while GetProcessTimes
     # and the Python wall clock are UTC. The two domains must stay distinct.
-    stamp = WINDOWS_EPOCH_FILETIME + time.time_ns() // 100
-    utc, local = _FileTime(stamp & 0xffffffff, stamp >> 32), _FileTime()
     kernel = C.WinDLL("kernel32.dll", use_last_error=True)
     convert = _function(kernel, "FileTimeToLocalFileTime", [C.POINTER(_FileTime)] * 2)
-    if not convert(C.byref(utc), C.byref(local)):
-        raise C.WinError(C.get_last_error())
-    return local.high << 32 | local.low
+
+    def read():
+        stamp = WINDOWS_EPOCH_FILETIME + time.time_ns() // 100
+        utc, local = _FileTime(stamp & 0xffffffff, stamp >> 32), _FileTime()
+        if not convert(C.byref(utc), C.byref(local)):
+            raise C.WinError(C.get_last_error())
+        return local.high << 32 | local.low
+
+    return read
 
 
 def _commands(stream, mailbox):
@@ -241,6 +245,7 @@ def _emit(row):
 
 def _capture(args):
     adapter = _adapter(args.cuda_uuid)
+    local_filetime = _local_filetime_clock()
     mailbox = queue.SimpleQueue()
     threading.Thread(target=_commands, args=(sys.stdin, mailbox), daemon=True).start()
     with _worker(args.pid, args.executable) as (identity, verify_live), _query(adapter, args.pid) as read:
@@ -261,7 +266,7 @@ def _capture(args):
                     continue
                 if command != "terminal" or terminal is not None:
                     raise ValueError("unexpected Krea memory observer command")
-                terminal = _local_filetime()
+                terminal = local_filetime()
                 _emit({"event": "terminal_requested", "elapsed_ms": int((time.monotonic() - start) * 1000),
                        "not_before_filetime": str(terminal)})
                 continue  # the terminal read uses the next normal sample, not a second cadence
@@ -269,12 +274,16 @@ def _capture(args):
                 pass
             read_started_ms = int((time.monotonic() - start) * 1000)
             verify_live()
+            read_started_filetime = local_filetime()
             sample = read()
+            read_ended_filetime = local_filetime()
             verify_live()
             now = time.monotonic()
             elapsed_ms = int((now - start) * 1000)
             next_poll = now + INTERVAL_MS / 1000
-            timing = {"elapsed_ms": elapsed_ms, "read_started_ms": read_started_ms}
+            timing = {"elapsed_ms": elapsed_ms, "read_started_ms": read_started_ms,
+                      "read_started_filetime": str(read_started_filetime),
+                      "read_ended_filetime": str(read_ended_filetime)}
             if sample is None:
                 _emit({"event": "missing", **timing})
                 if active or last is not None or terminal is not None:

@@ -43,3 +43,31 @@ test("missing active polls and gaps, cached provider values, and stale terminal 
     assert.throws(() => kreaWindowsDedicatedPeak(memory), error);
   }
 });
+
+test("fresh terminal reading cannot validate day-old nonterminal provider readings", () => {
+  const memory = kreaWindowsMemoryFixture();
+  const day = 24n * 60n * 60n * 10_000_000n;
+  for (const row of memory.wddmDedicated.rows) {
+    if (row.event === "sample" || row.event === "cached") row.filetime = String(BigInt(row.filetime) - day);
+  }
+  assert.throws(() => kreaWindowsDedicatedPeak(memory), /outside this poll's local FILETIME window/);
+});
+
+test("provider timestamps must stay inside their read windows and within the fresh gap limit", () => {
+  const shift = (value, ms) => String(BigInt(value) + BigInt(ms) * 10_000n);
+  const future = kreaWindowsMemoryFixture();
+  const sample = future.wddmDedicated.rows[3];
+  sample.filetime = shift(sample.filetime, 51);
+  assert.throws(() => kreaWindowsDedicatedPeak(future), /outside this poll's local FILETIME window/);
+
+  const gap = kreaWindowsMemoryFixture();
+  const rows = gap.wddmDedicated.rows;
+  rows[3].filetime = shift(rows[3].filetime, -49);
+  rows[4].filetime = rows[3].filetime;
+  rows[5].elapsed_ms += 1050;
+  rows[5].read_started_ms += 1050;
+  rows[5].read_started_filetime = shift(rows[5].read_started_filetime, 1050);
+  rows[5].read_ended_filetime = shift(rows[5].read_ended_filetime, 1050);
+  rows[5].filetime = shift(rows[5].filetime, 1099);
+  assert.throws(() => kreaWindowsDedicatedPeak(gap), /provider timestamp gap/);
+});

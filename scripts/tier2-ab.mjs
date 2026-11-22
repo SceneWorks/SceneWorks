@@ -1521,13 +1521,19 @@ async function cleanup(env, cfg) {
   return failed ? 1 : 0;
 }
 
+export function requireKreaCudaRunLease(cfg, mode, env) {
+  if (mode === "run" && cfg.backend === "cuda" && (cfg.allocation || cfg.perf)) {
+    fact(/^\d+$/.test(env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ""), "Krea Windows proof requires the existing exact-UUID CUDA execution guard");
+  }
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const modes = { "--stage-krea": "stage", "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
   fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-krea, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
   if (mode === "cleanup") return cleanup(env, cfg);
-  if (cfg.allocation && mode === "run") fact(/^\d+$/.test(env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ""), "Krea allocation requires the existing exact-UUID CUDA execution guard");
+  requireKreaCudaRunLease(cfg, mode, env);
   if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
   const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };

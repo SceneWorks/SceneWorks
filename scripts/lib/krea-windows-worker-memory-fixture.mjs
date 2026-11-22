@@ -6,7 +6,8 @@ export function kreaWindowsMemoryFixture({ gpuUuid = "GPU-2160ecaf-a2b7-7321-87a
   const workerPid = 37;
   const baseTime = 134397427954231587n;
   const stamp = (ms) => String(baseTime + BigInt(ms) * 10_000n);
-  const poll = (event, elapsed_ms, extra) => ({ event, elapsed_ms, read_started_ms: elapsed_ms - 1, ...extra });
+  const poll = (event, elapsed_ms, extra) => ({ event, elapsed_ms, read_started_ms: elapsed_ms - 1,
+    read_started_filetime: stamp(elapsed_ms - 1), read_ended_filetime: stamp(elapsed_ms), ...extra });
   return { gpuUuid, hostLifetimePeakBytes: hostPeakBytes, wddmDedicated: { source: KREA_WDDM_SOURCE, complete: true, exit: { code: 0, signal: null },
     intervalMs: 200, maxAllowedGapMs: 1500, physicalResidencyClaim: false, losslessPeakClaim: false, workerPid, workerExecutable, rows: [
       { event: "ready", interval_ms: 200, identity: { pid: workerPid, created_filetime: "134397607950102030", executable: workerExecutable },

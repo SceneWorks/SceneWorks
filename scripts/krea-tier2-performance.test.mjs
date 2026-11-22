@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dispatchOptions } from "./tier2-ab.mjs";
+import { dispatchOptions, requireKreaCudaRunLease } from "./tier2-ab.mjs";
 import { KREA_WDDM_SOURCE } from "./lib/krea-windows-worker-memory.mjs";
 import { kreaWindowsMemoryFixture } from "./lib/krea-windows-worker-memory-fixture.mjs";
 import { KREA_SUITE, kreaRoutes } from "./krea-tier2-proof.mjs";
@@ -101,4 +101,19 @@ test("CUDA memory compares one predeclared accounting method and adapter across 
   pairs[0].head.performance.deviceSource = KREA_WDDM_SOURCE;
   pairs[1].head.performance.wddmAdapter = { ...pairs[1].head.performance.wddmAdapter, luid: "luid_0x00000000_0x0001e267" };
   assert.match(compareKreaPerformance(pairs, "cuda").reason, /adapter changed/);
+});
+
+
+test("Windows Krea performance and allocation require the exact CUDA lease only for execution", () => {
+  for (const options of [{ perf: true }, { allocation: true }]) {
+    const cfg = { backend: "cuda", ...options };
+    assert.throws(() => requireKreaCudaRunLease(cfg, "run", {}), /exact-UUID CUDA execution guard/);
+    assert.throws(() => requireKreaCudaRunLease(cfg, "run", { SW_CI_CUDA_EXECUTION_ACTIVE: "true" }), /exact-UUID CUDA execution guard/);
+    assert.doesNotThrow(() => requireKreaCudaRunLease(cfg, "run", { SW_CI_CUDA_EXECUTION_ACTIVE: "1234" }));
+    for (const mode of ["preflight", "stage", "build"]) {
+      assert.doesNotThrow(() => requireKreaCudaRunLease(cfg, mode, {}));
+    }
+  }
+  assert.doesNotThrow(() => requireKreaCudaRunLease({ backend: "cuda", perf: false, allocation: false }, "run", {}));
+  assert.doesNotThrow(() => requireKreaCudaRunLease({ backend: "mlx", perf: true }, "run", {}));
 });
