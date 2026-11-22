@@ -873,7 +873,14 @@ async function preflight(env, cfg, report, signal) {
       report.staging = await priceKreaAssets(inventory, signal);
       fact(report.routes.every((route) => route.rows?.required?.length), "Krea public catalog no longer provides the exact proof routes");
       if (report.mode === "stage") {
-        report.staging = await stageKreaAssets(cfg.hubs[0], report.staging, signal);
+        report.stagingTransfers = [];
+        report.staging = await stageKreaAssets(cfg.hubs[0], report.staging, signal, {
+          cacheHub: cfg.backend === "cuda" ? defaultHubs("cuda")[0] : undefined,
+          progress(entry) {
+            report.stagingTransfers.push(entry);
+            progress({ phase: "krea_asset_stage", ...entry });
+          },
+        });
         await writeFile(stageReceipt, JSON.stringify(report.staging) + "\n", { flag: "wx" });
         report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
       }

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
   assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, kreaRoutes,
-  kreaAssetInventory, kreaExpectedStepEvents, kreaPerformance, openKreaEvents, priceKreaAssets,
+  kreaAssetInventory, kreaExpectedStepEvents, kreaPerformance, kreaSnapshotFile, openKreaEvents, priceKreaAssets, stageKreaAssets,
 } from "./krea-tier2-proof.mjs";
 
 const HEAD = "1".repeat(40);
@@ -64,6 +68,56 @@ test("asset metadata pricing refuses digest and length drift before downloading"
   await assert.rejects(priceKreaAssets([CHECKPOINT], signal, fetchMetadata), /changed length/);
   row = { ...row, size: CHECKPOINT.bytes, lfs: { oid: "f".repeat(64) } };
   await assert.rejects(priceKreaAssets([CHECKPOINT], signal, fetchMetadata), /changed LFS digest/);
+});
+
+test("staging copies verified cache hits and downloads only missing exact assets", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "krea-stage-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheHub = path.join(root, "cache");
+  const hub = path.join(root, "attempt");
+  const data = Buffer.from("cached fake weight");
+  const config = Buffer.from("{}");
+  const cached = { ...CHECKPOINT, bytes: data.length, sha256: createHash("sha256").update(data).digest("hex") };
+  const missing = { repo: CHECKPOINT.repo, revision: CHECKPOINT.revision, file: "bf16/config.json", bytes: config.length,
+    gitBlobSha1: createHash("sha1").update(`blob ${config.length}\0`).update(config).digest("hex") };
+  const cachedFile = kreaSnapshotFile(cacheHub, cached);
+  await mkdir(path.dirname(cachedFile), { recursive: true });
+  await writeFile(cachedFile, data);
+  const events = [];
+  const receipt = await stageKreaAssets(hub, { bytes: cached.bytes + missing.bytes, files: [cached, missing] },
+    new AbortController().signal, {
+      cacheHub, progress: (event) => events.push(event),
+      fetchImpl: async (url) => {
+        assert.match(url, /\/bf16\/config\.json$/);
+        return new Response(config);
+      },
+    });
+  assert.equal(receipt.stagedFileCount, 2);
+  assert.deepEqual(await readFile(kreaSnapshotFile(hub, cached)), data);
+  assert.deepEqual(await readFile(kreaSnapshotFile(hub, missing)), config);
+  assert.equal((await lstat(cachedFile)).nlink, 1);
+  assert.equal((await lstat(kreaSnapshotFile(hub, cached))).nlink, 1);
+  assert.deepEqual(events.filter(({ status }) => status === "verified").map(({ source, receivedBytes, digest }) => [source, receivedBytes, digest]),
+    [["runner-cache", cached.bytes, cached.sha256], ["pinned-https", missing.bytes, missing.gitBlobSha1]]);
+});
+
+test("staging rejects corrupt cache bytes and records their attempted transfer", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "krea-stage-corrupt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheHub = path.join(root, "cache");
+  const hub = path.join(root, "attempt");
+  const cached = { ...CHECKPOINT, bytes: 4 };
+  const cachedFile = kreaSnapshotFile(cacheHub, cached);
+  await mkdir(path.dirname(cachedFile), { recursive: true });
+  await writeFile(cachedFile, "fake");
+  const events = [];
+  await assert.rejects(stageKreaAssets(hub, { bytes: 4, files: [cached] }, new AbortController().signal, {
+    cacheHub, progress: (event) => events.push(event), fetchImpl: () => assert.fail("corrupt cache must refuse")
+  }), /after receiving 4 bytes: wrong artifact digest/);
+  assert.equal(events.at(-1).status, "failed");
+  assert.equal(events.at(-1).source, "runner-cache");
+  assert.equal(await readFile(cachedFile, "utf8"), "fake");
+  await assert.rejects(readFile(`${kreaSnapshotFile(hub, cached)}.part`), { code: "ENOENT" });
 });
 
 function jobEvents(route) {

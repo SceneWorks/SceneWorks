@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdir, open, readFile, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { lstat, mkdir, open, readFile, rename, rm, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import { probeCacheFile } from "./h3-finetune-terminal-stage.mjs";
 import { KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_FINAL_SIZE } from "./krea-tier2-allocation.mjs";
 
 export const KREA_SUITE = "krea-scoped-acceptance";
@@ -23,6 +24,7 @@ const PHASES = [{ steps: 3, guidance: 0, loras: [] }, { steps: 4, guidance: 1, l
 const HIRES = { enabled: true, upscaleBy: 1.5, steps: 4, denoisingStrength: 0.5 };
 const PROJECTOR_KEYS = ["diffusion_model.txtfusion.projector.lora_down.weight", "diffusion_model.txtfusion.projector.lora_up.weight"];
 const GIB = 1024 ** 3;
+const STAGING_PROGRESS_BYTES = GIB / 4;
 
 export function kreaRoutes(backend, { allocation = false } = {}) {
   const shared = { backend, kind: "image", mode: "text_to_image", group: null, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20 };
@@ -104,33 +106,57 @@ export function kreaSnapshotFile(hub, item) {
   return path.join(hub, `models--${item.repo.replace("/", "--")}`, "snapshots", item.revision, ...item.file.split("/"));
 }
 
-export async function stageKreaAssets(hub, price, signal, fetchImpl = fetch) {
+export async function stageKreaAssets(hub, price, signal, { cacheHub, fetchImpl = fetch, progress = () => {} } = {}) {
   await mkdir(hub, { recursive: true });
   const fs = await statfs(hub, { bigint: true });
   const freeBytes = Number(fs.bavail * fs.bsize);
   assert.ok(freeBytes >= price.bytes + 20 * GIB, `need ${price.bytes} bytes for pinned Krea assets plus 20 GiB for builds, have ${freeBytes} bytes`);
-  const deadline = AbortSignal.any([signal, AbortSignal.timeout(90 * 60_000)]);
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout((cacheHub ? 180 : 90) * 60_000)]);
   for (const item of price.files) {
-    deadline.throwIfAborted();
     const dest = kreaSnapshotFile(hub, item);
     const partial = `${dest}.part`;
-    await mkdir(path.dirname(dest), { recursive: true });
     const hash = createHash(item.sha256 ? "sha256" : "sha1");
     if (!item.sha256) hash.update(`blob ${item.bytes}\0`);
+    const identity = `${keyOf(item)}/${item.file}`;
+    let source = "cache-probe";
     let bytes = 0;
-    const verify = new Transform({ transform(chunk, _encoding, done) {
-      bytes += chunk.length;
-      if (bytes > item.bytes) return done(new Error(`pinned artifact exceeded its length: ${item.file}`));
-      hash.update(chunk);
-      done(null, chunk);
-    } });
+    let nextProgress = STAGING_PROGRESS_BYTES;
+    const report = (status, detail = {}) => progress({ status, identity, source, receivedBytes: bytes, expectedBytes: item.bytes, ...detail });
     try {
-      const response = await fetchImpl(resolveUrl(item), { redirect: "follow", signal: deadline });
-      assert.ok(response.ok && response.body, `cannot fetch pinned ${keyOf(item)}/${item.file} (HTTP ${response.status})`);
-      await pipeline(Readable.fromWeb(response.body), verify, createWriteStream(partial, { flags: "wx" }), { signal: deadline });
+      deadline.throwIfAborted();
+      const cached = cacheHub && await probeCacheFile({ ...item, repoType: "model" }, cacheHub, { signal: deadline });
+      const cacheHit = cached?.state === "present";
+      source = cacheHit ? "runner-cache" : "pinned-https";
+      report("started");
+      await mkdir(path.dirname(dest), { recursive: true });
+      let stream;
+      if (cacheHit) {
+        assert.equal(cached.size, item.bytes, `wrong cached artifact length: ${item.file}`);
+        stream = createReadStream(cached.sourcePath);
+      } else {
+        const response = await fetchImpl(resolveUrl(item), { redirect: "follow", signal: deadline });
+        assert.ok(response.ok && response.body, `cannot fetch pinned ${identity} (HTTP ${response.status})`);
+        stream = Readable.fromWeb(response.body);
+      }
+      const verify = new Transform({ transform(chunk, _encoding, done) {
+        bytes += chunk.length;
+        if (bytes > item.bytes) return done(new Error(`pinned artifact exceeded its length: ${item.file}`));
+        hash.update(chunk);
+        if (bytes >= nextProgress) {
+          report("transferring");
+          nextProgress = bytes + STAGING_PROGRESS_BYTES;
+        }
+        done(null, chunk);
+      } });
+      await pipeline(stream, verify, createWriteStream(partial, { flags: "wx" }), { signal: deadline });
       assert.equal(bytes, item.bytes, `wrong artifact length: ${item.file}`);
-      assert.equal(hash.digest("hex"), item.sha256 ?? item.gitBlobSha1, `wrong artifact digest: ${item.file}`);
+      const digest = hash.digest("hex");
+      assert.equal(digest, item.sha256 ?? item.gitBlobSha1, `wrong artifact digest: ${item.file}`);
       await rename(partial, dest);
+      report("verified", { digest });
+    } catch (error) {
+      report("failed", { error: error.message });
+      throw new Error(`Krea staging failed for ${identity} after receiving ${bytes} bytes: ${error.message}`, { cause: error });
     } finally {
       await rm(partial, { force: true });
     }
@@ -161,8 +187,8 @@ export async function stageKreaAssets(hub, price, signal, fetchImpl = fetch) {
 export async function assertStagedKreaAssets(hub, price, inventory) {
   assert.deepEqual(price.files.map(({ repo, revision, file }) => ({ repo, revision, file })), inventory.map(({ repo, revision, file }) => ({ repo, revision, file })), "staged asset receipt does not match the exact proof inventory");
   for (const item of price.files) {
-    const file = await stat(kreaSnapshotFile(hub, item));
-    assert.ok(file.isFile() && file.size === item.bytes, `staged asset changed: ${item.file}`);
+    const file = await lstat(kreaSnapshotFile(hub, item));
+    assert.ok(file.isFile() && file.nlink === 1 && file.size === item.bytes, `staged asset changed: ${item.file}`);
     const ref = path.join(hub, `models--${item.repo.replace("/", "--")}`, "refs", "main");
     assert.equal(await readFile(ref, "utf8"), item.revision, `staged snapshot ref changed: ${item.repo}`);
   }
