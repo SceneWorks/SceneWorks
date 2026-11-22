@@ -1101,16 +1101,19 @@ test("SCAIL requires an enabled candidate catalog and both pinned product compon
 });
 
 test("CUDA grouped and standalone SCAIL refusals preserve the worker reserve above the effective cap", async () => {
-  const { scailFitEvidence, scailPackagedRefusalCapBytes, scailRefusalCapBytes, scailRefusalBudget, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
+  const { scailPackagedRefusalCapBytes, scailRefusalCapBytes, scailRefusalBudget, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
   const config = async (name) => JSON.parse(await readFile(path.join(root, "config", name), "utf8"));
-  const [pool, coverage, closures, registry, anchor] = await Promise.all([
-    config("scail2-plural-memory.json"), config("scail2-memory-pin-coverage.json"), config("inference-provider-closures.json"),
+  const [registry, anchor] = await Promise.all([
     config("manifests/registry/evidence.json"), readFile(path.join(root, "crates/sceneworks-core/src/memory_anchor.rs"), "utf8"),
   ]);
   const gib = 1024 ** 3;
   const reserveBytes = Number(anchor.match(/pub const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = (\d+(?:\.\d+)?);/)[1]) * gib;
-  const evidence = scailFitEvidence(pool, "cuda", {coverage, closures, compiledPin: closures.inferenceRevision});
-  const six = evidence.find(row => row.references === 6);
+  // Freeze the measured donor that reproduced the emulation bug. Its coverage is
+  // specific to that capture's provider closure; future pins can have different prices.
+  const price = {grossDeviceBytes:57_048_903_680 + 9_294_577_664, grossHostBytes:58_836_885_504 + 77_594_624, grossUnifiedBytes:0};
+  const six = {artifactId:14_719_969_057, sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f",
+    references:6, nativePolicy:"cuda-q4-resident", price, acceleratorBytes:price.grossDeviceBytes};
+  const evidence = [six];
   const cold = {...six.price, stage:"cold_load", admitted:true, backend:"candle", referenceCount:6, providerCreditBytes:0,
     requiredAcceleratorBytes:six.acceleratorBytes, acceleratorReserveBytes:reserveBytes,
     evidenceArtifactId:six.artifactId, evidenceSha256:six.sha256, evidenceReferences:6};
