@@ -2309,21 +2309,19 @@ fn candle_hires_prices_bf16_adapters_per_ordered_slot() {
     file.resize(file.len() + 2 * factor_bytes, 0);
     std::fs::write(&path, file).unwrap();
 
-    let mut spec =
-        LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned())).with_adapters(vec![
-            gen_core::AdapterSpec::new(path.clone(), 0.25, gen_core::AdapterKind::Lora),
-        ]);
-    spec.prepare_file_sources().unwrap();
-    let one_slot = candle_hires_adapter_device_bytes(&spec).unwrap();
+    let prepared = |adapters| {
+        let mut spec =
+            LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned())).with_adapters(adapters);
+        spec.prepare_file_sources().unwrap();
+        spec
+    };
+    let first = gen_core::AdapterSpec::new(path.clone(), 0.25, gen_core::AdapterKind::Lora);
+    let second = gen_core::AdapterSpec::new(path, 0.75, gen_core::AdapterKind::Lora);
+    let one_slot = candle_hires_adapter_device_bytes(&prepared(vec![first.clone()])).unwrap();
     assert_eq!(one_slot, 2 * factor_elements as u64 * (4 + 2));
-
-    let mut duplicate = spec.adapters[0].clone();
-    duplicate.scale = 0.75;
-    spec.adapters.push(duplicate);
-    spec.prepare_file_sources().unwrap();
     assert_eq!(
-        candle_hires_adapter_device_bytes(&spec).unwrap(),
-        2 * one_slot
+        candle_hires_adapter_device_bytes(&prepared(vec![first, second])).unwrap(),
+        2 * one_slot,
     );
 }
 
@@ -2340,20 +2338,14 @@ fn candle_hires_prices_folded_bf16_delta_upload_at_f32() {
     std::fs::write(&path, file).unwrap();
     let checkpoint = fixture.path().join("imported.safetensors");
     std::fs::write(&checkpoint, []).unwrap();
-    let prepared = |adapters| {
-        let mut spec =
-            LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned())).with_adapters(adapters);
-        spec.prepare_file_sources().unwrap();
-        spec
-    };
-    let first = gen_core::AdapterSpec::new(path.clone(), 0.25, gen_core::AdapterKind::Lora);
-    let second = gen_core::AdapterSpec::new(path, 0.75, gen_core::AdapterKind::Lora);
-    let one_slot = candle_hires_adapter_device_bytes(&prepared(vec![first.clone()])).unwrap();
-    assert_eq!(one_slot, 2 * factor_elements as u64 * (4 + 2));
-    assert_eq!(
-        candle_hires_adapter_device_bytes(&prepared(vec![first, second])).unwrap(),
-        2 * one_slot,
-    );
+    let mut spec = LoadSpec::new(WeightsSource::File(checkpoint)).with_adapters(vec![
+        gen_core::AdapterSpec::new(path, 1.0, gen_core::AdapterKind::Lora),
+    ]);
+    spec.prepare_file_sources().unwrap();
+
+    assert_eq!(candle_hires_fold_upload_bytes(&spec).unwrap(), 6 * 4);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    assert!(candle_hires_adapter_device_bytes(&spec).unwrap() >= 6 * 4);
 }
 
 /// Candle's imported checkpoint uses the source floor and explicit workspaces. Scope geometry
