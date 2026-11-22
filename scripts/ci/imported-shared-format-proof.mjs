@@ -59,13 +59,15 @@ export function validateSdxlReferencePair(native, reference) {
   }
 }
 
-export function validateResult(spec, log, code, packets) {
+export function validateResult(spec, log, code, packets, proofPair = false) {
   assert.equal(code, 0, 'native worker test must succeed');
   assert.equal((log.match(/^test result: ok\. 1 passed; 0 failed; 0 ignored;/gm) ?? []).length, 1);
   const fqn = `imported_comfy_quant_gpu_smoke::${spec.test}`;
   assert.equal((log.match(new RegExp(`^MODEL_INFERENCE_BODY_COMPLETED ${fqn}$`, 'gm')) ?? []).length, 1);
-  assert.deepEqual(log.match(new RegExp(`^MODEL_INFERENCE_DEVICE ${fqn} .+$`, 'gm')),
-    [`MODEL_INFERENCE_DEVICE ${fqn} candle-cuda`]);
+  const devices = log.match(new RegExp(`^MODEL_INFERENCE_DEVICE ${fqn} .+$`, 'gm')) ?? [];
+  // Independent proof observers may each witness the same device. The manual marker is singular.
+  assert.deepEqual(proofPair ? [...new Set(devices)] : devices,
+    [`MODEL_INFERENCE_DEVICE ${fqn} candle-cuda`], 'expected only in-scope CUDA device evidence');
   assert.equal((log.match(/^RESULT status=pass /gm) ?? []).length, spec.count);
   assert.equal(packets.length, spec.count);
   const loadEvents = log.split('\n').flatMap(line => {
@@ -158,7 +160,7 @@ async function execute(binary, spec, output, proofPair) {
     await boundedFile(output, filename);
     packets.push(JSON.parse(await readFile(path.join(output, filename), 'utf8')));
   }
-  validateResult(spec, safeLog, log.code, packets);
+  validateResult(spec, safeLog, log.code, packets, proofPair);
   const files = [];
   for (const packet of packets) {
     const imageFile = await boundedFile(output, packet.output);

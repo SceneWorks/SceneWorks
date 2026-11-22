@@ -119,6 +119,24 @@ test('SDXL reference selects only its two cases under the physical guard', () =>
   ]) assert.throws(() => guardedCases({ ...guardedReference, ...override }));
 });
 
+test('reference permits the three identical CUDA observations emitted by the native run', () => {
+  const [native] = guardedCases(guardedReference);
+  const { log, packets } = fixture(native);
+  const fqn = 'imported_comfy_quant_gpu_smoke::imported_sdxl_fp8_worker_gpu_smoke';
+  const cuda = `MODEL_INFERENCE_DEVICE ${fqn} candle-cuda`;
+  const repeated = log.replace(cuda, [cuda, cuda, cuda].join('\n'));
+  validateResult(native, repeated, 0, packets, true);
+  assert.throws(() => validateResult(native, repeated, 0, packets), /CUDA device evidence/);
+
+  const missing = log.replace(cuda, '');
+  const mixed = repeated + `MODEL_INFERENCE_DEVICE ${fqn} candle-cpu\n`;
+  for (const invalid of [missing, mixed]) {
+    assert.throws(() => validateResult(native, invalid, 0, packets, true), /CUDA device evidence/);
+  }
+
+  assert.throws(() => validateResult(native, repeated + `MODEL_INFERENCE_BODY_COMPLETED ${fqn}\n`, 0, packets, true));
+});
+
 test('reference receipt requires only dense E5 and a witnessed CUDA device', () => {
   const [native, reference] = guardedCases(guardedReference);
   const f = fixture(reference);
