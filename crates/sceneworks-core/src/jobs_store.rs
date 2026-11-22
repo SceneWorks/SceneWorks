@@ -669,6 +669,36 @@ pub struct WorkerHeartbeatOutcome {
     pub interrupted_job: Option<JobSnapshot>,
 }
 
+fn matches_fixed_source_precision_upgrade(
+    job_type: &JobType,
+    payload: &crate::contracts::JsonObject,
+    previous: Option<&Value>,
+    next: Option<&Value>,
+) -> bool {
+    use crate::model_artifacts::portable_binding::PortableJobBinding;
+    if !crate::source_precision::applies_to_job(job_type) {
+        return false;
+    }
+    let (Some(previous), Some(next)) = (previous, next) else {
+        return false;
+    };
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    if crate::source_precision::SourcePrecision::for_entry(entry).is_none() {
+        return false;
+    }
+    let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    serde_json::from_value::<PortableJobBinding>(previous.clone())
+        .ok()
+        .and_then(|binding| binding.with_fixed_source_precision(id).ok())
+        .and_then(|binding| serde_json::to_value(binding).ok())
+        .as_ref()
+        == Some(next)
+}
+
 impl JobsStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -2579,7 +2609,16 @@ impl JobsStore {
                 ));
             }
         }
-        if previous_binding.is_some() && previous_binding.as_ref() != portable_binding {
+        if previous_binding.is_some()
+            && previous_binding.as_ref() != portable_binding
+            && (exact_replay.is_some()
+                || !matches_fixed_source_precision_upgrade(
+                    &job.job_type,
+                    &payload,
+                    previous_binding.as_ref(),
+                    portable_binding,
+                ))
+        {
             return Err(if exact_replay.is_some() {
                 JobsStoreError::ReplayUnavailable(crate::execution_receipt::ReplayUnavailable::new(
                     "source_route_changed",
@@ -2723,6 +2762,12 @@ impl JobsStore {
         if !portable.allow_rebind
             && previous_binding.is_some()
             && previous_binding.as_ref() != portable.binding
+            && !matches_fixed_source_precision_upgrade(
+                &job.job_type,
+                &payload,
+                previous_binding.as_ref(),
+                portable.binding,
+            )
         {
             return Err(JobsStoreError::InvalidStatus(
                 "Portable model identity changed during duplicate".to_owned(),

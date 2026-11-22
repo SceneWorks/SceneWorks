@@ -2,6 +2,9 @@ use super::*;
 use crate::checkpoint_derivative::{CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore};
 use crate::checkpoint_plan_store::CheckpointPlanStore;
 
+#[path = "minimax_h3_fp8_tests.rs"]
+mod fp8_sources;
+
 #[path = "minimax_h3_w4a8_tests.rs"]
 mod w4a8;
 
@@ -797,7 +800,19 @@ fn convrot_fixture(layout: H3QkvLayout) -> (H3Config, Entries, Entries) {
 #[test]
 fn convrot_groups64_and256_preserve_codes_scales_and_descriptors_through_real_cache() {
     for layout in [H3QkvLayout::Interleaved, H3QkvLayout::Contiguous] {
-        let (cfg, raw, expected) = convrot_fixture(layout);
+        let (cfg, mut raw, mut expected) = convrot_fixture(layout);
+        if layout == H3QkvLayout::Interleaved {
+            for entries in [&mut raw, &mut expected] {
+                for (name, (shape, _, bytes)) in entries {
+                    if name.ends_with(".comfy_quant") {
+                        let mut descriptor: Value = serde_json::from_slice(bytes).unwrap();
+                        descriptor["per_row"] = json!(true);
+                        *bytes = serde_json::to_vec(&descriptor).unwrap();
+                        shape[0] = bytes.len();
+                    }
+                }
+            }
+        }
         let data = tempfile::tempdir().unwrap();
         let library = tempfile::tempdir().unwrap();
         let file = library.path().join("user-checkpoint.safetensors");
@@ -847,6 +862,7 @@ fn convrot_malformed_descriptors_scales_and_signed_storage_refuse_before_copy() 
     let scale = "model.diffusion_model.blocks.0.attn.qkv_proj.weight_scale";
     for fault in [
         "unknown-field",
+        "non-row-scale",
         "group",
         "zero-scale",
         "nan-scale",
@@ -856,12 +872,12 @@ fn convrot_malformed_descriptors_scales_and_signed_storage_refuse_before_copy() 
     ] {
         let mut raw = original.clone();
         match fault {
-            "unknown-field" | "group" => {
+            "unknown-field" | "non-row-scale" | "group" => {
                 let mut value: Value = serde_json::from_slice(&raw[descriptor].2).unwrap();
-                if fault == "group" {
-                    value["convrot_groupsize"] = json!(32);
-                } else {
-                    value["per_row"] = json!(true);
+                match fault {
+                    "group" => value["convrot_groupsize"] = json!(32),
+                    "non-row-scale" => value["per_row"] = json!(false),
+                    _ => value["unexpected_field"] = json!(true),
                 }
                 let bytes = value.to_string().into_bytes();
                 raw.insert(descriptor.into(), (vec![bytes.len()], "U8".into(), bytes));

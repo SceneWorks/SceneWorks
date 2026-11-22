@@ -331,6 +331,7 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     lane: &'static str,
     gpu_id: String,
     source_weight_bytes: u64,
+    auxiliary_source_bytes: u64,
     phase_adapter_extra_bytes: u64,
     pag_workspace_bytes: u64,
     hires_workspace_bytes: u64,
@@ -379,6 +380,18 @@ impl CachedCandleBaseFloorAdmission {
     /// resident generator cannot promise to reclaim that allowance.
     pub(super) fn reclaimable_weight_bytes(&self) -> u64 {
         self.source_weight_bytes
+            .saturating_sub(self.auxiliary_source_bytes)
+    }
+
+    /// Auxiliary file bytes are priced in the incoming floor, but do not prove GPU occupancy.
+    pub(super) fn without_auxiliary_reclaim_credit(mut self, auxiliary_source_bytes: u64) -> Self {
+        self.auxiliary_source_bytes = auxiliary_source_bytes;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn source_floor_bytes(&self) -> u64 {
+        self.source_weight_bytes
     }
 
     /// Admit one cold load. `resident_reclaimable_weight_bytes` comes from the exact different-key
@@ -421,7 +434,7 @@ impl CachedCandleBaseFloorAdmission {
                 // `reclaimable_weight_bytes`).
                 crate::vram_gate::note_loaded_peak(
                     &self.gpu_id,
-                    self.source_weight_bytes as f64 / BYTES_PER_GIB,
+                    self.reclaimable_weight_bytes() as f64 / BYTES_PER_GIB,
                 );
                 tracing::info!(
                     model = self.model,
@@ -484,6 +497,7 @@ pub(super) fn prepare_cached_candle_base_floor(
         lane,
         gpu_id: settings.gpu_id.clone(),
         source_weight_bytes: bytes,
+        auxiliary_source_bytes: 0,
         phase_adapter_extra_bytes: 0,
         pag_workspace_bytes: 0,
         hires_workspace_bytes: 0,
@@ -661,19 +675,21 @@ mod tests {
             lane: "Krea imported",
             gpu_id: "unused".into(),
             source_weight_bytes: 1_000,
+            auxiliary_source_bytes: 0,
             phase_adapter_extra_bytes: 0,
             pag_workspace_bytes: 0,
             hires_workspace_bytes: 0,
             materialized_hires_weight_bytes: None,
             runtime: runtime.handle().clone(),
         }
+        .without_auxiliary_reclaim_credit(170)
         .with_phase_adapter_peak(&spec, 100)
         .unwrap()
         .with_pag_workspace(25)
         .with_hires_workspace(1_200, 15);
         assert_eq!(floor.phase_adapter_extra_bytes, 87);
         assert_eq!(floor.request_peak_floor_bytes(), 1_327);
-        assert_eq!(floor.reclaimable_weight_bytes(), 1_000);
+        assert_eq!(floor.reclaimable_weight_bytes(), 830);
     }
 
     #[test]
@@ -695,6 +711,7 @@ mod tests {
             lane: "Krea imported",
             gpu_id: gpu_id.to_owned(),
             source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
+            auxiliary_source_bytes: 0,
             phase_adapter_extra_bytes: (1.0 * BYTES_PER_GIB) as u64,
             pag_workspace_bytes: 0,
             hires_workspace_bytes: 0,
@@ -715,6 +732,7 @@ mod tests {
             lane: "Krea imported",
             gpu_id: empty_gpu.to_owned(),
             source_weight_bytes: 0,
+            auxiliary_source_bytes: 0,
             phase_adapter_extra_bytes: 0,
             pag_workspace_bytes: 0,
             hires_workspace_bytes: 0,

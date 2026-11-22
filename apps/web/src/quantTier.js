@@ -141,6 +141,11 @@ export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
 
+export function sourcePrecisionLabel(model) {
+  const label = model?.sourcePrecision?.label;
+  return typeof label === "string" && label ? label : null;
+}
+
 const PRECISION_FLOOR_COMPONENT_LABELS = {
   textEncoder: "text encoder layers",
   transformerHead: "transformer head",
@@ -227,6 +232,7 @@ export function installedTiers(model, options = {}) {
 // Installed and displayed tiers use the same source precedence and host gates. Only the
 // installed-only predicate differs; keep it here so the two public views cannot drift.
 function selectModelTiers(model, options, installedOnly) {
+  if (sourcePrecisionLabel(model)) return [];
   const hostEligible = (tier) => tierHostEligible(tier, options);
   // Imported same-shape providers can quantize the caller-owned checkpoint at load without a
   // separate downloaded tier. The API projects exactly the provider descriptor's supported set;

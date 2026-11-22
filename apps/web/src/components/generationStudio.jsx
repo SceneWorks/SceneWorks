@@ -29,7 +29,7 @@ import { savePresetDialogValidation } from "../generationValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { StylePicker } from "./StylePicker.jsx";
-import { defaultTierSelection, tierQuantize } from "../quantTier.js";
+import { defaultTierSelection, sourcePrecisionLabel, tierQuantize } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { errorMessage } from "../errorMessage.js";
@@ -51,7 +51,7 @@ export function useQuantTierPicker({
   resolvedTier = null,
 }) {
   const [pickedTier, setQuantTier] = useState("");
-  const quantTier = resolvedTier ?? pickedTier;
+  const quantTier = sourcePrecisionLabel(selectedModel) ? "" : (resolvedTier ?? pickedTier);
   const [tierSwitching, setTierSwitching] = useState("");
   // Bumped by `confirmTier` so the sticky it writes re-derives `tierExplicit` even though the
   // selected tier itself does not change.
@@ -130,6 +130,16 @@ export function useQuantTierPicker({
       skipReseedRef.current = true;
     },
   };
+}
+
+export function SourcePrecisionField({ model, className, labelClassName }) {
+  const label = sourcePrecisionLabel(model);
+  return label ? (
+    <div className={className}>
+      <span className={labelClassName}>Source precision</span>
+      <strong>{label}</strong>
+    </div>
+  ) : null;
 }
 
 // `className` lets the studios render this as a settings-bar cell (`settings-field`) instead of an

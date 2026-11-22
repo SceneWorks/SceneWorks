@@ -220,6 +220,37 @@ impl H3SourceAuthority {
         self.component_staging.lock().clone()
     }
 
+    /// Whether a measured source group is the full authorized runtime transformer, including its
+    /// normalized shards where applicable. Companion and original pre-normalization pins do not
+    /// establish execution of the selected runtime transformer.
+    fn binds_transformer_receipt(&self, sources: &[gen_core::SourceBinding]) -> bool {
+        let Ok(directory) = std::path::absolute(&self.directory) else {
+            return false;
+        };
+        let mut expected = 0;
+        for pin in &self.seals {
+            let path = pin.loader_path();
+            if path.parent() != Some(directory.as_path())
+                || !path
+                    .extension()
+                    .is_some_and(|ext| ext == "safetensors" || ext == "gguf")
+                || !path
+                    .file_name()
+                    .is_some_and(|name| self.planned.contains(name.to_string_lossy().as_ref()))
+            {
+                continue;
+            }
+            expected += 1;
+            if !sources.iter().any(|source| {
+                source.canonical_path() == pin.canonical_target_path()
+                    && source.target_fingerprint() == pin.target_fingerprint()
+            }) {
+                return false;
+            }
+        }
+        expected > 0 && expected == sources.len()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         for receipt in self.component_staging.lock().iter() {
             receipt.validate()?;
@@ -429,6 +460,13 @@ impl PreparedH3Load {
         &self.files
     }
 
+    /// Match a provider's runtime receipt to this prepared load's authorized transformer group.
+    pub fn binds_transformer_receipt(&self, sources: &[gen_core::SourceBinding]) -> bool {
+        self.authority
+            .as_ref()
+            .is_some_and(|authority| authority.binds_transformer_receipt(sources))
+    }
+
     pub fn component_staging(
         &self,
     ) -> Vec<crate::model_artifacts::provenance::H3ComponentStagingReceipt> {
@@ -523,6 +561,32 @@ mod tests {
             BTreeSet::from([file.file_name().unwrap().to_string_lossy().into_owned()]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn transformer_receipt_binding_requires_every_planned_runtime_shard() {
+        let temp = tempfile::tempdir().unwrap();
+        let transformer = temp.path().join("transformer");
+        std::fs::create_dir(&transformer).unwrap();
+        let pin = |path: PathBuf| {
+            std::fs::write(&path, b"metadata fixture").unwrap();
+            PinnedWeightsFile::pin(path).unwrap()
+        };
+        let first = pin(transformer.join("first.safetensors"));
+        let second = pin(transformer.join("second.safetensors"));
+        let companion = pin(temp.path().join("encoder.safetensors"));
+        let bind = |pin: &PinnedWeightsFile| gen_core::SourceBinding::verify(pin).unwrap();
+        let source = H3SourceAuthority::new(
+            vec![first.clone(), second.clone(), companion.clone()],
+            transformer,
+            BTreeSet::from(["first.safetensors".into(), "second.safetensors".into()]),
+        )
+        .unwrap();
+
+        assert!(source.binds_transformer_receipt(&[bind(&second), bind(&first)]));
+        assert!(!source.binds_transformer_receipt(&[bind(&first)]));
+        assert!(!source.binds_transformer_receipt(&[bind(&first), bind(&companion)]));
+        assert!(!source.binds_transformer_receipt(&[bind(&first), bind(&first)]));
     }
 
     /// sc-26691: a staging link made through the file's seal carries the seal across the

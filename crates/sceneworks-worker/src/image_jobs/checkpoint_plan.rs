@@ -14,7 +14,7 @@ use super::resolve_seed;
 use super::routing::imported_base_snapshot_companions;
 use super::routing::imported_generate_request_has_unsupported_shape;
 use super::routing::imported_generate_request_has_unsupported_shape_resolved;
-use super::sdxl_imported::resolve_sdxl_imported_component_dir_cache_only;
+use super::sdxl_imported::resolve_sdxl_imported_component_cache_only;
 use super::sdxl_imported::resolve_sdxl_ldm_tokenizer_root_cache_only;
 use super::stream::drive_gen_items;
 #[cfg(not(target_os = "macos"))]
@@ -806,10 +806,9 @@ pub(super) struct PreparedCheckpointPlanSources {
     /// backbone, a Dir for a component-directory dialect).
     pub(super) primary: WeightsSource,
     /// Components the provider declares as required, resolved to local sources.
-    pub(super) components: Vec<(&'static str, WeightsSource)>,
-    /// Every payload-selected File token the route retains from selection through load: the
-    /// primary's file(s) plus any component sourced from a plan layer.
-    pins: Vec<gen_core::PinnedWeightsFile>,
+    components: Vec<CheckpointPlanComponent>,
+    /// The primary's file(s), with the checkpoint backbone first.
+    primary_pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
 /// The backbone role a given source shape's primary layer must carry.
@@ -1107,7 +1106,9 @@ struct CheckpointPlanComponent {
     /// The plan layer this component consumed, when it came from the plan rather than from a
     /// resident tier. Feeds [`checkpoint_plan_unconsumed_layers`].
     consumed: Option<String>,
-    /// The payload-selected File token to keep pinned, when the component is a plan layer.
+    /// The complete file input of a single-file component, even when its loader accepts a
+    /// directory containing that member. An open-ended directory leaves this unset and
+    /// requires a separate admission price.
     pin: Option<gen_core::PinnedWeightsFile>,
 }
 
@@ -1178,7 +1179,7 @@ fn resolve_checkpoint_plan_component(
             // table the bespoke candle lane stages from, so both routes hand the loader the
             // identical directory rather than two copies (sc-20651). `None` here means "not an
             // SDXL component id", which falls through to the family resolvers below.
-            if let Some(dir) = resolve_sdxl_imported_component_dir_cache_only(
+            if let Some((dir, pin)) = resolve_sdxl_imported_component_cache_only(
                 settings,
                 family,
                 component,
@@ -1188,7 +1189,7 @@ fn resolve_checkpoint_plan_component(
                     id: component,
                     source: WeightsSource::Dir(dir),
                     consumed: None,
-                    pin: None,
+                    pin: Some(pin),
                 });
             }
             let resolved_components = checkpoint_plan_family_components(
@@ -1283,39 +1284,75 @@ fn checkpoint_plan_resident_base_tier(
     resolve(settings)
 }
 
-/// The companion directories the candle floor prices for this plan's declared components.
-///
-/// Mirrors [`resolve_checkpoint_plan_component`], which is the function that PRODUCED these
-/// components: a `base_snapshot` is a resident family tier whose own `transformer/` is replaced by
-/// the plan's primary file, so it is priced through the shared
-/// [`imported_base_snapshot_companions`] construction (the legacy Krea imported lane's, exactly)
-/// rather than recursively. Pricing the whole snapshot — which is what `admit_candle_load_spec_floor`
-/// does to every `spec.components` value — would charge the plan's DiT twice and over-refuse.
-///
-/// Any component shape this floor cannot account for refuses rather than going unpriced.
+/// Account for the declared components in the cached Candle floor. A base snapshot supplies
+/// only resident companion weights because the imported primary replaces its transformer.
+/// Other components supply their complete file input through the prepared pins, including
+/// auxiliary members such as tokenizer JSON that the snapshot's safetensors scan cannot price.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn checkpoint_plan_candle_companion_dirs(
+pub(super) fn checkpoint_plan_candle_components(
     sources: &PreparedCheckpointPlanSources,
     spec: &LoadSpec,
-) -> WorkerResult<Vec<PathBuf>> {
+) -> WorkerResult<(Vec<PathBuf>, u64)> {
     let mut companions = Vec::new();
-    for (component, source) in &sources.components {
-        match (*component, source) {
-            (gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(base_dir)) => companions.extend(
-                imported_base_snapshot_companions(base_dir, spec.text_encoder.is_some()),
-            ),
+    let mut auxiliary_members = std::collections::BTreeMap::new();
+    for component in &sources.components {
+        let pin = component
+            .pin
+            .as_ref()
+            .filter(|pin| spec.prepared_file_pins().get(pin.loader_path()) == Some(*pin));
+        match (component.id, &component.source, pin) {
+            (gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(base_dir), None) => companions
+                .extend(imported_base_snapshot_companions(
+                    base_dir,
+                    spec.text_encoder.is_some(),
+                )),
+            (id, WeightsSource::File(path), Some(pin))
+                if id != gen_core::BASE_SNAPSHOT_COMPONENT && pin.loader_path() == path => {}
+            (id, WeightsSource::Dir(dir), Some(pin))
+                if id != gen_core::BASE_SNAPSHOT_COMPONENT
+                    && pin.loader_path().parent() == Some(dir)
+                    && pin.target_fingerprint().size > 0 =>
+            {
+                // Directory member bytes enter the incoming floor through their pins. That
+                // alone supplies no evidence they can be reclaimed from the GPU.
+                auxiliary_members.insert(pin.loader_path(), pin.target_fingerprint().size);
+            }
             _ => {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "[checkpoint-plan:unpriceable-component] checkpoint {:?} ({} family) declares \
-                     component {component:?} as {source:?}, which this route's candle floor cannot \
-                     account for; admitting it would leave those bytes unpriced",
+                    "[checkpoint-plan:unpriceable-component] checkpoint {:?} ({} family) declares component {:?} as {:?}, which this route's candle floor cannot account for; admitting it would leave those bytes unpriced",
                     sources.checkpoint_id,
-                    sources.resolved.family()
+                    sources.resolved.family(),
+                    component.id,
+                    component.source,
                 )))
             }
         }
     }
-    Ok(companions)
+    let auxiliary_bytes = auxiliary_members
+        .into_values()
+        .fold(0_u64, u64::saturating_add);
+    Ok((companions, auxiliary_bytes))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn prepare_checkpoint_plan_candle_floor(
+    model: &str,
+    settings: &Settings,
+    sources: &PreparedCheckpointPlanSources,
+    spec: &LoadSpec,
+) -> WorkerResult<super::base_admission::CachedCandleBaseFloorAdmission> {
+    let (companions, auxiliary_bytes) = checkpoint_plan_candle_components(sources, spec)?;
+    let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    Ok(
+        prepare_cached_candle_base_floor(
+            model,
+            "Checkpoint plan",
+            settings,
+            spec,
+            &companion_refs,
+        )?
+        .without_auxiliary_reclaim_credit(auxiliary_bytes),
+    )
 }
 
 /// Select the plan-driven route for a plan-backed manifest entry. An empty selection with no
@@ -1408,22 +1445,19 @@ fn prepare_checkpoint_plan_sources_with_shape(
     let CheckpointPlanPrimary {
         weights: primary_weights,
         mut consumed,
-        mut pins,
+        pins: primary_pins,
     } = primary;
     let mut components = Vec::with_capacity(descriptor.required_components.len());
     for component in descriptor.required_components {
-        let resolved_component =
+        let mut resolved_component =
             match resolve_checkpoint_plan_component(component, &resolved, settings) {
                 Ok(component) => component,
                 Err(error) => return checkpoint_plan_unservable(request, error.to_string()),
             };
-        if let Some(layer_id) = resolved_component.consumed {
+        if let Some(layer_id) = resolved_component.consumed.take() {
             consumed.insert(layer_id);
         }
-        if let Some(pin) = resolved_component.pin {
-            pins.push(pin);
-        }
-        components.push((resolved_component.id, resolved_component.source));
+        components.push(resolved_component);
     }
     // Last, because a component is one of the things that CAN consume a layer: only now is the
     // consumed set complete, so only now can "this plan carries bytes nobody loads" be decided.
@@ -1440,7 +1474,7 @@ fn prepare_checkpoint_plan_sources_with_shape(
             operation,
             primary: primary_weights,
             components,
-            pins,
+            primary_pins,
         },
     ))
 }
@@ -1918,24 +1952,30 @@ pub(super) fn checkpoint_plan_load_spec(
     sources: &PreparedCheckpointPlanSources,
     quant: Option<Quant>,
 ) -> WorkerResult<LoadSpec> {
-    let mut spec = sources.components.iter().cloned().fold(
-        LoadSpec::new(sources.primary.clone()),
-        |spec, (id, source)| spec.with_component(id, source),
-    );
+    let mut spec = sources
+        .components
+        .iter()
+        .fold(LoadSpec::new(sources.primary.clone()), |spec, component| {
+            spec.with_component(component.id, component.source.clone())
+        });
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        sources.descriptor.id,
-        &sources.pins,
-    )?;
     // Every File token the plan contributed — the primary's file(s) and each component sourced from
     // a plan layer — finalized in one atomic pass on the spec admission and load both use, so no
     // await between selection and load can retarget one of them (sc-18306).
     crate::paths::prepare_load_spec_with_file_pins(
         &mut spec,
-        sources.pins.iter().cloned(),
+        sources
+            .primary_pins
+            .iter()
+            .chain(
+                sources
+                    .components
+                    .iter()
+                    .filter_map(|component| component.pin.as_ref()),
+            )
+            .cloned(),
         "Checkpoint plan source preparation failed",
     )?;
     Ok(spec)
@@ -2103,13 +2143,12 @@ pub(super) async fn generate_checkpoint_plan_stream(
         .collect();
     let total = work.len();
 
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let checkpoint_path_for_facts = match &sources.primary {
-        WeightsSource::File(path) => Some(path.clone()),
-        _ => None,
-    };
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
+    // Primary selection pins the verified backbone before its sidecars and companions.
+    let primary_pin = sources.primary_pins.first().ok_or_else(|| {
+        WorkerError::InvalidPayload("checkpoint plan has no prepared primary backbone".into())
+    })?;
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, primary_pin);
     let spec = checkpoint_plan_load_spec(&sources, quant)?;
     let engine_id = sources.descriptor.id;
 
@@ -2122,9 +2161,9 @@ pub(super) async fn generate_checkpoint_plan_stream(
     // lane leaves it to the cache for exactly that reason.
     //
     // candle: the base snapshot is a companion whose `transformer/` the plan's file replaces, so
-    // the floor is the prepared-pin floor over the shared companion construction — never
-    // `admit_candle_load_spec_floor`, which prices every component value recursively and would
-    // charge the DiT twice.
+    // the cached floor adds the shared companion weights to the exact prepared file sizes.
+    // The replaced transformer stays outside the floor, and independently staged component
+    // files are validated and priced through their pins.
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         engine_id,
@@ -2136,17 +2175,8 @@ pub(super) async fn generate_checkpoint_plan_stream(
     #[cfg(target_os = "macos")]
     let memory_inputs = checkpoint_plan_memory_inputs(request, engine_id, &spec);
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let cold_admission = {
-        let companions = checkpoint_plan_candle_companion_dirs(&sources, &spec)?;
-        let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        prepare_cached_candle_base_floor(
-            &request.model,
-            "Checkpoint plan",
-            settings,
-            &spec,
-            &companion_refs,
-        )?
-    };
+    let cold_admission =
+        prepare_checkpoint_plan_candle_floor(&request.model, settings, &sources, &spec)?;
 
     let checkpoint_id = sources.checkpoint_id.clone();
     let generate_one = move |model: &dyn gen_core::Generator,
@@ -2279,6 +2309,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
                             facts: pag_facts,
                         });
                     }
+                    checkpoint.publish(&facts_tx, model);
                     Ok(Some(generated))
                 },
             )
@@ -2333,19 +2364,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
                     // bespoke imported-Krea route, so publish the handle's post-load receipt through
                     // the same event seam. The consumer applies this measured fact set to the image
                     // event that follows, replacing the honest pre-load `no-runtime-receipt` fallback.
-                    if let Some(facts) =
-                        crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-                            &manifest_entry_for_facts,
-                            checkpoint_path_for_facts.as_deref(),
-                            model.checkpoint_weight_facts(),
-                        )
-                    {
-                        let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
-                            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
-                                &facts,
-                            ),
-                        });
-                    }
+                    checkpoint.publish(&facts_tx, model);
                     Ok(Some(generated))
                 },
             )

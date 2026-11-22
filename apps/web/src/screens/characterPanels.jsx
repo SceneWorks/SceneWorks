@@ -6,6 +6,7 @@ import { AssetCard, emptyTrash } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { LikenessBadge } from "../components/LikenessBadge.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { SourcePrecisionField } from "../components/generationStudio.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { ControlOverlayPicker } from "../components/ControlOverlayPicker.jsx";
@@ -712,6 +713,7 @@ export function CharacterGenerationPanel({
         </label>
       ) : null}
       {availableModels.length === 1 ? <StudioUpdateBadge item={activeModel} /> : null}
+      <SourcePrecisionField model={activeModel} className="settings-field" />
       <StudioUpdateNotice item={activeModel} onUpdate={createModelDownloadJob} />
       {approvedReferences.length ? (
         <div className="reference-thumb-row">

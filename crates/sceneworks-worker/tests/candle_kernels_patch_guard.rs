@@ -1,4 +1,5 @@
-//! Structural guard for the vendored Candle core, neural-network and kernel `[patch]` entries.
+//! Structural guard for vendored candle-core/candle-nn, multi-arch candle-kernels and
+//! candle-metal-kernels `[patch]` entries.
 //!
 //! candle-kernels compiles the GGUF quant/moe kernels into a static `libmoe.a` of SASS with a
 //! single `-gencode` derived from `CUDA_COMPUTE_CAP`. At the cap=80 packaging baseline that is an
@@ -20,6 +21,10 @@ use std::path::Path;
 
 const UPSTREAM_CANDLE: &str = "github.com/huggingface/candle";
 const INFERENCE_REPO: &str = "git+https://github.com/SceneWorks/inference";
+// candle-metal-kernels carries the upstream rank > 4 strided-reduce fix (inference sc-25909) and
+// is compiled by the macOS runtime through candle-core's Metal backend.
+// candle-nn carries the typed native projection hook; an upstream copy would silently bypass the
+// shared encoded-weight loader for stock Linear consumers.
 const PATCHED_CRATES: [&str; 4] = [
     "candle-kernels",
     "candle-core",
@@ -145,7 +150,7 @@ fn candle_kernels_resolves_through_the_inference_patch() {
         .iter()
         .any(|(name, source)| name == "candle-core" && source.is_some())
     {
-        // After the terminal pin, all three Candle patches resolve directly through that one
+        // After the terminal pin, all four Candle patches resolve directly through that one
         // inference revision. The frozen ZIP9 manifest remains historical provenance only.
         check_lock(&lock).unwrap_or_else(|message| panic!("{message}"));
         return;

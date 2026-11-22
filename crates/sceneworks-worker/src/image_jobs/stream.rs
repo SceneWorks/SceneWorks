@@ -18,10 +18,10 @@ use crate::heartbeat_while_blocking;
 use crate::ApiClient;
 use crate::JsonObject;
 use crate::Settings;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
+#[cfg(native_lane)]
+use sceneworks_core::checkpoint_weight_facts::CheckpointWeightFactsV1;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static FLUX_OWNER_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -86,12 +86,9 @@ pub(super) enum GenEvent {
     /// write, replacing the pre-load `no-runtime-receipt` stamp. Lanes that hold no handle simply
     /// never produce this variant.
     //
-    // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
-    // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
-    // lanes compile neither the variant nor its consumer arm. Candle tests retain both.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[cfg(native_lane)]
     CheckpointWeightFacts {
-        facts: Value,
+        facts: CheckpointWeightFactsV1,
     },
     /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
     /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
@@ -114,6 +111,42 @@ pub(super) enum GenEvent {
         /// path that doesn't score (every non-angle-set path) is untouched.
         face_likeness: Option<JsonObject>,
     },
+}
+
+/// Correlate directory and sharded loaders with the prepared backbone. Their generators also
+/// report text encoders and other companions, which may use the same source codec.
+#[cfg(native_lane)]
+pub(super) struct ImportedCheckpointPublisher {
+    entry: JsonObject,
+    primary: gen_core::PinnedWeightsFile,
+}
+
+#[cfg(native_lane)]
+impl ImportedCheckpointPublisher {
+    pub(super) fn new(entry: &JsonObject, primary: &gen_core::PinnedWeightsFile) -> Self {
+        Self {
+            entry: entry.clone(),
+            primary: primary.clone(),
+        }
+    }
+
+    pub(super) fn publish(&self, tx: &tokio::sync::mpsc::Sender<GenEvent>, model: &dyn Generator) {
+        self.publish_from(tx, || model.checkpoint_weight_facts_by_source());
+    }
+
+    pub(super) fn publish_from<I: IntoIterator<Item = gen_core::CheckpointWeightFacts>>(
+        &self,
+        tx: &tokio::sync::mpsc::Sender<GenEvent>,
+        available: impl FnOnce() -> I,
+    ) {
+        if let Some(facts) = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts_for_pin(
+            &self.entry,
+            &self.primary,
+            available,
+        ) {
+            let _ = tx.blocking_send(GenEvent::CheckpointWeightFacts { facts });
+        }
+    }
 }
 
 pub(super) type GeneratedImage = (i64, u32, u32, Vec<u8>);

@@ -1,7 +1,7 @@
 import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from "../SamplerSchedulerFields.jsx";
 import React, { useState } from "react";
 import { Icon } from "../Icons.jsx";
-import { LoraPickerSection } from "../generationStudio.jsx";
+import { LoraPickerSection, SourcePrecisionField } from "../generationStudio.jsx";
 import { MOTIONS } from "./editorUtils.js";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../StudioUpdateNotice.jsx";
 import { errorMessage } from "../../errorMessage.js";
@@ -294,6 +294,7 @@ export function GenerationRail({ gen, header, contextActions = [], onGenerate, g
                 ) : null}
               </div>
 
+              <SourcePrecisionField model={gen.selectedModel} className="ve-field" labelClassName="ve-field-label" />
               {gen.showTierPicker ? (
                 <div className="ve-field">
                   <span className="ve-field-label">Generation tier</span>

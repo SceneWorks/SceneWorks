@@ -722,12 +722,15 @@ pub(crate) async fn validate_historical_source_carrier(
         ));
     }
     for ((old_slot, old_entry), (new_slot, new_entry)) in old.iter().zip(new.iter()) {
-        if old_slot != new_slot
-            || historical_source_identity(old_entry) != historical_source_identity(new_entry)
-        {
-            return Err(incomplete(format!(
+        let mut old_identity = historical_source_identity(old_entry);
+        let new_identity = historical_source_identity(new_entry);
+        let source_changed = || {
+            incomplete(format!(
                 "historical model source {old_slot} differs from its original declaration"
-            )));
+            ))
+        };
+        if old_slot != new_slot {
+            return Err(source_changed());
         }
         let old_entry = old_entry
             .as_object()
@@ -745,6 +748,18 @@ pub(crate) async fn validate_historical_source_carrier(
                         .is_some_and(|s| !s.is_empty())
                 })
         });
+        let precision_refresh = pinned_plan
+            && old_entry.get("importQuantFormat") != new_entry.get("importQuantFormat")
+            && crate::models::needs_legacy_import_inspection(old_entry)
+            && sceneworks_core::source_precision::SourcePrecision::for_entry(new_entry).is_some();
+        if precision_refresh {
+            // Permit a single provisional identity correction. The original plan and full source
+            // ledger below must verify this exact classification before the job can rebind.
+            old_identity["importQuantFormat"] = new_identity["importQuantFormat"].clone();
+        }
+        if old_identity != new_identity {
+            return Err(source_changed());
+        }
         let produced = old_entry
             .get("provenance")
             .and_then(|value| value.get("trainingJobId"))
@@ -798,23 +813,31 @@ pub(crate) async fn validate_historical_source_carrier(
         }
         if pinned_plan {
             let plan = plan.expect("pinned plan has its source declaration");
-            let checkpoint_id = plan["checkpointId"].as_str().unwrap();
+            let checkpoint_id = plan["checkpointId"].as_str().unwrap().to_owned();
+            let plan_id = plan["planId"].as_str().unwrap().to_owned();
+            let semantic_digest = plan["semanticDigest"].as_str().unwrap().to_owned();
             let data_dir = state.settings.data_dir.clone();
-            let checkpoint_id = checkpoint_id.to_owned();
-            let resolved = tokio::task::spawn_blocking(move || {
-                sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
-                    .resolve(&checkpoint_id)
+            let precision_entry = precision_refresh.then(|| new_entry.clone());
+            blocking_source_capture(move || {
+                let resolved =
+                    sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                        .resolve(&checkpoint_id)
+                        .map_err(|error| {
+                            incomplete(format!("historical import bytes are invalid: {error}"))
+                        })?;
+                if resolved.plan.plan_id != plan_id
+                    || resolved.record.plan.semantic_digest != semantic_digest
+                {
+                    return Err(incomplete(
+                        "historical import plan differs from its source declaration",
+                    ));
+                }
+                if let Some(entry) = precision_entry {
+                    verify_historical_import_precision(&entry, &resolved)?;
+                }
+                Ok(())
             })
-            .await
-            .map_err(|error| incomplete(format!("historical import verification failed: {error}")))?
-            .map_err(|error| incomplete(format!("historical import bytes are invalid: {error}")))?;
-            if resolved.plan.plan_id != plan["planId"].as_str().unwrap()
-                || resolved.record.plan.semantic_digest != plan["semanticDigest"].as_str().unwrap()
-            {
-                return Err(incomplete(
-                    "historical import plan differs from its source declaration",
-                ));
-            }
+            .await?;
             let provenance =
                 sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
                     &state.settings.data_dir,
@@ -866,6 +889,28 @@ pub(crate) async fn validate_historical_source_carrier(
                 ))
             })?;
         }
+    }
+    Ok(())
+}
+
+fn verify_historical_import_precision(
+    entry: &JsonObject,
+    plan: &sceneworks_core::checkpoint_plan_store::ResolvedCheckpointV1,
+) -> Result<(), ApiError> {
+    use sceneworks_core::base_weights::{detect_base_weight_file, BaseWeightDetection};
+
+    let refusal = || incomplete("historical import precision differs from the verified plan bytes");
+    let (path, component) =
+        crate::models::legacy_import_plan_primary_weight_file(entry, plan).ok_or_else(refusal)?;
+    if !matches!(
+        detect_base_weight_file(path),
+        Ok(BaseWeightDetection::Recognized(verdict))
+            if verdict.family.as_deref() == Some(plan.family())
+                && entry.get("family").and_then(Value::as_str) == Some(plan.family())
+                && verdict.component == component
+                && entry.get("importQuantFormat").and_then(Value::as_str) == Some(verdict.quant.as_str())
+    ) {
+        return Err(refusal());
     }
     Ok(())
 }
@@ -1078,6 +1123,18 @@ pub(crate) fn portable_authored_options(payload: &JsonObject) -> Value {
         }
     }
     let mut options = project(&Value::Object(payload.clone()), None);
+    if payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .and_then(sceneworks_core::source_precision::SourcePrecision::for_entry)
+        .is_some()
+    {
+        sceneworks_core::source_precision::clear_precision_selectors(
+            options
+                .as_object_mut()
+                .expect("projection returns an object"),
+        );
+    }
     if let Some(target) = payload.get("plan").and_then(|plan| plan.get("target")) {
         let selected = options
             .as_object_mut()
@@ -1325,6 +1382,41 @@ pub(crate) async fn validate_frozen_replay_binding(
         validate_frozen_replay_binding_inner(state, job_type, payload, requested_gpu, frozen, None)
     })
     .await
+}
+
+/// A current catalog row can supply new precision facts to a frozen replay only if its primary
+/// byte ledger is the one that was admitted. The regular replay check still owns route policy
+/// and availability of every member of the original closure.
+pub(crate) async fn verify_replay_precision_source(
+    state: &AppState,
+    entry: &Value,
+    frozen: &PortableJobBinding,
+) -> Result<(), ApiError> {
+    const SLOT: &str = "modelManifestEntry";
+    frozen
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    let members = capture_local_model_entry_offloaded(state, entry, SLOT).await?;
+    let primary = members
+        .iter()
+        .find(|member| member.role == ArtifactMemberRole::Primary)
+        .ok_or_else(|| incomplete("replay precision has no verified primary source"))?;
+    if !frozen.routes.values().all(|route| {
+        route.models.iter().any(|model| {
+            model.slot == SLOT
+                && entry.get("id").and_then(Value::as_str) == Some(model.model_id.as_str())
+                && model.members.iter().any(|member| {
+                    member.role == ArtifactMemberRole::Primary
+                        && member.source == primary.source
+                        && member.files == primary.files
+                })
+        })
+    }) {
+        return Err(incomplete(
+            "The current source precision belongs to different bytes than the frozen replay source.",
+        ));
+    }
+    Ok(())
 }
 
 async fn validate_frozen_replay_binding_inner(

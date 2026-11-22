@@ -1929,7 +1929,10 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
   assert.ok(names.includes("run_imported_nvfp4_proof") && names.length <= 25);
   assert.equal(defaults.run_imported_nvfp4_proof, "false");
   const events = standalone.slice(standalone.indexOf("\non:\n") + 1, standalone.indexOf("\npermissions:"));
-  assert.match(events, /^on:\n  workflow_dispatch:\s*$/);
+  assert.deepEqual([...events.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]), ["workflow_dispatch"]);
+  assert.deepEqual([...events.matchAll(/^ {6}([\w-]+):$/gm)].map((match) => match[1]), ["format"]);
+  assert.match(events, /^ {8}default: nvfp4$/m);
+  assert.match(events, /options: \[nvfp4, fp8, convrot, all, sdxl-fp8-reference\]/);
   assert.doesNotMatch(events, /pull_request|push|schedule|workflow_call/);
   const bridge = workflowJob(ordinary, "imported-nvfp4-worker-smoke");
   const validateBridge = (job) => {
@@ -1938,25 +1941,32 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
   };
   validateBridge(bridge);
   assert.throws(() => validateBridge(bridge.replace("github.event_name == 'workflow_dispatch'", "github.event_name == 'push'")));
-  const standaloneJob = workflowJob(standalone, "imported-nvfp4-worker-smoke");
+  const standaloneJob = workflowJob(standalone, "imported-checkpoint-worker-smoke");
   for (const job of [bridge, standaloneJob]) {
     assert.doesNotMatch(job, /^ {4}needs:/m);
     assert.match(job, /^ {6}group: imported-nvfp4-proof-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/m);
     assert.match(job, /^ {6}cancel-in-progress: false$/m);
     assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
     assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
-    assert.match(job, /SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'/);
-    assert.match(job, /python -I scripts\/ci\/imported-nvfp4-cuda-guard\.py/);
+    assert.match(job, /SCENEWORKS_(?:IMPORTED_)?NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'/);
     // CI_IMPACT: source-only scope checks; runner context is valid in steps, not job env.
     assert.doesNotMatch(job.slice(0, job.indexOf("    steps:")), /\$\{\{ runner\./);
-    const execute = workflowStep(job, "Run the imported NVFP4 worker smoke");
-    for (const [name, directory] of [["OUTPUT", "proof"], ["RESOURCE", "resource"]]) {
-      assert.ok(execute.includes(`MODEL_PROOF_${name}_DIR: '\${{ runner.temp }}\\imported-nvfp4-${directory}-\${{ github.run_id }}-\${{ github.run_attempt }}'`));
-    }
-    const upload = workflowStep(job, "Upload only bounded owned model-validation evidence");
-    assert.ok(upload.includes("path: ${{ runner.temp }}\\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}/artifact"));
     assert.doesNotMatch(job, /cargo (?:test|run).*imported_nvfp4_worker_gpu_smoke|continue-on-error:/);
   }
+  assert.match(bridge, /python -I scripts\/ci\/imported-nvfp4-cuda-guard\.py/);
+  const execute = workflowStep(bridge, "Run the imported NVFP4 worker smoke");
+  for (const [name, directory] of [["OUTPUT", "proof"], ["RESOURCE", "resource"]]) {
+    assert.ok(execute.includes(`MODEL_PROOF_${name}_DIR: '\${{ runner.temp }}\\imported-nvfp4-${directory}-\${{ github.run_id }}-\${{ github.run_attempt }}'`));
+  }
+  const upload = workflowStep(bridge, "Upload only bounded owned model-validation evidence");
+  assert.ok(upload.includes("path: ${{ runner.temp }}\\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}/artifact"));
+  for (const actor of ["imported-shared-format", "imported-shared-format-h3"]) {
+    assert.match(standaloneJob, new RegExp(`python -I scripts/ci/windows_cuda_execution\\.py --actor ${actor} --budget-minutes (?:120|150) --physical-indices 0 --require-physical-index 0 --min-free-mib 49152 -- node scripts/ci/${actor}-proof\\.mjs`));
+  }
+  const nativeUpload = workflowStep(standaloneJob, "Retain bounded generated outputs, receipts and physical resource evidence");
+  assert.ok(nativeUpload.includes("${{ env.MODEL_PROOF_OUTPUT_DIR }}"));
+  assert.ok(nativeUpload.includes("${{ env.MODEL_PROOF_OUTPUT_DIR }}-h3/cuda.reduced.real-independent-fl2va"));
+  assert.doesNotMatch(nativeUpload, /-h3\/(?:inputs|services)|target\/|huggingface\/hub/);
   const reject = workflowStep(bridge, "Refuse combined imported NVFP4 proof profiles");
   assert.match(reject, /if \(\$otherProfiles -contains 'true'\) \{ throw/);
   assert.ok(bridge.indexOf(reject) < bridge.indexOf("python -I scripts/ci/imported-nvfp4-cuda-guard.py"));

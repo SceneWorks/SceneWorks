@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "38dab65f5d9640396cf2946cd4ee866ce46630c6",
+    "inferenceRevision": "56530ba8e50c9566ff03b327ded6364d791e9ac7",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -10020,7 +10020,8 @@
         "supports_lokr": false,
         "supported_quants": [
           "q4",
-          "q8"
+          "q8",
+          "fp8r"
         ],
         "supports_preview": false,
         "supports_prompt_enhancement": true,
@@ -10422,7 +10423,8 @@
         "supports_lokr": false,
         "supported_quants": [
           "q4",
-          "q8"
+          "q8",
+          "fp8r"
         ],
         "supports_preview": false,
         "supports_prompt_enhancement": true,

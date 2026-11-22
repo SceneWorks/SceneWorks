@@ -187,19 +187,19 @@ all = "warn"
 # apply when SceneWorks builds the graph, which is how the sc-7544 fix silently dropped out at
 # the candle-gen -> inference cutover. This patch re-applies it for every SceneWorks build.
 #
-# Candle-core provides the CUDA graph upload API used by candle-llm. Candle-nn provides the native
-# projection API used by candle-checkpoint. All four overrides use the direct inference revision.
-# Retired exact-revision security ports remain historical source evidence
+# Candle-core is also vendored at the final inference pin: its CUDA graph upload API is needed by
+# candle-llm. Cargo ignores dependency-workspace patches. The kernel overrides retain the direct
+# inference revision. Retired exact-revision security ports remain historical source evidence
 # in vendor/zip9-source-overrides.json; they are no longer effective Cargo overrides.
 #
 # candle-metal-kernels is vendored for the upstream rank > 4 strided-reduce out-of-bounds fix
 # (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
 # Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "5b7bd9690e084b8fe9ad746b74560cea601e973d" }
-candle-nn = { git = "https://github.com/SceneWorks/inference", rev = "5b7bd9690e084b8fe9ad746b74560cea601e973d" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "5b7bd9690e084b8fe9ad746b74560cea601e973d" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "5b7bd9690e084b8fe9ad746b74560cea601e973d" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "e48be3518c803e83c97e29b2e99847e87f35dc0e" }
+candle-nn = { git = "https://github.com/SceneWorks/inference", rev = "e48be3518c803e83c97e29b2e99847e87f35dc0e" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "e48be3518c803e83c97e29b2e99847e87f35dc0e" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "e48be3518c803e83c97e29b2e99847e87f35dc0e" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

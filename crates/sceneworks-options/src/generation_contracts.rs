@@ -26,6 +26,8 @@ pub struct ImageJobRequest<A = Value, M = Value> {
     pub negative_prompt: String,
     #[serde(default = "default_image_model")]
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     /// Batch size, or `None` when the caller named none — resolved from the model's declared
     /// `defaults.count` in `create_image_job`, not from a blanket 4 that **29 of the 45** image
     /// models contradict with `count: 1` (sc-12427 follow-up).
@@ -158,6 +160,8 @@ pub struct VideoJobRequest<A = Value> {
     pub negative_prompt: String,
     #[serde(default = "default_video_model")]
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     /// Original immutable import identity when replaying a recipe. Never a replacement catalog
     /// entry: the server resolves today's plan and refuses if it no longer matches this identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]

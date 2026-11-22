@@ -206,6 +206,11 @@ export function validateCudaRuntimeDevice(runtime){
   return selection;
 }
 
+function observeCaseHardware(backend, runtime, observe = hardware) {
+  const {deviceId,physicalGpuIndex,physicalGpuUuid}=runtime;
+  return observe(backend,deviceId,{physicalGpuIndex,physicalGpuUuid});
+}
+
 // A native test already performs the numerical comparison. Do not invent another flat-vector gate.
 export function validateComparisonProof(c, proof, log, { allowUnitFake = false } = {}) {
   assert.equal(proof.kind,'native-pinned-fixture');
@@ -378,7 +383,7 @@ export class OwnedService {
     assert.ok(r && isServicePort(r.port) && r.gpuId,'owned service port (0 = OS-assigned) and device required');
     if(!this.fake && this.c.backend==='cuda') {
       validateCudaRuntimeDevice(r);
-      await hardware('cuda',r.deviceId,{physicalGpuIndex:r.physicalGpuIndex,physicalGpuUuid:r.physicalGpuUuid}); // Before build/listener/model.
+      await observeCaseHardware('cuda',r); // Before build/listener/model.
     }
     await this.refuseLeftoverOwnedProcesses();
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});
@@ -1192,7 +1197,7 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
       }
     }
     await save(path.join(dir,'comparisons.json'),comparisons);
-    const primary=proofs[0];const h=await (deps.hardware??hardware)(c.backend,c.runtime.deviceId);
+    const primary=proofs[0];const h=await observeCaseHardware(c.backend,c.runtime,deps.hardware);
     const sourceCancelReceipt=sourceCancel?receiptNameFor(sourceCancel.jobId):undefined;
     const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),...conditioningBindings.map(v=>v.file),...(scenario.identificationControl?['identification-input.json']:[]),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json','source-cancel-actions.json',...(sourceCancelReceipt?[sourceCancelReceipt]:[]),...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',servicePorts:service.epochs.map(v=>({epoch:v.epoch,requestedPort:v.requestedPort,port:v.port})),testInputSha256:c.inputs[0].sha256,metrics,...(sourceCancelReceipt?{sourceCancelReceipt}:{})};
     if(primary){Object.assign(e,{runtimeIdentity:primary.runtimeIdentity,loadEvent:primary.event,completedJob:{id:primary.job.id,status:primary.job.status,providerId:normalizeLoadEvent(primary.event).providerId,output:primary.media.av},av:primary.media.av});}

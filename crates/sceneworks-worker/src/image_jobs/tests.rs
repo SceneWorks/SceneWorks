@@ -107,7 +107,7 @@ use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::checkpoint_plan::checkpoint_plan_bespoke_roles;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::checkpoint_plan::checkpoint_plan_candle_companion_dirs;
+use super::checkpoint_plan::checkpoint_plan_candle_components;
 #[cfg(native_lane)]
 use super::checkpoint_plan::checkpoint_plan_component_from_layers;
 #[cfg(native_lane)]
@@ -2652,6 +2652,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 Some(1.2),
                 tx,
                 CancelFlag::new(),
+                None,
                 |_generator,
                  _plan,
                  inputs,
@@ -5974,7 +5975,7 @@ fn flux2_comfyui_rejects_unexecutable_tiers_instead_of_relabeling_them() {
         assert!(
             !matches!(
                 flux2_comfyui_quant(&req(advanced.clone())),
-                Ok(Quant::Nvfp4)
+                Ok(Some(Quant::Nvfp4))
             ),
             "the comfyui lane cannot serve NVFP4 — the GGUF fold rejects it, so selecting it \
              hard-fails the job (advanced={advanced})"
@@ -5982,17 +5983,25 @@ fn flux2_comfyui_rejects_unexecutable_tiers_instead_of_relabeling_them() {
     }
     assert!(matches!(
         flux2_comfyui_quant(&req(json!({}))),
-        Ok(FLUX2_COMFYUI_DEFAULT_QUANT)
+        Ok(Some(FLUX2_COMFYUI_DEFAULT_QUANT))
     ));
     assert!(matches!(
         flux2_comfyui_quant(&req(json!({ "quant": "q4" }))),
-        Ok(Quant::Q4)
+        Ok(Some(Quant::Q4))
     ));
     assert!(matches!(
         flux2_comfyui_quant(&req(json!({ "quant": "q8" }))),
-        Ok(Quant::Q8)
+        Ok(Some(Quant::Q8))
     ));
     assert!(flux2_comfyui_quant(&req(json!({ "quant": "bf16" }))).is_err());
+    let fixed = request(json!({
+        "projectId": "p", "model": "external_base_flux2", "prompt": "p",
+        "modelManifestEntry": {
+            "catalogScope": "external", "importSourceShape": "comfy_ui_tree",
+            "importQuantFormat": "fp8_e4m3_scalar",
+        }
+    }));
+    assert_eq!(flux2_comfyui_quant(&fixed).unwrap(), None);
 }
 
 /// Candle Bernini tier-subdir selection (sc-11003): the published `SceneWorks/bernini` layout nests
@@ -15198,7 +15207,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     assert!(
         flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
             *sources,
-            flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+            Some(flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT),
             &request_flux,
             &settings,
             flux2_descriptor.id,
@@ -24309,7 +24318,7 @@ mod preview_stream_tests {
             GenEvent::Upsampling { .. } => "Upsampling",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            #[cfg(native_lane)]
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
             GenEvent::AssetWritten { .. } => "AssetWritten",
@@ -24697,13 +24706,6 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
     assert_eq!(
         prepared.primary,
         WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
-    );
-    assert_eq!(
-        prepared.components,
-        vec![(
-            gen_core::BASE_SNAPSHOT_COMPONENT,
-            WeightsSource::Dir(fx.base_tier.clone())
-        )]
     );
     // The spec the route loads is the exact spec the legacy lane builds for the same file + base:
     // primary File + the named base component, nothing else.
@@ -27134,16 +27136,13 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
         .into_sources()
         .expect("the plan route claims it");
     let plan_spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
-    let plan_base = sources
-        .components
-        .iter()
-        .find_map(|(component, source)| match (*component, source) {
-            (gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(dir)) => Some(dir.clone()),
-            _ => None,
-        })
-        .expect("the plan route declares its base snapshot as a directory component");
+    let Some(WeightsSource::Dir(plan_base)) =
+        plan_spec.components.get(gen_core::BASE_SNAPSHOT_COMPONENT)
+    else {
+        panic!("the plan route must declare its base snapshot as a directory component");
+    };
     let plan_companions =
-        imported_base_snapshot_companions(&plan_base, plan_spec.text_encoder.is_some());
+        imported_base_snapshot_companions(plan_base, plan_spec.text_encoder.is_some());
 
     // ---- the LEGACY lane's own answer ------------------------------------------------------
     let legacy_base = resolve_krea_imported_base_tier(&fx.settings)
@@ -27151,7 +27150,7 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
     let legacy_companions = imported_base_snapshot_companions(&legacy_base, false);
 
     assert_eq!(
-        plan_base, legacy_base,
+        plan_base, &legacy_base,
         "the plan route's declared base-snapshot component and the legacy lane's resident tier must \
          be one directory, or the two lanes are admitted on different floors"
     );
@@ -27183,7 +27182,7 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
     // are really outside the total.
     assert!(companion_bytes(&plan_companions) > 0);
     assert!(
-        crate::mlx_fit_gate::sum_safetensors_bytes(&plan_base) > companion_bytes(&plan_companions),
+        crate::mlx_fit_gate::sum_safetensors_bytes(plan_base) > companion_bytes(&plan_companions),
         "fixture check: the tier's own transformer carries bytes the floor must be excluding"
     );
 
@@ -27191,8 +27190,9 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
     // Candle-only, so this first EXECUTES on the windows-candle lane.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        let priced = checkpoint_plan_candle_companion_dirs(&sources, &plan_spec)
+        let (priced, auxiliary_bytes) = checkpoint_plan_candle_components(&sources, &plan_spec)
             .expect("the plan route can price every component it declares");
+        assert_eq!(auxiliary_bytes, 0);
         assert_eq!(
             priced, legacy_companions,
             "the plan route's candle floor must price exactly the legacy lane's companion set"
@@ -27363,8 +27363,9 @@ fn write_krea_nvfp4_safetensors(path: &Path) {
 
 /// Feature-end review (sc-11045, epic 11037, major 6) — the DISPATCH half of linked NVFP4 exposure.
 ///
-/// A LINKED copy of a packed NVFP4 checkpoint must be refused a `q4` tier exactly as a managed copy
-/// is. `imported_model_quant` gates on `krea_imported_native_nvfp4`, which reads
+/// A LINKED copy of a packed NVFP4 checkpoint must never receive a load-time `q4` conversion.
+/// Conflicting named tiers are refused; the shared source policy discards legacy bit overrides.
+/// `imported_model_quant` gates on `krea_imported_native_nvfp4`, which reads
 /// `imported_entry_source_codec` off the manifest entry — and until sc-11045 that answered `None`
 /// for every linked entry, because only the managed import branch stamped `importQuantFormat`. The
 /// guard was therefore off for linked copies, and `Quant::Q4` (or `mlxQuantize: 4`) could be handed
@@ -27436,7 +27437,6 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
         json!({ "quantTier": "q8" }),
         json!({ "quant": "q4" }),
         json!({ "quantTier": "bf16" }),
-        json!({ "mlxQuantize": 4 }),
     ] {
         let error = imported_model_quant(&request_with(advanced.clone()), &descriptor, "Linked")
             .expect_err("packed NVFP4 bytes accept no other tier");
@@ -27449,6 +27449,20 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
              provider's advertised-tier check: {message}"
         );
     }
+
+    // A legacy bit count is ignored by shared fixed-source binding, so it cannot select Q4.
+    let legacy = request_with(json!({ "mlxQuantize": 4 }));
+    assert_eq!(legacy.resolved_quant_bits(), None);
+    let native_quant = descriptor
+        .capabilities
+        .supported_quants
+        .contains(&gen_core::Quant::Nvfp4)
+        .then_some(gen_core::Quant::Nvfp4);
+    assert_eq!(
+        imported_model_quant(&legacy, &descriptor, "Linked")
+            .expect("legacy bits retain the verified source's packing"),
+        (native_quant, None)
+    );
 
     // The NEGATIVE CONTROL, and the named mutation made permanent: the SAME compile, the SAME
     // request, stamped with NO classification is exactly what an unstamped linked entry was before
@@ -27669,6 +27683,156 @@ fn a_linked_and_a_managed_sdxl_checkpoint_take_one_route_and_get_one_load_spec_s
         WeightsSource::File(install_dir.join("sdxlmania.safetensors"))
     );
     assert_ne!(linked_spec.weights, managed_spec.weights);
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[tokio::test]
+async fn candle_checkpoint_plan_prices_fused_sdxl_tokenizer_members() {
+    use super::checkpoint_plan::prepare_checkpoint_plan_candle_floor;
+
+    let mut fx = CheckpointPlanFixture::new("sdxl-component-floor", false);
+    fx.settings.backend_candle_enabled = true;
+    let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_fused_entries());
+    let request = bound_request(json!({
+        "projectId": "p",
+        "model": "linked_communityxl",
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "id": "linked_communityxl",
+            "catalogScope": "user",
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "importPlan": { "checkpointId": checkpoint_id }
+        }
+    }));
+    let prepare = || prepare_candle_image_route(&request, &fx.settings);
+    assert!(matches!(
+        prepare(),
+        Err(WorkerError::InvalidPayload(message))
+            if message.contains("[checkpoint-plan:missing-component]")
+                && message.contains("tokenizer.json")
+    ));
+
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
+    let staging = fx.settings.data_dir.join("cache/sdxl-imported-components");
+    let clip_l = staging.join("clip-l");
+    let clip_bigg = staging.join("clip-bigg");
+    std::fs::create_dir_all(&clip_l).unwrap();
+    std::fs::write(clip_l.join("unrelated.safetensors"), b"unused weights").unwrap();
+    let PreparedCandleImageRoute::CheckpointPlan(sources) = prepare().unwrap().unwrap() else {
+        panic!("the Candle dispatcher must select the shared checkpoint plan");
+    };
+
+    let spec = checkpoint_plan_load_spec(&sources, None).expect("mixed sources prepare");
+    let primary = fx.library_dir.join("communityxl.safetensors");
+    assert_eq!(spec.weights, WeightsSource::File(primary.clone()));
+    assert_eq!(
+        spec.components,
+        std::collections::BTreeMap::from([
+            (
+                "tokenizer_clip_l".to_owned(),
+                WeightsSource::Dir(clip_l.clone())
+            ),
+            (
+                "tokenizer_clip_bigg".to_owned(),
+                WeightsSource::Dir(clip_bigg.clone())
+            ),
+        ])
+    );
+    let primary_bytes = std::fs::metadata(&primary).unwrap().len();
+    let clip_l_file = clip_l.join("tokenizer.json");
+    let clip_bigg_file = clip_bigg.join("tokenizer.json");
+    let tokenizer_bytes = std::fs::metadata(&clip_l_file).unwrap().len()
+        + std::fs::metadata(&clip_bigg_file).unwrap().len();
+    assert!(tokenizer_bytes > 0);
+    assert_eq!(spec.prepared_file_pins().len(), 3);
+    let floor = prepare_checkpoint_plan_candle_floor(&request.model, &fx.settings, &sources, &spec)
+        .expect("the production cached floor prices both tokenizer files");
+    assert_eq!(floor.source_floor_bytes(), primary_bytes + tokenizer_bytes);
+    assert_eq!(floor.reclaimable_weight_bytes(), primary_bytes);
+
+    // A component directory alone does not identify the members the provider actually reads.
+    let mut unbound = LoadSpec::new(spec.weights.clone())
+        .with_component("tokenizer_clip_l", WeightsSource::Dir(clip_l))
+        .with_component("tokenizer_clip_bigg", WeightsSource::Dir(clip_bigg));
+    unbound
+        .prepare_file_sources()
+        .expect("only the primary File pins");
+    assert!(matches!(
+        prepare_checkpoint_plan_candle_floor(&request.model, &fx.settings, &sources, &unbound),
+        Err(WorkerError::InvalidPayload(message))
+            if message.contains("[checkpoint-plan:unpriceable-component]")
+                && message.contains("tokenizer_clip_l")
+    ));
+
+    std::fs::remove_file(clip_bigg_file).unwrap();
+    assert!(
+        prepare_checkpoint_plan_candle_floor(&request.model, &fx.settings, &sources, &spec)
+            .is_err(),
+        "a stale member pin cannot inherit the floor of the prepared source"
+    );
+    assert!(matches!(
+        prepare().expect("retry restages the pinned tokenizer from cache"),
+        Some(PreparedCandleImageRoute::CheckpointPlan(_))
+    ));
+}
+
+#[cfg(all(
+    any(unix, windows),
+    not(target_os = "macos"),
+    feature = "backend-candle"
+))]
+#[test]
+fn candle_checkpoint_plan_refuses_a_tokenizer_destination_outside_app_data() {
+    let mut fx = CheckpointPlanFixture::new("sdxl-component-escape", false);
+    fx.settings.backend_candle_enabled = true;
+    install_sdxl_clip_tokenizer_assets(&fx.settings);
+    let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_fused_entries());
+    let staging = fx
+        .settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components");
+    std::fs::create_dir_all(&staging).unwrap();
+    let outside = fx._library.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let escaped = staging.join("clip-l");
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&escaped)
+        .arg(&outside)
+        .status()
+        .unwrap()
+        .success());
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &escaped).unwrap();
+
+    let request = bound_request(json!({
+        "projectId": "p",
+        "model": "linked_communityxl",
+        "prompt": "a fox",
+        "modelManifestEntry": {
+            "id": "linked_communityxl",
+            "catalogScope": "user",
+            "family": "sdxl",
+            "importSourceShape": "fused_checkpoint",
+            "importPlan": { "checkpointId": checkpoint_id }
+        }
+    }));
+    let result = prepare_candle_image_route(&request, &fx.settings);
+    #[cfg(windows)]
+    std::fs::remove_dir(escaped).unwrap();
+    #[cfg(unix)]
+    std::fs::remove_file(escaped).unwrap();
+    assert!(matches!(
+        result,
+        Err(WorkerError::InvalidPayload(message))
+            if message.contains("[checkpoint-plan:unpriceable-component]")
+                && message.contains("tokenizer_clip_l")
+                && message.contains("path escapes its root")
+    ));
+    assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
 }
 
 /// Scope addition 12(a) / E4 — a PRE-EPIC manifest entry still resolves the route it always did.
@@ -27906,14 +28070,14 @@ fn the_candle_route_claims_a_plan_backed_entry_and_leaves_a_pre_epic_entry_on_it
         WeightsSource::File(fx.library_dir.join("kreamania.safetensors")),
         "the candle arm loads the plan's own verified layer, not a scanned install"
     );
-    assert_eq!(
-        sources.components,
-        vec![(
-            gen_core::BASE_SNAPSHOT_COMPONENT,
-            WeightsSource::Dir(fx.base_tier.clone())
-        )]
-    );
     let spec = checkpoint_plan_load_spec(&sources, None).expect("the plan implies a spec");
+    assert_eq!(
+        spec.components,
+        std::collections::BTreeMap::from([(
+            gen_core::BASE_SNAPSHOT_COMPONENT.to_owned(),
+            WeightsSource::Dir(fx.base_tier.clone())
+        )])
+    );
     assert_eq!(
         spec.weights,
         WeightsSource::File(fx.library_dir.join("kreamania.safetensors"))
@@ -28217,7 +28381,7 @@ fn a_linked_flux2_tree_loads_the_plans_dit_and_refuses_a_layer_the_lane_would_ig
         .expect("the bespoke FLUX.2 lane claims a plan-backed tree");
     let (spec, _snapshot) = flux2_comfyui_candle::prepare_flux2_comfyui_load_spec_for_request(
         paths,
-        flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT,
+        Some(flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT),
         &req,
         &fx.settings,
         flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,
@@ -28852,11 +29016,11 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
         .expect("legacy DiT resolves");
     let base = resolve_krea_imported_base_tier(&settings).expect("resident Krea 2 Turbo bf16 base");
     assert_eq!(
-        prepared.components,
-        vec![(
-            gen_core::BASE_SNAPSHOT_COMPONENT,
+        plan_spec.components,
+        std::collections::BTreeMap::from([(
+            gen_core::BASE_SNAPSHOT_COMPONENT.to_owned(),
             WeightsSource::Dir(base.clone())
-        )],
+        )]),
         "both routes pair the DiT with the same resident base tier"
     );
     let mut legacy_spec = LoadSpec::new(WeightsSource::File(legacy_dit.clone())).with_component(

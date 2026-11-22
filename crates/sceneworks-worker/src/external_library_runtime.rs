@@ -1429,6 +1429,16 @@ fn bound_runtime_variant(
     binding: Option<&PortableModelBinding>,
     options: &SourceOptionFacts,
 ) -> WorkerResult<Option<String>> {
+    use sceneworks_core::source_precision::{applies_to_job, SourcePrecision};
+    if slot == "modelManifestEntry"
+        && applies_to_job(job_type)
+        && entry
+            .as_object()
+            .and_then(SourcePrecision::for_entry)
+            .is_some()
+    {
+        return Ok(None);
+    }
     let model_id = entry
         .get("id")
         .and_then(serde_json::Value::as_str)
