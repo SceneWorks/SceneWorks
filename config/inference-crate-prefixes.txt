@@ -48,6 +48,7 @@ crates/contracts/gen-core-train
 crates/contracts/load-progress
 crates/kernels/candle-quant-kernels
 crates/layers/candle-checkpoint
+crates/layers/candle-layers
 crates/layers/mlx-layers
 crates/llm/candle-llm
 crates/llm/mlx-llm
