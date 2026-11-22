@@ -159,12 +159,15 @@ export function TierPickerField({
   onConfirm = null,
 }) {
   const suggestedNoteId = useId();
+  const conversionNoteId = useId();
+  const conversionHint = items.find((item) => item.tier === value)?.conversionHint;
   const showSuggested = suggested && !tierSwitching;
   return (
     <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
       Quant tier
       <select
-        aria-describedby={showSuggested ? suggestedNoteId : undefined}
+        aria-label="Quant tier"
+        aria-describedby={[showSuggested && suggestedNoteId, conversionHint && conversionNoteId].filter(Boolean).join(" ") || undefined}
         onChange={(event) => onChange(event.target.value)}
         value={value}
       >
@@ -174,6 +177,7 @@ export function TierPickerField({
           </option>
         ))}
       </select>
+      {conversionHint ? <span className="field-hint" id={conversionNoteId}>{conversionHint}</span> : null}
       {tierSwitching ? (
         <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
       ) : null}

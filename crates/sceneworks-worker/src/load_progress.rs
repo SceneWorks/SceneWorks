@@ -382,12 +382,14 @@ pub(crate) fn generate_text(
 #[derive(Clone)]
 pub(crate) struct Context {
     activity: LoadActivityContext,
+    quantization: gen_core::QuantizationCacheContext,
     session: Option<Arc<Session>>,
 }
 impl Context {
     pub(crate) fn capture() -> Self {
         Self {
             activity: LoadActivityContext::capture(),
+            quantization: gen_core::QuantizationCacheContext::capture(),
             session: JOB
                 .try_with(Arc::clone)
                 .ok()
@@ -395,11 +397,12 @@ impl Context {
         }
     }
     pub(crate) fn install(&self) -> impl Drop + '_ {
-        struct Guard {
+        struct Guard<Q> {
             previous: Option<Arc<Session>>,
             _observer: LoadActivityObserver,
+            _quantization: Q,
         }
-        impl Drop for Guard {
+        impl<Q> Drop for Guard<Q> {
             fn drop(&mut self) {
                 THREAD_JOB.with(|slot| *slot.borrow_mut() = self.previous.take());
             }
@@ -407,6 +410,7 @@ impl Context {
         Guard {
             previous: THREAD_JOB.with(|slot| slot.replace(self.session.clone())),
             _observer: self.activity.install(),
+            _quantization: self.quantization.install(),
         }
     }
     pub(crate) fn scope<F: Future>(&self, future: F) -> ScopedFuture<F> {
@@ -463,10 +467,20 @@ where
 }
 
 /// Covers route preparation, cache loads, render drives, analysis and training with one observer.
+#[cfg(test)]
 pub(crate) fn with_job<F: Future>(
     api: &ApiClient,
     job_id: &str,
     future: F,
+) -> impl Future<Output = F::Output> {
+    with_job_cache(api, job_id, future, None)
+}
+
+pub(crate) fn with_job_cache<F: Future>(
+    api: &ApiClient,
+    job_id: &str,
+    future: F,
+    cache: Option<Arc<sceneworks_core::quantization_cache::SavedQuantizations>>,
 ) -> impl Future<Output = F::Output> {
     // The handler contains the platform's complete job dispatch. Heap-own it before constructing
     // this async state machine, rather than duplicating its inline storage through nested scopes.
@@ -486,6 +500,10 @@ pub(crate) fn with_job<F: Future>(
             let _observer = LoadActivityObserver::new(move |activity| observed.observe(activity));
             Context {
                 activity: LoadActivityContext::capture(),
+                quantization: cache
+                    .as_ref()
+                    .map(|cache| gen_core::QuantizationCacheContext::new(cache.clone()))
+                    .unwrap_or_default(),
                 session: Some(session.clone()),
             }
         };
@@ -502,7 +520,16 @@ pub(crate) fn with_job<F: Future>(
             }
         }
         let _close = Close(session.clone(), poster);
-        JOB.scope(session, context.scope_boxed(future)).await
+        let result = JOB.scope(session, context.scope_boxed(future)).await;
+        if let Some(cache) = cache {
+            let (hits, writes) = cache.counts();
+            tracing::info!(
+                quantization_cache_hits = hits,
+                quantization_cache_writes = writes,
+                "Saved weight quantization reuse"
+            );
+        }
+        result
     }
 }
 
@@ -1607,6 +1634,70 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn migrated_jobs_keep_their_own_context() {
         isolation().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_quantization_context_reaches_loader_threads_without_leaking() {
+        let (api, _, server) = api().await;
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let cache = Arc::new(
+            sceneworks_core::quantization_cache::SavedQuantizations::new(
+                data.path(),
+                source.path().to_owned(),
+                "test".into(),
+                "test/checkpoint".into(),
+            ),
+        );
+        let expected: Arc<dyn gen_core::QuantizationArtifactCache> = cache.clone();
+        let nested_api = api.clone();
+        assert!(gen_core::QuantizationCacheContext::capture()
+            .cache()
+            .is_none());
+        with_job_cache(
+            &api,
+            "cached-job",
+            async move {
+                with_job_cache(
+                    &nested_api,
+                    "uncached-job",
+                    async {
+                        assert!(gen_core::QuantizationCacheContext::capture()
+                            .cache()
+                            .is_none());
+                    },
+                    None,
+                )
+                .await;
+                assert!(gen_core::QuantizationCacheContext::capture()
+                    .cache()
+                    .is_some());
+                spawn(async move {
+                    tokio::task::yield_now().await;
+                    spawn_blocking(move || {
+                        let context = gen_core::QuantizationCacheContext::capture();
+                        assert!(Arc::ptr_eq(context.cache().unwrap(), &expected));
+                    })
+                    .await
+                    .unwrap();
+                })
+                .await
+                .unwrap();
+            },
+            Some(cache),
+        )
+        .await;
+        assert!(gen_core::QuantizationCacheContext::capture()
+            .cache()
+            .is_none());
+        tokio::task::spawn_blocking(|| {
+            assert!(gen_core::QuantizationCacheContext::capture()
+                .cache()
+                .is_none());
+        })
+        .await
+        .unwrap();
+        server.abort();
     }
 
     #[test]

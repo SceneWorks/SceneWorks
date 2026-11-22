@@ -12,13 +12,26 @@ pub struct SourcePrecision {
 }
 
 impl SourcePrecision {
-    pub fn for_entry(entry: &JsonObject) -> Option<Self> {
+    fn imported_codec(entry: &JsonObject) -> Option<&'static str> {
         if entry.get("catalogScope").and_then(Value::as_str) == Some("builtin")
             || !entry.get("importSourceShape").is_some_and(Value::is_string)
         {
             return None;
         }
-        let codec_id = crate::jobs_store::imported_entry_source_codec(entry)?;
+        crate::jobs_store::imported_entry_source_codec(entry)
+    }
+
+    pub fn dense_import(entry: &JsonObject) -> Option<(&'static str, &'static str)> {
+        match Self::imported_codec(entry)? {
+            codecs::DENSE_BF16_CODEC_ID => Some(("bf16", "BF16")),
+            codecs::DENSE_F16_CODEC_ID => Some(("f16", "FP16")),
+            codecs::DENSE_F32_CODEC_ID => Some(("f32", "FP32")),
+            _ => None,
+        }
+    }
+
+    pub fn for_entry(entry: &JsonObject) -> Option<Self> {
+        let codec_id = Self::imported_codec(entry)?;
         let (format, label) = match codec_id {
             codecs::FP8_E4M3_SCALAR_CODEC_ID => ("fp8_e4m3_scalar", "Scaled FP8 (E4M3)"),
             codecs::FP8_E4M3_ROWWISE_CODEC_ID => ("fp8_e4m3_rowwise", "Per-row FP8 (E4M3)"),

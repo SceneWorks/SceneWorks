@@ -162,7 +162,40 @@ pub(super) async fn run_utility_job(
     shutdown: gen_core::CancelFlag,
 ) {
     let job_id = job.id.clone();
-    load_progress::with_job(
+    let quantization_cache = sceneworks_core::source_precision::applies_to_job(&job.job_type)
+        .then_some(&job.payload)
+        .and_then(|payload| {
+            payload
+                .get("modelManifestEntry")
+                .or_else(|| payload.get("manifestEntry"))
+        })
+        .and_then(serde_json::Value::as_object)
+        .filter(|entry| {
+            sceneworks_core::source_precision::SourcePrecision::dense_import(entry).is_some()
+        })
+        .map(|entry| {
+            let owner = entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("imported-checkpoint")
+                .to_owned();
+            let source = sceneworks_core::jobs_store::imported_entry_loadable_path(entry)
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .unwrap_or_else(|| settings.data_dir.clone());
+            let checkpoint = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+                .map(str::to_owned)
+                .unwrap_or_else(|| owner.clone());
+            std::sync::Arc::new(
+                sceneworks_core::quantization_cache::SavedQuantizations::new(
+                    &settings.data_dir,
+                    source,
+                    owner,
+                    checkpoint,
+                ),
+            )
+        });
+    load_progress::with_job_cache(
         api,
         &job_id,
         run_utility_job_inner(
@@ -173,6 +206,7 @@ pub(super) async fn run_utility_job(
             portable_model_binding,
             shutdown,
         ),
+        quantization_cache,
     )
     .await;
 }
