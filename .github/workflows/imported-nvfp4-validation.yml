@@ -74,7 +74,7 @@ jobs:
         with:
           repository: SceneWorks/inference
           ref: ${{ steps.paired.outputs.revision }}
-          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           path: inference
           fetch-depth: 0
           persist-credentials: false
