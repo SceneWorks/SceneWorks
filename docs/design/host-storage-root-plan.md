@@ -129,6 +129,9 @@ No two items share both a mechanism and a repo.
   - `dev-host cleanup` deletes only inside this host's `hosts/<host>/`,
     applies the E9 budgets to that folder, and only measures the shared
     `weights/`, `cache/` and campaign evidence.
+  - `dev-host env --local-build` gives a job a fresh build folder and
+    `TMPDIR` on the runner's local disk, outside the share (for signing
+    jobs, E15).
   - `dev-host check` also verifies that `hosts/<host>/` exists, and that
     every `required_mount` listed in `dev-host.conf` (on the Macs,
     `/Volumes/Models`) is a mounted share. It fails naming whichever is
@@ -277,6 +280,9 @@ No two items share both a mechanism and a repo.
     `dev-host guard --all` finds no target-path patterns.
   - `macos-mlx.yml`'s warm build runs in a `warm` sticky slot, and a
     second run of the job starts warm.
+  - `release.yml`'s signing and notarizing jobs build in a fresh local
+    folder and use no build slot, cache or `TMPDIR` on the share (E15), so
+    another host's account can't change what gets signed.
   - No SceneWorks caller turns incremental compilation back on for a
     build in a root slot on the NAS (r5). Today
     `scripts/remote-macos-verification.mjs:418,457` sets

@@ -434,6 +434,15 @@ The system drive holds only source code, apps, toolchains, personal files
     npm code and builds while the Apple and Tauri signing secrets are set,
     so a writable-by-anyone checkout or build folder would let any machine
     on the network get its own code signed and notarized.
+  - **Signing never uses state on the share.** Authenticated accounts stop
+    strangers, but `nax-macos-2`'s account can still write the whole
+    share, including `hosts/nax-macos/` and the shared caches, and the
+    NAS may not support per-folder permissions. So `release.yml`'s signing
+    and notarizing jobs build in a fresh folder on the runner's local disk,
+    with no root build slot, no shared or per-host cache from the share and
+    no `TMPDIR` on it. `dev-host env` gets an option that leaves these
+    jobs' build and temp paths local. Weights and HF models aren't loaded
+    by signing jobs.
   - Setting up the accounts and share permissions on Tower is Michael's
     step (credentials). The check is a test: a guest mount of each share
     can't create a file.
