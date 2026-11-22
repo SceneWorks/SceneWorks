@@ -203,8 +203,13 @@ function verifyCandlePatches(manifestText, sha, crates = PATCHED_CRATES) {
 // Cargo ignores a dependency workspace's patches. Mirror the typed projection fork only when
 // the target producer vendors it. Repin has already updated any existing app entry to sha.
 export function prepareCandleNnPatch(manifestText, producerManifest, sha) {
-  const declaresNn = (line) => /^\s*candle-nn\s*(?:\.|=)/.test(line);
-  const producerUsesFork = candlePatchLines(producerManifest).some(declaresNn);
+  const declaresNn = (line) => /^\s*(?:candle-nn|"candle-nn"|'candle-nn')\s*[.=]/.test(line);
+  const producerEntries = candlePatchLines(producerManifest).filter(declaresNn);
+  const vendorEntry = /^\s*candle-nn\s*=\s*\{\s*path\s*=\s*"crates\/media\/candle-gen\/vendor\/candle-nn"\s*\}\s*(?:#.*)?$/;
+  if (producerEntries.length > 1 || producerEntries.some((entry) => !vendorEntry.test(entry))) {
+    throw new Error("unrecognized inference candle-nn patch; expected the vendored Candle NN path");
+  }
+  const producerUsesFork = producerEntries.length === 1;
   const appHasPatch = candlePatchLines(manifestText).some(declaresNn);
   if (appHasPatch) verifyCandlePatches(manifestText, sha, ["candle-nn"]);
   if (producerUsesFork === appHasPatch) return manifestText;
@@ -222,10 +227,14 @@ export function prepareCandleNnPatch(manifestText, producerManifest, sha) {
 }
 
 // Cargo can resolve an upstream package while recording the requested patch as unused.
-export function verifyCandleNnResolution(manifestText, lockText, sha) {
-  if (!candlePatchLines(manifestText).some((line) => /^\s*candle-nn\s*=/.test(line))) return;
+function candleNnResolutionMatches(manifestText, lockText, sha) {
+  if (!candlePatchLines(manifestText).some((line) => /^\s*candle-nn\s*=/.test(line))) return true;
   const packages = parseCargoLock(lockText).byName.get("candle-nn") ?? [];
-  if (packages.length !== 1 || packages[0].source !== `git+${INFERENCE_GIT}?rev=${sha}#${sha}`) {
+  return packages.length === 1 && packages[0].source === `git+${INFERENCE_GIT}?rev=${sha}#${sha}`;
+}
+
+export function verifyCandleNnResolution(manifestText, lockText, sha) {
+  if (!candleNnResolutionMatches(manifestText, lockText, sha)) {
     throw new Error(`expected exactly one resolved candle-nn from inference at ${sha}`);
   }
 }
@@ -319,10 +328,11 @@ function verifyCargoLockCurrent(root = repoRoot, run = execFileSync) {
   });
 }
 
-function reconcileCargoLock(
+export function reconcileCargoLock(
   sha,
   manifestsAlreadyPinned,
   {
+    rootManifest = "",
     readLock = () => readFileSync(LOCKFILE, "utf8"),
     update = cargoUpdate,
     verify = verifyCargoLockCurrent,
@@ -334,12 +344,15 @@ function reconcileCargoLock(
   // the mutating command for a real manifest transition or a stale inference source. Once the
   // target revision is present everywhere, `cargo metadata --locked` is the non-mutating proof that
   // the checked-in lock still satisfies the manifests.
-  if (!manifestsAlreadyPinned || lockHasStaleInferenceRevision(sha, readLock())) {
-    update(sha);
-    return "updated";
+  if (manifestsAlreadyPinned) {
+    const lock = readLock();
+    if (!lockHasStaleInferenceRevision(sha, lock) && candleNnResolutionMatches(rootManifest, lock, sha)) {
+      verify();
+      return "verified";
+    }
   }
-  verify();
-  return "verified";
+  update(sha);
+  return "updated";
 }
 
 function cargoManifestsAlreadyPinned(entries) {
@@ -1826,7 +1839,7 @@ function main() {
       writeFileSync(m.path, m.bumped);
       console.log(`  wrote ${m.path}`);
     }
-    reconcileCargoLock(sha, cargoManifestsAlreadyPinned(manifests));
+    reconcileCargoLock(sha, cargoManifestsAlreadyPinned(manifests), { rootManifest: root.bumped });
     verifyCandleNnResolution(root.bumped, readFileSync(LOCKFILE, "utf8"), sha);
     verifyNoSkew();
     // Historical measurement and inspection artifacts are deliberately not regenerated on a pin

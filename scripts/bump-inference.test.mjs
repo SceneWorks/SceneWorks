@@ -17,6 +17,7 @@ import {
   parseCliArgs,
   prepareCandleNnPatch,
   prepareInferencePatches,
+  reconcileCargoLock,
   verifyCandleNnResolution,
   withInferenceCheckout,
 } from "./bump-inference.mjs";
@@ -49,10 +50,19 @@ test("the bump mirrors the target Candle NN fork only in the Candle git patch ta
   const header = '[patch."https://github.com/huggingface/candle"]';
   const registry = '[patch.crates-io]\nregex = { path = "vendor/clip-regex/regex" }';
   const older = `${header}\ncandle-core = { path = "vendor/candle-core" }\n${registry}\n`;
-  const newer = older.replace(header, `${header}\ncandle-nn = { path = "vendor/candle-nn" }`);
+  const vendor = 'candle-nn = { path = "crates/media/candle-gen/vendor/candle-nn" }';
+  const newer = older.replace(header, `${header}\n${vendor}`);
   const git = `{ git = "https://github.com/SceneWorks/inference", rev = "${SHA}" }`;
   const app = `${header}\ncandle-core = ${git}\n[workspace.dependencies]\ncandle-nn = "0.10"\n`;
   const required = app.replace(header, `${header}\ncandle-nn = ${git}`);
+  for (const invalid of [
+    'candle-nn = { git = "https://example.org/candle-nn", rev = "other" }',
+    'candle-nn = { path = "unrelated/candle-nn" }',
+    `${vendor}\n${vendor}`,
+  ]) {
+    assert.throws(() => prepareCandleNnPatch(required, newer.replace(vendor, invalid), SHA),
+      /unrecognized inference candle-nn patch/);
+  }
   assert.equal(prepareCandleNnPatch(app, older, SHA), app);
   assert.equal(prepareCandleNnPatch(app, newer, SHA), required);
   assert.equal(prepareCandleNnPatch(required, newer, SHA), required);
@@ -66,6 +76,27 @@ test("the bump mirrors the target Candle NN fork only in the Candle git patch ta
   }
   assert.throws(() => prepareCandleNnPatch(required.replace(git, '{ path = "foreign" }'), newer, SHA),
     /root Candle .*candle-nn/);
+});
+
+test("an interrupted same-pin Candle NN transition repairs the lock once", () => {
+  const repo = "https://github.com/SceneWorks/inference";
+  const target = `git+${repo}?rev=${SHA}#${SHA}`;
+  const manifest = `[patch."https://github.com/huggingface/candle"]\ncandle-nn = { git = "${repo}", rev = "${SHA}" }\n`;
+  const core = `[[package]]\nname = "sceneworks-gen-core"\nversion = "0.1.0"\nsource = "${target}"\n`;
+  const nn = `[[package]]\nname = "candle-nn"\nversion = "0.10.2"\nsource = "${target}"\n`;
+  for (const interrupted of [core, core + nn.replace(target, "git+https://github.com/huggingface/candle#old")]) {
+    let lock = interrupted;
+    const calls = [];
+    const retry = () => reconcileCargoLock(SHA, true, {
+      rootManifest: manifest,
+      readLock: () => lock,
+      update: () => { calls.push("update"); lock = core + nn; },
+      verify: () => calls.push("verify"),
+    });
+    assert.equal(retry(), "updated");
+    assert.equal(retry(), "verified");
+    assert.deepEqual(calls, ["update", "verify"]);
+  }
 });
 
 // Stands in for the shallow fetch: records where it was asked to clone and leaves clone-shaped
