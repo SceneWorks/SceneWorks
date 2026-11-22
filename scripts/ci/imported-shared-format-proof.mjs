@@ -15,12 +15,57 @@ export const CASES = Object.freeze([
   { group: 'nvfp4', test: 'imported_native_nvfp4_worker_gpu_smoke', model: 'linked_krea2_native_nvfp4', codec: 'nvfp4-v1', route: 'candle_checkpoint_plan', provider: 'krea_2_turbo', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
 ]);
 
+const SDXL_REFERENCE_PROFILE = 'sdxl-fp8-reference';
+const SDXL_FP8_NATIVE = CASES.find(spec => spec.model === 'linked_sdxl_fp8');
+const SDXL_FP8_DENSE_REFERENCE = Object.freeze({
+  ...SDXL_FP8_NATIVE, test: 'imported_sdxl_fp8_dense_reference', phaseExecution: 'dense-fallback',
+});
+
+export function guardedCases(environment) {
+  assert.equal(environment.GITHUB_EVENT_NAME, 'workflow_dispatch');
+  assert.equal(environment.SCENEWORKS_GPU_ID, '0');
+  assert(/^[1-9][0-9]*$/.test(environment.SW_CI_CUDA_EXECUTION_ACTIVE ?? ''),
+    'physical guard must own the child');
+  const profile = environment.SHARED_FORMAT_PROFILE;
+  assert(['all', 'fp8', 'convrot', 'nvfp4', SDXL_REFERENCE_PROFILE].includes(profile));
+  return profile === SDXL_REFERENCE_PROFILE
+    ? [SDXL_FP8_NATIVE, SDXL_FP8_DENSE_REFERENCE]
+    : CASES.filter(spec => profile === 'all' || spec.group === profile);
+}
+
+export function validateSdxlReferencePair(native, reference) {
+  assert.deepEqual(native.runtimeFacts.sourceBinding, {
+    stableToken: 'cd9ee36e57a438aa89ba4b47b5c0703d0cd9bc6b27b871072e7057ea8298fb68@3552885118',
+    sizeBytes: 3552885118,
+  }, 'normal and dense runs must use the original E5 checkpoint');
+  assert.deepEqual(native.runtimeFacts.sourceBinding, reference.runtimeFacts.sourceBinding);
+  assert.deepEqual(native.runtimeFacts.source, reference.runtimeFacts.source);
+  assert.deepEqual(native.importPlan, reference.importPlan, 'both processes must open the same plan');
+  assert.deepEqual(native.requestControls, {
+    mode: 'text_to_image',
+    prompt: 'a red fox in a sunlit autumn forest, sharp focus',
+    negativePrompt: '',
+    advanced: { steps: 20 },
+    loras: [],
+  });
+  assert.deepEqual(native.requestControls, reference.requestControls, 'request controls must match');
+  for (const packet of [native, reference]) {
+    const phase = packet.metrics.find(row => Number.isFinite(row.loadMs));
+    // Omitted SDXL controls resolve to DDIM, the normal sigma schedule and CFG 7 at this pin.
+    assert.equal(phase.sampler, 'default');
+    assert.equal(phase.scheduler, 'default');
+    assert.equal(phase.guidanceMethod, 'cfg');
+    assert.equal(phase.usePid, false);
+  }
+}
+
 export function validateResult(spec, log, code, packets) {
   assert.equal(code, 0, 'native worker test must succeed');
   assert.equal((log.match(/^test result: ok\. 1 passed; 0 failed; 0 ignored;/gm) ?? []).length, 1);
   const fqn = `imported_comfy_quant_gpu_smoke::${spec.test}`;
   assert.equal((log.match(new RegExp(`^MODEL_INFERENCE_BODY_COMPLETED ${fqn}$`, 'gm')) ?? []).length, 1);
-  assert.equal((log.match(new RegExp(`^MODEL_INFERENCE_DEVICE ${fqn} candle-cuda$`, 'gm')) ?? []).length, 1);
+  assert.deepEqual(log.match(new RegExp(`^MODEL_INFERENCE_DEVICE ${fqn} .+$`, 'gm')),
+    [`MODEL_INFERENCE_DEVICE ${fqn} candle-cuda`]);
   assert.equal((log.match(/^RESULT status=pass /gm) ?? []).length, spec.count);
   assert.equal(packets.length, spec.count);
   const loadEvents = log.split('\n').flatMap(line => {
@@ -52,8 +97,14 @@ export function validateResult(spec, log, code, packets) {
     assert.equal(packet.seed, 42);
     assert.equal(packet.output, `${spec.model}-${iteration}.png`);
     assert.equal(packet.runtimeFacts?.materialization?.status, 'reported');
-    assert(packet.runtimeFacts.materialization.rows.some(row => row.codecId === spec.codec
-      && row.representation === 'native-packed' && row.tensorCount > 0), 'measured native materialization required');
+    const codecRows = packet.runtimeFacts.materialization.rows.filter(row => row.codecId === spec.codec);
+    if (spec === SDXL_FP8_DENSE_REFERENCE) {
+      assert(codecRows.length > 0 && codecRows.every(row =>
+        row.representation === 'dense-fallback' && row.tensorCount > 0), 'only measured dense E5 materialization required');
+    } else {
+      assert(codecRows.some(row => row.representation === 'native-packed' && row.tensorCount > 0),
+        'measured native materialization required');
+    }
     const phase = packet.metrics.find(row => Number.isFinite(row.loadMs));
     assert(phase, 'request load timing required');
     if (spec.group === 'fp8') {
@@ -84,11 +135,14 @@ async function boundedFile(directory, name) {
   return { name, bytes: info.size, sha256: await fileSha256(file) };
 }
 
-async function execute(binary, spec, output) {
+async function execute(binary, spec, output, proofPair) {
   const fqn = `imported_comfy_quant_gpu_smoke::${spec.test}`;
   const log = await new Promise((resolve, reject) => {
     const child = spawn(binary, [fqn, '--exact', '--ignored', '--nocapture', '--test-threads=1'],
-      { env: { ...process.env, MODEL_PROOF_OUTPUT_DIR: output }, windowsHide: true });
+      { env: {
+        ...process.env, MODEL_PROOF_OUTPUT_DIR: output,
+        ...(proofPair && { MODEL_INFERENCE_CASE_FQN: fqn }),
+      }, windowsHide: true });
     let text = '', size = 0;
     const append = chunk => { size += chunk.length; if (size <= 16 * 1024 * 1024) text += chunk.toString(); };
     child.stdout.on('data', append); child.stderr.on('data', append);
@@ -114,16 +168,14 @@ async function execute(binary, spec, output) {
     files.push(imageFile, await boundedFile(output, `${spec.model}-${packet.iteration}.json`));
   }
   files.push(await boundedFile(output, `${spec.model}.log`));
-  return { test: fqn, sourceCodec: spec.codec, generations: packets.length, files,
-    timings: packets.map(p => ({ iteration: p.iteration, phases: p.metrics, hardware: p.hardwareMetrics })) };
+  return { packets, evidence: { test: fqn, sourceCodec: spec.codec, generations: packets.length, files,
+    timings: packets.map(p => ({ iteration: p.iteration, phases: p.metrics, hardware: p.hardwareMetrics })) } };
 }
 
 async function main() {
-  assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
-  assert.equal(process.env.SCENEWORKS_GPU_ID, '0');
-  assert(/^[1-9][0-9]*$/.test(process.env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ''), 'physical guard must own the child');
+  const cases = guardedCases(process.env);
   const profile = process.env.SHARED_FORMAT_PROFILE;
-  assert(['all', 'fp8', 'convrot', 'nvfp4'].includes(profile));
+  const proofPair = profile === SDXL_REFERENCE_PROFILE;
   const binary = path.resolve(process.env.SHARED_FORMAT_TEST_BINARY);
   const output = path.resolve(process.env.MODEL_PROOF_OUTPUT_DIR);
   const relative = path.relative(path.resolve(process.env.RUNNER_TEMP), output);
@@ -136,9 +188,23 @@ async function main() {
   const binaryIdentity = await fileSha256(binary);
   await mkdir(output, { recursive: false });
   const receipt = { schemaVersion: 1, status: 'running', source, inference: pin,
-    binarySha256: binaryIdentity, profile, deviceProvenance: 'source-enforced-native-materialization-and-physical-UUID-guard', cases: [] };
+    binarySha256: binaryIdentity, profile, deviceProvenance: proofPair
+      ? 'observed-learned-tensor-and-physical-UUID-guard'
+      : 'source-enforced-native-materialization-and-physical-UUID-guard', cases: [] };
   try {
-    for (const spec of CASES.filter(c => profile === 'all' || c.group === profile)) receipt.cases.push(await execute(binary, spec, output));
+    const pair = [];
+    for (const spec of cases) {
+      const directory = proofPair && (spec === SDXL_FP8_DENSE_REFERENCE ? 'dense-reference' : 'native');
+      const destination = directory ? path.join(output, directory) : output;
+      if (directory) await mkdir(destination);
+      const { evidence, packets } = await execute(binary, spec, destination, proofPair);
+      if (directory) {
+        evidence.directory = directory;
+        pair.push(packets[0]);
+      }
+      receipt.cases.push(evidence);
+    }
+    if (proofPair) validateSdxlReferencePair(...pair);
     assert.equal(git(['rev-parse', 'HEAD']), source);
     assert.equal(git(['status', '--porcelain', '--untracked-files=no']), '');
     assert.equal(await fileSha256(binary), binaryIdentity);

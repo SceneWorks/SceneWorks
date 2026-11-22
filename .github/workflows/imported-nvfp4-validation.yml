@@ -8,7 +8,7 @@ on:
         description: Imported checkpoint formats to execute
         type: choice
         default: nvfp4
-        options: [nvfp4, fp8, convrot, all]
+        options: [nvfp4, fp8, convrot, all, sdxl-fp8-reference]
 
 permissions:
   contents: read
@@ -34,6 +34,7 @@ jobs:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       SHARED_FORMAT_PROFILE: ${{ inputs.format }}
+      SHARED_FORMAT_FEATURES: ${{ inputs.format == 'sdxl-fp8-reference' && 'model-inference-proof' || 'backend-candle' }}
       SHARED_FORMAT_INFERENCE_ROOT: ${{ github.workspace }}/inference
       SCENEWORKS_SCALAR_FP8_CHECKPOINT: 'C:\Users\Michael\AppData\Roaming\SceneWorks\data\models\imports\muse_fp8\Muse__By__Stable__Yogi__Krea2__V4.0__Extended__CIV__fp8-scaled__C86.safetensors'
       SCENEWORKS_CONVROT_CHECKPOINT: 'C:\Users\Michael\AppData\Roaming\SceneWorks\data\models\imports\muse_int8\Muse__By__Stable__Yogi__Krea2__V4.0__Extended__CIV__INT8-ConvRot__C86.safetensors'
@@ -89,7 +90,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test --locked -p sceneworks-worker --lib --features backend-candle --release --no-run --message-format=json > "%RUNNER_TEMP%\shared-format-build.jsonl"
+          cargo test --locked -p sceneworks-worker --lib --features %SHARED_FORMAT_FEATURES% --release --no-run --message-format=json > "%RUNNER_TEMP%\shared-format-build.jsonl"
           if errorlevel 1 exit /b 1
       - name: Select the actual compiled libtest binary
         shell: powershell
@@ -97,7 +98,9 @@ jobs:
           $artifacts = Get-Content "$env:RUNNER_TEMP\shared-format-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'sceneworks_worker' -and $_.profile.test -and $_.executable }
           if (@($artifacts).Count -ne 1) { throw 'expected one compiled native worker test binary' }
           $listing = & $artifacts.executable --list
-          foreach ($test in @('imported_scalar_fp8_worker_gpu_smoke', 'imported_sdxl_fp8_worker_gpu_smoke', 'imported_convrot_worker_gpu_smoke', 'imported_native_nvfp4_worker_gpu_smoke', 'imported_shared_formats_product_import_preflight')) {
+          $required = @('imported_scalar_fp8_worker_gpu_smoke', 'imported_sdxl_fp8_worker_gpu_smoke', 'imported_convrot_worker_gpu_smoke', 'imported_native_nvfp4_worker_gpu_smoke', 'imported_shared_formats_product_import_preflight')
+          if ($env:SHARED_FORMAT_PROFILE -eq 'sdxl-fp8-reference') { $required += 'imported_sdxl_fp8_dense_reference' }
+          foreach ($test in $required) {
             if (@($listing | Where-Object { $_ -eq "imported_comfy_quant_gpu_smoke::${test}: test" }).Count -ne 1) { throw "missing exact compiled case $test" }
           }
           Add-Content -Path $env:GITHUB_ENV -Value "SHARED_FORMAT_TEST_BINARY=$($artifacts.executable)"

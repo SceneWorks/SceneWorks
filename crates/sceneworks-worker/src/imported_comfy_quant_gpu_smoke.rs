@@ -272,6 +272,36 @@ struct SmokeCase {
 enum AcceptanceStage {
     ImportOnly,
     Generate,
+    #[cfg(feature = "model-inference-proof")]
+    DenseReference,
+}
+
+const SDXL_FP8_REFERENCE_PROFILE: &str = "sdxl-fp8-reference";
+
+fn is_sdxl_fp8_reference_profile() -> bool {
+    std::env::var("SHARED_FORMAT_PROFILE").as_deref() == Ok(SDXL_FP8_REFERENCE_PROFILE)
+}
+
+#[cfg(feature = "model-inference-proof")]
+fn require_sdxl_fp8_reference_guard() {
+    assert_eq!(
+        std::env::var("GITHUB_EVENT_NAME").as_deref(),
+        Ok("workflow_dispatch")
+    );
+    assert_eq!(std::env::var("SCENEWORKS_GPU_ID").as_deref(), Ok("0"));
+    assert!(
+        std::env::var("SW_CI_CUDA_EXECUTION_ACTIVE")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|pid| pid > 0),
+        "physical CUDA guard must own the reference child"
+    );
+    let thread = std::thread::current();
+    let fqn = thread.name().expect("actual named libtest case");
+    assert_eq!(
+        std::env::var("MODEL_INFERENCE_CASE_FQN").as_deref(),
+        Ok(fqn)
+    );
 }
 
 async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage) {
@@ -285,6 +315,27 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
         companion_repo,
         with_adapter_and_reuse,
     } = case;
+    let reference_pair = family == "sdxl"
+        && is_sdxl_fp8_reference_profile()
+        && !matches!(stage, AcceptanceStage::ImportOnly);
+    if reference_pair {
+        #[cfg(feature = "model-inference-proof")]
+        require_sdxl_fp8_reference_guard();
+        #[cfg(not(feature = "model-inference-proof"))]
+        panic!("reference pair needs the proof build");
+    }
+    let expect_native = match stage {
+        AcceptanceStage::ImportOnly | AcceptanceStage::Generate => true,
+        #[cfg(feature = "model-inference-proof")]
+        AcceptanceStage::DenseReference => {
+            assert!(
+                reference_pair,
+                "dense reference requires its SDXL workflow profile"
+            );
+            candle_gen::logical_weights::CandleCodecResidency::force_dense_fp8_for_model_proof();
+            false
+        }
+    };
     let _ = tracing_subscriber::fmt()
         .json()
         .with_env_filter("info")
@@ -581,9 +632,16 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
             .representation_label(expected_codec_id)
             .expect("the runtime receipt reports the execution representation");
         assert_eq!(
-        facts.executes_natively(expected_codec_id), Some(true),
-        "expected measured native materialization for {expected_codec_id}, got {representation:?}"
-    );
+            facts.executes_natively(expected_codec_id),
+            Some(expect_native),
+            "unexpected materialization for {expected_codec_id}: {representation:?}"
+        );
+        if !expect_native {
+            assert_eq!(
+                representation, "dense-fallback",
+                "reference must use dense source weights"
+            );
+        }
 
         let media_path = asset
             .get("mediaPath")
@@ -622,7 +680,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
             let image_name = format!("{model_id}-{iteration}.png");
             std::fs::copy(&rendered_path, output.join(&image_name))
                 .expect("retain generated image");
-            let packet = json!({
+            let mut packet = json!({
                 "schemaVersion":1, "modelId":model_id, "provider":provider,
                 "checkpointId":checkpoint_id,
                 "importPlan":imported.get("importPlan"),
@@ -634,6 +692,15 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 "metrics":metrics.lock().expect("metrics lock").iter()
                     .filter(|(id, _)| id == &image_job_id).map(|(_,value)|value).collect::<Vec<_>>()
             });
+            if reference_pair {
+                packet["requestControls"] = json!({
+                    "mode": image_job.payload["mode"],
+                    "prompt": image_job.payload["prompt"],
+                    "negativePrompt": image_job.payload["negativePrompt"],
+                    "advanced": image_job.payload["advanced"],
+                    "loras": image_job.payload["loras"],
+                });
+            }
             std::fs::write(
                 output.join(format!("{model_id}-{iteration}.json")),
                 serde_json::to_vec_pretty(&packet).unwrap(),
@@ -646,9 +713,11 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
         .expect("actual libtest FQN")
         .to_owned();
     eprintln!("MODEL_INFERENCE_BODY_COMPLETED {fqn}");
-    // A successful request's measured NativePacked row comes from the source-aware CUDA loader;
-    // its public constructor refuses CPU. The separately dispatched controller binds physical GPU0.
-    eprintln!("MODEL_INFERENCE_DEVICE {fqn} candle-cuda");
+    if !reference_pair {
+        // NativePacked rows come from the CUDA loader. The reference pair instead requires the
+        // shared proof observer's actual learned-tensor device because its dense arm has no native row.
+        eprintln!("MODEL_INFERENCE_DEVICE {fqn} candle-cuda");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -714,6 +783,13 @@ async fn imported_sdxl_fp8_worker_gpu_smoke() {
     run_imported_comfy_quant_smoke(sdxl_fp8_case(), AcceptanceStage::Generate).await;
 }
 
+#[cfg(feature = "model-inference-proof")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "dedicated same-source CUDA dense reference for corrected native SDXL E5M2"]
+async fn imported_sdxl_fp8_dense_reference() {
+    run_imported_comfy_quant_smoke(sdxl_fp8_case(), AcceptanceStage::DenseReference).await;
+}
+
 fn sdxl_fp8_case() -> SmokeCase {
     SmokeCase {
         checkpoint_env: "SCENEWORKS_IMPORTED_SDXL_FP8_CHECKPOINT",
@@ -754,7 +830,7 @@ async fn imported_shared_formats_product_import_preflight() {
     let selected = std::env::var("SHARED_FORMAT_PROFILE").unwrap_or_else(|_| "all".into());
     assert!(matches!(
         selected.as_str(),
-        "all" | "fp8" | "convrot" | "nvfp4"
+        "all" | "fp8" | "convrot" | "nvfp4" | SDXL_FP8_REFERENCE_PROFILE
     ));
     for (profile, case) in [
         ("fp8", scalar_fp8_case()),
@@ -762,7 +838,10 @@ async fn imported_shared_formats_product_import_preflight() {
         ("convrot", convrot_case()),
         ("nvfp4", native_nvfp4_case()),
     ] {
-        if selected == "all" || selected == profile {
+        if selected == "all"
+            || selected == profile
+            || (selected == SDXL_FP8_REFERENCE_PROFILE && case.family == "sdxl")
+        {
             run_imported_comfy_quant_smoke(case, AcceptanceStage::ImportOnly).await;
         }
     }

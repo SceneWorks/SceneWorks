@@ -1,7 +1,7 @@
 // Metadata only: no model, tensor, CUDA or subprocess execution.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CASES, validateResult } from './imported-shared-format-proof.mjs';
+import { CASES, guardedCases, validateResult, validateSdxlReferencePair } from './imported-shared-format-proof.mjs';
 
 function fixture(spec) {
   const fqn = `imported_comfy_quant_gpu_smoke::${spec.test}`;
@@ -94,4 +94,72 @@ test('FP8 phase metrics report source-owned precision and measured Muse executio
     quantLabel: null, quantBits: null, executionRepresentation: 'mixed:2/1',
   });
   validateResult(sdxl, f.log, 0, f.packets);
+});
+
+const guardedReference = {
+  GITHUB_EVENT_NAME: 'workflow_dispatch',
+  SCENEWORKS_GPU_ID: '0',
+  SW_CI_CUDA_EXECUTION_ACTIVE: '230',
+  SHARED_FORMAT_PROFILE: 'sdxl-fp8-reference',
+};
+
+test('SDXL reference selects only its two cases under the physical guard', () => {
+  const [native, reference] = guardedCases(guardedReference);
+  assert.equal(native, CASES[1]);
+  assert.equal(reference.model, native.model);
+  assert.equal(reference.test, 'imported_sdxl_fp8_dense_reference');
+  assert.deepEqual(guardedCases({ ...guardedReference, SHARED_FORMAT_PROFILE: 'all' }), CASES);
+  assert.deepEqual(guardedCases({ ...guardedReference, SHARED_FORMAT_PROFILE: 'fp8' }), CASES.slice(0, 2));
+  for (const override of [
+    { GITHUB_EVENT_NAME: 'pull_request' },
+    { SCENEWORKS_GPU_ID: '1' },
+    { SW_CI_CUDA_EXECUTION_ACTIVE: '' },
+    { SW_CI_CUDA_EXECUTION_ACTIVE: '0' },
+    { SHARED_FORMAT_PROFILE: 'dense' },
+  ]) assert.throws(() => guardedCases({ ...guardedReference, ...override }));
+});
+
+test('reference receipt requires only dense E5 and a witnessed CUDA device', () => {
+  const [native, reference] = guardedCases(guardedReference);
+  const f = fixture(reference);
+  const row = f.packets[0].runtimeFacts.materialization.rows[0];
+  assert.throws(() => validateResult(reference, f.log, 0, f.packets), /only measured dense E5/);
+  row.representation = 'dense-fallback';
+  validateResult(reference, f.log, 0, f.packets);
+  const g = fixture(native);
+  g.packets[0].runtimeFacts.materialization.rows[0].representation = 'dense-fallback';
+  assert.throws(() => validateResult(native, g.log, 0, g.packets), /measured native/);
+  const mixedDevice = f.log + 'MODEL_INFERENCE_DEVICE imported_comfy_quant_gpu_smoke::imported_sdxl_fp8_dense_reference candle-cpu\n';
+  assert.throws(() => validateResult(reference, mixedDevice, 0, f.packets));
+  f.packets[0].runtimeFacts.materialization.rows.push({ ...row, representation: 'native-packed' });
+  assert.throws(() => validateResult(reference, f.log, 0, f.packets), /only measured dense E5/);
+});
+
+test('reference comparison binds the exact original file and frozen controls', () => {
+  const [native] = guardedCases(guardedReference);
+  const packet = fixture(native).packets[0];
+  packet.runtimeFacts.sourceBinding = {
+    stableToken: 'cd9ee36e57a438aa89ba4b47b5c0703d0cd9bc6b27b871072e7057ea8298fb68@3552885118',
+    sizeBytes: 3552885118,
+  };
+  packet.runtimeFacts.source = [{ codecId: native.codec, tensorCount: 2393, sourceBytes: 3385184004 }];
+  packet.requestControls = {
+    mode: 'text_to_image', prompt: 'a red fox in a sunlit autumn forest, sharp focus',
+    negativePrompt: '', advanced: { steps: 20 }, loras: [],
+  };
+  Object.assign(packet.metrics[0], { sampler: 'default', scheduler: 'default', guidanceMethod: 'cfg', usePid: false });
+  validateSdxlReferencePair(packet, structuredClone(packet));
+  for (const mismatch of [
+    p => { p.runtimeFacts.sourceBinding.sizeBytes += 1; },
+    p => { p.runtimeFacts.source[0].tensorCount -= 1; },
+    p => { p.importPlan.planId = 'a different plan'; },
+    p => { p.requestControls.prompt = 'a different prompt'; },
+    p => { p.requestControls.advanced.guidanceScale = 6; },
+    p => { p.metrics[0].sampler = 'heun'; },
+    p => { p.metrics[0].scheduler = 'karras'; },
+  ]) {
+    const changed = structuredClone(packet);
+    mismatch(changed);
+    assert.throws(() => validateSdxlReferencePair(packet, changed));
+  }
 });
