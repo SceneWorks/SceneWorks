@@ -9,9 +9,15 @@ function fixture(spec) {
     log: `${Array(spec.count).fill('RESULT status=pass native request').join('\n')}\n`
       + `MODEL_INFERENCE_BODY_COMPLETED ${fqn}\nMODEL_INFERENCE_DEVICE ${fqn} candle-cuda\n`
       + 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 100 filtered out;\n'
+      + Array.from({ length: spec.count }, (_, iteration) => JSON.stringify({ fields: {
+        event: 'image_pipeline_load_complete', sw_payload: JSON.stringify({
+          jobId: `comfy-quant-image-generate-${iteration}`, engine: spec.provider, adapterCount: spec.adapters,
+        }),
+      } })).join('\n') + '\n'
       + (spec.count === 2 ? '{"fields":{"event":"generator_cache_miss"}}\n' : ''),
     packets: Array.from({ length: spec.count }, (_, iteration) => ({
       schemaVersion: 1, modelId: spec.model, iteration, sourceCodec: spec.codec, physicalGpu: '0',
+      route: spec.route, provider: spec.provider,
       checkpointId: 'linked/root-1234567890abcdef/model.safetensors',
       importPlan: { checkpointId: 'linked/root-1234567890abcdef/model.safetensors',
         planId: `checkpoint-plan-${'a'.repeat(64)}`, semanticDigest: `sha256:${'b'.repeat(64)}` },
@@ -43,6 +49,11 @@ test('receipt identity, adapter, physical device and metrics stay bound', () => 
   const spec = CASES[0];
   for (const change of [
     f => { f.packets[0].modelId = CASES[1].model; },
+    f => { f.packets[0].route = 'candle_checkpoint_plan'; },
+    f => { f.packets[0].provider = 'another-provider'; },
+    f => { f.log = f.log.replace('image_pipeline_load_complete', 'image_pipeline_load_start'); },
+    f => { f.log = f.log.replaceAll('krea_2_turbo', 'another-provider'); },
+    f => { f.log = f.log.replaceAll('adapterCount\\":1', 'adapterCount\\":0'); },
     f => { f.packets[0].physicalGpu = '1'; },
     f => { f.packets[0].adapterCount = 0; },
     f => { f.packets[0].metrics = []; },

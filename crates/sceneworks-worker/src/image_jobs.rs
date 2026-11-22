@@ -3665,6 +3665,34 @@ mod tier_resolver;
 pub(crate) fn standard_tier_subdir_for_test(root: &Path, request: &ImageRequest) -> PathBuf {
     standard_tier_subdir(root, request)
 }
+
+/// Exercise the normal source/adapter route preparation without constructing a generator.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn imported_checkpoint_route_preflight_for_test(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<(&'static str, PathBuf, usize)> {
+    let execution = conditioning::ResolvedImageExecution::new(request)?;
+    let route = routing::prepare_candle_image_route(&execution, settings)?
+        .ok_or_else(|| WorkerError::InvalidPayload("No native checkpoint route".into()))?;
+    let label = route.kind().adapter_label(request);
+    match route {
+        routing::PreparedCandleImageRoute::CheckpointPlan(sources) => match sources.primary {
+            gen_core::WeightsSource::File(path) => Ok((label, path, 0)),
+            _ => Err(WorkerError::InvalidPayload(
+                "Expected a single-file checkpoint".into(),
+            )),
+        },
+        routing::PreparedCandleImageRoute::KreaImported(sources) => Ok((
+            label,
+            sources.dit_pin.loader_path().to_path_buf(),
+            sources.prepared_adapters.specs.len(),
+        )),
+        _ => Err(WorkerError::InvalidPayload(
+            "Unexpected checkpoint validation route".into(),
+        )),
+    }
+}
 #[cfg(target_os = "macos")]
 use tier_resolver::resolved_tier_is_complete;
 #[cfg(all(test, native_lane))]

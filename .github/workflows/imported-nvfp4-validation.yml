@@ -97,10 +97,15 @@ jobs:
           $artifacts = Get-Content "$env:RUNNER_TEMP\shared-format-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'sceneworks_worker' -and $_.profile.test -and $_.executable }
           if (@($artifacts).Count -ne 1) { throw 'expected one compiled native worker test binary' }
           $listing = & $artifacts.executable --list
-          foreach ($test in @('imported_scalar_fp8_worker_gpu_smoke', 'imported_sdxl_fp8_worker_gpu_smoke', 'imported_convrot_worker_gpu_smoke', 'imported_native_nvfp4_worker_gpu_smoke')) {
+          foreach ($test in @('imported_scalar_fp8_worker_gpu_smoke', 'imported_sdxl_fp8_worker_gpu_smoke', 'imported_convrot_worker_gpu_smoke', 'imported_native_nvfp4_worker_gpu_smoke', 'imported_shared_formats_product_import_preflight')) {
             if (@($listing | Where-Object { $_ -eq "imported_comfy_quant_gpu_smoke::${test}: test" }).Count -ne 1) { throw "missing exact compiled case $test" }
           }
           Add-Content -Path $env:GITHUB_ENV -Value "SHARED_FORMAT_TEST_BINARY=$($artifacts.executable)"
+      - name: Preflight normal request routes and prepared source bindings without execution
+        shell: powershell
+        run: |
+          & $env:SHARED_FORMAT_TEST_BINARY imported_comfy_quant_gpu_smoke::imported_shared_formats_product_import_preflight --exact --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw 'shared-format request route preflight failed' }
       - name: Execute completed native requests under the existing physical GPU0 guard
         shell: powershell
         run: python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format --budget-minutes 120 --physical-indices 0 --require-physical-index 0 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-proof.mjs

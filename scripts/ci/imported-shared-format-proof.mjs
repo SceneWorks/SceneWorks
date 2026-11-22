@@ -9,10 +9,10 @@ import { lockedInferenceRevision } from '../select-windows-cargo-cache.mjs';
 import { redact } from './imported-nvfp4-proof.mjs';
 
 export const CASES = Object.freeze([
-  { group: 'fp8', test: 'imported_scalar_fp8_worker_gpu_smoke', model: 'linked_krea2_scalar_fp8', codec: 'fp8-e4m3-scalar-v1', count: 2, width: 1408, height: 2048, steps: 8, adapters: 1 },
-  { group: 'fp8', test: 'imported_sdxl_fp8_worker_gpu_smoke', model: 'linked_sdxl_fp8', codec: 'fp8-e5m2-scalar-v1', count: 1, width: 512, height: 512, steps: 20, adapters: 0 },
-  { group: 'convrot', test: 'imported_convrot_worker_gpu_smoke', model: 'linked_krea2_convrot', codec: 'convrot-int8-native', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
-  { group: 'nvfp4', test: 'imported_native_nvfp4_worker_gpu_smoke', model: 'linked_krea2_native_nvfp4', codec: 'nvfp4-v1', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
+  { group: 'fp8', test: 'imported_scalar_fp8_worker_gpu_smoke', model: 'linked_krea2_scalar_fp8', codec: 'fp8-e4m3-scalar-v1', route: 'candle_krea_imported', provider: 'krea_2_turbo', count: 2, width: 1408, height: 2048, steps: 8, adapters: 1 },
+  { group: 'fp8', test: 'imported_sdxl_fp8_worker_gpu_smoke', model: 'linked_sdxl_fp8', codec: 'fp8-e5m2-scalar-v1', route: 'candle_checkpoint_plan', provider: 'sdxl', count: 1, width: 512, height: 512, steps: 20, adapters: 0 },
+  { group: 'convrot', test: 'imported_convrot_worker_gpu_smoke', model: 'linked_krea2_convrot', codec: 'convrot-int8-native', route: 'candle_checkpoint_plan', provider: 'krea_2_turbo', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
+  { group: 'nvfp4', test: 'imported_native_nvfp4_worker_gpu_smoke', model: 'linked_krea2_native_nvfp4', codec: 'nvfp4-v1', route: 'candle_checkpoint_plan', provider: 'krea_2_turbo', count: 1, width: 512, height: 512, steps: 8, adapters: 0 },
 ]);
 
 export function validateResult(spec, log, code, packets) {
@@ -23,9 +23,21 @@ export function validateResult(spec, log, code, packets) {
   assert.equal((log.match(new RegExp(`^MODEL_INFERENCE_DEVICE ${fqn} candle-cuda$`, 'gm')) ?? []).length, 1);
   assert.equal((log.match(/^RESULT status=pass /gm) ?? []).length, spec.count);
   assert.equal(packets.length, spec.count);
+  const loadEvents = log.split('\n').flatMap(line => {
+    try {
+      const fields = JSON.parse(line).fields;
+      return fields?.event === 'image_pipeline_load_complete' ? [JSON.parse(fields.sw_payload)] : [];
+    } catch { return []; }
+  });
+  assert.equal(loadEvents.length, spec.count, 'each completed request must identify its actual loaded provider');
   for (const [iteration, packet] of packets.entries()) {
     assert.equal(packet.schemaVersion, 1);
     assert.equal(packet.modelId, spec.model);
+    assert.equal(packet.route, spec.route);
+    assert.equal(packet.provider, spec.provider);
+    assert.equal(loadEvents[iteration].jobId, `comfy-quant-image-generate-${iteration}`);
+    assert.equal(loadEvents[iteration].engine, spec.provider);
+    assert.equal(loadEvents[iteration].adapterCount, spec.adapters);
     assert.equal(packet.iteration, iteration);
     assert.equal(packet.sourceCodec, spec.codec);
     assert(/^linked\/root-[a-f0-9]{16}\/.+\.safetensors$/.test(packet.checkpointId), 'actual approved linked source required');

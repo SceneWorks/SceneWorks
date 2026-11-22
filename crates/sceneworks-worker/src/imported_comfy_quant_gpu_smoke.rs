@@ -389,20 +389,31 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
         .and_then(Value::as_str)
         .expect("the linked import stamps its checkpoint plan id")
         .to_owned();
-    assert!(
-        plan_store.resolve(&checkpoint_id).is_ok(),
-        "the stamped checkpoint plan resolves through the approved root"
+    let resolved_plan = plan_store
+        .resolve(&checkpoint_id)
+        .expect("the stamped checkpoint plan resolves through the approved root");
+    let primaries = resolved_plan
+        .layers_with_role(if family == "sdxl" {
+            "checkpoint"
+        } else {
+            "transformer"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        primaries.len(),
+        1,
+        "the real checkpoint must have one primary plan layer"
     );
+    let primary_path = std::fs::canonicalize(&primaries[0].path).unwrap();
+    assert_eq!(primary_path, std::fs::canonicalize(&checkpoint).unwrap());
+    let expected_source_binding =
+        crate::checkpoint_weight_facts_host::source_binding_for(&primary_path)
+            .expect("the verified primary source must have a binding");
     let import_result = completed_result(&progress_posts, "comfy-quant-linked-import");
     assert_eq!(
         import_result.get("checkpointId").and_then(Value::as_str),
         Some(checkpoint_id.as_str())
     );
-
-    if matches!(stage, AcceptanceStage::ImportOnly) {
-        eprintln!("IMPORT_FORMAT_PREFLIGHT model={model_id} source_codec={expected_codec_id} checkpoint={checkpoint_id}");
-        return;
-    }
 
     let project = ProjectStore::new(settings.data_dir.clone(), "comfy-quant-smoke")
         .create_project("Imported ComfyUI-quantized worker smoke")
@@ -430,6 +441,13 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
     if with_adapter_and_reuse {
         advanced["pag"] = json!({"scale":1.2});
     }
+    // The generic plan body deliberately declines adapters; the existing family route loads the
+    // same verified plan layer and shared native provider while retaining additive adapters.
+    let expected_route = if with_adapter_and_reuse {
+        "candle_krea_imported"
+    } else {
+        "candle_checkpoint_plan"
+    };
     for iteration in 0..if with_adapter_and_reuse { 2 } else { 1 } {
         let image_job_id = format!("comfy-quant-image-generate-{iteration}");
         let image_job = smoke_job(
@@ -450,6 +468,43 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 "modelManifestEntry": imported
             }),
         );
+        if matches!(stage, AcceptanceStage::ImportOnly) {
+            let facts = sceneworks_core::request_validation::facts_for_job(
+                &image_job.job_type,
+                &image_job.payload,
+            );
+            let resolved = sceneworks_core::request_validation::resolve_request(
+                "image",
+                &image_job.payload,
+                &facts,
+            )
+            .expect("the real source request resolves before execution");
+            let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                &image_job.payload,
+                resolved.as_payload(),
+            )
+            .expect("the real source request parses before execution");
+            let (route, primary, adapter_count) =
+                crate::image_jobs::imported_checkpoint_route_preflight_for_test(
+                    &request, &settings,
+                )
+                .expect("normal source and adapter preparation succeeds without model execution");
+            assert_eq!(route, expected_route);
+            assert_eq!(
+                crate::checkpoint_weight_facts_host::source_binding_for(
+                    &std::fs::canonicalize(&primary).unwrap()
+                )
+                .as_ref(),
+                Some(&expected_source_binding)
+            );
+            assert_eq!(
+                std::fs::canonicalize(primary).unwrap(),
+                std::fs::canonicalize(&checkpoint).unwrap()
+            );
+            assert_eq!(adapter_count, adapters.len());
+            eprintln!("IMPORT_FORMAT_PREFLIGHT model={model_id} source_codec={expected_codec_id} checkpoint={checkpoint_id} route={route} adapters={adapter_count}");
+            return;
+        }
         let physical_gpu = std::env::var("SCENEWORKS_GPU_ID")
             .expect("manual proof must name its reserved physical GPU for hardware metrics");
         let hardware = crate::job_metrics::JobMetricsProbe::start(&physical_gpu);
@@ -470,14 +525,34 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
             .expect("the image asset carries worker-resolved settings");
         assert_eq!(
             raw.get("engine").and_then(Value::as_str),
-            Some("candle_checkpoint_plan"),
-            "the render must run through the worker checkpoint-plan route"
+            Some(expected_route),
+            "the render must use the normal route for its exact request shape"
         );
-        assert_eq!(
-            raw.get("importPlanProvider").and_then(Value::as_str),
-            Some(provider),
-            "the plan must dispatch to the source architecture's provider"
-        );
+        if with_adapter_and_reuse {
+            assert_eq!(
+                raw.get("importedCheckpoint").and_then(Value::as_str),
+                Some(model_id)
+            );
+            assert_eq!(raw.get("adapterCount").and_then(Value::as_u64), Some(1));
+        } else {
+            assert_eq!(
+                raw.get("checkpointId").and_then(Value::as_str),
+                Some(checkpoint_id.as_str())
+            );
+            assert_eq!(
+                raw.get("importPlanId").and_then(Value::as_str),
+                Some(resolved_plan.plan.plan_id.as_str())
+            );
+            assert_eq!(
+                raw.get("importPlanSemanticDigest").and_then(Value::as_str),
+                Some(resolved_plan.record.plan.semantic_digest.as_str())
+            );
+            assert_eq!(
+                raw.get("importPlanProvider").and_then(Value::as_str),
+                Some(provider),
+                "the plan must dispatch to the source architecture's provider"
+            );
+        }
 
         let facts: CheckpointWeightFactsV1 = serde_json::from_value(
             raw.get(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY)
@@ -485,6 +560,11 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 .expect("the asset carries checkpointWeightFacts"),
         )
         .expect("checkpointWeightFacts is a valid correlated fact set");
+        assert_eq!(
+            facts.source_binding(),
+            Some(&expected_source_binding),
+            "native materialization must bind the actual imported primary checkpoint"
+        );
         assert!(
             facts.declares(expected_codec_id),
             "the asset must report source codec {expected_codec_id}"
@@ -519,7 +599,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
             "the worker render looks degenerate (RGB std {std:.2})"
         );
         eprintln!(
-            "RESULT status=pass route=candle_checkpoint_plan provider={provider} source_codec={} \
+            "RESULT status=pass route={expected_route} provider={provider} source_codec={} \
          execution_representation={} geometry={}x{} rgb_std={std:.3} checkpoint={} output={}",
             expected_codec_id,
             representation,
@@ -539,7 +619,8 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 "checkpointId":checkpoint_id,
                 "importPlan":imported.get("importPlan"),
                 "iteration":iteration, "sourceCodec":expected_codec_id,
-                "runtimeFacts":facts, "adapterCount":adapters.len(),
+                "runtimeFacts":facts, "adapterCount":raw.get("adapterCount").and_then(Value::as_u64).unwrap_or(0),
+                "route":expected_route,
                 "physicalGpu":physical_gpu,"hardwareMetrics":hardware,
                 "seed":42,"steps":steps,"width":width,"height":height,"output":image_name,
                 "metrics":metrics.lock().expect("metrics lock").iter()
@@ -662,12 +743,19 @@ fn native_nvfp4_case() -> SmokeCase {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "metadata-only real-source preflight; requires the four pinned local artifacts"]
 async fn imported_shared_formats_product_import_preflight() {
-    for case in [
-        scalar_fp8_case(),
-        sdxl_fp8_case(),
-        convrot_case(),
-        native_nvfp4_case(),
+    let selected = std::env::var("SHARED_FORMAT_PROFILE").unwrap_or_else(|_| "all".into());
+    assert!(matches!(
+        selected.as_str(),
+        "all" | "fp8" | "convrot" | "nvfp4"
+    ));
+    for (profile, case) in [
+        ("fp8", scalar_fp8_case()),
+        ("fp8", sdxl_fp8_case()),
+        ("convrot", convrot_case()),
+        ("nvfp4", native_nvfp4_case()),
     ] {
-        run_imported_comfy_quant_smoke(case, AcceptanceStage::ImportOnly).await;
+        if selected == "all" || selected == profile {
+            run_imported_comfy_quant_smoke(case, AcceptanceStage::ImportOnly).await;
+        }
     }
 }
