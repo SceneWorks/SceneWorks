@@ -25,7 +25,7 @@
 //   array / ';'-separated list of hub roots), TIER2_AB_INFERENCE_SHA (optional cross-check).
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn, spawnSync } from "node:child_process";
-import { chmod, copyFile, cp, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +53,7 @@ import { startKreaWindowsWorkerMemory } from "./lib/krea-windows-worker-memory.m
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 import {
   KREA_LINKED_SOURCE_REPAIR_CHECKOUT, KREA_LINKED_SOURCE_REPAIR_REVISION,
-  bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild,
+  appleRawProjectorReceipt, bindKreaAppleRawProjector, bindKreaLinkedSourceBuild, withKreaAppleRawProjector, withKreaLinkedSourceBuild,
 } from "./krea-tier2-linked-source.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -874,6 +874,11 @@ async function preflight(env, cfg, report, signal) {
   if (cfg.krea) {
     assertKreaPins(report.base.sha, report.base.inferencePin, report.head.sha, report.head.inferencePin);
     fact(report.head.inferencePin === cfg.inferenceSha, "candidate checkout does not source-pin the requested inference SHA");
+    const projector = appleRawProjectorReceipt(cfg.routes);
+    if (projector) {
+      assert.equal(report.base.inferencePin, projector.inferenceRevision, "Apple Raw projector repair requires the frozen inference pin");
+      report.base.kreaAppleRawProjector = projector;
+    }
     if (cfg.repairDir) {
       const binding = await readKreaLinkedSourceBuild(cfg);
       if (env.GITHUB_ACTIONS === "true") {
@@ -983,8 +988,19 @@ async function build(env, cfg, report) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
+    const cargoEnv = { ...scrubSecrets(env), CARGO_TARGET_DIR: target };
+    let projector;
+    if (label === "base" && report.base.kreaAppleRawProjector) {
+      // Keep the locked Git source and its exact package identities. Cargo owns the private checkout.
+      cargoEnv.CARGO_HOME = await mkdtemp(path.join(await realpath(scratch), "krea-apple-base-cargo-"));
+      const { stdout } = await execFile("cargo", ["metadata", "--locked", "--format-version", "1", "--filter-platform", "aarch64-apple-darwin"], {
+        cwd: dir, env: cargoEnv, timeout: 10 * 60_000, maxBuffer: 64 * 1024 ** 2,
+      });
+      projector = await bindKreaAppleRawProjector(cargoEnv.CARGO_HOME, JSON.parse(stdout), git);
+      assert.deepEqual(projector.receipt, report.base.kreaAppleRawProjector);
+    }
     const compile = async () => {
-      const cargo = () => runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+      const cargo = () => runLogged("cargo", args, { cwd: dir, env: cargoEnv, log });
       if (!cfg.perf && !cfg.allocation && !cfg.nativeProgress) return cargo();
       const file = path.join(dir, SAMPLER_SOURCE_FILE);
       const original = await readFile(file);
@@ -997,11 +1013,16 @@ async function build(env, cfg, report) {
         await writeFile(file, original);
       }
     };
-    const result = label === "base" && linkedSourceBuild
-      ? await withKreaLinkedSourceBuild(linkedSourceBuild, compile)
-      : await compile();
+    const compileApp = () => label === "base" && linkedSourceBuild
+      ? withKreaLinkedSourceBuild(linkedSourceBuild, compile)
+      : compile();
+    const result = projector ? await withKreaAppleRawProjector(projector, compileApp, log) : await compileApp();
     if (result.code !== 0) { await writeFile(path.join(evidence, `build-${label}.tail.log`), await tail(log, 64_000)); throw new Error(`${label} release build failed (${JSON.stringify(result)}); see build-${label}.tail.log`); }
     fact(await git(dir, "status", "--porcelain") === "" && await git(dir, "rev-parse", "HEAD") === sha, `${label} build changed its checkout`);
+    if (projector) {
+      fact(await git(projector.base, "status", "--porcelain", "--untracked-files=no") === "" &&
+        await git(projector.base, "rev-parse", "HEAD") === projector.receipt.inferenceRevision, "Apple Krea build changed its frozen inference checkout");
+    }
     let metallib = null;
     if (cfg.backend === "mlx") {
       const native = await bindMetallib({ messages: log, lockFile: path.join(dir, "Cargo.lock"), targetRoot: target, temporaryRoot: scratch, consumer: "app", explicitOverride: env.PMETAL_METALLIB_PATH ?? "", explicitNativeDirectory: env.PMETAL_MLX_PREBUILT_DIR ?? "" });
@@ -1010,7 +1031,8 @@ async function build(env, cfg, report) {
     const bin = path.join(scratch, "bin", label); await mkdir(bin, { recursive: true });
     for (const entry of await readdir(path.join(target, "release"), { withFileTypes: true })) if (entry.isFile() && (entry.name === exe || /\.(dll|dylib|so)$/i.test(entry.name))) await copyFile(path.join(target, "release", entry.name), path.join(bin, entry.name));
     const binary = path.join(bin, exe);
-    built[label] = { binary, binarySha256: await fileSha256(binary), samplerOverlay: report[label].samplerOverlay ?? null, metallib, buildSeconds: (Date.now() - started) / 1000 };
+    built[label] = { binary, binarySha256: await fileSha256(binary), samplerOverlay: report[label].samplerOverlay ?? null,
+      ...(projector && { kreaAppleRawProjector: projector.receipt }), metallib, buildSeconds: (Date.now() - started) / 1000 };
     report[label] = { ...report[label], binarySha256: built[label].binarySha256, buildSeconds: built[label].buildSeconds, metallibSha256: metallib?.sha256 ?? null };
   }
   if (linkedSourceBuild) {
@@ -1514,6 +1536,7 @@ async function runComparison(env, cfg, report, signal) {
   assert.deepEqual(recorded.kreaLinkedSourceBuild, report.kreaLinkedSourceBuild, "build used a different Krea linked-source repair");
   const built = recorded.built;
   for (const side of cfg.allocation ? ["head"] : ["base", "head"]) {
+    assert.deepEqual(built[side].kreaAppleRawProjector, report[side].kreaAppleRawProjector, "build used a different Apple Raw projector repair");
     if (cfg.perf || cfg.allocation || cfg.nativeProgress) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
     fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`);
     report[side].binarySha256 = built[side].binarySha256;

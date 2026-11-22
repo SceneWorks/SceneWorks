@@ -132,7 +132,9 @@ test("no credential reaches the compared builds or their processes", async () =>
     assert.deepEqual(Object.keys(child).filter((key) => /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$/i.test(key)), ["SCENEWORKS_CREDENTIALS_DIR"]);
   }
   const source = await readFile(path.join(root, "scripts", "tier2-ab.mjs"), "utf8");
-  assert.match(source, /env: \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/, "the cargo build gets the scrubbed environment");
+  assert.match(source, /const cargoEnv = \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/);
+  assert.match(source, /execFile\("cargo", \["metadata", "--locked"[^\n]*\n[^\n]*env: cargoEnv/, "Cargo metadata gets the scrubbed environment");
+  assert.match(source, /runLogged\("cargo", args, \{ cwd: dir, env: cargoEnv, log \}\)/, "Cargo build gets the scrubbed environment");
   assert.doesNotMatch(source, /base\.HF_TOKEN\s*=/);
   // A gated repository needs a credential for head's pinned-metadata admission, so it is skipped.
   const models = await readCatalog(root);

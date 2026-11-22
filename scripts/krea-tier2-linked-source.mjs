@@ -3,12 +3,28 @@ import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { sha256 } from "./lib/file-sha256.mjs";
+import { assertTerminalPhysicalContainment } from "./lib/starvector-terminal-pin-paths.mjs";
 
 export const KREA_LINKED_SOURCE_REPAIR_REVISION = "5b2c605c9371f7ecdf11dcbd6e76ac5e3d52d957";
 export const KREA_LINKED_SOURCE_REPAIR_CHECKOUT = "tier2-ab-krea-repair";
 const WINDOWS_RAW_ROUTING_FILE = "crates/sceneworks-core/src/jobs_store/routing/candle.rs";
 const WINDOWS_RAW_ROUTING_BASE_SHA256 = "dabba99e040d63659cec71cb84067431cc2bd2f1c1f89a018eea750ad7e038c7";
 const WINDOWS_RAW_ROUTING_REPAIR_SHA256 = "596a7690cf9f166fbcecef2e1b34bb223838069081140c232683dfbcc8225a4d";
+const KREA_APPLE_RAW_PACKAGE = "mlx-gen-krea";
+const KREA_APPLE_RAW_MANIFEST = "crates/media/mlx-gen/mlx-gen-krea/Cargo.toml";
+export const KREA_APPLE_RAW_PROJECTOR = Object.freeze({
+  inferenceRevision: "e86b8d5fc493c16b2d9d852e0c9ecbdefee58294",
+  file: "crates/media/mlx-gen/mlx-gen-krea/src/transformer/mod.rs",
+  originalSha256: "e6dcb5b38cb0011e5550a049edbc4703a94a4765af414d6f09ce623661af7344",
+  buildSha256: "ef16f9e2d7462a95d7c2e796c552aaa8c91a12980a29dedb3d70456b935c30d5",
+  mismatchRunId: "45051714564",
+  appliesTo: "Apple baseline Raw phase adapter clear",
+});
+const PROJECTOR_ANCHOR = "        self.txt_in_l2.set_adapters(Vec::new());\n        self.final_linear.set_adapters(Vec::new());\n";
+const PROJECTOR_CLEAR = `        self.adaptable_mut(&["text_fusion", "projector"])
+            .expect("Krea text-fusion projector is an adapter target")
+            .clear_adapters();
+`;
 const SOURCES = [
   ["apps/rust-api/src/portable_admission.rs",
     "41409a5904443d20b710e1d17c4f5f1ef8851b67777d9f9a032820db8cd4f9a5",
@@ -84,6 +100,53 @@ export async function bindKreaLinkedSourceBuild(baseDir, headDir, repairDir, { w
       baseCheckoutSha256: sha256(original), sharedBuildSha256: sha256(repaired) };
   }
   return { base, repair, replacements, receipt };
+}
+
+export function appleRawProjectorReceipt(routes) {
+  return routes.some(({ backend, proof }) => backend === "mlx" && proof === "raw") ? KREA_APPLE_RAW_PROJECTOR : undefined;
+}
+
+export async function bindKreaAppleRawProjector(cargoHome, metadata, git) {
+  const receipt = KREA_APPLE_RAW_PROJECTOR;
+  const packages = metadata.packages.filter(({ name }) => name === KREA_APPLE_RAW_PACKAGE);
+  const [provider] = packages;
+  assert.ok(packages.length === 1 && provider.source ===
+    `git+https://github.com/SceneWorks/inference?rev=${receipt.inferenceRevision}#${receipt.inferenceRevision}`,
+  "Cargo did not resolve the exact frozen Apple Krea provider");
+  const manifest = provider.manifest_path;
+  const base = path.resolve(path.dirname(manifest), "../../../..");
+  const checkouts = path.join(cargoHome, "git", "checkouts");
+  const relative = path.relative(checkouts, base);
+  assert.match(relative.split(path.sep).join("/"), /^inference-[a-f0-9]+\/[a-f0-9]+$/, "Krea projector repair must use the private Cargo checkout");
+  assert.equal(manifest, path.join(base, KREA_APPLE_RAW_MANIFEST), "unexpected frozen Krea manifest path");
+  await assertTerminalPhysicalContainment(cargoHome, path.dirname(manifest));
+  assert.equal(await git(base, "rev-parse", "--show-toplevel"), base);
+  assert.equal(await git(base, "rev-parse", "HEAD"), receipt.inferenceRevision);
+  assert.equal(await git(base, "status", "--porcelain", "--untracked-files=no"), "", "frozen Cargo checkout changed before the Apple Krea repair");
+  const original = await readSource(base, receipt.file);
+  assert.equal(sha256(original), receipt.originalSha256, "unreviewed frozen Krea projector source");
+  const pieces = original.toString("utf8").split(PROJECTOR_ANCHOR);
+  assert.equal(pieces.length, 2, "frozen Krea adapter clear must have one exact anchor");
+  const repaired = Buffer.from(pieces.join(PROJECTOR_ANCHOR + PROJECTOR_CLEAR));
+  assert.equal(sha256(repaired), receipt.buildSha256, "unreviewed Apple Krea projector repair bytes");
+  return { base, manifest, replacements: [{ file: receipt.file, original, repaired }], receipt };
+}
+
+export async function withKreaAppleRawProjector(binding, build, messages) {
+  return withKreaLinkedSourceBuild(binding, async () => {
+    const result = await build();
+    if (result.code === 0) {
+      const compiled = (await readFile(messages, "utf8")).split(/\r?\n/)
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((message) => message.reason === "compiler-artifact" && message.target?.name === "mlx_gen_krea");
+      assert.ok(compiled.length === 1 && compiled[0].manifest_path === binding.manifest && compiled[0].fresh === false,
+        "Apple Krea baseline build did not compile its private repaired provider");
+      assert.equal(sha256(await readSource(binding.base, binding.receipt.file)), binding.receipt.buildSha256,
+        "frozen Apple Krea projector repair changed during the build");
+    }
+    return result;
+  });
 }
 
 // Only the frozen proof checkout changes. Restore every attempted write before publishing a binary receipt.

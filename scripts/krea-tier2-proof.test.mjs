@@ -6,8 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
 import {
-  KREA_LINKED_SOURCE_REPAIR_REVISION, bindKreaLinkedSourceBuild,
-  reviewedKreaLinkedSourceCandidate, withKreaLinkedSourceBuild,
+  KREA_APPLE_RAW_PROJECTOR, KREA_LINKED_SOURCE_REPAIR_REVISION, appleRawProjectorReceipt, bindKreaAppleRawProjector,
+  bindKreaLinkedSourceBuild, reviewedKreaLinkedSourceCandidate, withKreaAppleRawProjector, withKreaLinkedSourceBuild,
 } from "./krea-tier2-linked-source.mjs";
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_RAW_ADAPTER, KREA_RAW_LORA, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
@@ -81,6 +81,60 @@ test("Krea baseline restores exact checkout bytes after the borrowed-source buil
     throw new Error("fixture build failed");
   }), /fixture build failed/);
   assert.deepEqual(await readFile(file), replaced.original);
+});
+
+test("only paired Apple Raw selects the frozen projector correction", () => {
+  assert.equal(appleRawProjectorReceipt([RAW, HIRES]), KREA_APPLE_RAW_PROJECTOR);
+  assert.equal(KREA_APPLE_RAW_PROJECTOR.inferenceRevision, KREA_BASE_ENGINE);
+  assert.equal(appleRawProjectorReceipt([HIRES]), undefined);
+  assert.equal(appleRawProjectorReceipt(kreaRoutes("cuda")), undefined);
+  assert.equal(appleRawProjectorReceipt(kreaRoutes("cuda", { allocation: true })), undefined);
+  assert.deepEqual(HIRES.body.loras, []);
+  assert.equal(HIRES.body.advanced.phases, undefined);
+  assert.equal(HIRES.body.model, LINKED_MODEL);
+});
+
+test("Krea projector binder refuses unpinned, shared and modified Cargo sources", async (t) => {
+  const temp = await mkdtemp(path.join(tmpdir(), "krea-cargo-projector-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const home = await realpath(temp);
+  const engine = path.join(home, "git", "checkouts", "inference-49f35a375a576bbb", "e86b8d5");
+  const file = path.join(engine, KREA_APPLE_RAW_PROJECTOR.file);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, "modified projector source");
+  const manifest_path = path.join(engine, "crates/media/mlx-gen/mlx-gen-krea/Cargo.toml");
+  const source = `git+https://github.com/SceneWorks/inference?rev=${KREA_BASE_ENGINE}#${KREA_BASE_ENGINE}`;
+  const provider = { name: "mlx-gen-krea", manifest_path, source };
+  async function git(_dir, ...args) {
+    return { "--show-toplevel": engine, HEAD: KREA_BASE_ENGINE, "--untracked-files=no": "" }[args.at(-1)];
+  }
+  await assert.rejects(bindKreaAppleRawProjector(home, { packages: [{ ...provider, source: "other source" }] }, git), /exact frozen Apple Krea provider/);
+  await assert.rejects(bindKreaAppleRawProjector(path.join(home, "different-private-home"), { packages: [provider] }, git), /private Cargo checkout/);
+  await assert.rejects(bindKreaAppleRawProjector(home, { packages: [provider] }, git), /unreviewed frozen Krea projector source/);
+});
+
+test("Krea projector compile receipt rejects an unrelated or fresh artifact and restores the source", async (t) => {
+  const temp = await mkdtemp(path.join(tmpdir(), "krea-projector-restore-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const base = await realpath(temp);
+  const replaced = { file: "projector.rs", original: Buffer.from("original"), repaired: Buffer.from("repaired") };
+  const file = path.join(base, replaced.file);
+  await writeFile(file, replaced.original);
+  const log = path.join(base, "build.jsonl");
+  const manifest = path.join(base, "Cargo.toml");
+  const receipt = { file: replaced.file, buildSha256: createHash("sha256").update(replaced.repaired).digest("hex") };
+  const binding = { base, manifest, replacements: [replaced], receipt };
+  const artifact = { reason: "compiler-artifact", manifest_path: manifest, fresh: false, target: { name: "mlx_gen_krea" } };
+  for (const fields of [{ fresh: true }, { manifest_path: "/different/Cargo.toml" }, {}]) {
+    const build = withKreaAppleRawProjector(binding, async () => {
+      assert.deepEqual(await readFile(file), replaced.repaired);
+      await writeFile(log, JSON.stringify({ ...artifact, ...fields }) + "\n");
+      return { code: 0 };
+    }, log);
+    if (Object.keys(fields).length) await assert.rejects(build, /did not compile its private repaired provider/);
+    else assert.deepEqual(await build, { code: 0 });
+    assert.deepEqual(await readFile(file), replaced.original);
+  }
 });
 
 function inputs(options = {}, over = {}) {
