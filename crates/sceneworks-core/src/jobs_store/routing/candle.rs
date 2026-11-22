@@ -104,6 +104,7 @@ pub(crate) enum CandleImageLane {
     Flux1Control,
     Flux2Control,
     KreaControl,
+    KreaMultiPhase,
     KreaImg2Img,
     Pulid,
     TextToImage,
@@ -453,6 +454,14 @@ pub(crate) fn image_job_candle_lane_with_context(
         return None;
     }
 
+    // The Raw worker dispatches explicit phases before its edit and ordinary generation lanes.
+    // Keep a conflicting phase request from falling through to either lane.
+    if model == "krea_2_raw" && context.options.phases.is_present_nonnull() {
+        return (job.job_type == JobType::ImageGenerate
+            && krea_raw_phases_candle_eligible(context))
+        .then_some(CandleImageLane::KreaMultiPhase);
+    }
+
     CANDLE_IMAGE_ROUTES
         .iter()
         .find(|route| route.matches(model, context))
@@ -460,6 +469,50 @@ pub(crate) fn image_job_candle_lane_with_context(
         .or_else(|| {
             image_request_candle_eligible_with_context(model, context)
                 .then_some(CandleImageLane::TextToImage)
+        })
+}
+
+fn krea_raw_phases_candle_eligible(context: &crate::jobs_store::routing::RouteContext<'_>) -> bool {
+    use crate::resolved_options::RouteField;
+
+    let payload = context.payload;
+    let options = context.options;
+    let low_res_start = match &options.low_res_start {
+        RouteField::Valid(start) => !start.disabled,
+        RouteField::Invalid => true,
+        RouteField::Absent | RouteField::Null => false,
+    };
+    let tier = options.requested_runtime_variant(options.variant.as_deref());
+    // The worker validates the ordered schedule and its adapter references before loading weights.
+    matches!(options.phases, RouteField::Valid(1..))
+        && payload.get("mode").and_then(Value::as_str) == Some("text_to_image")
+        && ![
+            "sourceAssetId",
+            "referenceAssetId",
+            "maskAssetId",
+            "characterId",
+            "characterLookId",
+        ]
+        .iter()
+        .any(|key| has_nonempty_or_malformed_string(payload, key))
+        && !["referenceAssetIds", "controls", "controlnets"]
+            .iter()
+            .any(|key| has_nonempty_or_malformed_array(payload, key))
+        && !matches!(
+            options.use_pid,
+            RouteField::Valid(true) | RouteField::Invalid
+        )
+        && !matches!(
+            options.hires_fix_enabled,
+            RouteField::Valid(true) | RouteField::Invalid
+        )
+        && !low_res_start
+        && !options.conv_rot_selected()
+        && matches!(tier.as_deref(), None | Some("q4" | "q8" | "bf16"))
+        && crate::jobs_store::routing::probe_image_precision_options_from_facts(options).is_ok()
+        && CANDLE_ROUTED_MODELS.contains(&"krea_2_raw")
+        && CANDLE_IMAGE_CHECKS.iter().all(|(kind, refuses)| {
+            *kind == CandleImageRefusal::Phases || !refuses("krea_2_raw", context)
         })
 }
 
