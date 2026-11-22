@@ -1248,6 +1248,12 @@ fn portable_owner_gate_requires_each_module_to_be_reviewed() {
     assert!(portable_owner_module(
         "crates/sceneworks-options/src/h3_veda.rs"
     ));
+    assert!(portable_owner_module(
+        "crates/sceneworks-options/src/source_precision.rs"
+    ));
+    assert!(!portable_owner_module(
+        "crates/sceneworks-worker/src/source_precision.rs"
+    ));
     assert!(!portable_owner_module(
         "crates/sceneworks-options/src/new_execution_reader.rs"
     ));
@@ -1422,6 +1428,9 @@ fn portable_owner_module(file: &str) -> bool {
             | "crates/sceneworks-options/src/request_validation.rs"
             | "crates/sceneworks-options/src/request_validation/shape.rs"
             | "crates/sceneworks-options/src/sensenova_validation.rs"
+            // Validates authored precision carriers before resolution and removes historical
+            // conversion selectors. Registered-key coverage still checks every read here.
+            | "crates/sceneworks-options/src/source_precision.rs"
             | "crates/sceneworks-options/src/supra2.rs"
             | "crates/sceneworks-options/src/training_validation.rs"
             | "crates/sceneworks-options/src/training_validation/body_losses.rs"
@@ -1820,7 +1829,7 @@ fn raw_option_map_mutations_have_reviewed_sites() {
         ),
         (
             "apps/rust-api/src/jobs.rs",
-            "canonicalize_image_model_payload",
+            "canonicalize_image_model_payload_with_replay_changes",
             "key",
         ),
         (
@@ -1894,6 +1903,13 @@ fn raw_option_map_mutations_have_reviewed_sites() {
             "crates/sceneworks-options/src/sensenova_validation.rs",
             "materialize_interleave",
             "computed expression",
+        ),
+        // Fixed-source authoring removes only the finite historical precision selectors;
+        // execution receives the verified source contract rather than these raw overrides.
+        (
+            "crates/sceneworks-options/src/source_precision.rs",
+            "clear_advanced_precision_selectors",
+            "key",
         ),
         // Fresh-generation authoring removes the finite machine-decision fields before
         // persistence; exact replay follows its separate verified receipt path.
