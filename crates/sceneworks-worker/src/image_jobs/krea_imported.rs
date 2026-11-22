@@ -2,8 +2,6 @@ use super::adapters::resolve_prepared_adapters;
 use super::adapters::PreparedAdapters;
 #[cfg(not(target_os = "macos"))]
 use super::admit_conditioning_paths;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::base_admission::prepared_adapter_source_bytes;
 use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
 use super::checkpoint_plan::checkpoint_plan_operation;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
@@ -2194,6 +2192,36 @@ impl PreparedKreaHires {
     }
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_hires_adapter_device_bytes(spec: &LoadSpec) -> gen_core::Result<u64> {
+    // Empty phases price the provider's default ordered stack, including one independently
+    // installed copy of each projection per slot and its BF16 compute cache.
+    let installed = runtime_cuda::providers::krea::phase_adapter_memory(spec, &[])?.device_bytes;
+    Ok(installed.max(candle_hires_fold_upload_bytes(spec)?))
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn candle_hires_fold_upload_bytes(spec: &LoadSpec) -> gen_core::Result<u64> {
+    if !matches!(spec.weights, WeightsSource::File(_)) {
+        return Ok(0);
+    }
+    // The native-file loader folds .diff/.diff_b into CPU F32 weights and uploads each
+    // result before casting to the base dtype. The base contract already prices the
+    // final weights. The largest F32 upload is transient, before residual installation.
+    spec.adapters.iter().try_fold(0_u64, |peak, adapter| {
+        let upload = spec.read_file_unchanged_if_prepared(&adapter.path, |path| {
+            gen_core::weightsmeta::safetensors_path_tensor_headers(path)?
+                .into_iter()
+                .filter(|header| header.name.ends_with(".diff") || header.name.ends_with(".diff_b"))
+                .try_fold(0_u64, |peak, header| {
+                    let elements = header.element_count()?;
+                    Ok::<_, gen_core::Error>(peak.max(elements.saturating_mul(4)))
+                })
+        })?;
+        Ok(peak.max(upload))
+    })
+}
+
 #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 pub(super) fn candle_hires_missing_weight_bytes(
     facts: &gen_core::MemoryAssetFacts,
@@ -2258,6 +2286,74 @@ fn candle_hires_same_key_retry_charges_physically_missing_weights() {
     assert_eq!(base_only, 300);
     assert!(budget.fits(base_only));
     assert_eq!(both, 0);
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_hires_prices_bf16_adapters_per_ordered_slot() {
+    let fixture = tempfile::tempdir().unwrap();
+    let path = fixture.path().join("lora.safetensors");
+    let factor_elements = 256 * 4;
+    let factor_bytes = factor_elements * 2;
+    let header = json!({
+        "transformer_blocks.0.attn.to_q.lora_A.weight": {
+            "dtype": "BF16", "shape": [4, 256], "data_offsets": [0, factor_bytes],
+        },
+        "transformer_blocks.0.attn.to_q.lora_B.weight": {
+            "dtype": "BF16", "shape": [256, 4], "data_offsets": [factor_bytes, 2 * factor_bytes],
+        },
+    });
+    let header = serde_json::to_vec(&header).unwrap();
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend(header);
+    file.resize(file.len() + 2 * factor_bytes, 0);
+    std::fs::write(&path, file).unwrap();
+
+    let mut spec =
+        LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned())).with_adapters(vec![
+            gen_core::AdapterSpec::new(path.clone(), 0.25, gen_core::AdapterKind::Lora),
+        ]);
+    spec.prepare_file_sources().unwrap();
+    let one_slot = candle_hires_adapter_device_bytes(&spec).unwrap();
+    assert_eq!(one_slot, 2 * factor_elements as u64 * (4 + 2));
+
+    let mut duplicate = spec.adapters[0].clone();
+    duplicate.scale = 0.75;
+    spec.adapters.push(duplicate);
+    spec.prepare_file_sources().unwrap();
+    assert_eq!(
+        candle_hires_adapter_device_bytes(&spec).unwrap(),
+        2 * one_slot
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn candle_hires_prices_folded_bf16_delta_upload_at_f32() {
+    let fixture = tempfile::tempdir().unwrap();
+    let path = fixture.path().join("diff.safetensors");
+    let header =
+        br#"{"text_fusion.projector.diff":{"dtype":"BF16","shape":[2,3],"data_offsets":[0,12]}}"#;
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend_from_slice(header);
+    file.extend_from_slice(&[0; 12]);
+    std::fs::write(&path, file).unwrap();
+    let checkpoint = fixture.path().join("imported.safetensors");
+    std::fs::write(&checkpoint, []).unwrap();
+    let prepared = |adapters| {
+        let mut spec =
+            LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned())).with_adapters(adapters);
+        spec.prepare_file_sources().unwrap();
+        spec
+    };
+    let first = gen_core::AdapterSpec::new(path.clone(), 0.25, gen_core::AdapterKind::Lora);
+    let second = gen_core::AdapterSpec::new(path, 0.75, gen_core::AdapterKind::Lora);
+    let one_slot = candle_hires_adapter_device_bytes(&prepared(vec![first.clone()])).unwrap();
+    assert_eq!(one_slot, 2 * factor_elements as u64 * (4 + 2));
+    assert_eq!(
+        candle_hires_adapter_device_bytes(&prepared(vec![first, second])).unwrap(),
+        2 * one_slot,
+    );
 }
 
 /// Candle's imported checkpoint uses the source floor and explicit workspaces. Scope geometry
@@ -2773,7 +2869,8 @@ pub(super) async fn generate_krea_imported_stream(
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
         let quant = runtime_cuda::providers::krea::actual_quant_tier(&spec, engine_id)
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
-        let adapter_bytes = prepared_adapter_source_bytes(&spec)?;
+        let adapter_bytes = candle_hires_adapter_device_bytes(&spec)
+            .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
         let cold_bytes = candle_hires_missing_weight_bytes(
             &contract.asset_facts,
             encoder.device_bytes,
