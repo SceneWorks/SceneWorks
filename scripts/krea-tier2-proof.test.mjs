@@ -12,7 +12,7 @@ import {
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_RAW_ADAPTER, KREA_RAW_LORA, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
   assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, assertKreaRawAdapterFactors, importKreaRawAdapter, kreaRoutes,
-  kreaAssetInventory, kreaExpectedStepEvents, kreaPerformance, kreaSnapshotFile, openKreaEvents, priceKreaAssets, stageKreaAssets,
+  kreaAssetInventory, kreaExpectedStepEvents, kreaPerformance, kreaRawOutputDiagnostics, kreaSnapshotFile, openKreaEvents, priceKreaAssets, stageKreaAssets,
 } from "./krea-tier2-proof.mjs";
 
 const HEAD = "1".repeat(40);
@@ -572,7 +572,10 @@ function rawOutputProof(dataRoot, locator) {
   const asset = { ...sidecar, recipe: { ...recipe, loras: [publicAdapter] } };
   const libraryAsset = {
     ...sidecar, projectId: "p", lineage: { jobId: "job" }, generationSetId: "set",
-    generationSet: { id: "set", jobId: "job", recipe, prompt: body.prompt },
+    generationSet: {
+      id: "set", jobId: "job", prompt: body.prompt,
+      recipe: { ...recipe, rawAdapterSettings: { ...raw, modelRepo: "SceneWorks/krea-2-raw-mlx" } },
+    },
   };
   const share = {
     prompt: body.prompt, negativePrompt: body.negativePrompt,
@@ -593,6 +596,7 @@ test("Raw compares the exact public job projection while keeping the full genera
   assert.deepEqual(assertKreaOutput(proof).raw.phasePlan, RAW.body.advanced.phases);
   assert.deepEqual(proof.sidecar.recipe.loras, proof.library[0].generationSet.recipe.loras);
   assert.equal(proof.sidecar.recipe.loras[0].source.path, locator);
+  assert.equal(Object.hasOwn(proof.sidecar.recipe.rawAdapterSettings, "modelRepo"), false);
 
   const windowsRoot = "D:\\runner\\run\\state\\data";
   const windowsLocator = path.win32.toNamespacedPath(path.win32.join(windowsRoot, ...segments));
@@ -612,6 +616,10 @@ test("Raw compares the exact public job projection while keeping the full genera
   rejects(({ asset }) => { asset.recipe.loras[0].weight = 0.75; }, /exact redacted disk sidecar/);
   rejects(({ asset }) => { delete asset.recipe.loras[0].triggerWords; }, /exact redacted disk sidecar/);
   rejects(({ asset, library }) => { library[0].generationSet.recipe = asset.recipe; }, /generation set must preserve persisted recipe/);
+  rejects(({ library }) => { delete library[0].generationSet.recipe.rawAdapterSettings.modelRepo; }, /generation set must preserve persisted recipe/);
+  rejects(({ library }) => { library[0].generationSet.recipe.rawAdapterSettings.modelRepo = "Other/krea"; }, /generation set must preserve persisted recipe/);
+  rejects(({ library }) => { delete library[0].generationSet.recipe.rawAdapterSettings.repo; }, /generation set must preserve persisted recipe/);
+  rejects(({ sidecar }) => { sidecar.recipe.rawAdapterSettings.modelRepo = "Other/krea"; }, /Raw repo aliases must agree/);
   rejects(({ sidecar }) => { delete sidecar.recipe.loras[0].source.path; }, /source.path must match its installed locator/);
   rejects(({ sidecar }) => { sidecar.recipe.loras[0].sourcePath = `${locator}/other`; }, /sourcePath must match its installed locator/);
   assert.throws(() => assertKreaOutput(rawOutputProof(`${dataRoot}-other`, locator)), /owned portable bundle member/);
@@ -621,6 +629,18 @@ test("Raw compares the exact public job projection while keeping the full genera
   rejects(({ share }) => { share.loras[0].path = locator; }, /exact shareable adapter attribution/);
   rejects(({ share }) => { share.loras[0].hash = "b".repeat(64); }, /exact shareable adapter attribution/);
   rejects(({ sidecar }) => { sidecar.recipe.rawAdapterSettings.phases[1].loras[0].weight = 0.5; }, /0.75/);
+});
+
+test("Raw failure diagnostics report each comparison without exposing artifact metadata", () => {
+  const dataRoot = "/runner/private/state/data";
+  const locator = `${dataRoot}/models/portable-attempts/${"a".repeat(64)}/bundle/model0/member1/`;
+  const proof = rawOutputProof(dataRoot, locator);
+  proof.asset.recipe.loras[0].installedPath = locator;
+  proof.share.loras[0].weight = 0.5;
+  assert.deepEqual(kreaRawOutputDiagnostics(proof), {
+    libraryCount: 1, jobAssetMatches: false, generationSetRecipeMatches: true,
+    diskSamplingMatches: true, sharePromptMatches: true, shareLorasMatch: false,
+  });
 });
 
 test("a skipped, refused or incomparable arm cannot pass the Krea product suite", () => {

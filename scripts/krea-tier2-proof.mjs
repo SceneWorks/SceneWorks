@@ -544,6 +544,47 @@ function publicKreaRawAsset(sidecar, route, adapterImport, dataRoot) {
   return publicAsset;
 }
 
+function hydratedKreaRawRecipe(recipe) {
+  const raw = recipe?.rawAdapterSettings;
+  assert.equal(raw?.repo, RAW.repo);
+  // Asset history upgrades the recipe's options: "repo" is retained and mirrored to "modelRepo".
+  assert.ok(!Object.hasOwn(raw, "modelRepo") || raw.modelRepo === raw.repo, "Raw repo aliases must agree");
+  return { ...recipe, rawAdapterSettings: { ...raw, modelRepo: raw.repo } };
+}
+
+function kreaRawShareLoras(route) {
+  return [{ name: path.posix.basename(KREA_RAW_ADAPTER.file, ".safetensors"), weight: route.body.loras[0].weight, hash: KREA_RAW_ADAPTER.sha256 }];
+}
+
+function assertKreaRawSampling(raw, route) {
+  assert.equal(raw?.realModelInference, true);
+  assert.equal(raw.repo, RAW.repo);
+  assert.equal(raw.samplingRegime, "krea_2_raw_multiphase");
+  assert.equal(raw.multiPhase, true);
+  assert.equal(raw.mlxQuantize, 4);
+  assert.deepEqual(raw.phases, PHASES);
+  assert.equal(raw.numInferenceSteps, route.steps);
+}
+
+export function kreaRawOutputDiagnostics({ route, asset, library, sidecar, share, adapterImport, dataRoot }) {
+  function passes(check) {
+    try {
+      check();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return {
+    libraryCount: Array.isArray(library) ? library.length : null,
+    jobAssetMatches: passes(() => assert.deepEqual(asset, publicKreaRawAsset(sidecar, route, adapterImport, dataRoot))),
+    generationSetRecipeMatches: passes(() => assert.deepEqual(library?.[0]?.generationSet?.recipe, hydratedKreaRawRecipe(sidecar.recipe))),
+    diskSamplingMatches: passes(() => assertKreaRawSampling(sidecar.recipe?.rawAdapterSettings, route)),
+    sharePromptMatches: share?.prompt === route.body.prompt && (share?.negativePrompt ?? "") === route.body.negativePrompt,
+    shareLorasMatch: passes(() => assert.deepEqual(share?.loras, kreaRawShareLoras(route))),
+  };
+}
+
 export function assertKreaOutput({ route, job, asset, library, sidecar, share, width, height, workerId, projectId, adapterImport, dataRoot }) {
   assert.equal(job.workerId, workerId);
   assert.equal(job.result?.model, route.body.model);
@@ -566,7 +607,8 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
   } else {
     assert.deepEqual(asset, sidecar, "API asset and exact disk sidecar must agree");
   }
-  assert.deepEqual(hydrated.generationSet?.recipe, sidecar.recipe, "generation set must preserve persisted recipe");
+  const generationSetRecipe = route.proof === "raw" ? hydratedKreaRawRecipe(sidecar.recipe) : sidecar.recipe;
+  assert.deepEqual(hydrated.generationSet?.recipe, generationSetRecipe, "generation set must preserve persisted recipe");
   assert.equal(hydrated.generationSet.prompt, PROMPT);
   assert.equal(sidecar.recipe?.prompt, PROMPT);
   assert.equal(sidecar.recipe?.seed, route.body.seed);
@@ -578,18 +620,13 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
   assert.equal(sidecar.file?.width, width);
   assert.equal(sidecar.file?.height, height);
   const raw = sidecar.recipe?.rawAdapterSettings;
-  assert.equal(raw?.realModelInference, true);
   if (route.proof === "raw") {
     assert.equal(job.payload?.model, "krea_2_raw");
     assert.deepEqual(job.payload?.loras?.map(({ id, weight }) => ({ id, weight })), route.body.loras);
-    assert.deepEqual(share.loras, [{ name: path.posix.basename(KREA_RAW_ADAPTER.file, ".safetensors"), weight: route.body.loras[0].weight, hash: KREA_RAW_ADAPTER.sha256 }], "PNG workflow must contain the exact shareable adapter attribution");
-    assert.equal(raw.repo, RAW.repo);
-    assert.equal(raw.samplingRegime, "krea_2_raw_multiphase");
-    assert.equal(raw.multiPhase, true);
-    assert.equal(raw.mlxQuantize, 4);
-    assert.deepEqual(raw.phases, PHASES);
-    assert.equal(raw.numInferenceSteps, route.steps);
+    assert.deepEqual(share.loras, kreaRawShareLoras(route), "PNG workflow must contain the exact shareable adapter attribution");
+    assertKreaRawSampling(raw, route);
   } else {
+    assert.equal(raw?.realModelInference, true);
     assert.equal(raw.importedCheckpoint, LINKED_MODEL);
     assert.equal(raw.engine, `${route.backend === "mlx" ? "mlx" : "candle"}_krea_imported`);
     const facts = raw.checkpointWeightFacts;

@@ -41,7 +41,7 @@ import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText, uti
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, assertKreaPins, kreaRoutes, kreaAssetInventory,
   assertKreaCatalogRows, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importKreaRawAdapter, importLinkedKrea,
-  assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaPerformance,
+  assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaRawOutputDiagnostics, kreaPerformance,
 } from "./krea-tier2-proof.mjs";
 import {
   SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedCudaAttachment,
@@ -1347,12 +1347,21 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const sidecar = JSON.parse(await readFile(sidecarFile, "utf8"));
       const { imageQualityStats, readWorkflowShareFromPng } = await import("./pag-acceptance.mjs");
       const { width, height, rgba } = decodePng(saved);
-      record.productProof = assertKreaOutput({
+      const outputProof = {
         route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved),
         width, height, workerId, projectId: project.id, adapterImport: record.adapterImport, dataRoot: path.join(stateReal, "data"),
-      });
-      record.productProof.imageStats = imageQualityStats(rgba);
-      fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
+      };
+      try {
+        record.productProof = assertKreaOutput(outputProof);
+        record.productProof.imageStats = imageQualityStats(rgba);
+        fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
+      } catch (error) {
+        if (route.proof === "raw") record.rawOutputDiagnostics = {
+          ...kreaRawOutputDiagnostics(outputProof), width, height,
+          rgbaSha256: sha256(rgba), channelStdDev: imageQualityStats(rgba).channelStdDev,
+        };
+        throw error;
+      }
     }
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
