@@ -158,23 +158,23 @@ export async function sweepMoss(workspace, env, { attempt = runAttempt, storage 
   }
 }
 
-export async function main(env = process.env) {
+export async function main(env = process.env, { storage = native, prepare = prepareDevHost } = {}) {
   if (process.platform !== 'win32' || env.RUNNER_ENVIRONMENT !== 'self-hosted') return;
   const workspace = resolve(env.GITHUB_WORKSPACE);
   if (!env.STATE_registered) {
     // Registered before rust-cache: post actions run in reverse order, so uploads finish first.
     // The barrier coordinates a newly starting model reader with a running deletion.
-    if ((await native('barrier', workspace, dirname(workspace))).status !== 'registered') throw Error('Could not register storage safety barrier');
+    if ((await storage('barrier', workspace, dirname(workspace))).status !== 'registered') throw Error('Could not register storage safety barrier');
     await appendFile(env.GITHUB_STATE, 'registered=true\n');
-    if (env.INPUT_DEV_HOST === 'true') await prepareDevHost(env);
+    if (env['INPUT_DEV-HOST'] === 'true') await prepare(env);
     return;
   }
   for (const target of disposableTargets(workspace, env)) {
-    if (await exists(target)) await native('cargo', target, dirname(target));
+    if (await exists(target)) await storage('cargo', target, dirname(target));
   }
   if (env.INPUT_MOSS === 'true' && env.GITHUB_REPOSITORY === 'SceneWorks/SceneWorks') await sweepMoss(workspace, env);
   if (env.STATE_dev_host_root && await exists(env.STATE_dev_host_root)) {
-    if (env.DEV_HOST_WORK_UPLOADS_COMPLETE === 'true') await native('job-work', env.STATE_dev_host_root, resolve(env.DEV_HOST_ROOT, 't'));
+    if (env.DEV_HOST_WORK_UPLOADS_COMPLETE === 'true') await storage('job-work', env.STATE_dev_host_root, resolve(env.DEV_HOST_ROOT, 't'));
     else console.log(JSON.stringify({ status: 'skipped', path: env.STATE_dev_host_root, reason: 'Evidence publication not confirmed; retained for recovery and scheduled dev-host retention' }));
   }
 }

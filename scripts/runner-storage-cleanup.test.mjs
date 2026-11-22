@@ -245,6 +245,14 @@ test('failed or unconfirmed publication preserves owned job work', { skip: proce
   assert.equal(await readFile(join(work,'recovery'),'utf8'), 'keep');
 });
 
+test('Actions dev-host input reaches setup and post state, and failed barriers never start work', { skip: process.platform !== 'win32' }, async t => {
+  const root=await fixture(t), state=join(root,'state'), prepared=[];
+  const env={RUNNER_ENVIRONMENT:'self-hosted',GITHUB_WORKSPACE:root,GITHUB_STATE:state,'INPUT_DEV-HOST':'true'};
+  await main(env,{storage:async mode=>{assert.equal(mode,'barrier');return {status:'registered'};},prepare:async received=>prepared.push(received)});
+  assert.deepEqual(prepared,[env]); assert.equal(await readFile(state,'utf8'),'registered=true\n');
+  await assert.rejects(main(env,{storage:async()=>({status:'skipped'}),prepare:async()=>assert.fail('barrier bypassed')}),/safety barrier/);
+});
+
 test('job cleanup retains mismatched owners and live files without deleting siblings', { skip: process.platform !== 'win32' }, async t => {
   const root = await fixture(t), work = join(root, '1234abcd'); await mkdir(work);
   const owner = { repository: 'SceneWorks/test', run: '123', attempt: '2', job: 'proof', runner: 'runner', nonce: 'owned' };
