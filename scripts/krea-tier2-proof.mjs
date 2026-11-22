@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, statfs, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import { probeCacheFile } from "./h3-finetune-terminal-stage.mjs";
 import { KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_FINAL_SIZE } from "./krea-tier2-allocation.mjs";
+import { fileSha256 } from "./lib/file-sha256.mjs";
 
 export const KREA_SUITE = "krea-scoped-acceptance";
 export const KREA_BASE_APP = "2aa525dfb2fb1ab889bd6a15f80c0a0cc1df1e2d";
@@ -15,14 +16,15 @@ export const KREA_BASE_ENGINE = "e86b8d5fc493c16b2d9d852e0c9ecbdefee58294";
 const RAW = { repo: "SceneWorks/krea-2-raw-mlx", revision: "b88090c79762ba34b1de23a892da239eb76962e4" };
 const COMPANION = { repo: "SceneWorks/krea-2-turbo-mlx", revision: "d009674080cc1bccf2b629d834c34bf5eccdb723" };
 const COMFY = { repo: "Comfy-Org/Krea-2", revision: "952f49d49653cb42e7d6cf7cbfad74738073ec7d" };
-const ADAPTER = { ...COMFY, file: "loras/krea2_turbo_lora_rank_64_bf16.safetensors", bytes: 469423778, sha256: "db8c5bae0a415d448da9d842111d6e51f7d32e47143a3118eb267e5c4773de87" };
+export const KREA_RAW_ADAPTER = Object.freeze({ ...COMFY, file: "loras/krea2_darkbrush.safetensors", bytes: 469291992, sha256: "f47c4316dd93af66e0518c93b582f459571d4925b519133770c73a52cd5db7c6" });
+export const KREA_RAW_LORA = "krea2_darkbrush_phase_proof";
 export const CHECKPOINT = Object.freeze({ ...COMFY, file: "diffusion_models/krea2_turbo_bf16.safetensors", bytes: 26283332608, sha256: "78bbf8f4165eda19cea3cb06c78089221932a39e2eed8af9da741f942c47ffb3" });
 export const LINKED_MODEL = "linked_krea2_turbo_bf16_proof";
 const PROMPT = "A red glass apple beside a blue ceramic cup, a sharp studio photograph with soft shadows";
 const NEGATIVE = "blur, text, watermark";
 const PHASES = [{ steps: 3, guidance: 0, loras: [] }, { steps: 4, guidance: 1, loras: [{ index: 0, weight: 0.75 }] }, { steps: 3, guidance: 0, loras: [] }];
 const HIRES = { enabled: true, upscaleBy: 1.5, steps: 4, denoisingStrength: 0.5 };
-const PROJECTOR_KEYS = ["diffusion_model.txtfusion.projector.lora_down.weight", "diffusion_model.txtfusion.projector.lora_up.weight"];
+const PROJECTOR = "transformer.text_fusion.projector";
 const GIB = 1024 ** 3;
 const STAGING_PROGRESS_BYTES = GIB / 4;
 
@@ -30,7 +32,7 @@ export function kreaRoutes(backend, { allocation = false } = {}) {
   const shared = { backend, kind: "image", mode: "text_to_image", group: null, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20 };
   const body = { mode: shared.mode, prompt: PROMPT, width: 512, height: 512, count: 1, seed: 33602 };
   const routes = [
-    { ...shared, id: `${backend}-krea-raw-phases`, model: "krea_2_raw", tier: "q4", proof: "raw", steps: 10, executedSteps: 10, finalSize: 512, body: { ...body, model: "krea_2_raw", negativePrompt: NEGATIVE, loras: [{ id: "krea2_turbo_accel", weight: 1 }], advanced: { mlxQuantize: 4, sampler: "euler", phases: PHASES } } },
+    { ...shared, id: `${backend}-krea-raw-phases`, model: "krea_2_raw", tier: "q4", proof: "raw", steps: 10, executedSteps: 10, finalSize: 512, body: { ...body, model: "krea_2_raw", negativePrompt: NEGATIVE, loras: [{ id: KREA_RAW_LORA, weight: 1 }], advanced: { mlxQuantize: 4, sampler: "euler", phases: PHASES } } },
     { ...shared, id: `${backend}-krea-imported-bf16-hires`, model: "krea_2_turbo", tier: "bf16", proof: "hires", steps: 12, executedSteps: 10, finalSize: 768, body: { ...body, model: LINKED_MODEL, negativePrompt: "", loras: [], advanced: { mlxQuantize: 0, steps: 8, guidanceScale: 0, sampler: "euler" }, hiresFix: HIRES } },
   ];
   if (!allocation) return routes;
@@ -70,7 +72,7 @@ function tierEntries(evidence, source, tier, sharedOnly) {
 
 export function kreaAssetInventory(evidence, routes) {
   return [
-    ...(routes.some(({ proof }) => proof === "raw") ? [...tierEntries(evidence, RAW, "q4", false), ADAPTER] : []),
+    ...(routes.some(({ proof }) => proof === "raw") ? [...tierEntries(evidence, RAW, "q4", false), KREA_RAW_ADAPTER] : []),
     ...(routes.some(({ proof }) => proof === "hires") ? [...tierEntries(evidence, COMPANION, "bf16", true), CHECKPOINT] : []),
   ];
 }
@@ -167,8 +169,36 @@ export async function stageKreaAssets(hub, price, signal, { cacheHub, fetchImpl 
     await writeFile(path.join(refs, "main"), revision, { flag: "wx" });
   }
   const receipt = { ...price, freeBytes, stagedFileCount: price.files.length };
-  if (!price.files.some(({ repo, revision, file }) => repo === ADAPTER.repo && revision === ADAPTER.revision && file === ADAPTER.file)) return receipt;
-  const adapter = await open(kreaSnapshotFile(hub, ADAPTER), "r");
+  if (price.files.some(isRawAdapter)) receipt.rawAdapter = await readRawAdapterFactors(hub);
+  return receipt;
+}
+
+function isRawAdapter({ repo, revision, file }) {
+  return repo === KREA_RAW_ADAPTER.repo && revision === KREA_RAW_ADAPTER.revision && file === KREA_RAW_ADAPTER.file;
+}
+
+export function assertKreaRawAdapterFactors(tensors) {
+  const factors = Object.entries(tensors).filter(([name]) => name !== "__metadata__");
+  assert.equal(factors.length, 528, "Darkbrush must contain exactly 528 LoRA factors");
+  const targets = new Set();
+  for (const [name, tensor] of factors) {
+    const match = /^(transformer\.[a-zA-Z0-9_.]+)\.lora_([AB])\.weight$/.exec(name);
+    assert.ok(match, `Darkbrush has a tensor outside its LoRA factors: ${name}`);
+    const [, target, side] = match;
+    assert.equal(tensor?.dtype, "F32", `wrong Darkbrush factor dtype: ${name}`);
+    assert.ok(Array.isArray(tensor.shape) && tensor.shape.length === 2 && tensor.shape.every((dim) => Number.isSafeInteger(dim) && dim > 0), `wrong Darkbrush factor shape: ${name}`);
+    assert.equal(tensor.shape[side === "A" ? 0 : 1], 32, `wrong Darkbrush factor rank: ${name}`);
+    const peer = `${target}.lora_${side === "A" ? "B" : "A"}.weight`;
+    assert.ok(Object.hasOwn(tensors, peer), `Darkbrush factor without its peer: ${name}`);
+    targets.add(target);
+  }
+  const projectorFactors = [`${PROJECTOR}.lora_A.weight`, `${PROJECTOR}.lora_B.weight`];
+  assert.deepEqual(projectorFactors.map((name) => tensors[name]?.shape), [[32, 12], [1, 32]], "Darkbrush projector factors changed");
+  return { tensorCount: factors.length, targetCount: targets.size, rank: 32, dtype: "F32", projectorFactors };
+}
+
+async function readRawAdapterFactors(hub) {
+  const adapter = await open(kreaSnapshotFile(hub, KREA_RAW_ADAPTER), "r");
   try {
     const prefix = Buffer.alloc(8);
     assert.equal((await adapter.read(prefix, 0, prefix.length, 0)).bytesRead, prefix.length);
@@ -176,9 +206,7 @@ export async function stageKreaAssets(hub, price, signal, { cacheHub, fetchImpl 
     assert.ok(length > 0 && length <= 1024 * 1024, "pinned adapter header length is invalid");
     const header = Buffer.alloc(length);
     assert.equal((await adapter.read(header, 0, length, 8)).bytesRead, length);
-    const tensors = JSON.parse(header.toString("utf8"));
-    assert.ok(PROJECTOR_KEYS.every((name) => tensors[name]), "exact Raw adapter must exercise the historical projector path");
-    return { ...receipt, adapterProjectorKeys: PROJECTOR_KEYS };
+    return assertKreaRawAdapterFactors(JSON.parse(header.toString("utf8")));
   } finally {
     await adapter.close();
   }
@@ -192,11 +220,11 @@ export async function assertStagedKreaAssets(hub, price, inventory) {
     const ref = path.join(hub, `models--${item.repo.replace("/", "--")}`, "refs", "main");
     assert.equal(await readFile(ref, "utf8"), item.revision, `staged snapshot ref changed: ${item.repo}`);
   }
-}
-
-export function assertKreaLoraManifest(loras) {
-  const entry = loras.find(({ id }) => id === "krea2_turbo_accel");
-  assert.deepEqual(entry?.source, { provider: "huggingface", repo: ADAPTER.repo, revision: ADAPTER.revision, file: ADAPTER.file }, "public catalog must source the exact projector adapter");
+  const adapter = price.files.find(isRawAdapter);
+  if (adapter) {
+    assert.deepEqual(adapter, KREA_RAW_ADAPTER, "staged Raw adapter pin changed");
+    assert.deepEqual(price.rawAdapter, await readRawAdapterFactors(hub), "staged Raw adapter header changed");
+  }
 }
 
 export function assertKreaCatalogRows(route, rows, evidence) {
@@ -204,6 +232,53 @@ export function assertKreaCatalogRows(route, rows, evidence) {
   assert.equal(rows.required.length, 1);
   assert.equal(keyOf(rows.required[0]), keyOf(source), `public catalog no longer binds the exact ${route.model} snapshot`);
   return { tier: route.tier, optional: [], required: kreaAssetInventory(evidence, [route]).map((row) => ({ ...row, files: [row.file] })) };
+}
+
+async function waitKreaImport({ endpoint, wait, ownsWorker }, jobId, label) {
+  const job = await wait(async () => {
+    const result = await endpoint.call("GET", `/api/v1/jobs/${jobId}`);
+    assert.ok(!["failed", "canceled", "interrupted"].includes(result.status), `${label} ${result.status}: ${result.error ?? result.message}`);
+    return result.status === "completed" && result;
+  }, 300, label);
+  assert.ok(ownsWorker(job.workerId), `${label} was not claimed by this attempt's worker`);
+  return job;
+}
+
+export async function importKreaRawAdapter({ endpoint, hub, project, projectPath, wait, trackJob, ownsWorker, signal }) {
+  const file = path.basename(KREA_RAW_ADAPTER.file);
+  const loras = path.join(projectPath, "loras");
+  await mkdir(loras, { recursive: true });
+  const inputDirectory = await mkdtemp(path.join(loras, "proof-input-"));
+  const sourcePath = path.join(inputDirectory, file);
+  await pipeline(createReadStream(kreaSnapshotFile(hub, KREA_RAW_ADAPTER)), createWriteStream(sourcePath, { flags: "wx" }), { signal });
+  const queued = await endpoint.exchange("POST", "/api/v1/loras/import", {
+    loraId: KREA_RAW_LORA, name: "Krea Darkbrush phase proof", family: "krea_2", baseModel: "krea_2_raw",
+    scope: "project", projectId: project.id, sourcePath, files: [file], expectedSha256: KREA_RAW_ADAPTER.sha256,
+  });
+  assert.equal(queued.status, 201, `public Darkbrush import refused: ${queued.body?.detail ?? queued.status}`);
+  assert.ok(queued.body?.id, "public Darkbrush import returned no job id");
+  trackJob(queued.body);
+  assert.equal(queued.body.payload?.loraId, KREA_RAW_LORA, "worker import changed the adapter slot");
+  const job = await waitKreaImport({ endpoint, wait, ownsWorker }, queued.body.id, "Darkbrush import");
+  const catalog = await endpoint.call("GET", `/api/v1/loras?projectId=${encodeURIComponent(project.id)}`);
+  const entry = catalog.find(({ id }) => id === KREA_RAW_LORA);
+  const target = path.join(loras, "imports", KREA_RAW_LORA);
+  assert.equal(entry?.scope, "project");
+  assert.equal(entry.family, "krea_2");
+  assert.equal(entry.baseModel, "krea_2_raw");
+  assert.equal(entry.installState, "installed");
+  assert.equal(entry.source?.provider, "local");
+  assert.equal(entry.source?.path, `loras/imports/${KREA_RAW_LORA}`);
+  assert.deepEqual(entry.files, [file]);
+  assert.equal(await realpath(entry.installedPath), target, "catalog selected a different Darkbrush directory");
+  assert.equal(await realpath(job.result?.path), target, "worker installed Darkbrush in a different directory");
+  const installed = path.join(target, file);
+  const stat = await lstat(installed);
+  assert.ok(stat.isFile() && stat.nlink === 1 && stat.size === KREA_RAW_ADAPTER.bytes, "installed Darkbrush file changed");
+  const digest = await fileSha256(installed, { signal });
+  assert.equal(digest, KREA_RAW_ADAPTER.sha256, "installed Darkbrush digest changed");
+  await rm(inputDirectory, { recursive: true });
+  return { jobId: job.id, workerId: job.workerId, adapterId: KREA_RAW_LORA, scope: entry.scope, source: KREA_RAW_ADAPTER };
 }
 
 export async function importLinkedKrea({ endpoint, hub, wait, trackJob, ownsWorker }) {
@@ -215,12 +290,7 @@ export async function importLinkedKrea({ endpoint, hub, wait, trackJob, ownsWork
   assert.equal(queued.status, 201, `public linked import refused: ${queued.body?.detail ?? queued.status}`);
   assert.ok(queued.body?.id && queued.body.payload?.linkedRootId === approved.rootId && !queued.body.payload?.targetDir, "worker import must retain linked ownership");
   trackJob(queued.body);
-  const job = await wait(async () => {
-    const result = await endpoint.call("GET", `/api/v1/jobs/${queued.body.id}`);
-    assert.ok(!["failed", "canceled", "interrupted"].includes(result.status), `linked import ${result.status}: ${result.error ?? result.message}`);
-    return result.status === "completed" && result;
-  }, 300, "linked model import");
-  assert.ok(ownsWorker(job.workerId), "linked import was not claimed by this attempt's worker");
+  const job = await waitKreaImport({ endpoint, wait, ownsWorker }, queued.body.id, "linked model import");
   const catalog = await endpoint.call("GET", "/api/v1/models");
   const goal = catalog.find((item) => item.id === LINKED_MODEL);
   return assertKreaImportStamp(job, goal, approved.rootId);
@@ -377,6 +447,7 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
   assert.equal(raw?.realModelInference, true);
   if (route.proof === "raw") {
     assert.equal(job.payload?.model, "krea_2_raw");
+    assert.deepEqual(job.payload?.loras?.map(({ id, weight }) => ({ id, weight })), route.body.loras);
     assert.equal(raw.repo, RAW.repo);
     assert.equal(raw.samplingRegime, "krea_2_raw_multiphase");
     assert.equal(raw.multiPhase, true);

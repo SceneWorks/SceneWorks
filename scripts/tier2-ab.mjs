@@ -38,7 +38,7 @@ import { assertPins, buildChildEnv } from "./qwen-image-2-1-app-lifecycle.mjs";
 import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText, utilityWorkerId } from "./flux3-image-klein-app-lifecycle.mjs";
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, assertKreaPins, kreaRoutes, kreaAssetInventory,
-  assertKreaCatalogRows, assertKreaLoraManifest, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importLinkedKrea,
+  assertKreaCatalogRows, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importKreaRawAdapter, importLinkedKrea,
   assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaPerformance,
 } from "./krea-tier2-proof.mjs";
 import {
@@ -563,7 +563,7 @@ export function exitCodeFor(report) {
     if (report.fatal || report.routes.length !== expected) return 1;
     if (report.mode === "preflight") return report.staging?.files?.length > 0 ? 0 : 1;
     if (report.mode === "stage" || report.mode === "build") return report.summary.ready === expected ? 0 : 1;
-    const productPassed = report.routes.every((route) => route.status === "ran" && ["equal", "product_pass_oracle_required"].includes(route.verdict));
+    const productPassed = report.routes.every((route) => route.status === "ran" && route.verdict === "equal");
     if (report.allocationProtocol) return report.routes.every((route) => route.status === "ran" && route.allocationWitness?.status === "observed") ? 0 : 1;
     return productPassed && (!report.performanceProtocol || report.routes.every((route) => route.performanceComparison?.status === "pass")) ? 0 : 1;
   }
@@ -797,6 +797,7 @@ export function renderMarkdown(report) {
       lines.push(`- Worker sampleMs per observed step: ${base.secondsPerObservedStep.toFixed(3)} s base, ${head.secondsPerObservedStep.toFixed(3)} s head. ${base.method}. Paired observations only.`, `- Observed memory: ${memoryCell(base.memory)} base, ${memoryCell(head.memory)} head.`);
     }
     if (route.comparison?.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
+    if (route.comparison?.productPixelDifference) lines.push(`- Decoded channel differences between base#1 and head: ${JSON.stringify(route.comparison.productPixelDifference)}`);
     if (route.hubMutation?.changed) {
       const attribution = hubMutationAttribution(route);
       lines.push(attribution === "base_only"
@@ -848,8 +849,6 @@ async function preflight(env, cfg, report, signal) {
       const manifests = ["Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml"];
       const contents = await Promise.all(manifests.map((file) => readFile(path.join(side.checkout, file), "utf8")));
       assertPins(contents, await readFile(path.join(side.checkout, "Cargo.lock"), "utf8"), side.inferencePin);
-      const loras = await readFile(path.join(side.checkout, "config", "manifests", "builtin.loras.jsonc"), "utf8");
-      assertKreaLoraManifest(JSON.parse(stripJsoncComments(loras)).loras);
       if (cfg.perf || cfg.allocation) {
         const { sourceSha256, overlaySha256 } = await bindKreaSamplerOverlay(await readFile(path.join(side.checkout, SAMPLER_SOURCE_FILE)), side.sha === cfg.baseSha ? "base" : "head", cfg);
         side.samplerOverlay = { sourceSha256, overlaySha256 };
@@ -1138,7 +1137,8 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     await phase("services_up", { side, startup_s: record.timing.startupSeconds.toFixed(1) });
     const project = await endpoint.call("POST", "/api/v1/projects", { name: `SW-7033 tier2 A/B ${route.id} ${label}` });
     const projectPath = await realpath(project.path), stateReal = await realpath(state);
-    fact(!path.relative(stateReal, projectPath).startsWith(".."), "project escaped the run's own state");
+    const relativeProject = path.relative(stateReal, projectPath);
+    fact(relativeProject && !relativeProject.startsWith("..") && !path.isAbsolute(relativeProject), "project escaped the run's own state");
     let referenceAudioAssetId;
     if (route.referenceAudio) {
       const form = new FormData(); form.append("file", new Blob([referenceWav()], { type: "audio/wav" }), "reference.wav");
@@ -1146,13 +1146,18 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       fact(upload.status < 300 && upload.body?.id, `reference audio upload refused (${upload.status}): ${JSON.stringify(upload.body).slice(0, 600)}`);
       referenceAudioAssetId = upload.body.id;
     }
-    if (route.proof === "hires" && previousImport) {
+    const importOptions = { endpoint, hub: plan.hub, wait, trackJob: (job) => { accepted = job; }, ownsWorker: (id) => id === workerId || id === utilityWorkerId(workerId) || id?.startsWith(`${utilityWorkerId(workerId)}-`) };
+    if (route.proof === "raw") {
+      record.adapterImport = await importKreaRawAdapter({ ...importOptions, project, projectPath, signal: controller.signal });
+      accepted = null;
+      await phase("adapter_imported", { side, job: record.adapterImport.jobId, adapter: record.adapterImport.adapterId });
+    } else if (route.proof === "hires" && previousImport) {
       const catalog = await endpoint.call("GET", "/api/v1/models");
       const entry = catalog.find(({ id }) => id === route.body.model);
       fact(entry?.importPlan?.checkpointId === previousImport.receipt.checkpointId, "cold performance worker did not reuse the exact linked checkpoint stamp");
       record.import = { ...previousImport.receipt, reused: true };
     } else if (route.proof === "hires") {
-      record.import = await importLinkedKrea({ endpoint, hub: plan.hub, wait, trackJob: (job) => { accepted = job; }, ownsWorker: (id) => id === workerId || id === utilityWorkerId(workerId) || id?.startsWith(`${utilityWorkerId(workerId)}-`) });
+      record.import = await importLinkedKrea(importOptions);
       accepted = null;
     }
     const body = requestBody(route, project.id, referenceAudioAssetId);
@@ -1471,9 +1476,6 @@ async function runComparison(env, cfg, report, signal) {
     const head = signal.aborted ? null : await run("head");
     let decision = verdictFor({ base1, head });
     let base2 = null;
-    if (definition.proof === "raw" && base1.status === "completed" && head?.status === "completed") {
-      decision = { verdict: "product_pass_oracle_required", reason: "both public routes passed; exact pinned adapter contains a text-fusion projector affected by the frozen baseline's known bug; compare against the independent source-bound oracle" };
-    }
     if (decision.needBase2 && !cfg.perf && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
     if (decision.verdict === null) decision = { verdict: "error", reason: cfg.perf ? "instrumented priming outputs differed" : "interrupted before base#2" };
     route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
@@ -1485,13 +1487,14 @@ async function runComparison(env, cfg, report, signal) {
         route.verdictReason = "the two CUDA arms must report the same admitted physical GPU UUID";
       }
       route.comparison.productOutputHashesMatch = contentOf(base1) === contentOf(head);
+      if (!route.comparison.productOutputHashesMatch) route.comparison.productPixelDifference = numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head));
       route.comparison.observedPerformance = { base: base1.performance, head: head.performance, comparisonScope: "single paired observations on the same device; no performance claim" };
     }
-    if (decision.verdict === "head_differs" || decision.verdict === "product_pass_oracle_required") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
+    if (decision.verdict === "head_differs" && !definition.proof) Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
     if (cfg.perf) {
       const pairs = [];
       route.performancePairs = pairs;
-      if (base1.performance?.eligibility === "valid" && head?.performance?.eligibility === "valid" && ["equal", "product_pass_oracle_required"].includes(route.verdict)) {
+      if (base1.performance?.eligibility === "valid" && head?.performance?.eligibility === "valid" && route.verdict === "equal") {
         for (const [index, order] of KREA_PERF_ORDER.entries()) {
           const pair = { order };
           pairs.push(pair);

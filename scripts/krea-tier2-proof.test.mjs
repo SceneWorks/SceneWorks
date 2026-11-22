@@ -7,8 +7,8 @@ import test from "node:test";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
 import { bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild } from "./krea-tier2-linked-source.mjs";
 import {
-  KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
-  assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, kreaRoutes,
+  KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_RAW_ADAPTER, KREA_RAW_LORA, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
+  assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, assertKreaRawAdapterFactors, importKreaRawAdapter, kreaRoutes,
   kreaAssetInventory, kreaExpectedStepEvents, kreaPerformance, kreaSnapshotFile, openKreaEvents, priceKreaAssets, stageKreaAssets,
 } from "./krea-tier2-proof.mjs";
 
@@ -70,6 +70,8 @@ test("pinned inventory preserves the Raw q4 tier, exact adapter and linked BF16 
   const inventory = kreaAssetInventory(evidence, [RAW, HIRES]);
   assert.equal(inventory.length, 23);
   assert.ok(inventory.some((item) => item.file.match(/^q4\/transformer\/.*\.safetensors$/)));
+  assert.deepEqual(inventory.find(({ file }) => file.startsWith("loras/")), KREA_RAW_ADAPTER);
+  assert.deepEqual(RAW.body.loras, [{ id: KREA_RAW_LORA, weight: 1 }]);
   assert.ok(inventory.some((item) => item.file === "bf16/text_encoder/model.safetensors"));
   assert.deepEqual(inventory.filter((item) => item.file.startsWith("bf16/transformer/")).map((item) => item.file), ["bf16/transformer/config.json"]);
   assert.deepEqual(inventory.find((item) => item.file.startsWith("diffusion_models/")), CHECKPOINT);
@@ -80,6 +82,57 @@ test("pinned inventory preserves the Raw q4 tier, exact adapter and linked BF16 
   changed.find((model) => model.id === "krea_2_raw").downloads.find((row) => row.variant === "q4").revision = "1".repeat(40);
   const drifted = await planRoutes({ routes: [RAW], hubs: ["/missing"], baseCatalog: changed, headCatalog: changed, platform: "darwin", evidence });
   assert.match(drifted[0].skipReason, /exact krea_2_raw snapshot/);
+});
+
+test("Darkbrush factors must be complete PEFT pairs and cannot include a merge-only bias", () => {
+  const projector = "transformer.text_fusion.projector";
+  const targets = [projector, ...Array.from({ length: 263 }, (_, index) => `transformer.blocks.${index}.attn.to_q`)];
+  const tensors = Object.fromEntries(targets.flatMap((target) => [
+    [`${target}.lora_A.weight`, { dtype: "F32", shape: [32, target === projector ? 12 : 512] }],
+    [`${target}.lora_B.weight`, { dtype: "F32", shape: [target === projector ? 1 : 512, 32] }],
+  ]));
+  assert.deepEqual(assertKreaRawAdapterFactors(tensors), { tensorCount: 528, targetCount: 264, rank: 32, dtype: "F32", projectorFactors: [`${projector}.lora_A.weight`, `${projector}.lora_B.weight`] });
+  const mixed = { "transformer.first.diff_b": { dtype: "F32", shape: [6144] }, ...tensors };
+  delete mixed[`${targets.at(-1)}.lora_B.weight`];
+  assert.throws(() => assertKreaRawAdapterFactors(mixed), /outside its LoRA factors.*\.diff_b/);
+  const unpaired = { ...tensors, "transformer.extra.lora_B.weight": { dtype: "F32", shape: [512, 32] } };
+  delete unpaired[`${targets.at(-1)}.lora_B.weight`];
+  assert.throws(() => assertKreaRawAdapterFactors(unpaired), /without its peer/);
+});
+
+test("Raw sends the fixed pin to normal project import and refuses a changed installation", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "krea-lora-import-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const [hub, projectPath] = ["hub", "project"].map((name) => path.join(dir, name));
+  const source = kreaSnapshotFile(hub, KREA_RAW_ADAPTER);
+  await mkdir(path.dirname(source), { recursive: true });
+  await writeFile(source, "fake adapter input");
+  const target = path.join(projectPath, "loras", "imports", KREA_RAW_LORA);
+  const file = path.basename(source);
+  const exchange = async (method, url, body) => {
+    assert.deepEqual([method, url], ["POST", "/api/v1/loras/import"]);
+    assert.equal(body.loraId, KREA_RAW_LORA);
+    assert.equal(body.expectedSha256, KREA_RAW_ADAPTER.sha256);
+    assert.equal(body.projectId, "owned project");
+    assert.equal(body.scope, "project");
+    assert.equal(body.family, "krea_2");
+    assert.equal(body.baseModel, "krea_2_raw");
+    assert.equal(await readFile(body.sourcePath, "utf8"), "fake adapter input");
+    assert.notEqual(body.sourcePath, source);
+    return { status: 201, body: { id: "import-job", payload: { loraId: body.loraId } } };
+  };
+  const call = async (method, url) => {
+    assert.equal(method, "GET");
+    if (url === "/api/v1/jobs/import-job") return { status: "completed", workerId: "owned", result: { path: target } };
+    assert.equal(url, "/api/v1/loras?projectId=owned%20project");
+    await mkdir(target, { recursive: true });
+    await writeFile(path.join(target, file), "substituted adapter");
+    return [{ id: KREA_RAW_LORA, scope: "project", family: "krea_2", baseModel: "krea_2_raw", installState: "installed", source: { provider: "local", path: `loras/imports/${KREA_RAW_LORA}` }, files: [file], installedPath: target }];
+  };
+  let tracked;
+  await assert.rejects(importKreaRawAdapter({ endpoint: { exchange, call }, hub, project: { id: "owned project" }, projectPath: path.join(await realpath(dir), "project"), wait: (probe) => probe(), trackJob: (job) => { tracked = job.id; }, ownsWorker: (id) => id === "owned", signal: new AbortController().signal }), /installed Darkbrush file changed/);
+  assert.equal(tracked, "import-job");
+  assert.equal(await readFile(source, "utf8"), "fake adapter input");
 });
 
 test("asset metadata pricing refuses digest and length drift before downloading", async () => {
@@ -269,7 +322,6 @@ test("the linked stamp and sole final output bind the actual authored request an
 
 test("a skipped, refused or incomparable arm cannot pass the Krea product suite", () => {
   const pass = { status: "ran", verdict: "equal" };
-  const oracle = { status: "ran", verdict: "product_pass_oracle_required" };
-  assert.equal(exitCodeFor({ kind: KREA_SUITE, mode: "run", routes: [pass, oracle] }), 0);
-  for (const other of [{ status: "skipped" }, { status: "ran", verdict: "error" }, { status: "ran", verdict: "nondeterministic_on_runner" }]) assert.equal(exitCodeFor({ kind: KREA_SUITE, mode: "run", routes: [pass, other] }), 1);
+  assert.equal(exitCodeFor({ kind: KREA_SUITE, mode: "run", routes: [pass, pass] }), 0);
+  for (const other of [{ status: "skipped" }, { status: "ran", verdict: "error" }, { status: "ran", verdict: "head_differs" }, { status: "ran", verdict: "nondeterministic_on_runner" }, { status: "ran", verdict: "product_pass_oracle_required" }]) assert.equal(exitCodeFor({ kind: KREA_SUITE, mode: "run", routes: [pass, other] }), 1);
 });
