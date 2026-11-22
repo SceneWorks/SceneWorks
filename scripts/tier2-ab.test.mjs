@@ -748,8 +748,9 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
     assert.match(item, /--preflight-only/); assert.match(item, /--build-only/); assert.match(item, /--run/);
     assert.match(item, /if: \$\{\{ !inputs\.preflight_only \}\}/);
     assert.match(item, /actions\/upload-artifact@[0-9a-f]{40}/);
-    assert.match(item, /name: Remove every scratch directory[\s\S]*if: \$\{\{ always\(\) \}\}/);
   }
+  assert.match(mlx, /name: Remove every scratch directory\s+if: \$\{\{ always\(\) \}\}/);
+  assert.match(cuda, /name: Remove every scratch directory\s+if: \$\{\{ always\(\) && inputs\.suite != 'krea-scoped-acceptance' \}\}/);
   assert.match(mlx, /metal_execution_entry [0-9]+ node tier2-ab-driver\/scripts\/tier2-ab\.mjs --run/);
   assert.match(mlx, /node tier2-ab-driver\/scripts\/tier2-ab\.mjs --cleanup/); assert.match(cuda, /node tier2-ab-driver\\scripts\\tier2-ab\.mjs --cleanup/);
   assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
@@ -764,4 +765,21 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(cuda, /vcvars64\.bat/);
   assert.doesNotMatch(reusable, /download_missing|--download-missing|hf download|huggingface-cli/);
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
+});
+
+test("Windows Krea keeps runtime until the registered post action verifies published evidence", async () => {
+  const reusable = await workflowText("tier2-ab.yml");
+  const mlx = job(reusable, "mlx"), cuda = job(reusable, "cuda");
+  assert.doesNotMatch(mlx, /dev-host|DEV_HOST_JOB_ROOT/);
+  const registration = cuda.indexOf("./tier2-ab-driver/.github/actions/cleanup-runner-storage");
+  assert.ok(registration > cuda.indexOf("name: Check out the dispatched driver"));
+  assert.ok(registration < cuda.indexOf("name: Prepare the Rust toolchain"));
+  assert.match(cuda, /Register disposable Windows Krea storage\s+if: \$\{\{ inputs\.suite == 'krea-scoped-acceptance' \}\}[\s\S]*dev-host: 'true'/);
+  assert.match(cuda, /TIER2_AB_WORK=\$env:DEV_HOST_JOB_ROOT\\tier2-ab/);
+  assert.match(cuda, /\$env:RUNNER_TEMP = Join-Path \$env:TIER2_AB_WORK 'evidence'/);
+  assert.match(cuda, /steps\.krea-evidence\.outcome == 'success'/);
+  assert.match(cuda, /steps\.krea-evidence\.outputs\.artifact-id/);
+  assert.match(cuda, /steps\.krea-evidence\.outputs\.artifact-digest/);
+  assert.match(cuda, /Missing Windows Krea driver evidence[\s\S]*DEV_HOST_WORK_UPLOADS_COMPLETE=true/);
+  assert.match(cuda, /DEV_HOST_WORK_UPLOADS_COMPLETE: "false"/);
 });

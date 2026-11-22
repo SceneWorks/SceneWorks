@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -107,6 +107,26 @@ test("Krea dispatch is opt-in, selects two fixed public routes, and requires exa
   assert.throws(() => resolveConfig({ ...env, TIER2_AB_HUBS: "/other" }, { platform: "darwin" }), /attempt-owned/);
 });
 
+test("Windows Actions Krea uses the registered job child and canonical HF cache", () => {
+  const jobs = "D:\\dev-host\\t\\abcd1234";
+  const hub = "E:\\huggingface\\hub";
+  const env = {
+    GITHUB_ACTIONS: "true", TIER2_AB_SUITE: KREA_SUITE, TIER2_AB_BACKEND: "cuda",
+    TIER2_AB_BASE_SHA: KREA_BASE_APP, TIER2_AB_HEAD_SHA: HEAD, TIER2_AB_INFERENCE_SHA: PIN,
+    TIER2_AB_BASE_DIR: "C:\\runner\\base", TIER2_AB_HEAD_DIR: "C:\\runner\\head",
+    RUNNER_TEMP: "C:\\runner\\temp", DEV_HOST_ROOT: "D:\\dev-host", DEV_HOST_JOB_ROOT: jobs,
+    TIER2_AB_WORK: `${jobs}\\tier2-ab`, HF_HUB_CACHE: hub,
+  };
+  const config = (over = {}) => resolveConfig({ ...env, ...over }, { platform: "win32" });
+  assert.equal(config().managedJobRoot, jobs);
+  assert.equal(config().kreaCacheHub, hub);
+  assert.deepEqual(config().hubs, [`${jobs}\\tier2-ab\\scratch\\krea-hf\\hub`]);
+  assert.throws(() => config({ TIER2_AB_WORK: `${env.RUNNER_TEMP}\\tier2-ab` }), /DEV_HOST_JOB_ROOT/);
+  assert.throws(() => config({ DEV_HOST_JOB_ROOT: "D:\\dev-host\\foreign\\abcd1234" }), /registered D:/);
+  assert.throws(() => config({ HF_HUB_CACHE: "E:\\huggingface\\other" }), /canonical E:/);
+  assert.doesNotThrow(() => config({ TIER2_AB_SUITE: "", TIER2_AB_WORK: `${env.RUNNER_TEMP}\\tier2-ab`, DEV_HOST_JOB_ROOT: "" }));
+});
+
 test("pinned inventory preserves the Raw q4 tier, exact adapter and linked BF16 with only the companion surface", async () => {
   const evidence = await readPatternEvidence(".");
   const inventory = kreaAssetInventory(evidence, [RAW, HIRES]);
@@ -209,8 +229,13 @@ test("staging copies verified cache hits and downloads only missing exact assets
   const missing = { repo: CHECKPOINT.repo, revision: CHECKPOINT.revision, file: "bf16/config.json", bytes: config.length,
     gitBlobSha1: createHash("sha1").update(`blob ${config.length}\0`).update(config).digest("hex") };
   const cachedFile = kreaSnapshotFile(cacheHub, cached);
+  const missingFile = kreaSnapshotFile(cacheHub, missing);
   await mkdir(path.dirname(cachedFile), { recursive: true });
   await writeFile(cachedFile, data);
+  const existing = await lstat(cachedFile);
+  const ref = path.join(cacheHub, `models--${CHECKPOINT.repo.replace("/", "--")}`, "refs", "main");
+  await mkdir(path.dirname(ref));
+  await writeFile(ref, "existing-ref");
   const events = [];
   const receipt = await stageKreaAssets(hub, { bytes: cached.bytes + missing.bytes, files: [cached, missing] },
     new AbortController().signal, {
@@ -223,10 +248,70 @@ test("staging copies verified cache hits and downloads only missing exact assets
   assert.equal(receipt.stagedFileCount, 2);
   assert.deepEqual(await readFile(kreaSnapshotFile(hub, cached)), data);
   assert.deepEqual(await readFile(kreaSnapshotFile(hub, missing)), config);
+  assert.deepEqual(await readFile(missingFile), config);
+  assert.equal(await readFile(ref, "utf8"), "existing-ref");
+  assert.equal((await lstat(cachedFile)).ino, existing.ino);
+  assert.deepEqual(await readdir(path.dirname(missingFile)), [path.basename(missingFile)]);
   assert.equal((await lstat(cachedFile)).nlink, 1);
-  assert.equal((await lstat(kreaSnapshotFile(hub, cached))).nlink, 1);
-  assert.deepEqual(events.filter(({ status }) => status === "verified").map(({ source, receivedBytes, digest }) => [source, receivedBytes, digest]),
-    [["runner-cache", cached.bytes, cached.sha256], ["pinned-https", missing.bytes, missing.gitBlobSha1]]);
+  assert.equal((await lstat(missingFile)).nlink, 1);
+  assert.equal((await lstat(kreaSnapshotFile(hub, missing))).nlink, 1);
+  assert.deepEqual(events.filter(({ status }) => ["download-verified", "verified"].includes(status)).map(({ status, source, receivedBytes, digest }) => [status, source, receivedBytes, digest]),
+    [["verified", "runner-cache", cached.bytes, cached.sha256], ["download-verified", "pinned-https", missing.bytes, missing.gitBlobSha1], ["verified", "runner-cache", missing.bytes, missing.gitBlobSha1]]);
+});
+
+test("a concurrent exact snapshot winner is verified and kept without overwrite", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "krea-stage-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheHub = path.join(root, "cache");
+  const hub = path.join(root, "attempt");
+  await mkdir(cacheHub);
+  const bytes = Buffer.from("valid");
+  const item = { ...CHECKPOINT, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  const candidate = kreaSnapshotFile(cacheHub, item);
+  const events = [];
+  let original;
+  await stageKreaAssets(hub, { bytes: bytes.length, files: [item] }, new AbortController().signal, {
+    cacheHub, progress: (event) => events.push(event), fetchImpl: async () => {
+      await writeFile(candidate, bytes, { flag: "wx" });
+      original = await lstat(candidate);
+      return new Response(bytes);
+    }
+  });
+  assert.equal((await lstat(candidate)).ino, original.ino);
+  assert.equal(events.find(({ status }) => status === "download-verified").cacheDisposition, "existing");
+  assert.deepEqual(await readdir(path.dirname(candidate)), [path.basename(candidate)]);
+});
+
+test("canonical staging leaves redirects, bad network bytes and corrupt race winners untouched", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "krea-stage-unsafe-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cacheHub = path.join(root, "cache"), external = path.join(root, "external");
+  await mkdir(cacheHub);
+  await mkdir(external);
+  const bytes = Buffer.from("valid");
+  const item = { ...CHECKPOINT, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  const price = { bytes: bytes.length, files: [item] };
+  const candidate = kreaSnapshotFile(cacheHub, item);
+  const repoDir = path.join(cacheHub, `models--${item.repo.replace("/", "--")}`);
+  await symlink(external, repoDir, process.platform === "win32" ? "junction" : "dir");
+  const signal = new AbortController().signal;
+  await assert.rejects(stageKreaAssets(path.join(root, "redirect"), price, signal, {
+    cacheHub, fetchImpl: () => assert.fail("redirected canonical parent must refuse before HTTPS"),
+  }), /rejects symlink, junction/);
+  assert.deepEqual(await readdir(external), []);
+  await rm(repoDir, { recursive: true });
+  await assert.rejects(stageKreaAssets(path.join(root, "bad-download"), price, signal, {
+    cacheHub, fetchImpl: async () => new Response("bogus"),
+  }), /wrong artifact digest/);
+  assert.deepEqual(await readdir(path.dirname(candidate)), []);
+  await assert.rejects(stageKreaAssets(path.join(root, "bad-winner"), price, signal, {
+    cacheHub, fetchImpl: async () => {
+      await writeFile(candidate, "bogus", { flag: "wx" });
+      return new Response(bytes);
+    },
+  }), /wrong artifact digest/);
+  assert.equal(await readFile(candidate, "utf8"), "bogus");
+  assert.deepEqual(await readdir(path.dirname(candidate)), [path.basename(candidate)]);
 });
 
 test("staging rejects corrupt cache bytes and records their attempted transfer", async (t) => {

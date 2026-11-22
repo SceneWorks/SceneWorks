@@ -7,9 +7,9 @@
 # scripts/tier2-ab.mjs: base#1, head, and (only when head differs) base#2 per route, against the
 # same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
 # The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
-# comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
-# the end of the job. The original suite uses read-only hubs. The opt-in Krea suite stages its
-# fixed public assets into a separate attempt-owned hub before building.
+# comparison live in the driver. The original suite uses read-only hubs. The opt-in Krea suite
+# stages its fixed public assets into a separate attempt-owned hub before building. Windows Krea
+# lets the dev-host post action remove build and runtime storage after evidence publication.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
 # selector's trusted-ref rule), and their builds and processes receive no credential.
@@ -225,6 +225,7 @@ jobs:
       NVIDIA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
       TIER2_AB_GPU_POLICY: shared-display
+      DEV_HOST_WORK_UPLOADS_COMPLETE: "false"
       # Heavy candle lane: no sccache wrapper (windows-candle.yml / catalog walk, os error 10054).
       RUSTC_WRAPPER: ""
       CARGO_INCREMENTAL: "0"
@@ -232,6 +233,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - name: Set attempt-owned scratch directory
+        if: ${{ inputs.suite != 'krea-scoped-acceptance' }}
         run: Add-Content -Path $env:GITHUB_ENV -Value "TIER2_AB_WORK=$env:RUNNER_TEMP\t2ab-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
       - name: Check out the dispatched driver
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -240,6 +242,16 @@ jobs:
           path: tier2-ab-driver
           fetch-depth: 1
           persist-credentials: false
+      - name: Register disposable Windows Krea storage
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' }}
+        uses: ./tier2-ab-driver/.github/actions/cleanup-runner-storage
+        with:
+          dev-host: 'true'
+      - name: Set the registered Windows Krea work directory
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' }}
+        run: |
+          if (-not $env:DEV_HOST_JOB_ROOT) { throw 'Missing registered Windows Krea job storage' }
+          Add-Content -Path $env:GITHUB_ENV -Value "TIER2_AB_WORK=$env:DEV_HOST_JOB_ROOT\tier2-ab"
       - name: Check out base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -315,6 +327,10 @@ jobs:
           # peak of run 43287955401 rounded up, + 8 GiB margin) and stable memory.used and
           # utilization. The wrapper logs each refusal reason while it waits; the driver prints
           # "phase=driver_started" once admitted.
+          if ($env:TIER2_AB_SUITE -eq 'krea-scoped-acceptance') {
+            # The wrapper and its child keep the same lease and write their receipts together.
+            $env:RUNNER_TEMP = Join-Path $env:TIER2_AB_WORK 'evidence'
+          }
           if ($env:TIER2_AB_KREA_ALLOCATION -eq 'true') {
             Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=85"
             python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 85 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
@@ -324,7 +340,7 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
-        if: ${{ always() }}
+        if: ${{ always() && inputs.suite != 'krea-scoped-acceptance' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tier2-ab-cuda-${{ github.run_id }}-${{ github.run_attempt }}
@@ -333,10 +349,34 @@ jobs:
             ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-tier2-ab-cuda/
           if-no-files-found: warn
           retention-days: 30
+      - name: Retain the Windows Krea evidence
+        id: krea-evidence
+        if: ${{ always() && inputs.suite == 'krea-scoped-acceptance' && env.TIER2_AB_WORK != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier2-ab-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TIER2_AB_WORK }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Confirm Windows Krea evidence before dev-host cleanup
+        if: ${{ always() && steps.krea-evidence.outcome == 'success' }}
+        env:
+          ARTIFACT_ID: ${{ steps.krea-evidence.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.krea-evidence.outputs.artifact-digest }}
+        run: |
+          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:ARTIFACT_DIGEST -notmatch '^[a-f0-9]{64}$') { throw 'Missing Windows Krea artifact receipt' }
+          $preflight = Join-Path $env:TIER2_AB_WORK 'evidence\preflight.json'
+          if (-not (Test-Path -LiteralPath $preflight -PathType Leaf) -or (Get-Item -LiteralPath $preflight).Length -eq 0) { throw 'Missing Windows Krea driver evidence' }
+          Add-Content -Path $env:GITHUB_ENV -Value 'DEV_HOST_WORK_UPLOADS_COMPLETE=true'
+      - name: Remove compared Krea source checkouts after evidence publication
+        if: ${{ always() && inputs.suite == 'krea-scoped-acceptance' && env.DEV_HOST_WORK_UPLOADS_COMPLETE == 'true' }}
+        run: |
+          node tier2-ab-driver/scripts/tier2-ab.mjs --cleanup
+          if ($LASTEXITCODE -ne 0) { throw 'Krea source checkout cleanup failed' }
       # Same read-only-bundle restore as the mlx job; multiply linked read-only files are refused
       # rather than changed, because they may share bytes with the hub.
       - name: Remove every scratch directory
-        if: ${{ always() }}
+        if: ${{ always() && inputs.suite != 'krea-scoped-acceptance' }}
         run: |
           $status = 0
           if (Test-Path -LiteralPath 'tier2-ab-driver\scripts\tier2-ab.mjs') { node tier2-ab-driver\scripts\tier2-ab.mjs --cleanup; $status = $LASTEXITCODE }

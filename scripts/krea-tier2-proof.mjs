@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, statfs, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -9,6 +9,7 @@ import { pipeline } from "node:stream/promises";
 import { probeCacheFile } from "./h3-finetune-terminal-stage.mjs";
 import { KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_FINAL_SIZE } from "./krea-tier2-allocation.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
+import { assertTerminalPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 
 export const KREA_SUITE = "krea-scoped-acceptance";
 export const KREA_BASE_APP = "2aa525dfb2fb1ab889bd6a15f80c0a0cc1df1e2d";
@@ -108,8 +109,58 @@ export function kreaSnapshotFile(hub, item) {
   return path.join(hub, `models--${item.repo.replace("/", "--")}`, "snapshots", item.revision, ...item.file.split("/"));
 }
 
+async function verifyKreaTransfer(input, output, item, signal, onBytes) {
+  const hash = createHash(item.sha256 ? "sha256" : "sha1");
+  if (!item.sha256) hash.update(`blob ${item.bytes}\0`);
+  let bytes = 0;
+  const verify = new Transform({ transform(chunk, _encoding, done) {
+    bytes += chunk.length;
+    onBytes(bytes);
+    if (bytes > item.bytes) return done(new Error(`pinned artifact exceeded its length: ${item.file}`));
+    hash.update(chunk);
+    done(null, chunk);
+  } });
+  await pipeline(input, verify, output, { signal });
+  assert.equal(bytes, item.bytes, `wrong artifact length: ${item.file}`);
+  const digest = hash.digest("hex");
+  assert.equal(digest, item.sha256 ?? item.gitBlobSha1, `wrong artifact digest: ${item.file}`);
+  return digest;
+}
+
+async function publishKreaCacheMiss({ hub, target, item, signal, download, onBytes }) {
+  const directory = path.dirname(target);
+  await ensureTerminalPhysicalDirectory(hub, directory);
+  const partial = path.join(directory, `.krea-${randomUUID()}.part`);
+  const file = await open(partial, "wx");
+  try {
+    const digest = await verifyKreaTransfer(await download(), file.createWriteStream(), item, signal, onBytes);
+    signal.throwIfAborted();
+    await assertTerminalPhysicalContainment(hub, directory);
+    try {
+      // The exact snapshot path accepts an ordinary file on Windows. Publish the complete leaf
+      // with exclusive creation. A concurrent installer can win without being overwritten.
+      await link(partial, target);
+      return { digest, cacheDisposition: "published" };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      return { digest, cacheDisposition: "existing" };
+    }
+  } finally {
+    try { await file.close(); }
+    finally { await rm(partial, { force: true }); }
+  }
+}
+
 export async function stageKreaAssets(hub, price, signal, { cacheHub, fetchImpl = fetch, progress = () => {} } = {}) {
   await mkdir(hub, { recursive: true });
+  if (cacheHub) {
+    const [attempt, shared] = await Promise.all([realpath(hub), realpath(cacheHub)]);
+    const outside = (root, target) => {
+      const relative = path.relative(root, target);
+      return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    };
+    assert.ok(outside(shared, attempt) && outside(attempt, shared), "Krea staging requires a separate attempt and canonical hub");
+  }
   const fs = await statfs(hub, { bigint: true });
   const freeBytes = Number(fs.bavail * fs.bsize);
   assert.ok(freeBytes >= price.bytes + 20 * GIB, `need ${price.bytes} bytes for pinned Krea assets plus 20 GiB for builds, have ${freeBytes} bytes`);
@@ -117,43 +168,48 @@ export async function stageKreaAssets(hub, price, signal, { cacheHub, fetchImpl 
   for (const item of price.files) {
     const dest = kreaSnapshotFile(hub, item);
     const partial = `${dest}.part`;
-    const hash = createHash(item.sha256 ? "sha256" : "sha1");
-    if (!item.sha256) hash.update(`blob ${item.bytes}\0`);
     const identity = `${keyOf(item)}/${item.file}`;
     let source = "cache-probe";
     let bytes = 0;
     let nextProgress = STAGING_PROGRESS_BYTES;
     const report = (status, detail = {}) => progress({ status, identity, source, receivedBytes: bytes, expectedBytes: item.bytes, ...detail });
+    const onBytes = (received) => {
+      bytes = received;
+      if (bytes >= nextProgress) {
+        report("transferring");
+        nextProgress = bytes + STAGING_PROGRESS_BYTES;
+      }
+    };
+    const download = async () => {
+      const response = await fetchImpl(resolveUrl(item), { redirect: "follow", signal: deadline });
+      assert.ok(response.ok && response.body, `cannot fetch pinned ${identity} (HTTP ${response.status})`);
+      return Readable.fromWeb(response.body);
+    };
     try {
       deadline.throwIfAborted();
-      const cached = cacheHub && await probeCacheFile({ ...item, repoType: "model" }, cacheHub, { signal: deadline });
-      const cacheHit = cached?.state === "present";
-      source = cacheHit ? "runner-cache" : "pinned-https";
+      const probe = () => probeCacheFile({ ...item, repoType: "model" }, cacheHub, { signal: deadline });
+      let cached = cacheHub ? await probe() : null;
+      if (cached?.state === "absent") {
+        source = "pinned-https";
+        report("started");
+        report("download-verified", await publishKreaCacheMiss({ hub: cacheHub, target: cached.candidate, item, signal: deadline, download, onBytes }));
+        source = "runner-cache";
+        bytes = 0;
+        nextProgress = STAGING_PROGRESS_BYTES;
+        cached = await probe();
+        assert.equal(cached.state, "present", `verified canonical snapshot file disappeared: ${item.file}`);
+      }
+      source = cached ? "runner-cache" : "pinned-https";
       report("started");
       await mkdir(path.dirname(dest), { recursive: true });
       let stream;
-      if (cacheHit) {
+      if (cached) {
         assert.equal(cached.size, item.bytes, `wrong cached artifact length: ${item.file}`);
         stream = createReadStream(cached.sourcePath);
       } else {
-        const response = await fetchImpl(resolveUrl(item), { redirect: "follow", signal: deadline });
-        assert.ok(response.ok && response.body, `cannot fetch pinned ${identity} (HTTP ${response.status})`);
-        stream = Readable.fromWeb(response.body);
+        stream = await download();
       }
-      const verify = new Transform({ transform(chunk, _encoding, done) {
-        bytes += chunk.length;
-        if (bytes > item.bytes) return done(new Error(`pinned artifact exceeded its length: ${item.file}`));
-        hash.update(chunk);
-        if (bytes >= nextProgress) {
-          report("transferring");
-          nextProgress = bytes + STAGING_PROGRESS_BYTES;
-        }
-        done(null, chunk);
-      } });
-      await pipeline(stream, verify, createWriteStream(partial, { flags: "wx" }), { signal: deadline });
-      assert.equal(bytes, item.bytes, `wrong artifact length: ${item.file}`);
-      const digest = hash.digest("hex");
-      assert.equal(digest, item.sha256 ?? item.gitBlobSha1, `wrong artifact digest: ${item.file}`);
+      const digest = await verifyKreaTransfer(stream, createWriteStream(partial, { flags: "wx" }), item, deadline, onBytes);
       await rename(partial, dest);
       report("verified", { digest });
     } catch (error) {

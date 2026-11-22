@@ -12,14 +12,15 @@
 // base#1 != base#2 -> `nondeterministic_on_runner` (numeric difference recorded once, no more
 // runs); base#1 == base#2 -> `head_differs` (non-zero exit, payload diff printed). Time and memory
 // are observations and never fail the job. A route whose weights are absent from every hub root is
-// `skipped` with its reason; nothing is ever downloaded and the hub is never written or deleted.
+// `skipped` with its reason. The opt-in Krea suite stages its allowlisted pinned assets first.
 //
 // Modes: --preflight-only (inputs, both checkouts, pins, tools, hub presence; no build, no model)
 //        --build-only     (release API/worker for base then head into one shared scratch target)
 //        --run            (the comparison; requires --build-only output from the same work dir)
 // Configuration is environment-only so the same invocation works from bash, cmd and PowerShell:
 //   TIER2_AB_BACKEND mlx|cuda, TIER2_AB_BASE_SHA/HEAD_SHA (40 hex), TIER2_AB_BASE_DIR/HEAD_DIR,
-//   TIER2_AB_WORK (absolute, under RUNNER_TEMP in Actions), TIER2_AB_ROUTES (empty = defaults,
+//   TIER2_AB_WORK (absolute, managed dev-host for Windows Krea and RUNNER_TEMP for other jobs),
+//   TIER2_AB_ROUTES (empty = defaults,
 //   or a JSON array / comma list of route ids), TIER2_AB_HUBS (empty = backend defaults, or a JSON
 //   array / ';'-separated list of hub roots), TIER2_AB_INFERENCE_SHA (optional cross-check).
 import assert from "node:assert/strict";
@@ -32,6 +33,7 @@ import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
+import { assertTerminalPhysicalContainment } from "./lib/starvector-terminal-pin-paths.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 import { assertPins, buildChildEnv } from "./qwen-image-2-1-app-lifecycle.mjs";
@@ -154,18 +156,33 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const absolute = (key) => { const value = env[key] ?? ""; fact(absoluteFor(platform, value), `${key} must be an absolute path`); return paths.resolve(value); };
   const baseDir = absolute("TIER2_AB_BASE_DIR"), headDir = absolute("TIER2_AB_HEAD_DIR"), work = absolute("TIER2_AB_WORK");
   fact(baseDir !== headDir, "base and head checkouts must be separate directories");
+  const suite = env.TIER2_AB_SUITE || "tier2-ab";
+  fact(["tier2-ab", KREA_SUITE].includes(suite), "unknown Tier 2 suite");
+  const krea = suite === KREA_SUITE;
+  const windowsKrea = krea && backend === "cuda";
+  let managedJobRoot, kreaCacheHub;
   for (const dir of [baseDir, headDir]) {
     const rel = paths.relative(dir, work);
     fact(rel.startsWith("..") || paths.isAbsolute(rel), "work directory must be outside both checkouts");
   }
   if (env.GITHUB_ACTIONS === "true") {
-    fact(env.RUNNER_TEMP && paths.isAbsolute(env.RUNNER_TEMP), "RUNNER_TEMP required in Actions");
-    const rel = paths.relative(paths.resolve(env.RUNNER_TEMP), work);
-    fact(rel && !rel.startsWith("..") && !paths.isAbsolute(rel), "TIER2_AB_WORK must be under RUNNER_TEMP in Actions");
+    if (windowsKrea) {
+      const devHost = absolute("DEV_HOST_ROOT");
+      managedJobRoot = absolute("DEV_HOST_JOB_ROOT");
+      const leaf = paths.relative(paths.join(devHost, "t"), managedJobRoot);
+      fact(/^D:[\\/]/i.test(devHost) && /^[a-f0-9]{8}$/.test(leaf), "Windows Krea requires a registered D: dev-host job root");
+      fact(paths.relative(managedJobRoot, work) === "tier2-ab", "Windows Krea work must be the tier2-ab child of DEV_HOST_JOB_ROOT");
+    } else {
+      fact(env.RUNNER_TEMP && paths.isAbsolute(env.RUNNER_TEMP), "RUNNER_TEMP required in Actions");
+      const rel = paths.relative(paths.resolve(env.RUNNER_TEMP), work);
+      fact(rel && !rel.startsWith("..") && !paths.isAbsolute(rel), "TIER2_AB_WORK must be under RUNNER_TEMP in Actions");
+    }
   }
-  const suite = env.TIER2_AB_SUITE || "tier2-ab";
-  fact(["tier2-ab", KREA_SUITE].includes(suite), "unknown Tier 2 suite");
-  const krea = suite === KREA_SUITE;
+  if (windowsKrea) {
+    const canonical = defaultHubs(backend)[0];
+    kreaCacheHub = managedJobRoot || env.HF_HUB_CACHE ? absolute("HF_HUB_CACHE") : canonical;
+    fact(paths.relative(canonical, kreaCacheHub) === "", "Windows Krea requires the canonical E: Hugging Face hub");
+  }
   const perf = env.TIER2_AB_KREA_PERFORMANCE === "true";
   const allocation = env.TIER2_AB_KREA_ALLOCATION === "true";
   fact(!perf || krea, "Krea performance requires the explicit Krea suite");
@@ -183,7 +200,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { suite, krea, perf, allocation, backend, baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes,
+  return { suite, krea, perf, allocation, backend, baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes, managedJobRoot, kreaCacheHub,
     hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
@@ -905,7 +922,7 @@ async function preflight(env, cfg, report, signal) {
       if (report.mode === "stage") {
         report.stagingTransfers = [];
         report.staging = await stageKreaAssets(cfg.hubs[0], report.staging, signal, {
-          cacheHub: cfg.backend === "cuda" ? defaultHubs("cuda")[0] : undefined,
+          cacheHub: cfg.kreaCacheHub,
           progress(entry) {
             report.stagingTransfers.push(entry);
             progress({ phase: "krea_asset_stage", ...entry });
@@ -1552,13 +1569,29 @@ async function cleanup(env, cfg) {
   fact(allowedRoots.length, "--cleanup needs RUNNER_TEMP or GITHUB_WORKSPACE to bound what it may remove");
   const protectedRoots = [...(cfg.krea ? [] : cfg.hubs), ...defaultHubs(cfg.backend)];
   let failed = 0;
+  if (cfg.managedJobRoot) fact(env.DEV_HOST_WORK_UPLOADS_COMPLETE === "true", "Windows Krea cleanup needs confirmed artifact publication");
   const checkouts = [cfg.baseDir, cfg.headDir];
   if (cfg.repairDir && env.GITHUB_ACTIONS === "true") checkouts.push(cfg.repairDir);
-  for (const target of [cfg.work, ...checkouts]) {
+  // The dev-host post action owns Windows Krea's build/runtime directory and its activity guards.
+  for (const target of cfg.managedJobRoot ? checkouts : [cfg.work, ...checkouts]) {
     try { const result = await removeScratch(target, { allowedRoots, protectedRoots }); progress({ phase: "cleanup", target, removed: result.removed, restored_dirs: result.restoredDirectories, restored_files: result.restoredFiles }); }
     catch (error) { failed++; progress({ phase: "cleanup_failed", target, reason: error.message }); }
   }
   return failed ? 1 : 0;
+}
+
+async function assertManagedKreaStorage(env, cfg) {
+  if (!cfg.managedJobRoot) return;
+  await assertTerminalPhysicalContainment(env.DEV_HOST_ROOT, cfg.work);
+  const marker = path.join(cfg.managedJobRoot, ".actions-owner.json");
+  const info = await lstat(marker);
+  fact(info.isFile() && info.nlink === 1 && info.size <= 4096, "Windows Krea requires an ordinary dev-host owner record");
+  const owner = JSON.parse(await readFile(marker, "utf8"));
+  for (const [key, field] of Object.entries({ repository: "GITHUB_REPOSITORY", run: "GITHUB_RUN_ID", attempt: "GITHUB_RUN_ATTEMPT", job: "GITHUB_JOB", runner: "RUNNER_NAME" })) {
+    fact(env[field] && owner[key] === env[field], "Windows Krea dev-host ownership differs from this invocation");
+  }
+  fact(typeof owner.nonce === "string" && owner.nonce.length > 0, "Windows Krea dev-host ownership has no registration nonce");
+  await assertTerminalPhysicalContainment(path.parse(cfg.kreaCacheHub).root, cfg.kreaCacheHub);
 }
 
 export function requireKreaCudaRunLease(cfg, mode, env) {
@@ -1572,6 +1605,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-krea, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
+  await assertManagedKreaStorage(env, cfg);
   if (mode === "cleanup") return cleanup(env, cfg);
   requireKreaCudaRunLease(cfg, mode, env);
   if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
