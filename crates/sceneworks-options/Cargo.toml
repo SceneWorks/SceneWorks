@@ -9,9 +9,9 @@ publish = false
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error = { workspace = true }
-sceneworks-gen-core-moss-image-policy = { git = "https://github.com/SceneWorks/inference", rev = "3bb35a17baf0bef896304e149dab6bb6d54e5d0d" }
-sceneworks-gen-core-pag-policy = { git = "https://github.com/SceneWorks/inference", rev = "3bb35a17baf0bef896304e149dab6bb6d54e5d0d" }
-sceneworks-gen-core-supra2-policy = { git = "https://github.com/SceneWorks/inference", rev = "3bb35a17baf0bef896304e149dab6bb6d54e5d0d" }
+sceneworks-gen-core-moss-image-policy = { git = "https://github.com/SceneWorks/inference", rev = "2085c382705e4ec275ee93c698c134993673221e" }
+sceneworks-gen-core-pag-policy = { git = "https://github.com/SceneWorks/inference", rev = "2085c382705e4ec275ee93c698c134993673221e" }
+sceneworks-gen-core-supra2-policy = { git = "https://github.com/SceneWorks/inference", rev = "2085c382705e4ec275ee93c698c134993673221e" }
 
 [lints]
 workspace = true

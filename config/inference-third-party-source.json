@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision 3dae89c9: 807 provenance candidates and 139 production-Rust crate prefixes. This pin adds first-party terminal LoRA recovery checkpoints and focused continuation/export-retry tests in the shared MLX loop and Candle flow-match driver. The provenance inventory changes only the Candle driver blob; normalized markers, production crate population, dependencies, notices and include sites are unchanged. Existing Iris, MOSS, FLUX.3 and runtime source classifications remain as reviewed at the previous pin; unclassified source areas remain open items reported by check-license-coverage.",
-  "inferenceRevision": "3bb35a17baf0bef896304e149dab6bb6d54e5d0d",
-  "auditDigest": "876c956b34dd2eec491201f1f79a900b1639fff791bc516d1351413daf619d01",
+  "_comment": "The inference inventory at 2085c382 records 817 provenance candidates and 146 production-Rust crate prefixes. This integration pins the vendored Candle neural-network crate and records its upstream license. The shared Candle checkpoint crate contains SceneWorks checkpoint readers and projection routing. Existing open source classifications remain in the check-license-coverage report.",
+  "inferenceRevision": "2085c382705e4ec275ee93c698c134993673221e",
+  "auditDigest": "cad9db170e5c9002c40ca53194df45347d02a5e044ad7b8eb41e254b1846ea03",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "3bb35a17baf0bef896304e149dab6bb6d54e5d0d",
+    "revision": "2085c382705e4ec275ee93c698c134993673221e",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 817,
-    "populationSha256": "11e0359ab9e37b3c8cbb1fb5972ba097bc49a589d58d2c90e663f878c608c62a"
+    "populationSha256": "8add7033b518ad45f01750bb61db07c5e170d7151520f9b3f75224bc32cd1c26"
   },
   "portedSourceAreas": [
     {
@@ -510,6 +510,13 @@
       "id": "architecture:crates/media/candle-gen/vendor/candle-core",
       "pathPrefix": "crates/media/candle-gen/vendor/candle-core/",
       "provenance": "Vendored Hugging Face Candle core 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d, including upstream CUDA graph parameter-cache commits cabbc30191b352814d8bb94e821e82faa883c7b5 and f53ed3bfbd2e3291c70e4db81eaf0faeccbb8e83 plus the local zeroed quantized-padding change, as documented in VENDORED.md.",
+      "disposition": "about-license",
+      "component": "candle-transformers-source"
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/vendor/candle-nn",
+      "pathPrefix": "crates/media/candle-gen/vendor/candle-nn/",
+      "provenance": "Vendored Hugging Face Candle NN 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d. SceneWorks adds the typed native projection operation to VarBuilder and Linear. VENDORED.md and both upstream license files accompany the source.",
       "disposition": "about-license",
       "component": "candle-transformers-source"
     },
@@ -1057,7 +1064,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "3bb35a17baf0bef896304e149dab6bb6d54e5d0d",
+    "revision": "2085c382705e4ec275ee93c698c134993673221e",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 146,
     "cratePopulationSha256": "dd5c31283ab160566bc23f3da7cd8af6f0cda29e0a43d09cd5b1acf8e75049c5"
@@ -1159,6 +1166,11 @@
       "prefix": "crates/contracts/gen-core-testkit",
       "disposition": "first-party-original",
       "evidence": "SceneWorks-authored conformance harness for the gen-core provider contracts (epic 3720). Tensor-free; the `derived from` phrasing in its docs describes test data derived from a seed/descriptor, not upstream source — which is why the marker vocabulary deliberately anchors `derived from` to a port object."
+    },
+    {
+      "prefix": "crates/layers/candle-checkpoint",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks checkpoint readers and projection construction moved from candle-gen in c683ac994, with source alias and VarBuilder routing for the shared Candle loader. No upstream source is copied into this crate."
     },
     {
       "prefix": "crates/llm/mlx-llm/server",

@@ -4,9 +4,9 @@
 // SceneWorks is its only consumer, so a formal release does not belong on the critical path between
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
-// The pins live in the core, worker and memory-adapter Cargo.toml manifests. The root Cargo.toml additionally `[patch]`es
-// candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
-// revision. Those revs must move in lockstep with the direct crates. This
+// The pins live in the workspace Cargo.toml manifests. The root Cargo.toml also patches
+// candle-core, candle-nn and the CUDA and Metal kernel crates to the vendored copies inside the
+// same inference revision. Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
 //
 // The direct `mlx-rs` pin (michaeltrefry/mlx-rs, a DIFFERENT url) is intentionally left alone -- but
@@ -66,7 +66,7 @@ const INFERENCE_CRATES = [
 ];
 // Resolved through the root [patch], not direct dependencies. Every vendored package must move
 // with the inference pin and have its lock entry refreshed by Cargo.
-const PATCHED_CRATES = ["candle-core", "candle-kernels", "candle-metal-kernels"];
+const PATCHED_CRATES = ["candle-core", "candle-nn", "candle-kernels", "candle-metal-kernels"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
@@ -183,6 +183,9 @@ function verifyCandlePatches(manifestText, sha) {
   for (const crate of PATCHED_CRATES) {
     const matches = section.filter((line) =>
       new RegExp(`^${crate}\\s*=`).test(line.trim()));
+    if (crate === "candle-nn" && sha === SECURITY_BACKPORT.engine_revision && matches.length === 0) {
+      continue;
+    }
     const historicalCore = crate === "candle-core" && sha === SECURITY_BACKPORT.engine_revision &&
       matches[0]?.trim() === 'candle-core = { path = "vendor/zip9-candle-core" }';
     if (matches.length !== 1 || (!historicalCore && (
@@ -981,28 +984,33 @@ function selfTest() {
     repin(`candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }`, SHA) ===
       `candle-kernels = { git = "${INFERENCE_GIT}", rev = "${SHA}" }`,
   );
-  const bothPatches = repin(
+  const candlePatches = repin(
     `[patch."https://github.com/huggingface/candle"]\n` +
     `candle-core = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
+    `candle-nn = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
     `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
     `candle-metal-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
   check("root Candle patches repin together", (() => {
-    try { verifyCandlePatches(bothPatches, SHA); return true; } catch { return false; }
+    try { verifyCandlePatches(candlePatches, SHA); return true; } catch { return false; }
   })());
   check("a missing vendored Metal kernels patch refuses a later pin", (() => {
     try {
-      verifyCandlePatches(bothPatches.replace(/^candle-metal-kernels.*\n/m, ""), SHA);
+      verifyCandlePatches(candlePatches.replace(/^candle-metal-kernels.*\n/m, ""), SHA);
       return false;
     } catch { return true; }
   })());
   check("a missing vendored core patch refuses a later pin", (() => {
-    try { verifyCandlePatches(bothPatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
+    try { verifyCandlePatches(candlePatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
+    catch { return true; }
+  })());
+  check("a missing vendored candle-nn patch refuses a later pin", (() => {
+    try { verifyCandlePatches(candlePatches.replace(/^candle-nn.*\n/m, ""), SHA); return false; }
     catch { return true; }
   })());
   check("a core patch in another TOML section cannot satisfy the root patch", (() => {
     try {
       verifyCandlePatches(
-        bothPatches.replace(/^candle-core.*\n/m, "") +
+        candlePatches.replace(/^candle-core.*\n/m, "") +
           `[workspace.dependencies]\ncandle-core = { git = "${INFERENCE_GIT}", rev = "${SHA}" }\n`,
         SHA);
       return false;

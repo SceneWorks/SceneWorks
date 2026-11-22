@@ -1,5 +1,4 @@
-//! Structural guard for the vendored candle-core, multi-arch candle-kernels and
-//! candle-metal-kernels `[patch]` entries.
+//! Structural guard for the vendored Candle core, neural-network and kernel `[patch]` entries.
 //!
 //! candle-kernels compiles the GGUF quant/moe kernels into a static `libmoe.a` of SASS with a
 //! single `-gencode` derived from `CUDA_COMPUTE_CAP`. At the cap=80 packaging baseline that is an
@@ -21,9 +20,12 @@ use std::path::Path;
 
 const UPSTREAM_CANDLE: &str = "github.com/huggingface/candle";
 const INFERENCE_REPO: &str = "git+https://github.com/SceneWorks/inference";
-/// candle-metal-kernels carries the upstream rank > 4 strided-reduce fix (inference sc-25909) and
-/// is compiled by the macOS runtime through candle-core's Metal backend.
-const PATCHED_CRATES: [&str; 3] = ["candle-kernels", "candle-core", "candle-metal-kernels"];
+const PATCHED_CRATES: [&str; 4] = [
+    "candle-kernels",
+    "candle-core",
+    "candle-nn",
+    "candle-metal-kernels",
+];
 
 /// `(name, source)` for every `[[package]]` block in a Cargo.lock. Path dependencies have no
 /// `source` line and yield `None`. `[[patch.unused]]` blocks are ignored — an unused patch is
@@ -215,6 +217,11 @@ version = "0.10.2"
 source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
 
 [[package]]
+name = "candle-nn"
+version = "0.10.2"
+source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
+
+[[package]]
 name = "sceneworks-gen-core"
 version = "0.1.0"
 source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
@@ -234,6 +241,18 @@ fn guard_rejects_upstream_or_missing_candle_metal_kernels() {
     assert!(check_lock(&missing)
         .unwrap_err()
         .contains("exactly one candle-metal-kernels"));
+}
+
+#[test]
+fn guard_rejects_upstream_candle_nn() {
+    let upstream = GOOD_LOCK.replacen(
+        "name = \"candle-nn\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/SceneWorks/inference",
+        "name = \"candle-nn\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/huggingface/candle",
+        1,
+    );
+    assert!(check_lock(&upstream)
+        .unwrap_err()
+        .contains("candle-nn resolves from upstream candle"));
 }
 
 #[test]
@@ -362,7 +381,7 @@ fn guard_rejects_candle_core_source_or_revision_skew() {
     assert!(check_lock(&skew).unwrap_err().contains("skews"));
 }
 
-// Retain the epic's duplicate-resolution mutant coverage for both vendored patches.
+// Cover duplicate resolutions for every vendored patch.
 #[test]
 fn guard_rejects_duplicate_patched_resolutions() {
     for crate_name in PATCHED_CRATES {
