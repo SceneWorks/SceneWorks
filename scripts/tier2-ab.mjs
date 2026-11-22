@@ -1251,9 +1251,26 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuIdentityError ??= "physical GPU changed while sampling"; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
-    const posted = Date.now();
+    let posted;
     let postedMonotonicMs;
-    const response = await endpoint.exchange("POST", route.endpoint, body, cfg.perf ? { onRequest: () => { postedMonotonicMs = performance.now(); } } : undefined);
+    const post = () => {
+      posted = Date.now();
+      return endpoint.exchange("POST", route.endpoint, body, cfg.perf ? { onRequest: () => { postedMonotonicMs = performance.now(); } } : undefined);
+    };
+    const sourceClaimDeadline = Math.min(deadline, Date.now() + 60_000);
+    let response = await post();
+    // The rendering worker may publish the newly imported digest on its next heartbeat.
+    // Retry only a refusal that could not have queued a job. Start timing at the accepted POST.
+    while (route.proof === "raw" && response.status === 409 && !response.body?.id &&
+      response.body?.code === "model_artifact_incomplete" &&
+      typeof response.body?.detail === "string" &&
+      response.body.detail.startsWith("no eligible worker advertises the complete local source closure for ") &&
+      Date.now() + 2000 < sourceClaimDeadline) {
+      await delay(2000);
+      alive();
+      record.sourceClaimRetries = (record.sourceClaimRetries ?? 0) + 1;
+      response = await post();
+    }
     record.acceptedStatus = response.status;
     fact(response.status < 300 && response.body?.id, `API refused the request (${response.status}): ${JSON.stringify(response.body).slice(0, 1500)}`);
     accepted = response.body; record.jobId = accepted.id;
