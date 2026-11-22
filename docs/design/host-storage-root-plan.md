@@ -277,8 +277,17 @@ No two items share both a mechanism and a repo.
     `dev-host guard --all` finds no target-path patterns.
   - `macos-mlx.yml`'s warm build runs in a `warm` sticky slot, and a
     second run of the job starts warm.
+  - No SceneWorks caller turns incremental compilation back on for a
+    build in a root slot on the NAS (r5). Today
+    `scripts/remote-macos-verification.mjs:418,457` sets
+    `CARGO_INCREMENTAL=1` for the `consumer-assertions` profile, overriding
+    `dev-host env`. That recipe and its recorded cache context
+    (`CACHE_FLAGS`, `cacheFlags()`, and their tests) change to `0`, and a
+    `consumer-assertions` dispatch passes on `nax-macos-2` with its build
+    folder on the share.
 - **Inherits:** E4, E7
-- **Touches:** `.github/workflows/*`, `scripts/ci/**`
+- **Touches:** `.github/workflows/*`, `scripts/ci/**`,
+  `scripts/remote-macos-verification.mjs`
 - **Blocked by:** SW-2
 
 ### INF-2a — inference setup step, agent hook, guard, docs (task, inference)

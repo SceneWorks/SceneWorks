@@ -531,7 +531,9 @@ The system drive holds only source code, apps, toolchains, personal files
 - Builds on the NAS showed no speed loss (Michael, 2026-11-22). On the
   share, rustc's incremental compilation can't create its session lock
   (macOS error 45), so every build on the Macs runs with
-  `CARGO_INCREMENTAL=0`. Edit-compile loops in agent worktrees therefore
+  `CARGO_INCREMENTAL=0`, and no script may set it back to `1` for a build
+  on the share (`remote-macos-verification.mjs` does today; SW-4b fixes
+  it). Edit-compile loops in agent worktrees therefore
   rebuild whole crates instead of only what changed.
 - The NAS is a single point of failure for both Macs' CI and agent builds at
   once, and so is the network path to it. E5 makes the failure loud and
