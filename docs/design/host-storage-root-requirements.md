@@ -1,4 +1,4 @@
-# Shared dev host root on external storage — requirements (DRAFT r4)
+# Shared dev host root on external storage — requirements (DRAFT r5)
 
 Status: draft for Michael's review. No CodeGraph items until approved.
 - r2 (2026-11-13) folded in review round 1 (12 findings).
@@ -52,13 +52,22 @@ LensWorks runner exists any more. A stale, unloaded
 
 | Host | Root (`DEV_HOST_ROOT`) | Budgets (E9) |
 |---|---|---|
-| This Mac (runner `nax-macos`; labels incl. `rw-starvector`, `nax`, `signing`) and agent sessions on it | `/Volumes/Models/dev-host` | full |
-| `nax-macos-2` (labels incl. `rw-mage`, `rw-llm`) | `/Volumes/Models/dev-host` on the new 8 TB drive (about 2026-11-20), which takes over the `/Volumes/Models` mount name. The current drive has no room for a root (Michael, 2026-11-15), so the host has none until then | full |
+| This Mac (runner `nax-macos`; labels incl. `rw-starvector`, `nax`, `signing`) and agent sessions on it | `/Volumes/Work/dev-host`, an SMB share on the Tower NAS, shared with `nax-macos-2` | full, for this host's own folders |
+| `nax-macos-2` (labels incl. `rw-mage`, `rw-llm`) | the same `/Volumes/Work/dev-host` share | full, for this host's own folders |
 | Windows CUDA runners (`[self-hosted, Windows, X64, cuda]`) | `D:\dev-host` | full, unless `D:` is smaller |
 | GitHub-hosted runners (`ubuntu-latest`, `macos-*`, `windows-*`) | none: disposable, out of scope | — |
 
-Both Macs mount their dev volume at `/Volumes/Models`, so the fixed lock
-path (E3) is the same constant on both.
+**Amendment r5 (2026-11-22).** Michael moved the Macs from external USB
+drives to the Tower NAS: both Macs mount the same SMB share at
+`/Volumes/Work` and use one root, `/Volumes/Work/dev-host`. `/Volumes/Models` will not come back as an
+external drive; it is now the NAS's `Models` share, mounted on both Macs,
+and holds the HF hub cache. Michael measured no build-speed loss against the NAS. One
+root shared by two machines changes E2, E3, E4, E5, E8, E9 and E13 below:
+anything one host writes and decides about alone (locks, build slots,
+scratch, campaign work, Docker, the runner folder) moves under a per-host
+folder, `hosts/<host>/`, and each host's cleanup only ever deletes inside its
+own folder. The Windows box keeps its local `D:\dev-host` with the same
+layout, so all hosts run the same code.
 
 ## Goal
 
@@ -83,14 +92,27 @@ The system drive holds only source code, apps, toolchains, personal files
   - **Exceptions:** GPU and service lock paths (E3), and short-lived Unix
     socket rendezvous folders under `/tmp` (E13).
 - **E2 Fixed layout under the root.**
+  - **Shared by every host using the root:** `weights/`, `cache/` and
+    `campaigns/<project>/<id>/evidence/`. Writers to these never rewrite a
+    file in place: they write a temporary name and rename it, so two hosts
+    can't corrupt one file.
+  - **Per host:** everything else lives under `hosts/<host>/`, where
+    `<host>` is the machine's local host name as the OS reports it
+    (`scutil --get LocalHostName` on macOS, `COMPUTERNAME` read from the OS,
+    not the environment, on Windows). `dev-host` never takes it from an
+    overridable variable. The folders listed below as `locks/`, `build/`,
+    `t/`, `campaigns/<project>/<id>/work/`, `runner/` and `docker/` are all
+    under `hosts/<host>/` (r5).
   - `locks/` holds GPU, service and other cross-process locks. It is
-    machine-wide, not per project.
+    per machine, not per project.
   - `cache/<project>/` holds non-model caches: pmetal, torch, docker-smoke,
     cargo registry/git for CI, Playwright browsers, Xcode DerivedData.
   - `weights/<project>/` holds model weights that tests and campaigns load
     and that aren't in the HF hub. It includes a manifest naming each set,
-    its source and the workflows that use it. HF weights stay in
-    `/Volumes/Models/huggingface/hub` and are referenced, not copied.
+    its source and the workflows that use it. HF weights stay in the HF
+    hub cache at `/Volumes/Models/huggingface/hub`, now on the NAS's
+    `Models` share and shared by both Macs, and are referenced, not copied
+    (r5).
   - `build/<project>/<build-key>/slot-<n>/` holds Rust build output (E4).
   - `t/<short-id>/` holds per-run and per-session scratch and `TMPDIR`
     (E13). The path is kept short on purpose.
@@ -102,9 +124,12 @@ The system drive holds only source code, apps, toolchains, personal files
   - **Fixed path.** Each lock path is a fixed constant per host class,
     never derived from `DEV_HOST_ROOT`, `%PUBLIC%` or any other overridable
     variable:
-    - Macs: `/Volumes/Models/dev-host/locks/apple-metal.lock`
+    - Macs: `/Volumes/Work/dev-host/hosts/<host>/locks/apple-metal.lock`
+      (r5). `<host>` comes from the OS as in E2, so each Mac locks only its
+      own GPU and the two never block each other.
     - Windows: `D:\dev-host\locks\gpu\<UUID>.lock` and
-      `D:\dev-host\locks\service\…`
+      `D:\dev-host\locks\service\…`, moving under
+      `D:\dev-host\hosts\<host>\` with the r5 layout.
   - **No mkdir on a missing volume.** Before opening a lock, the helper
     runs the E5 check. It never creates any folder above `locks/`. Today's
     `mkdir(parents=True)` calls in `metal_execution_lock.py` and
@@ -170,7 +195,8 @@ The system drive holds only source code, apps, toolchains, personal files
       `mlx-sys`'s `build.rs` has no `rerun-if-env-changed`, so sharing
       would silently drop the NAX Metal kernels.
     - **a sticky slot:** one slot per worktree path and key, recorded under
-      the root and kept until E8 reclaims it. The worktree always builds
+      `hosts/<host>/build/` and kept until E8 reclaims it. Two hosts never
+      share a slot or a slot registry, even for the same worktree path (r5). The worktree always builds
       incrementally in the same slot, and no two worktrees ever share a
       slot, so one can't overwrite another's binaries. Slots are capped per
       key. When none is free, the least recently used idle slot is
@@ -261,6 +287,10 @@ The system drive holds only source code, apps, toolchains, personal files
     allowlist of system tools (e.g. `/opt/homebrew/bin`).
   - It runs on every PR.
 - **E8 Automatic cleanup with liveness checks.**
+  - **Own folder only (r5).** A host's cleanup deletes only inside
+    `hosts/<host>/`. It can't see another host's processes, so it never
+    deletes anything another host might be using. Shared folders
+    (`weights/`, `cache/`, campaign evidence) are only measured and reported.
   - A scheduled job on each in-scope host:
     - deletes `build/` slots whose stamp file (touched by `dev-host` at
       every assignment) is older than 7 days
@@ -277,8 +307,11 @@ The system drive holds only source code, apps, toolchains, personal files
     - `cache/` ≤ 50 GB
     - `campaigns/*/work` ≤ 100 GB
     - `docker/` ≤ 120 GB
-  - `nax-macos-2` gets the full figures on its new drive. Windows uses the Mac figures without
-    `docker/`, scaled down if `D:` is smaller.
+  - These budgets are per host: each Mac gets them for its own
+    `hosts/<host>/` folder, so the two Macs together may use twice the
+    `build/`, `t/`, campaign-work and `docker/` figures on the NAS (r5).
+    `cache/` (50 GB) is shared and counted once. Windows uses the Mac
+    figures without `docker/`, scaled down if `D:` is smaller.
   - `weights/` is sized by its manifest.
   - The cleanup job reports any folder over budget. In `build/` and `t/` it
     deletes the least recently used idle entries until under budget, using
@@ -306,10 +339,9 @@ The system drive holds only source code, apps, toolchains, personal files
     6. Move data.
     7. Delete the old copies.
 
-    `nax-macos-2` does steps 1–2 on its new drive before any workflow
+    `nax-macos-2` does steps 1–2 on the NAS share before any workflow
     cut-over on main (step 4), so its jobs never meet an unset
-    `DEV_HOST_ROOT`. Until the drive arrives, nobody dispatches a
-    repointed workflow to it, and the cut-over on main waits.
+    `DEV_HOST_ROOT` (r5: no new drive is needed).
   - **Data that moves:**
     - test and campaign weights, including StarVector's
     - evidence
@@ -343,8 +375,13 @@ The system drive holds only source code, apps, toolchains, personal files
     downloads on macOS
 - **E13 Temp files under the root, with short paths.**
   - `TMPDIR` (macOS) and `TEMP`/`TMP` (Windows) point at
-    `$DEV_HOST_ROOT/t/<short-id>/`. The short id is 8 characters, so the
-    macOS path stays around 40 bytes.
+    `$DEV_HOST_ROOT/hosts/<host>/t/<short-id>/`. The short id is 8
+    characters, so the macOS path stays well under the socket limit.
+  - **SMB caveat (r5).** On the NAS, scratch files sit on SMB. dev-host's
+    own suite failed 4 of 75 tests with `TMPDIR` on the share (same-process
+    lock visibility, one cleanup test, two install-staging tests) and passed
+    all 75 with local scratch (2026-11-20). Whether SceneWorks and inference
+    tests pass with `TMPDIR` on SMB is an open question; see below.
   - `dev-host` sets them at job and session start (E4); a per-run id
     can't live in the runner `.env`.
   - **Socket exception.** Tools that need a Unix socket path under macOS's
@@ -376,8 +413,8 @@ The system drive holds only source code, apps, toolchains, personal files
      socket folders under `/tmp`.
    - Not allowed: build output, weights, caches or scratch.
 2. **Missing storage fails before anything is written.** Run with the
-   external volume unmounted, and again with a plain folder created at
-   `/Volumes/Models` (that needs admin rights; Michael runs this part):
+   NAS share unmounted, and again with a plain folder created at
+   `/Volumes/Work` (that needs admin rights; Michael runs this part):
    - the runner launcher refuses to start;
    - a queued job fails in the pre-job hook within 10 s, naming the mount;
    - `dev-host check`, the `cargo` shim and the lock helper all fail the
@@ -453,11 +490,15 @@ The system drive holds only source code, apps, toolchains, personal files
 
 ## Accepted properties
 
-- Builds on external USB storage will be somewhat slower than on internal
-  drives (not measured). Decided by Michael on 2026-11-13.
-- The external volume is a single point of failure for that host's CI and
-  agent builds. E5 makes the failure loud and early.
-- The Mac volume has ownership disabled, so file permissions don't separate
+- Builds on the NAS showed no speed loss (Michael, 2026-11-22). On the
+  share, rustc's incremental compilation can't create its session lock
+  (macOS error 45), so every build on the Macs runs with
+  `CARGO_INCREMENTAL=0`. Edit-compile loops in agent worktrees therefore
+  rebuild whole crates instead of only what changed.
+- The NAS is a single point of failure for both Macs' CI and agent builds at
+  once, and so is the network path to it. E5 makes the failure loud and
+  early. Its SMB mount must come back by itself after a reboot or a drop.
+- The Mac volume (now the SMB share) has ownership disabled, so file permissions don't separate
   runner state from agent state.
 - Spotlight indexing is read-only on the Mac volume, and Time Machine
   already excludes it.
@@ -469,8 +510,9 @@ The system drive holds only source code, apps, toolchains, personal files
 ## Decided (2026-11-13)
 
 - One shared root for all projects: `dev-host` on each host's external or
-  `D:` storage. Both Macs mount at `/Volumes/Models`.
-- Builds go on the external drive.
+  `D:` storage. Both Macs mount at `/Volumes/Models`. (Superseded by r5: the
+  Macs share one root on the NAS.)
+- Builds go on the external drive (now the NAS).
 - Cleanup age: 7 days.
 - `nax-macos-2` gets a new 8 TB drive matching this Mac's (ordered; about
   one week out). Its current drive has no room for a temporary root
@@ -488,10 +530,26 @@ The system drive holds only source code, apps, toolchains, personal files
     low-to-medium confidence). Whether to clear it is Michael's call,
     outside this feature.
 
-- `nax-macos-2`'s current external drive is already mounted as
-  `/Volumes/Models` (Michael), so both Macs share the fixed lock path with no
-  rename. The new 8 TB drive must take the same name.
+- (Superseded by r5: both Macs now use the NAS share at `/Volumes/Work`.)
+
+## Decided (2026-11-22, r5)
+
+- Both Macs use one root on the Tower NAS, `/Volumes/Work/dev-host`.
+  `/Volumes/Models` will not come back as an external drive; the name is
+  now the NAS's `Models` share, which holds the HF hub cache.
+- `nax-macos-2` needs no new drive; it mounts the same share.
 
 ## Open questions
 
-None.
+1. **Scratch on SMB.** Keep `TMPDIR` on the share, or put `hosts/<host>/t/`
+   on each Mac's local disk? Recommendation: keep it on the share, and run
+   the SceneWorks and inference non-inference test suites once with
+   `TMPDIR` there (part of SW-1/INF-1). Move it local only if they fail the
+   way dev-host's 4 tests did.
+2. **Automatic remount.** How does each Mac mount `/Volumes/Work` and
+   `/Volumes/Models` at boot, and do they come back after a network drop?
+   On 2026-11-22 both shares had dropped on this Mac while its runner was
+   listening (its pre-job hook would have failed every job), and Michael
+   remounted them by hand.
+   Both shares are mounted as `GUEST` today, so any machine on the network
+   that can reach Tower can also write to them.
