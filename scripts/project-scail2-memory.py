@@ -411,7 +411,7 @@ def validate_post_output_gaps(guard, end, last_used, *, tied_read=False, fresh_g
         )
 
 
-def validate_job_release(guard, claim, basis):
+def validate_job_release(guard, claim, basis, *, require_quiet=True):
     pid = guard["pid"]
     if basis == "owned-job-completion":
         expected = {
@@ -429,20 +429,58 @@ def validate_job_release(guard, claim, basis):
             )
     else:
         require(basis == "archived-supervisor-return", "unknown CUDA completion basis")
-    release = claim["release_background_activity"]["samples"]
+    # Native shared release permits other tenants after owned Job exit. The
+    # exceptional render intervals additionally require five quiet samples.
+    activity = claim["release_background_activity"]
+    release = activity["samples"]
+    verification = claim["release_metadata_verification"]
+    baseline = claim["admission_baseline"]
+    total = byte_count(baseline["admitted_total_mib"])
     require(
-        len(release) == 5
-        and all(
-            v["selected_index_matches_admission"] is True
-            and v["post_owned_exit_primary_metadata_valid"] is True
-            and all(
-                byte_count(v["selected_card"][key]) == 0
-                for key in ("index", "used_mib", "utilization_percent")
-            )
-            for v in release
-        ),
-        "missing five quiet selected-card release samples",
+        baseline["uuid"] == claim["device_uuid"] == guard["admission"]["cudaDeviceUuid"]
+        and byte_count(claim["physical_index"]) == 0
+        and total > 0
+        and activity["status"] == "retained-existing-samples"
+        and activity["activity_profile"] == claim["activity_profile"]
+        and activity["admission_headroom_is_diagnostic_only"] is True
+        and 1 <= len(release) == byte_count(activity["sample_count"]) <= 5,
+        "shared GPU0 release differs from the selected device or sample window",
     )
+    if verification == {"status": "verified"}:
+        require(
+            len(release) == 5
+            and claim["release_utilization_percent"]
+            == [s["selected_card"]["utilization_percent"] for s in release],
+            "incomplete verified release series",
+        )
+    else:
+        require(
+            not require_quiet
+            and verification.get("status") == "inconclusive-driver-query-timing"
+            and isinstance(verification.get("error"), str)
+            and "release_utilization_percent" not in claim
+            and verification.get("diagnostic") == activity,
+            "missing original shared GPU0 timing diagnostics",
+        )
+    for index, sample in enumerate(release, 1):
+        card = sample["selected_card"]
+        require(
+            byte_count(sample["sample_number"]) == index
+            and sample["predicates"]["unique_uuid"] is True
+            and sample["selected_index_matches_admission"] is True
+            and sample["post_owned_exit_primary_metadata_valid"] is True
+            and byte_count(card["index"]) == 0
+            and byte_count(card["total_mib"]) == total
+            and byte_count(card["used_mib"]) <= total
+            and byte_count(card["free_mib"]) <= total
+            and card["used_mib"] + card["free_mib"] <= total + 2,
+            "shared GPU0 release sample differs from the claimed adapter capacity",
+        )
+        if require_quiet:
+            require(
+                card["used_mib"] == byte_count(card["utilization_percent"]) == 0,
+                "completed render scope lacks five quiet release samples",
+            )
 
 
 def validate_cuda_guard_samples(guard, end, card):
@@ -1054,6 +1092,12 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                 "completed Job polling interval differs from the signed policy",
             )
             completion = (record["claim"], summary, basis)
+        if partial or fresh_gpu0 or completion:
+            require(
+                byte_count(record["claim"]["admission_baseline"]["admitted_total_mib"])
+                == int(hw["memory.total"]),
+                "release baseline differs from physical GPU0 capacity",
+            )
         if (partial or fresh_gpu0) and not completion:
             require(
                 guard["admission"]["pollMillis"]
@@ -1062,11 +1106,15 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                 and record["claim"]["device_uuid"] == hw["uuid"]
                 and record["claim"]["physical_index"] == 0
                 and record["claim"]["lease_released"] is True
-                and record["claim"]["release_metadata_verification"] == {"status": "verified"}
                 and review["domains"]["device"]["basis"] == "measured_aggregate",
                 "CUDA count lacks its original signed guard or release",
             )
-            validate_job_release(guard, record["claim"], "owned-job-completion")
+            validate_job_release(
+                guard,
+                record["claim"],
+                "owned-job-completion",
+                require_quiet=tied_read,
+            )
             validate_cuda_guard_samples(
                 guard,
                 end,

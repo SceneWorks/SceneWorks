@@ -659,6 +659,21 @@ def completed_job_fixture(*, tied=False):
             ]
         },
     }
+    claim.update(
+        activity_profile="non-isolated-correctness-headroom",
+        admission_baseline={"admitted_total_mib": 97887, "uuid": uuid},
+        release_utilization_percent=[0] * 5,
+    )
+    activity = claim["release_background_activity"]
+    activity.update(
+        status="retained-existing-samples",
+        activity_profile=claim["activity_profile"],
+        admission_headroom_is_diagnostic_only=True,
+        sample_count=5,
+    )
+    for i, sample in enumerate(activity["samples"], 1):
+        sample.update(sample_number=i, predicates={"unique_uuid": True})
+        sample["selected_card"].update(total_mib=97887, free_mib=97438)
     if tied:
         set_tied_read(guard, scope)
         return guard, claim, scope, pool
@@ -856,6 +871,7 @@ def completed_capture_fixture(tmp_path, *, tied=False):
         },
         "logs": {},
     }
+    capture["hardware"]["memory.total"] = "97887"
     for name, data in (("count-6.cuda-pool.json", pool), ("count-6.supervisor.json", guard)):
         capture["logs"][name] = {"sha256": tool["sha256"](write(name, data).read_bytes())}
     receipt = write("receipt.json", capture)
@@ -1090,9 +1106,10 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
 
 
 @pytest.mark.parametrize(
-    "tied", [True, False], ids=["sampled-owned-zero", "no-zero-owned-completion"]
+    "mode", ["tied", "owned-completion", "shared-release", "partial-shared-release"]
 )
-def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path, tied):
+def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path, mode):
+    tied = mode != "owned-completion"
     write, guard, claim, _, _, _, record, capture, _, review = completed_capture_fixture(
         tmp_path, tied=tied
     )
@@ -1166,9 +1183,38 @@ def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path,
         review["receipt_sha256"] = digest(receipt.read_bytes())
         return tool["project"](receipt, write("review.json", review))
 
+    shared_release = mode in ("shared-release", "partial-shared-release")
+    if shared_release:
+        del record["candidate_row_pending_physical_review"]["cuda_render_scope"]
+        for gauge, data in [
+            ("dedicated", guard["cuda_attribution"]["wddm_dedicated"]),
+            ("shared", obs["wddm_shared"]),
+        ]:
+            data["missing_active_polls"] = 0
+            obs["wddm_retry"][gauge] = {"attempts": 0, "events": []}
+        activity = claim["release_background_activity"]
+        capture["hardware"]["memory.total"] = "97887"
+        for i, sample in enumerate(activity["samples"], 1):
+            sample.update(sample_number=i, predicates={"unique_uuid": True})
+            sample["selected_card"].update(
+                total_mib=97887, used_mib=450, free_mib=97000, utilization_percent=1
+            )
+        if mode == "partial-shared-release":
+            del claim["release_utilization_percent"]
+            activity["samples"] = activity["samples"][:2]
+            claim["release_metadata_verification"] = {
+                "status": "inconclusive-driver-query-timing",
+                "error": "timeout",
+                "diagnostic": activity,
+            }
+        else:
+            claim["release_utilization_percent"] = [1] * 5
+        activity["sample_count"] = len(activity["samples"])
     result = project()
     assert result["accepted"] is True and "recovery_certificate_sha256" not in result
-    assert result["bounds"]["device_interval"] == "load_through_completed_rgb"
+    assert result["bounds"].get("device_interval") == (
+        None if shared_release else "load_through_completed_rgb"
+    )
     assert result["bounds"]["device"]["classified_peak_bytes"] == 110
     for target, field, invalid in [
         (review, "hosted_plan_sha256", "0" * 64),
@@ -1177,6 +1223,10 @@ def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path,
         (claim["owned_execution_completion"], "owned_pids", [41]),
         (admission, "childFootprintCapBytes", 1),
         (guard["samples"][0], "gpuFreeBytes", free_reserve - 1),
+        (claim["release_background_activity"]["samples"][0]["selected_card"], "total_mib", 0),
+        (claim["release_background_activity"]["samples"][0]["selected_card"], "free_mib", 97888),
+        (claim["release_background_activity"], "sample_count", 0),
+        (claim["admission_baseline"], "uuid", "other"),
         (record["native"]["output"], "frames", 44),
         (review["domains"]["device"], "basis", "guarded_ceiling"),
     ]:
