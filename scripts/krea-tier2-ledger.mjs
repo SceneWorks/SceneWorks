@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { link, lstat, open, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
-import { COMPANION, kreaSnapshotFile } from "./krea-tier2-proof.mjs";
+import { COMPANION, KREA_HF_ORIGIN, kreaSnapshotFile } from "./krea-tier2-proof.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 
@@ -18,7 +18,7 @@ const selectors = Object.freeze([
   "bf16/scheduler/*",
   "bf16/model_index.json",
 ]);
-const expectedLedger = Object.freeze({ schemaVersion: 1, baseUrl: "https://huggingface.co", ...COMPANION, selectors });
+const expectedLedger = Object.freeze({ schemaVersion: 1, baseUrl: KREA_HF_ORIGIN, ...COMPANION, selectors });
 const { baseUrl, repo, revision } = expectedLedger;
 const ledgerLeaf = `${sha256([baseUrl, repo, revision, ...selectors].join("\0"))}.json`;
 const expectedCompanions = 10;

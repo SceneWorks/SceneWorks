@@ -154,6 +154,25 @@ test("win32 launch: API and worker hold a stdin pipe and the worker gets the can
   assert.deepEqual(processState({ label: "worker", pid: 9, exitCode: 3, signalCode: null }), { pid: 9, alive: false, exitCode: 3, signal: null, stdin: "pipe" });
 });
 
+test("paired Krea Hires pins the Hugging Face origin for both Windows child processes", () => {
+  const host = {
+    SCENEWORKS_HUGGINGFACE_BASE_URL: "https://alternate.invalid",
+    Sceneworks_HuggingFace_Base_Url: "https://alternate.invalid",
+    sceneworks_huggingface_base_url: "https://alternate.invalid",
+    HF_ENDPOINT: "https://alternate.invalid",
+    Hf_Endpoint: "https://alternate.invalid",
+    hf_endpoint: "https://alternate.invalid",
+  };
+  const options = { backend: "cuda", state: "/s", hub: "/h/hub", xet: "/x", workerId: "w", metallib: null };
+  const envs = childEnvironments(host, { ...options, pairedKreaHires: true });
+  for (const child of [envs.api, envs.worker("http://127.0.0.1:1")]) {
+    const origins = Object.entries(child).filter(([key]) =>
+      ["SCENEWORKS_HUGGINGFACE_BASE_URL", "HF_ENDPOINT"].includes(key.toUpperCase()));
+    assert.deepEqual(origins, [["SCENEWORKS_HUGGINGFACE_BASE_URL", "https://huggingface.co"]]);
+  }
+  assert.equal(childEnvironments(host, options).api.SCENEWORKS_HUGGINGFACE_BASE_URL, undefined);
+});
+
 test("job polling: claim bound before a worker attaches, execution bound after, terminal states stop at once", () => {
   const base = { postedMs: 0, claimMinutes: 5, timeoutMinutes: 20 };
   assert.equal(jobProgressDecision({ ...base, job: { status: "queued", stage: "queued" }, nowMs: 4 * 60_000 }).state, "waiting_claim");

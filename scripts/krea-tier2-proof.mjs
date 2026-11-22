@@ -13,6 +13,7 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 
 export const KREA_SUITE = "krea-scoped-acceptance";
+export const KREA_HF_ORIGIN = "https://huggingface.co";
 export const KREA_BASE_APP = "2aa525dfb2fb1ab889bd6a15f80c0a0cc1df1e2d";
 export const KREA_BASE_ENGINE = "e86b8d5fc493c16b2d9d852e0c9ecbdefee58294";
 const RAW = { repo: "SceneWorks/krea-2-raw-mlx", revision: "b88090c79762ba34b1de23a892da239eb76962e4" };
@@ -80,7 +81,7 @@ export function kreaAssetInventory(evidence, routes) {
 }
 
 function resolveUrl({ repo, revision, file }) {
-  return `https://huggingface.co/${repo}/resolve/${revision}/${file.split("/").map(encodeURIComponent).join("/")}`;
+  return `${KREA_HF_ORIGIN}/${repo}/resolve/${revision}/${file.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 export async function priceKreaAssets(inventory, signal, fetchImpl = fetch) {
@@ -90,7 +91,7 @@ export async function priceKreaAssets(inventory, signal, fetchImpl = fetch) {
     const dir = source.file.split("/")[0];
     const key = `${keyOf(source)}/${dir}`;
     if (!trees.has(key)) {
-      const url = `https://huggingface.co/api/models/${source.repo}/tree/${source.revision}/${dir}?recursive=true`;
+      const url = `${KREA_HF_ORIGIN}/api/models/${source.repo}/tree/${source.revision}/${dir}?recursive=true`;
       const response = await fetchImpl(url, { redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
       assert.ok(response.ok && !response.headers.get("link"), `incomplete pinned inventory, HTTP ${response.status}: ${key}`);
       trees.set(key, await response.json());

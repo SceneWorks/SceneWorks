@@ -206,7 +206,7 @@ test("Raw sends the fixed pin to normal project import and refuses a changed ins
 test("asset metadata pricing refuses digest and length drift before downloading", async () => {
   let row = { type: "file", path: CHECKPOINT.file, size: CHECKPOINT.bytes, lfs: { oid: CHECKPOINT.sha256 } };
   const fetchMetadata = async (url, opts) => {
-    assert.match(url, /\/tree\/952f49d49653cb42e7d6cf7cbfad74738073ec7d\/diffusion_models\?recursive=true$/);
+    assert.equal(url, `https://huggingface.co/api/models/Comfy-Org/Krea-2/tree/952f49d49653cb42e7d6cf7cbfad74738073ec7d/diffusion_models?recursive=true`);
     assert.equal(opts.redirect, "error");
     return new Response(JSON.stringify([row]));
   };
@@ -241,7 +241,7 @@ test("staging copies verified cache hits and downloads only missing exact assets
     new AbortController().signal, {
       cacheHub, progress: (event) => events.push(event),
       fetchImpl: async (url) => {
-        assert.match(url, /\/bf16\/config\.json$/);
+        assert.equal(url, `https://huggingface.co/${missing.repo}/resolve/${missing.revision}/bf16/config.json`);
         return new Response(config);
       },
     });

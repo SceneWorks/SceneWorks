@@ -40,7 +40,7 @@ import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 import { assertPins, buildChildEnv } from "./qwen-image-2-1-app-lifecycle.mjs";
 import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText, utilityWorkerId } from "./flux3-image-klein-app-lifecycle.mjs";
 import {
-  KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, assertKreaPins, kreaRoutes, kreaAssetInventory,
+  KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_HF_ORIGIN, assertKreaPins, kreaRoutes, kreaAssetInventory,
   assertKreaCatalogRows, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importKreaRawAdapter, importLinkedKrea,
   assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaRawOutputDiagnostics, kreaPerformance,
 } from "./krea-tier2-proof.mjs";
@@ -1068,13 +1068,11 @@ export function childStdio(name, logFd) { return [CHILD_STDIN[name] ?? "ignore",
 // commits). Removes every *TOKEN*, *SECRET*, *PASSWORD*, *CREDENTIAL* and *_KEY variable, including
 // HF_TOKEN, HUGGING_FACE_HUB_TOKEN and HF_HUB_TOKEN.
 export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/i;
-// Ambient SCENEWORKS_* variables are cleared for the children (buildChildEnv); these are the only
-// ones put back, because the children need them and they are not secrets. SCENEWORKS_FFMPEG is the
-// ffmpeg preflight validated (media_process.rs resolves the API/worker's ffmpeg from it, else PATH),
-// and SCENEWORKS_FFMPEG_TIMEOUT_SECONDS bounds that ffmpeg. The product reads no ffprobe variable.
+// Pass the host's checked ffmpeg path and timeout after buildChildEnv clears SCENEWORKS_*.
+// media_process.rs resolves ffmpeg from SCENEWORKS_FFMPEG or PATH.
 export const FORWARDED_SCENEWORKS_ENV = Object.freeze(["SCENEWORKS_FFMPEG", "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS"]);
 export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
-export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib, allocation = false }) {
+export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib, allocation = false, pairedKreaHires = false }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
   if (backend === "cuda") {
@@ -1086,6 +1084,15 @@ export function childEnvironments(env, { backend, state, hub, xet, workerId, met
   // gated ones are skipped at planning, so the API and worker get no token of any kind.
   base = scrubSecrets(base);
   for (const key of FORWARDED_SCENEWORKS_ENV) if (env[key]) base[key] = env[key];
+  if (pairedKreaHires) {
+    // Windows treats environment names case-insensitively. Pin the exact origin used by
+    // Krea staging and the companion ledger without inheriting either endpoint alias.
+    for (const key of Object.keys(base)) {
+      const name = key.toUpperCase();
+      if (name === "SCENEWORKS_HUGGINGFACE_BASE_URL" || name === "HF_ENDPOINT") delete base[key];
+    }
+    base.SCENEWORKS_HUGGINGFACE_BASE_URL = KREA_HF_ORIGIN;
+  }
   return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1", ...(allocation ? { SCENEWORKS_CUDA_PROOF_POOL_BYTES: String(KREA_ALLOCATION_POOL_BYTES) } : {}) }) };
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1107,7 +1114,10 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   // run.json is rewritten at every phase transition, so a cancelled job still leaves evidence.
   const persist = () => writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets)).catch(() => {});
   const phase = async (name, fields = {}) => { record.phase = name; progress({ route: route.id, run: label, phase: name, ...fields }); await persist(); };
-  const envs = childEnvironments(env, { backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path, allocation: cfg.allocation });
+  const envs = childEnvironments(env, {
+    backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path,
+    allocation: cfg.allocation, pairedKreaHires: Boolean(hiresLedger),
+  });
   const children = [], handles = [], controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason ?? new Error("A/B interrupted"));
   signal.addEventListener("abort", onAbort, { once: true });
