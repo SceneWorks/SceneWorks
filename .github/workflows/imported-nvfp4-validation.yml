@@ -9,6 +9,16 @@ on:
         type: choice
         default: nvfp4
         options: [nvfp4, fp8, convrot, all, sdxl-fp8-reference, quantization-cache]
+      cache_backend:
+        description: Native saved-quantization proof backend
+        type: choice
+        default: both
+        options: [both, candle, mlx]
+      mac_runner:
+        description: Optional secondary Mac routing when the primary host is unavailable
+        type: choice
+        default: auto
+        options: [auto, secondary]
 
 permissions:
   contents: read
@@ -135,7 +145,7 @@ jobs:
           if-no-files-found: error
 
   saved-quantization-candle:
-    if: ${{ inputs.format == 'quantization-cache' }}
+    if: ${{ inputs.format == 'quantization-cache' && inputs.cache_backend != 'mlx' }}
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 90
     defaults:
@@ -195,7 +205,7 @@ jobs:
         shell: powershell
         run: ./scripts/ci/cleanup-saved-quantization-proof.ps1 -Root $env:SAVED_QUANTIZATION_ROOT
       - name: Retain metadata and physical execution receipts
-        if: always()
+        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: saved-quantization-candle-${{ github.run_id }}-${{ github.run_attempt }}
@@ -205,8 +215,8 @@ jobs:
           if-no-files-found: error
 
   saved-quantization-mlx:
-    if: ${{ inputs.format == 'quantization-cache' }}
-    runs-on: [self-hosted, macOS, ARM64, nax]
+    if: ${{ inputs.format == 'quantization-cache' && inputs.cache_backend != 'candle' }}
+    runs-on: ${{ inputs.mac_runner == 'secondary' && fromJSON('["self-hosted","macOS","ARM64","nax","rw-krea"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     timeout-minutes: 90
     defaults:
       run:
@@ -282,7 +292,7 @@ jobs:
           print(json.dumps({'removedBytes':sum(entry['bytes'] for entry in removed),'verifiedAbsent':removed}))
           PY
       - name: Retain cold and warm receipts
-        if: always()
+        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: saved-quantization-mlx-${{ github.run_id }}-${{ github.run_attempt }}
