@@ -1,6 +1,6 @@
 // Dedicated numerical validation only; ordinary CI may use --prepare for metadata startup checks.
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, openSync, readSync, closeSync, fstatSync } from "node:fs";
-import { resolve, dirname, join, basename } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, openSync, readSync, closeSync, fstatSync, readdirSync } from "node:fs";
+import { resolve, dirname, join, basename, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { lockedInferenceRevision } from "../select-windows-cargo-cache.mjs";
@@ -21,6 +21,22 @@ const marker = join(root, ".saved-quantization-proof");
 const owner = `${process.env.GITHUB_RUN_ID ?? "local-metadata"}:${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
 if (existsSync(root) && (!existsSync(marker) || readFileSync(marker, "utf8").trim() !== owner)) {
   throw new Error("proof root exists without this run's ownership marker");
+}
+if (args.includes("--stage-receipts")) {
+  if (process.env.GITHUB_ACTIONS !== "true" || !isAbsolute(process.env.GITHUB_WORKSPACE ?? "") || !existsSync(marker)) {
+    throw new Error("receipt staging requires an existing owned Actions proof");
+  }
+  const destination = join(process.env.GITHUB_WORKSPACE, "saved-quantization-receipts", owner.replace(":", "-"));
+  mkdirSync(destination, { recursive: true });
+  for (const file of readdirSync(root, { withFileTypes: true })) {
+    if (file.isFile() && file.name.endsWith(".json")) copyFileSync(join(root, file.name), join(destination, file.name));
+  }
+  if (backend === "candle" && process.env.RUNNER_TEMP) {
+    const receipt = join(process.env.RUNNER_TEMP, `sceneworks-cuda-execution-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-saved-quantization`, "resource-receipt.json");
+    if (existsSync(receipt)) copyFileSync(receipt, join(destination, "resource-receipt.json"));
+  }
+  console.log(JSON.stringify({ destination, files: readdirSync(destination) }));
+  process.exit(0);
 }
 mkdirSync(root, { recursive: true });
 writeFileSync(marker, `${owner}\n`);
