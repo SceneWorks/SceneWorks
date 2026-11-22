@@ -120,6 +120,19 @@ jobs:
       - name: Record the original terminal job start
         shell: bash
         run: echo "H3_TERMINAL_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Check out workflow-owned storage tooling
+        if: runner.os == 'Windows'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runner-storage-tooling
+          sparse-checkout: .github/actions/cleanup-runner-storage
+          persist-credentials: false
+      - name: Own disposable Windows campaign storage
+        if: runner.os == 'Windows'
+        uses: ./runner-storage-tooling/.github/actions/cleanup-runner-storage
+        with:
+          dev-host: 'true'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v5
         with:
           ref: ${{ inputs.sceneworks_sha }}
@@ -151,7 +164,7 @@ jobs:
       # static, read-only model volume) and refused its next case for space. Weights are now read
       # from the HF hub only (E:\huggingface\hub on Windows; request.mlx_hf_home, default
       # /Volumes/Models/huggingface, on macOS) and every write goes under request.work_root
-      # (default D:\sc26691-campaign on Windows, ~/sc26691-campaign — the main drive — on macOS). The
+      # (an owned dev-host job directory on Windows, ~/sc26691-campaign on macOS). The
       # stage refuses any write path on E: or under the macOS HF home, loudly.
       - name: Resolve the campaign work root and weights roots
         shell: bash
@@ -172,11 +185,19 @@ jobs:
           } else {
             // Windows reads E:\huggingface\hub (cacheHub); the services and native witnesses set their own HF homes.
             if (request.mlx_hf_home !== undefined) throw new Error("mlx_hf_home applies to the macOS lane only");
-            resolved.HF_HOME = "";
+            resolved.HF_HOME = "E:\\huggingface";
+            resolved.HF_HUB_CACHE = "E:\\huggingface\\hub";
           }
           const readEnv = {...env, ...resolved};
           if (request.work_root !== undefined && (typeof request.work_root !== "string" || !request.work_root)) throw new Error("request.work_root must be a non-empty path string");
-          resolved.H3_WORK_ROOT = campaignWorkRoot({platform: process.platform, env: {...readEnv, H3_WORK_ROOT: request.work_root || ""}});
+          let workRoot = request.work_root || "";
+          if (process.platform === "win32") {
+            if (!env.DEV_HOST_JOB_ROOT) throw new Error("Windows campaign requires registered dev-host job storage");
+            workRoot ||= path.join(env.DEV_HOST_JOB_ROOT, "h3");
+            const relative = path.relative(env.DEV_HOST_JOB_ROOT, path.resolve(workRoot));
+            if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Windows work_root must be inside this job's dev-host directory");
+          }
+          resolved.H3_WORK_ROOT = campaignWorkRoot({platform: process.platform, env: {...readEnv, H3_WORK_ROOT: workRoot}});
           await mkdir(resolved.H3_WORK_ROOT, {recursive: true});
           await appendFile(env.GITHUB_ENV, Object.entries(resolved).map(([k, v]) => `${k}=${v}\n`).join(""));
           console.log(JSON.stringify({readsWeightsFrom: cacheHub({platform: process.platform, env: readEnv}), writesUnder: resolved.H3_WORK_ROOT, runner: env.RUNNER_NAME}));
@@ -832,6 +853,7 @@ jobs:
           for(const c of executionCases(plan).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
           NODE
       - name: Retain terminal staging and conditioning receipts without uploading weights
+        id: stage_artifact
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -840,6 +862,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
       - name: Retain reduced-case evidence including failure and resume identity
+        id: reduced_artifact
         if: always() && inputs.case_id == '' && env.H3_OUTPUT_EFFECTIVE != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -858,6 +881,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Retain evidence including failure and resume identity
+        id: case_artifact
         if: always() && inputs.case_id != '' && env.H3_OUTPUT_EFFECTIVE != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -876,3 +900,7 @@ jobs:
             !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/*.pth
           if-no-files-found: error
           retention-days: 30
+      - name: Confirm evidence is published before disposable cleanup
+        if: ${{ always() && runner.os == 'Windows' && steps.stage_artifact.outcome == 'success' && (env.H3_OUTPUT_EFFECTIVE == '' || steps.reduced_artifact.outcome == 'success' || steps.case_artifact.outcome == 'success') }}
+        shell: powershell
+        run: '"DEV_HOST_WORK_UPLOADS_COMPLETE=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'

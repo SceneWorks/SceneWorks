@@ -789,7 +789,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.campaign }}-mlx-campaign-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/memory-catalog-${{ inputs.campaign }}-${{ github.run_id }}/
+          path: ${{ env.WORK_DIR_NATIVE }}
           if-no-files-found: warn
           retention-days: 30
 
@@ -823,16 +823,38 @@ jobs:
       BACKEND: candle
       MEMORY_CAMPAIGN_PROFILE: ${{ inputs.profile || 'catalog' }}
       DEFAULT_HF_CACHE: 'E:\huggingface\hub'
-      # The persistent inference clone, on the drive this runner already keeps its per-runner caches
-      # on. Deliberately NOT under $GITHUB_WORKSPACE or $RUNNER_TEMP: both are wiped between jobs,
-      # which is what made every dispatch re-pull ~650 MB over this box's slow link.
-      INFERENCE_CLONE_DIR: 'D:\memory-catalog-inference'
+      # The persistent inference object cache is resolved below under DEV_HOST_ROOT/cache,
+      # outside disposable job work, so completed jobs do not force another full fetch.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           # See the mlx job's checkout step for why a shallow clone is sufficient here too.
           fetch-depth: 1
+
+      - name: Keep workflow tooling outside product source checks
+        shell: powershell
+        run: |
+          $exclude = & git rev-parse --git-path info/exclude
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot locate checkout-local excludes' }
+          [IO.File]::AppendAllText($exclude, "`n/runner-storage-tooling/`n", [Text.UTF8Encoding]::new($false))
+      - name: Check out workflow-owned storage tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: runner-storage-tooling
+          sparse-checkout: .github/actions/cleanup-runner-storage
+          persist-credentials: false
+      - name: Own disposable Windows campaign storage
+        uses: ./runner-storage-tooling/.github/actions/cleanup-runner-storage
+        with:
+          dev-host: 'true'
+      - name: Resolve managed build and object-cache paths
+        shell: powershell
+        run: |
+          if (-not $env:DEV_HOST_JOB_ROOT -or -not $env:DEV_HOST_ROOT) { throw 'Missing managed job storage' }
+          "CARGO_TARGET_DIR=$env:DEV_HOST_JOB_ROOT\target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "INFERENCE_CLONE_DIR=$env:DEV_HOST_ROOT\cache\memory-catalog-inference" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # WHY THIS STEP EXISTS: `bash` ON THIS BOX IS THE WSL RELAY, NOT GIT BASH.
       # ------------------------------------------------------------------------------------------
@@ -1003,7 +1025,7 @@ jobs:
             if errorlevel 1 exit /b 1
           )
           rem Workspace target belongs to this runner service, which schedules one job at a time.
-          echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
+          echo ADAPTER=%CARGO_TARGET_DIR%\release\memory-candle-adapter.exe>>%GITHUB_ENV%
 
       # CI_IMPACT: explicit replay only. Reuses this job's native CUDA toolchain and caches,
       # runs the new pure gate contracts and strict worker Clippy, then builds the real app/worker.
@@ -1030,7 +1052,7 @@ jobs:
           if errorlevel 1 exit /b 1
           cargo build --release --locked -p sceneworks-rust-api --features backend-candle --bin sceneworks-rust-api
           if errorlevel 1 exit /b 1
-          echo SDXL_REPLAY_API=%GITHUB_WORKSPACE%\target\release\sceneworks-rust-api.exe>>%GITHUB_ENV%
+          echo SDXL_REPLAY_API=%CARGO_TARGET_DIR%\release\sceneworks-rust-api.exe>>%GITHUB_ENV%
 
       # The owned UUID guard below supplies trusted inventory and idle/post-idle checks without
       # the former name-based process reap or CUDA-ordinal-as-NVML-index ambiguity.
@@ -1082,11 +1104,12 @@ jobs:
         run: bash scripts/ci/memory-catalog/push.sh
 
       - name: Upload the campaign work dir
+        id: campaign_artifact
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.campaign }}-candle-campaign-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/memory-catalog-${{ inputs.campaign }}-${{ github.run_id }}/
+          path: ${{ env.WORK_DIR_NATIVE }}
           if-no-files-found: warn
           retention-days: 30
 
@@ -1095,3 +1118,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/memory-catalog/pr.sh
+      - name: Confirm evidence is published before disposable cleanup
+        if: ${{ always() && steps.campaign_artifact.outcome == 'success' }}
+        shell: powershell
+        run: '"DEV_HOST_WORK_UPLOADS_COMPLETE=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
