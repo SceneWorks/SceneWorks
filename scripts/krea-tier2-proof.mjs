@@ -486,7 +486,10 @@ function publicKreaRawAsset(sidecar, route, adapterImport, dataRoot) {
   assert.ok(typeof dataRoot === "string", "Raw output must identify the owned data directory");
   const paths = path.posix.isAbsolute(dataRoot) ? path.posix : path.win32;
   const separator = paths === path.win32 ? /[\\/]/ : "/";
-  assert.ok(paths.isAbsolute(dataRoot) && typeof locator === "string" && paths.isAbsolute(locator) &&
+  const absolute = paths === path.win32
+    ? (value) => /^(?:\\\\\?\\)?[a-z]:[\\/]/i.test(value)
+    : path.posix.isAbsolute;
+  assert.ok(absolute(dataRoot) && typeof locator === "string" && absolute(locator) &&
     !locator.includes("\0") && !locator.split(separator).some((part) => part === ".." || part === "."),
   "Raw disk adapter locator must be an absolute bundle path");
   const member = paths.relative(paths.toNamespacedPath(dataRoot), paths.toNamespacedPath(locator)).split(paths.sep).join("/");

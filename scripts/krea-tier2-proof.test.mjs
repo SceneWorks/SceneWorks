@@ -497,6 +497,7 @@ test("Raw compares the exact public job projection while keeping the full genera
   const windowsRoot = "D:\\runner\\run\\state\\data";
   const windowsLocator = path.win32.toNamespacedPath(path.win32.join(windowsRoot, ...segments));
   assert.equal(assertKreaOutput(rawOutputProof(windowsRoot, windowsLocator)).raw.tier, "q4");
+  assert.throws(() => assertKreaOutput(rawOutputProof(windowsRoot, path.win32.join("\\", ...segments))), /absolute bundle path/);
 
   function rejects(change, message) {
     const altered = rawOutputProof(dataRoot, locator);
