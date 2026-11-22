@@ -40,17 +40,24 @@ test('planner is pure and covers both checkpoints/backends, all explicit obligat
   assert.equal(new Set(plan.cases.map(c => c.caseId)).size, plan.cases.length);
   for (const backend of ['mlx', 'candle']) for (const model of ['base', 'distilled']) {
     for (const scenario of ['t2i', 'refs-1', 'refs-10', 'layout-placement', 'box-move-remove', 'pup-t2i', 'pup-i2i', 'pup-t2i_bbox', 'pup-i2i_bbox', 'lora-zero', 'lora-on', 'portrait', 'landscape', 'max-resolution', 'cancel', 'saved-settings-repro', 'install-missing', 'authentication-denied', 'bad-reference', 'reference-count', 'bad-box', 'checkpoint-compatibility']) assert(find(scenario, model, backend), `${backend}/${model}/${scenario}`);
-    for (const tier of ['q4', 'q8', ...(backend === 'candle' ? ['fp8r', 'nvfp4'] : [])]) assert(plan.cases.some(c => c.caseId === `${backend}.${model}.native-tier.${tier}`));
+    for (const tier of ['q4', 'q8', 'fp8r', ...(backend === 'candle' ? ['nvfp4'] : [])]) assert(plan.cases.some(c => c.caseId === `${backend}.${model}.native-tier.${tier}`));
     if (model === 'base') for (const mode of ['captioned', 'edit']) assert(find(`train-interrupt-resume-export-${mode}`, model, backend));
   }
   assert(plan.cases.every(c => ['NOT_RUN', 'BLOCKED'].includes(c.status)));
   // Base q4/q8 now have production rows pinned to genuine local conversions: runnable-but-unrun,
   // not BLOCKED and never PASS.
-  assert.deepEqual(plan.cases.filter(c => c.status === 'BLOCKED').map(c => c.caseId), []);
+  // Shared native FP8 is now advertised on MLX, but these builtins have no pinned
+  // FP8 artifact rows. Keep their catalog obligations visible and blocked.
+  assert.deepEqual(plan.cases.filter(c => c.status === 'BLOCKED').map(c => c.caseId), [
+    'mlx.distilled.native-tier.fp8r', 'mlx.base.native-tier.fp8r',
+  ]);
+  for (const cell of plan.cases.filter(c => c.backend === 'mlx' && c.tier === 'fp8r')) {
+    assert.match(cell.blocker, /No production catalog row\/trusted real conversion hashes/);
+  }
   for (const caseId of ['mlx.base.native-tier.q4', 'mlx.base.native-tier.q8', 'candle.base.native-tier.q4', 'candle.base.native-tier.q8']) {
     const cell = plan.cases.find(c => c.caseId === caseId); assert.equal(cell?.status, 'NOT_RUN', caseId); assert.equal(cell.blocker, null);
   }
-  assert(!plan.cases.some(c => c.backend === 'mlx' && ['fp8r', 'nvfp4'].includes(c.tier)));
+  assert(!plan.cases.some(c => c.backend === 'mlx' && c.tier === 'nvfp4'));
 });
 test('payload uses shipped defaults and actual quantTier/enhancePrompt/ordered-layout carriers', () => {
   const cell = find('box-move-remove'), inputs = { 'reference-0': { assetId: 'owned-1' } }, body = imageRequest(cell, target(cell), 'p', inputs);
