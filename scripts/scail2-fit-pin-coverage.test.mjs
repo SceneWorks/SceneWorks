@@ -5,7 +5,8 @@ import { verifyCoverage } from "./scail2-fit-pin-coverage.mjs";
 
 test("scripts and separate image modules require review of the whole Git delta", () => {
   const source = { provider: "mlx:scail2_14b", digest: "1", sharedContractDigest: "2", crates: ["crates/media/mlx-gen/mlx-gen-scail2"] };
-  const files = ["scripts/ci/video_tier1_comparison.py", "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs"];
+  const files = ["scripts/ci/video_tier1_comparison.py", "scripts/ci/wan_pair/production_timing.py",
+    "scripts/tests/test_scail2_owned_zero_recovery.py", "scripts/tests/test_wan_production_timing.py", "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs"];
   assert.doesNotThrow(() => verifyCoverage(source, source, files, "whole-diff", "whole-diff"));
   assert.throws(() => verifyCoverage(source, source, files, "whole-diff", "other-diff"), /independent review/);
   for (const changed of [{ digest: "3" }, { sharedContractDigest: "4" }, { provider: "candle:scail2_14b" }]) {
