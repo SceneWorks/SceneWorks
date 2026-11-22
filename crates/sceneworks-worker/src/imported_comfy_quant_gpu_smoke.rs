@@ -484,12 +484,20 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 resolved.as_payload(),
             )
             .expect("the real source request parses before execution");
-            let (route, primary, adapter_count) =
+            let (route, bound_provider, primary, adapter_count, floor_bytes) =
                 crate::image_jobs::imported_checkpoint_route_preflight_for_test(
                     &request, &settings,
                 )
-                .expect("normal source and adapter preparation succeeds without model execution");
+                .expect(
+                    "normal source preparation and floor pricing succeed without model execution",
+                );
             assert_eq!(route, expected_route);
+            assert_eq!(bound_provider, provider);
+            let primary_bytes = std::fs::metadata(&primary).unwrap().len();
+            assert!(
+                floor_bytes > primary_bytes,
+                "the imported source floor must include its required companions as well as the primary"
+            );
             assert_eq!(
                 crate::checkpoint_weight_facts_host::source_binding_for(
                     &std::fs::canonicalize(&primary).unwrap()
@@ -502,7 +510,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 std::fs::canonicalize(&checkpoint).unwrap()
             );
             assert_eq!(adapter_count, adapters.len());
-            eprintln!("IMPORT_FORMAT_PREFLIGHT model={model_id} source_codec={expected_codec_id} checkpoint={checkpoint_id} route={route} adapters={adapter_count}");
+            eprintln!("IMPORT_FORMAT_PREFLIGHT model={model_id} source_codec={expected_codec_id} checkpoint={checkpoint_id} route={route} adapters={adapter_count} floor_bytes={floor_bytes}");
             return;
         }
         let physical_gpu = std::env::var("SCENEWORKS_GPU_ID")
@@ -738,7 +746,7 @@ fn native_nvfp4_case() -> SmokeCase {
     }
 }
 
-/// Only normal import/classification and source pinning. This case never loads a model or emits
+/// Normal import, classification, source pinning and static admission pricing. This case never loads a model or emits
 /// the successful learned-execution protocol used by the separate native generation cases.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "metadata-only real-source preflight; requires the four pinned local artifacts"]

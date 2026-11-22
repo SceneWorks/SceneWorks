@@ -645,7 +645,7 @@ fn sdxl_component_files_match(source: &Path, destination: &Path) -> std::io::Res
 ///
 /// Read by BOTH SDXL routes: the bespoke candle lane stages from it over the network
 /// ([`attach_imported_sdxl_components`]), and the universal plan route mirrors from it cache-only
-/// ([`resolve_sdxl_imported_component_dir_cache_only`]). One table, so the two routes can never
+/// ([`resolve_sdxl_imported_component_cache_only`]). One table, so the two routes can never
 /// disagree about which repo or pinned revision a component id means (sc-20651).
 const SDXL_IMPORTED_COMPONENT_SOURCES: &[(&str, &str, &str, &str, &str)] = &[
     (
@@ -715,30 +715,18 @@ async fn attach_imported_sdxl_components(
     Ok(spec)
 }
 
-/// The staging directory a table-declared SDXL component resolves to for the PLAN route, cache-only.
-///
-/// The candle sibling of [`resolve_sdxl_ldm_tokenizer_root_cache_only`]. Candle's fused-SDXL
-/// binding declares `tokenizer_clip_l` + `tokenizer_clip_bigg` where MLX declares the single
-/// `ldm_tokenizer`, and the plan route special-cased only the MLX spelling — so on the candle lane
-/// a plan-backed fused SDXL request was CLAIMED by the route and then refused by name with
-/// `[checkpoint-plan:missing-component] … 'tokenizer_clip_l'`, leaving the family no servable shape
-/// at all on the universal route (sc-20651).
-///
-/// Resolution goes through [`SDXL_IMPORTED_COMPONENT_SOURCES`] — the same rows, same staging root
-/// and same subdirectories the bespoke lane stages into — so the two routes hand the loader the
-/// identical directory rather than two divergent copies. `None` means "not an SDXL component id
-/// this build knows", which is the caller's cue to fall through to the family resolvers rather than
-/// to load a neighbour's bytes (E8).
-///
-/// This never DOWNLOADS: it mirrors assets already in the app-managed Hugging Face cache, and
-/// refuses during PLANNING with an actionable install-it-from-the-Model-Manager diagnostic when
-/// they are absent (epic 17625 AC9 / E7).
-pub(super) fn resolve_sdxl_imported_component_dir_cache_only(
+/// Resolve a declared SDXL component from the same pinned cache and staging layout as the
+/// bespoke lane. The table names the entire input of each component (one file) while the
+/// provider continues to receive a directory. The file token lets the shared plan account for
+/// and validate that exact member without scanning unrelated staging files.
+pub(super) fn resolve_sdxl_imported_component_cache_only(
     settings: &Settings,
     family: &str,
     component: &str,
     checkpoint_id: &str,
-) -> WorkerResult<Option<PathBuf>> {
+) -> WorkerResult<Option<(PathBuf, gen_core::PinnedWeightsFile)>> {
+    use sceneworks_core::safe_path::{confine_under, Confinement};
+
     if family != "sdxl" {
         return Ok(None);
     }
@@ -748,20 +736,35 @@ pub(super) fn resolve_sdxl_imported_component_dir_cache_only(
     else {
         return Ok(None);
     };
-    let destination_dir = settings
-        .data_dir
-        .join("cache")
-        .join("sdxl-imported-components")
-        .join(subdir);
+    let data_dir = crate::paths::normalized_data_dir(settings)?;
+    let relative = format!("cache/sdxl-imported-components/{subdir}/{file}");
+    let destination = data_dir.join(&relative);
+    let destination_dir = destination.parent().expect("staged component has a parent");
+    let invalid_destination = |reason: &str| {
+        WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:unpriceable-component] checkpoint {checkpoint_id:?} ({family} family) cannot use the staged path for component {component:?}: {reason}"
+        ))
+    };
+    let confined_destination = || {
+        confine_under(&data_dir, &relative, Confinement::SymlinkSafe)
+            .map_err(|error| invalid_destination(&error.to_string()))
+    };
+    confined_destination()?;
     mirror_cached_sdxl_component_file(
         settings,
         checkpoint_id,
         repo,
         revision,
         file,
-        &destination_dir,
+        destination_dir,
     )?;
-    Ok(Some(destination_dir))
+    let expected_target = confined_destination()?;
+    let pin = gen_core::PinnedWeightsFile::pin(&destination)
+        .map_err(|error| invalid_destination(&error.to_string()))?;
+    if pin.canonical_target_path() != expected_target {
+        return Err(invalid_destination("staged target changed while pinning"));
+    }
+    Ok(Some((destination_dir.to_path_buf(), pin)))
 }
 
 pub(super) async fn generate_sdxl_imported_stream(

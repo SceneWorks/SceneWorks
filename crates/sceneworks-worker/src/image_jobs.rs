@@ -3666,28 +3666,71 @@ pub(crate) fn standard_tier_subdir_for_test(root: &Path, request: &ImageRequest)
     standard_tier_subdir(root, request)
 }
 
-/// Exercise the normal source/adapter route preparation without constructing a generator.
+/// Exercise normal source/adapter preparation and the static floor. The live VRAM gate runs
+/// only on the generator cache's cold-load callback, which this preflight never enters.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn imported_checkpoint_route_preflight_for_test(
     request: &ImageRequest,
     settings: &Settings,
-) -> WorkerResult<(&'static str, PathBuf, usize)> {
+) -> WorkerResult<(&'static str, &'static str, PathBuf, usize, u64)> {
     let execution = conditioning::ResolvedImageExecution::new(request)?;
     let route = routing::prepare_candle_image_route(&execution, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("No native checkpoint route".into()))?;
     let label = route.kind().adapter_label(request);
     match route {
-        routing::PreparedCandleImageRoute::CheckpointPlan(sources) => match sources.primary {
-            gen_core::WeightsSource::File(path) => Ok((label, path, 0)),
-            _ => Err(WorkerError::InvalidPayload(
-                "Expected a single-file checkpoint".into(),
-            )),
-        },
-        routing::PreparedCandleImageRoute::KreaImported(sources) => Ok((
-            label,
-            sources.dit_pin.loader_path().to_path_buf(),
-            sources.prepared_adapters.specs.len(),
-        )),
+        routing::PreparedCandleImageRoute::CheckpointPlan(sources) => {
+            let gen_core::WeightsSource::File(path) = &sources.primary else {
+                return Err(WorkerError::InvalidPayload(
+                    "Expected a single-file checkpoint".into(),
+                ));
+            };
+            let (quant, _) = krea_imported::imported_model_quant(
+                request,
+                &sources.descriptor,
+                "Checkpoint plan",
+            )?;
+            let spec = checkpoint_plan::checkpoint_plan_load_spec(&sources, quant)?;
+            let floor = checkpoint_plan::prepare_checkpoint_plan_candle_floor(
+                &request.model,
+                settings,
+                &sources,
+                &spec,
+            )?;
+            Ok((
+                label,
+                sources.descriptor.id,
+                path.clone(),
+                0,
+                floor.source_floor_bytes(),
+            ))
+        }
+        routing::PreparedCandleImageRoute::KreaImported(sources) => {
+            let descriptor = krea_imported::krea_imported_descriptor(request).ok_or_else(|| {
+                WorkerError::InvalidPayload("No registered imported Krea provider".into())
+            })?;
+            let (quant, _) =
+                krea_imported::imported_model_quant(request, &descriptor, "Imported Krea 2")?;
+            let primary = sources.dit_pin.loader_path().to_path_buf();
+            let adapter_count = sources.prepared_adapters.specs.len();
+            let base = krea_imported::resolve_krea_imported_base_tier(settings)?;
+            let spec = krea_imported::prepare_krea_imported_load_spec(
+                request,
+                settings,
+                descriptor.id,
+                &base,
+                quant,
+                *sources,
+            )?;
+            let floor =
+                krea_imported::prepare_krea_imported_candle_floor(request, settings, &base, &spec)?;
+            Ok((
+                label,
+                descriptor.id,
+                primary,
+                adapter_count,
+                floor.source_floor_bytes(),
+            ))
+        }
         _ => Err(WorkerError::InvalidPayload(
             "Unexpected checkpoint validation route".into(),
         )),
