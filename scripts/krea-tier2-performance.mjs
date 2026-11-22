@@ -82,7 +82,7 @@ export function compareKreaPerformance(pairs, backend) {
   if (pairs.length !== KREA_PERF_PAIRS) return { status: "inconclusive", reason: "all six ordered pairs are required" };
   if (!pairs.every(({ order }, index) => JSON.stringify(order) === JSON.stringify(KREA_PERF_ORDER[index]))) return { status: "inconclusive", reason: "pair order departed from the frozen protocol" };
   const sides = ["base", "head"];
-  if (!pairs.every((pair) => sides.every((side) => pair[side]?.performance?.eligibility === "valid"))) return { status: "inconclusive", reason: "at least one arm lacks complete attributed measurements" };
+  if (!pairs.every((pair) => sides.every((side) => pair[side]?.status === "completed" && pair[side].performance?.eligibility === "valid"))) return { status: "inconclusive", reason: "at least one arm lacks a completed render or complete attributed measurements" };
   if (pairs.some(({ base, head }) => base.performance.device !== head.performance.device || base.requestSha256 !== head.requestSha256)) return { status: "inconclusive", reason: "paired device or authored request differed" };
   const runs = pairs.flatMap((pair) => sides.map((side) => pair[side]));
   const ordered = runs.map(({ performance }) => performance);

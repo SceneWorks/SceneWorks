@@ -1143,7 +1143,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.requestSha256 = sha256(JSON.stringify({ ...body, projectId: "<project>", ...(route.referenceAudio ? { referenceAudioAssetId: "<reference-audio>" } : {}) }));
     fact(record.requestSha256 === plan.request.sha256, "request body diverged from the route template");
     // Memory baselines and samplers start before the POST and stop at completion.
-    const memory = { samples: 0, errors: 0, peakBytes: null };
+    const memory = record.memory = { samples: 0, errors: 0, peakBytes: null };
     sampling = true;
     if (cfg.backend === "mlx") {
       const cap = Math.min(100 * GIB, Math.floor(os.totalmem() * 0.8)); record.watchdog.capBytes = cap;
@@ -1223,7 +1223,6 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     }
     if (route.proof) {
       record.observedEvents = await events.collect(accepted.id, wait);
-      record.eventProof = assertKreaEvents(record.observedEvents, route);
       await events.close();
       events = null;
     }
@@ -1242,7 +1241,6 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       }
     }
     memory.workerReportedPeakGpuMemoryPct = job.peakGpuMemoryPct ?? null;
-    record.memory = memory;
     const at = (stage) => stages.find((item) => item.stage === stage)?.atSeconds;
     record.timing.claimSeconds ??= null;
     const loadStart = at("loading_model") ?? record.timing.claimSeconds, generate = at("generating") ?? at("rendering"), finish = at("saving") ?? at("muxing") ?? record.timing.enqueueToCompleteSeconds;
@@ -1263,8 +1261,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const saved = await readFile(media);
     fact(sha256(served.bytes) === sha256(saved), "API-served bytes differ from the saved project file");
     if (route.proof) {
-      const expectedBackend = cfg.backend === "mlx" ? "mlx" : "candle";
-      fact(job.backend === expectedBackend, `public job ran on ${job.backend}, expected ${expectedBackend}`);
+      fact(job.backend === expectedGpu, `public job reported GPU ${job.backend}, expected ${expectedGpu}`);
       const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
       const sidecarFile = media.replace(/\.png$/, ".sceneworks.json");
       const diskFiles = await readdir(path.join(projectPath, "assets", "images"), { recursive: true, withFileTypes: true });
@@ -1276,6 +1273,16 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       record.productProof = assertKreaOutput({ route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved), width, height, workerId, projectId: project.id });
       record.productProof.imageStats = imageQualityStats(rgba);
       fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
+    }
+    const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
+    const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
+    record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
+    decodedBuffers.set(record, content.buffer);
+    record.identity.payload = redactPaths(identitySubset(job.payload), roots);
+    record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
+    fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
+    if (route.proof) {
+      record.eventProof = assertKreaEvents(record.observedEvents, route);
       if (cfg.allocation) {
         try {
           record.allocation = kreaAllocationReceipt(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), memory, record.watchdog.capBytes);
@@ -1298,13 +1305,6 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         }
       }
     }
-    const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
-    const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
-    record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
-    decodedBuffers.set(record, content.buffer);
-    record.identity.payload = redactPaths(identitySubset(job.payload), roots);
-    record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
-    fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
     record.status = "completed";
   } catch (error) {
     record.status = "error"; record.error = error.message;

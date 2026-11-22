@@ -59,7 +59,7 @@ test("Hires requires independently fenced timings and a persisted terminal SSE, 
 });
 
 function arm(ratio, memory = 102, device = GPU) {
-  return { requestSha256: SHA, performance: { eligibility: "valid", device, secondsPerOuterStep: ratio, productSeconds: 100 * ratio, hostPeakBytes: memory, devicePeakBytes: memory } };
+  return { status: "completed", requestSha256: SHA, performance: { eligibility: "valid", device, secondsPerOuterStep: ratio, productSeconds: 100 * ratio, hostPeakBytes: memory, devicePeakBytes: memory } };
 }
 
 function six(ratios, memory = 102) {
@@ -78,6 +78,9 @@ test("frozen six-pair method passes wholly below the ceiling, fails wholly above
   assert.equal(compareKreaPerformance(six(Array(6).fill(1), 103), "cuda").deviceOrAllocatorPeak.status, "fail");
   const pairs = six(Array(6).fill(1));
   assert.equal(compareKreaPerformance(pairs.slice(0, 5), "cuda").status, "inconclusive");
+  pairs[0].head.status = "error";
+  assert.match(compareKreaPerformance(pairs, "cuda").reason, /completed render/);
+  pairs[0].head.status = "completed";
   pairs[0].head = arm(1, 100, OTHER);
   assert.equal(compareKreaPerformance(pairs, "cuda").status, "inconclusive");
 });

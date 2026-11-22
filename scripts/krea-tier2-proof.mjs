@@ -321,18 +321,27 @@ export function kreaExpectedStepEvents(route) {
 }
 
 export function assertKreaEvents(events, route) {
-  assert.ok(events.some((event) => event.status === "completed"), "worker terminal event missing");
-  const steps = events.flatMap(({ message }) => { const m = /\bstep (\d+)\/(\d+)\b/i.exec(message ?? ""); return m ? [[Number(m[1]), Number(m[2])]] : []; });
+  const terminal = events.findIndex((event) => event.status === "completed" && event.publishedAssets === 1);
+  assert.ok(terminal >= 0, "worker terminal event with one output missing");
+  let lastStep = -1;
+  const steps = events.flatMap(({ message }, index) => {
+    const match = /\bstep (\d+)\/(\d+)\b/i.exec(message ?? "");
+    if (!match) return [];
+    lastStep = index;
+    return [[Number(match[1]), Number(match[2])]];
+  });
   const unique = steps.filter((pair, index) => index === 0 || pair[0] !== steps[index - 1][0] || pair[1] !== steps[index - 1][1]);
   // Hires.fix keeps the two-pass authored total on the wire while Krea clips the refine
   // schedule at floor(4 * (1 - 0.5)) = 2. Its two emitted ticks are numbered 9 and 10.
   // Raw calls the native solver on separate phase slices. Both pinned engines forward
   // their numbering unchanged, so every phase's first Step starts at 1 on the public wire.
   assert.deepEqual(unique, kreaExpectedStepEvents(route), "public step events must match the authored phase slices or actual clipped schedule");
-  const decoding = events.filter((event) => event.status === "running" && /\bdecoding\b/i.test(event.message ?? ""));
-  assert.equal(decoding.length, 1, "only final decoding may be published");
+  const decoding = events.flatMap((event, index) => event.status === "running" && /\bdecoding\b/i.test(event.message ?? "") ? [index] : []);
+  // The job stream republishes snapshots while the worker remains in the same stage.
+  assert.ok(decoding.length && decoding[0] > lastStep && decoding.at(-1) < terminal &&
+    decoding.every((index, offset) => index === decoding[0] + offset), "only one final decoding state may be published");
   assert.ok(events.filter((event) => event.status !== "completed").every((event) => event.publishedAssets === 0), "intermediate output reached public job events");
-  return { observedSteps: unique, decodingEvents: decoding.length, authoredStepSlices: route.proof === "raw" ? PHASES.map(({ steps }) => steps) : [8, 4], executedStepSlices: route.proof === "raw" ? [3, 4, 3] : [8, 2] };
+  return { observedSteps: unique, decodingEvents: 1, decodingUpdates: decoding.length, authoredStepSlices: route.proof === "raw" ? PHASES.map(({ steps }) => steps) : [8, 4], executedStepSlices: route.proof === "raw" ? [3, 4, 3] : [8, 2] };
 }
 
 export function assertKreaOutput({ route, job, asset, library, sidecar, share, width, height, workerId, projectId }) {

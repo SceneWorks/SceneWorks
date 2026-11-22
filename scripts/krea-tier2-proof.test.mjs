@@ -145,6 +145,25 @@ test("queue proof checks observed CFG phase and clipped Hires progress without e
   assert.throws(() => kreaPerformance({ steps: 12, imageCount: 1, sampleMs: 5000 }, HIRES, { samples: 0 }), /memory/);
 });
 
+test("queue proof accepts repeated snapshots of the final decoding state only", () => {
+  const events = jobEvents(HIRES);
+  const finalDecode = events.at(-2);
+  events.splice(-1, 0, { ...finalDecode }, { ...finalDecode });
+  const proof = assertKreaEvents(events, HIRES);
+  assert.equal(proof.decodingEvents, 1);
+  assert.equal(proof.decodingUpdates, 3);
+
+  const earlyDecode = [...events];
+  earlyDecode.splice(8, 0, { ...finalDecode });
+  assert.throws(() => assertKreaEvents(earlyDecode, HIRES), /one final decoding state/);
+  const interruptedDecode = [...events];
+  interruptedDecode.splice(-2, 0, { status: "running", message: "Saving.", publishedAssets: 0 });
+  assert.throws(() => assertKreaEvents(interruptedDecode, HIRES), /one final decoding state/);
+  assert.throws(() => assertKreaEvents([...events, finalDecode], HIRES), /one final decoding state/);
+  events.at(-2).publishedAssets = 1;
+  assert.throws(() => assertKreaEvents(events, HIRES), /intermediate output/);
+});
+
 test("owned SSE opens before the request and keeps only scoped job events across fragmented frames", async () => {
   const encoder = new TextEncoder();
   let output;
