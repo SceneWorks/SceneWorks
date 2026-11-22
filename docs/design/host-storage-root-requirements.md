@@ -95,7 +95,13 @@ The system drive holds only source code, apps, toolchains, personal files
   - **Shared by every host using the root:** `weights/`, `cache/` and
     `campaigns/<project>/<id>/evidence/`. Writers to these never rewrite a
     file in place: they write a temporary name and rename it, so two hosts
-    can't corrupt one file.
+    can't corrupt one file. `cache/` therefore holds only caches whose
+    entries are written whole and then published by rename (downloaded
+    artifacts, pmetal, torch hub files). A cache that a tool keeps updating
+    in place, such as Xcode DerivedData, the cargo registry and git
+    checkouts, Playwright browsers or the docker-smoke state, is per host,
+    under `hosts/<host>/cache/<project>/`, because two Macs building at
+    once would modify the same build database (r5).
   - **Per host:** everything else lives under `hosts/<host>/`, where
     `<host>` is the machine's local host name as the OS reports it
     (`scutil --get LocalHostName` on macOS, `COMPUTERNAME` read from the OS,
@@ -105,8 +111,10 @@ The system drive holds only source code, apps, toolchains, personal files
     under `hosts/<host>/` (r5).
   - `locks/` holds GPU, service and other cross-process locks. It is
     per machine, not per project.
-  - `cache/<project>/` holds non-model caches: pmetal, torch, docker-smoke,
-    cargo registry/git for CI, Playwright browsers, Xcode DerivedData.
+  - `cache/<project>/` (shared) holds non-model caches written whole and
+    published by rename: pmetal, torch. `hosts/<host>/cache/<project>/`
+    holds the ones a tool updates in place: docker-smoke, cargo registry/git
+    for CI, Playwright browsers, Xcode DerivedData (r5).
   - `weights/<project>/` holds model weights that tests and campaigns load
     and that aren't in the HF hub. It includes a manifest naming each set,
     its source and the workflows that use it. HF weights stay in the HF
@@ -280,8 +288,8 @@ The system drive holds only source code, apps, toolchains, personal files
     `runner/<runner-name>/_work`.
   - Docker Desktop's disk image location moves to `docker/`.
   - Xcode DerivedData for CI and agent builds goes to
-    `cache/<project>/DerivedData`, via `-derivedDataPath` or the Xcode
-    setting.
+    `hosts/<host>/cache/<project>/DerivedData` (per host, r5), via
+    `-derivedDataPath` or the Xcode setting.
 - **E7 Guard against new hardcoded paths.**
   - A CI check in each in-scope repo looks only at lines **added** in the
     PR diff of workflows, scripts and tools.
@@ -417,9 +425,12 @@ The system drive holds only source code, apps, toolchains, personal files
     writable by authenticated accounts of the in-scope hosts. Guest or
     anonymous write access is not allowed. Each Mac mounts `/Volumes/Work`
     and `/Volumes/Models` with its own authenticated account.
-  - Until that holds, the signing runner (`nax-macos`, label `signing`) keeps
-    its runner work folder, build slots and caches on local storage, and
-    SWITCH does not move them onto the share. `release.yml` runs repository
+  - It must hold before MERGE, the first point where workflows on main
+    write build or cache state under the root: HOST-1 and HOST-3 verify the
+    authenticated mounts, and they block MERGE. Until then, nothing moves
+    the signing runner's (`nax-macos`, label `signing`) work folder, build
+    slots or caches onto the share, and the integration branches don't run
+    `release.yml`. `release.yml` runs repository
     npm code and builds while the Apple and Tauri signing secrets are set,
     so a writable-by-anyone checkout or build folder would let any machine
     on the network get its own code signed and notarized.

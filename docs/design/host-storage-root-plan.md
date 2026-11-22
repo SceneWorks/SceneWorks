@@ -65,6 +65,9 @@ No two items share both a mechanism and a repo.
     - this Mac: `/Volumes/Work/dev-host` (NAS), with its own state under
       `hosts/<host>/`
     - Windows CUDA: `D:\dev-host`
+  - E15: this Mac mounts `/Volumes/Work` and `/Volumes/Models` with its
+    own authenticated account, and a guest mount of each share can't
+    create a file (Michael sets up the Tower accounts).
   - Runner wiring is in place:
     - the pinned `dev-host` binary is installed;
     - each runner `.env` sets `DEV_HOST_ROOT` and
@@ -246,7 +249,7 @@ No two items share both a mechanism and a repo.
     10).
   - The StarVector readiness workflow passes reading the HOST-1 copy at
     `weights/sceneworks/starvector`. xcodebuild steps write DerivedData
-    under `cache/sceneworks/`.
+    under `hosts/<host>/cache/sceneworks/` (per host, r5).
 - **Inherits:** E1, E2, E6, E10
 - **Touches:** `.github/workflows/*`, `scripts/**`, `apps/desktop/scripts/**`
 - **Blocked by:** SW-2
@@ -304,7 +307,8 @@ No two items share both a mechanism and a repo.
     target-path patterns. That covers about 287 path matches, 119
     `CARGO_TARGET_DIR` lines, 16 consumers, and the absolute-path cargo
     launches.
-  - The 25 xcodebuild sites write DerivedData under `cache/inference/`.
+  - The 25 xcodebuild sites write DerivedData under
+    `hosts/<host>/cache/inference/` (per host, r5).
   - One real-weights job and one kv-poc job pass, reading HOST-1's copies.
 - **Inherits:** E1, E2, E4, E6, E10
 - **Touches:** `.github/workflows/*`, `scripts/**`
@@ -378,10 +382,8 @@ No two items share both a mechanism and a repo.
 - **Inherits:** E4, E6, E11
 - **Touches:** host filesystems, runner registrations, Codex config on each
   host, `PATH` on each host
-- **Blocked by:** MERGE, CW-1, LW-1, and E15: the shares accept writes
-  only from the hosts' authenticated accounts (Michael sets these up on
-  Tower). Without that, SWITCH leaves the signing runner's work folder,
-  build slots and caches on local storage.
+- **Blocked by:** MERGE, CW-1, LW-1. (E15's authenticated mounts are
+  already in place: HOST-1 and HOST-3 verify them before MERGE.)
 
 ### RELNEXT — Dual lock onto `release/next` by hotfix (task, SceneWorks)
 - **Goal:** Lets the old locks retire without waiting for a release.
@@ -403,8 +405,8 @@ No two items share both a mechanism and a repo.
 - **Goal:** Gives `nax-macos-2` the runner wiring HOST-1 gives the other
   hosts, on the same NAS root as this Mac (r5; no new drive).
 - **Acceptance:**
-  - `/Volumes/Work` and `/Volumes/Models` are mounted on `nax-macos-2` and
-    come back after a reboot; its `hosts/<host>/` folder exists, and
+  - `/Volumes/Work` and `/Volumes/Models` are mounted on `nax-macos-2`
+    with its own authenticated account (E15) and come back after a reboot; its `hosts/<host>/` folder exists, and
     `dev-host check` passes there. Its cleanup schedule is installed.
   - The SceneWorks runner on it has HOST-1's wiring; the devworks-mac
     runners on the same machine are unchanged.
@@ -476,7 +478,7 @@ one. The other edges into HOST-1 are for the binary and the schedule.
 | E12 | DW-2, DW-3, SW-2, INF-2a, CW-1, LW-1 |
 | E13 | DW-1, SW-2, INF-2a |
 | E14 | DW-2, HOST-1, SW-2, INF-2a |
-| E15 | HOST-1, HOST-3 (authenticated mounts), SWITCH |
+| E15 | HOST-1, HOST-3 (authenticated mounts, before MERGE) |
 
 Acceptance tests:
 - 3 (SW-1, INF-1)
