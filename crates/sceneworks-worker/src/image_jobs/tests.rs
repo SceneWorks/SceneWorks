@@ -29882,7 +29882,9 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
                     );
                 match row.shape {
                     // The route opens the base's own tier: its PRIMARY row must survive.
-                    ResidentBaseShape::FullTier => !co_requisite,
+                    ResidentBaseShape::FullTier | ResidentBaseShape::KreaImportedCompanions => {
+                        !co_requisite
+                    }
                     // The route opens only declared components: a co-requisite row at this tier
                     // must survive, and it is the only thing the guard's closure will name.
                     ResidentBaseShape::ComponentsOnly => {

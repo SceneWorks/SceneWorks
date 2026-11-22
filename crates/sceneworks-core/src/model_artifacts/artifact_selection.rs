@@ -236,12 +236,34 @@ pub fn retain_downloads_for_os(model: &mut Value, os: &str) {
     {
         return;
     }
-    downloads.retain(
-        |entry| match entry.get("platforms").and_then(Value::as_array) {
-            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
-            None => true,
-        },
-    );
+    downloads.retain(|entry| download_matches_os(entry, os));
+}
+
+fn download_matches_os(download: &Value, os: &str) -> bool {
+    download
+        .get("platforms")
+        .and_then(Value::as_array)
+        .is_none_or(|platforms| {
+            platforms
+                .iter()
+                .any(|platform| platform.as_str() == Some(os))
+        })
+}
+
+/// Whether this entry declares a required download for the worker's OS. Optional components do
+/// not replace the resident base of a local checkpoint.
+pub fn has_required_model_downloads_for_os(entry: &Value, os: &str) -> bool {
+    entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|download| {
+            is_supported_model_download(download)
+                && !is_pending_artifact_download(download)
+                && download_matches_os(download, os)
+                && download.get("required").and_then(Value::as_str) != Some("soft")
+        })
 }
 
 /// The declared size of one download row: the row's own `estimatedSizeBytes` /
@@ -929,6 +951,7 @@ pub fn selected_portable_requirements_for_model_resolved(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentBaseShape {
     FullTier,
+    KreaImportedCompanions,
     ComponentsOnly,
 }
 
@@ -944,7 +967,7 @@ pub const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[
         family: "krea_2",
         base_model_id: "krea_2_turbo",
         tier: "bf16",
-        shape: ResidentBaseShape::FullTier,
+        shape: ResidentBaseShape::KreaImportedCompanions,
     },
     PlanBackedResidentBase {
         family: "mage-flow",
@@ -966,6 +989,20 @@ pub fn selected_resident_base_closure_for_row(
             platform,
             Some(tier),
         )),
+        ResidentBaseShape::KreaImportedCompanions => {
+            let mut closure = selected_model_artifact_closure(base_entry, platform, Some(tier));
+            let transformer = format!("{tier}/transformer/*");
+            // The imported checkpoint owns the transformer weights. Only its architecture
+            // config belongs to the resident companion snapshot.
+            for download in closure.get_mut("downloads")?.as_array_mut()? {
+                for selector in download.get_mut("files")?.as_array_mut()? {
+                    if selector.as_str() == Some(transformer.as_str()) {
+                        *selector = Value::String(format!("{tier}/transformer/config.json"));
+                    }
+                }
+            }
+            Some(closure)
+        }
         ResidentBaseShape::ComponentsOnly => {
             let mut platform_entry = base_entry.clone();
             retain_downloads_for_os(&mut platform_entry, platform);
@@ -1004,6 +1041,32 @@ pub fn selected_resident_base_closure(entry: &Value, platform: &str) -> Option<V
     let base =
         Value::Object(crate::builtin_manifests::builtin_model_entry(row.base_model_id)?.clone());
     selected_resident_base_closure_for_row(&base, row.tier, row.shape, platform)
+}
+
+/// The installed closure for an imported route. A full-tier Krea install receipt can also list
+/// the turnkey transformer, which the imported route never opens.
+pub fn selected_resident_base_requirements(
+    closure: &Value,
+    shape: ResidentBaseShape,
+    data_dir: &Path,
+) -> SelectedRequirements {
+    let mut selected = selected_requirements_for_closure(closure, data_dir);
+    if shape == ResidentBaseShape::KreaImportedCompanions {
+        if let Some(download) = model_download(closure) {
+            let selectors = string_array_field(&download, "files");
+            if let Some(primary) = selected.requirements.iter_mut().find(|row| row.is_primary) {
+                primary.files.retain(|file| {
+                    file.to_str()
+                        .is_some_and(|file| allow_pattern_matches(file, &selectors))
+                });
+                if primary.files.is_empty() {
+                    selected.requirements.clear();
+                    selected.receipt_backed = false;
+                }
+            }
+        }
+    }
+    selected
 }
 
 /// The same selected rows, represented as supplemental members of the imported model binding.

@@ -265,12 +265,16 @@ impl RuntimeSourceGuard {
             for (slot, id) in slots {
                 let model_binding =
                     binding.and_then(|route| route.models.iter().find(|model| model.slot == slot));
-                let primary = model_binding.and_then(|model| {
-                    model
-                        .members
-                        .iter()
-                        .find(|member| member.role == ArtifactMemberRole::Primary)
-                });
+                // Checkpoint plans resolve their primary by frozen bytes through the worker's plan
+                // store. A linked plan has no ordinary catalog path to rewrite here.
+                let primary = model_binding
+                    .filter(|model| !checkpoint_plan_owns_primary(model))
+                    .and_then(|model| {
+                        model
+                            .members
+                            .iter()
+                            .find(|member| member.role == ArtifactMemberRole::Primary)
+                    });
                 let registered_id = model_binding
                     .filter(|_| primary.is_some_and(|member| matches!(member.source, PortableSourceIdentity::Digest { .. })))
                     .map(|model| {
@@ -404,12 +408,14 @@ impl RuntimeSourceGuard {
         let mut plans: Vec<EntryPlan> = Vec::new();
         let mut converted_co_requirements = Vec::new();
         for (slot, entry) in &model_entries {
+            let model_binding =
+                binding.and_then(|route| route.models.iter().find(|model| &model.slot == slot));
             let requested_variant = bound_runtime_variant(
                 job_type,
                 payload,
                 slot,
                 entry,
-                binding.and_then(|route| route.models.iter().find(|model| &model.slot == slot)),
+                model_binding,
                 &source_options,
             )?;
             let has_hf_downloads = entry
@@ -422,26 +428,30 @@ impl RuntimeSourceGuard {
                         )
                     })
                 });
+            let plan_primary = model_binding.is_some_and(checkpoint_plan_owns_primary);
+            let has_checkpoint_plan =
+                model_binding.is_some_and(|model| model.checkpoint_plan.is_some());
+            let local_primary = !has_hf_downloads
+                && (plan_primary || entry_is_provably_non_hf_local(entry, settings)?);
+            if local_primary
+                || (has_checkpoint_plan
+                    && !sceneworks_core::model_artifacts::artifact_selection::has_required_model_downloads_for_os(
+                        entry, std::env::consts::OS,
+                    ))
+            {
+                // The imported checkpoint owns its primary. Plan the shared base alongside it,
+                // even when a soft catalog download is declared for an optional decoder.
+                if let Some(plan) = plan_backed_resident_base_plan(
+                    entry,
+                    settings,
+                    &configured_library,
+                    &local_artifacts,
+                ) {
+                    plans.push(plan);
+                }
+            }
             if !has_hf_downloads {
-                // Imported/app-owned and explicitly configured external-root models are the only
-                // entries outside the HF-library contract; they must prove their confinement.
-                if entry_is_provably_non_hf_local(entry, settings)? {
-                    // sc-22329: a plan-backed imported checkpoint is the transformer only — its
-                    // resident base components (text encoder, VAE, tokenizer) load from the
-                    // family's installed base model, which this entry does not carry. Give the
-                    // base its own plan so it participates in local-tier selection exactly like an
-                    // HF-managed entry's closure; without one, no scope is installed and the base
-                    // streams from the source library on every cold load even while the resolved
-                    // cache holds it. Every degradation returns `None`, which is the pre-sc-22329
-                    // behavior (the route's own typed refusal still owns the not-installed case).
-                    if let Some(plan) = plan_backed_resident_base_plan(
-                        entry,
-                        settings,
-                        &configured_library,
-                        &local_artifacts,
-                    ) {
-                        plans.push(plan);
-                    }
+                if local_primary {
                     continue;
                 }
                 return Err(WorkerError::InvalidPayload(format!(
@@ -3110,20 +3120,25 @@ fn verify_portable_binding(
         &artifact_options,
     )
     .map_err(invalid_binding)?;
-    if entry
-        .get("downloads")
-        .and_then(serde_json::Value::as_array)
-        .is_none_or(Vec::is_empty)
-    {
-        if let Some(base) = selected_resident_base_closure_for_entry(entry, std::env::consts::OS) {
-            selected_manifest
-                .as_object_mut()
-                .ok_or_else(|| invalid_binding("selected model manifest is invalid"))?
-                .insert(
-                    "downloads".to_owned(),
-                    serde_json::Value::Array(resident_base_component_downloads(&base)),
-                );
-        }
+    let has_required_downloads =
+        sceneworks_core::model_artifacts::artifact_selection::has_required_model_downloads_for_os(
+            entry,
+            std::env::consts::OS,
+        );
+    let resident_downloads = (!has_required_downloads)
+        .then(|| selected_resident_base_closure_for_entry(entry, std::env::consts::OS))
+        .flatten()
+        .map(|base| resident_base_component_downloads(&base))
+        .unwrap_or_default();
+    if !resident_downloads.is_empty() {
+        let downloads = selected_manifest
+            .as_object_mut()
+            .ok_or_else(|| invalid_binding("selected model manifest is invalid"))?
+            .entry("downloads".to_owned())
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| invalid_binding("selected model downloads are invalid"))?;
+        downloads.extend(resident_downloads.iter().cloned());
     }
     // Raw ModelConvert admission can freeze the immutable source privately while the synthetic
     // public manifest entry only carries repo/file hints. The binding is the source authority;
@@ -3365,11 +3380,12 @@ fn verify_portable_binding(
                     job_type,
                     JobType::DatasetAnalysis | JobType::TrainingCaption
                 ) && binding.slot == "modelManifestEntries/0");
-    verify_manifest_globs(
+    verify_manifest_selectors(
         binding,
         &selected_manifest,
         settings,
         verified_derivative_primary,
+        &resident_downloads,
     )
 }
 
@@ -3500,11 +3516,12 @@ fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<V
     Ok(selected)
 }
 
-fn verify_manifest_globs(
+fn verify_manifest_selectors(
     binding: &PortableModelBinding,
     selected: &serde_json::Value,
     settings: &Settings,
     verified_derivative_primary: bool,
+    resident_downloads: &[serde_json::Value],
 ) -> WorkerResult<()> {
     for download in selected
         .get("downloads")
@@ -3530,6 +3547,9 @@ fn verify_manifest_globs(
         let Some(files) = download.get("files").and_then(serde_json::Value::as_array) else {
             continue;
         };
+        // A resident companion can be served from the pinned snapshot before it has an install
+        // receipt. The freeze must still cover literal files that this route opens by name.
+        let resident = resident_downloads.contains(download);
         // Admission expands the legacy empty selector to `*` before freezing its exact
         // pinned ledger. Verify the same whole-snapshot set on this worker.
         let selectors = if files.is_empty() {
@@ -3538,10 +3558,31 @@ fn verify_manifest_globs(
             files
                 .iter()
                 .filter_map(serde_json::Value::as_str)
-                .filter(|selector| selector.contains(['*', '?', '[']))
+                .filter(|selector| resident || selector.contains(['*', '?', '[']))
                 .collect()
         };
         for selector in selectors {
+            let pattern =
+                glob::Pattern::new(selector).map_err(|error| invalid_binding(error.to_string()))?;
+            let mut frozen = binding.members.iter()
+                .filter(|member| {
+                    matches!(&member.source, PortableSourceIdentity::Revision { identity }
+                        if identity.repository == repo && identity.revision == revision && identity.variant == variant)
+                        && (member.role == ArtifactMemberRole::Primary) == primary
+                })
+                .flat_map(|member| &member.files)
+                .filter(|file| pattern.matches(&file.relative_path.to_string_lossy()))
+                .map(|file| file.relative_path.clone())
+                .collect::<Vec<_>>();
+            if resident && frozen.is_empty() {
+                return Err(invalid_binding(
+                    "the admitted route omits a resident base file",
+                ));
+            }
+            if !selector.contains(['*', '?', '[']) {
+                // The binding already verified the exact file's bytes above.
+                continue;
+            }
             let snapshot = discover_frozen_selector_snapshot(
                 settings,
                 binding.members.iter(),
@@ -3551,17 +3592,6 @@ fn verify_manifest_globs(
                 primary,
             )?;
             let mut actual = recursive_snapshot_matches(&snapshot, selector)?;
-            let mut frozen = binding.members.iter()
-                .filter(|member| {
-                    matches!(&member.source, PortableSourceIdentity::Revision { identity }
-                        if identity.repository == repo && identity.revision == revision && identity.variant == variant)
-                        && (member.role == ArtifactMemberRole::Primary) == primary
-                })
-                .flat_map(|member| &member.files)
-                .filter(|file| sceneworks_core::model_artifacts::artifact_selection::pattern_matches(
-                    selector, &file.relative_path.to_string_lossy()))
-                .map(|file| file.relative_path.clone())
-                .collect::<Vec<_>>();
             actual.sort();
             actual.dedup();
             frozen.sort();
@@ -3826,6 +3856,13 @@ struct SelectedCheckpointPlanLayer {
     layer_id: String,
     target_path: PathBuf,
     source_path: PathBuf,
+}
+
+fn checkpoint_plan_owns_primary(model: &PortableModelBinding) -> bool {
+    model
+        .checkpoint_plan
+        .as_ref()
+        .is_some_and(|plan| plan.primary_layer_id.is_some())
 }
 
 fn checkpoint_plan_layer_id<'a>(
@@ -4243,7 +4280,7 @@ fn plan_backed_resident_base_plan(
     configured_library: &Path,
     local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Option<EntryPlan> {
-    use sceneworks_core::model_artifacts::artifact_selection::selected_requirements_for_closure;
+    use sceneworks_core::model_artifacts::artifact_selection::selected_resident_base_requirements;
 
     let family = entry
         .get("family")
@@ -4255,7 +4292,7 @@ fn plan_backed_resident_base_plan(
     // request's runtime variant (see [`PlanBackedResidentBase::tier`]).
     let closure =
         selected_resident_base_closure_for_row(&base_entry, &tier, shape, std::env::consts::OS)?;
-    let selected = selected_requirements_for_closure(&closure, &settings.data_dir);
+    let selected = selected_resident_base_requirements(&closure, shape, &settings.data_dir);
     if selected.requirements.is_empty() {
         return None;
     }
@@ -6363,6 +6400,176 @@ mod tests {
         assert!(FileLock::try_open_exclusive(&entry.join(".lease")).is_ok());
     }
 
+    #[test]
+    fn linked_checkpoint_primary_and_companion_are_verified_without_catalog_paths() {
+        use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+        use sceneworks_core::model_artifacts::portable_binding::{
+            portable_closure_sha256, PortableCheckpointPlan,
+        };
+
+        let temp = TempDir::new().unwrap();
+        let mut settings = settings(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        let external = temp.path().join("checkpoints");
+        std::fs::create_dir_all(&external).unwrap();
+        let relative = "linked-krea.safetensors";
+        let checkpoint = external.join(relative);
+        // Only the header shape is needed for catalog inspection. The test loads no model.
+        let header = json!({
+            "model.diffusion_model.txtfusion.projector.weight": {"dtype":"BF16","shape":[1],"data_offsets":[0,2]},
+            "model.diffusion_model.blocks.0.attn.wq.weight": {"dtype":"BF16","shape":[1],"data_offsets":[2,4]},
+            "model.diffusion_model.first.weight": {"dtype":"BF16","shape":[1],"data_offsets":[4,6]},
+        }).to_string();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(header.as_bytes());
+        bytes.extend([0; 6]);
+        std::fs::write(&checkpoint, &bytes).unwrap();
+        let store = CheckpointPlanStore::open(&settings.data_dir);
+        let approved = store.approve_root(&external).unwrap();
+        let compiled = store.compile_linked(&approved.root_id, relative).unwrap();
+        let checkpoint_id = compiled.checkpoint_id;
+        let layer_id = compiled.plan.layers[0].layer_id.clone();
+        let plan = PortableCheckpointPlan::from_import_plan(&compiled.plan, Some(layer_id.clone()))
+            .unwrap();
+        let entry = json!({
+            "id": "guardfx_linked_krea", "family": "krea_2",
+            "source": {"provider": "linked-library", "rootId": approved.root_id, "relativePath": relative},
+            "importPlan": {"checkpointId": checkpoint_id},
+            "downloads": [{"provider":"huggingface", "repo":"guardfx/optional-preview",
+                "coRequisite":true, "required":"soft", "platforms":["macos"], "files":["vae.safetensors"]}],
+        });
+        let catalog = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::fs::write(&catalog, json!({"models":[entry.clone()]}).to_string()).unwrap();
+
+        let repo = "guardfx/linked-companions";
+        let companion = "bf16/transformer/config.json";
+        let encoder = "bf16/text_encoder/model.safetensors";
+        let library = temp.path().join("source-library");
+        seed_snapshot(&library, repo, REV_A, companion);
+        seed_snapshot(&library, repo, REV_A, encoder);
+        let _base = ResidentBaseRowGuard::install(
+            "krea_2",
+            "bf16",
+            ResidentBaseShape::KreaImportedCompanions,
+            json!({"id":"guardfx_companions", "downloads":[{
+                "provider":"huggingface", "repo":repo, "revision":REV_A, "variant":"bf16",
+                "files":["bf16/transformer/*", "bf16/text_encoder/*"],
+            }]}),
+        );
+        let file = |relative: &str, bytes: &[u8]| PortableArtifactFile {
+            relative_path: relative.into(),
+            size_bytes: bytes.len() as u64,
+            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+        };
+        let primary = file("artifact", &bytes);
+        let slot = "modelManifestEntry";
+        let model = |files| {
+            PortableModelBinding::new(
+                slot,
+                "guardfx_linked_krea",
+                "cpu",
+                "local",
+                None,
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![
+                    PortableArtifactMember {
+                        role: ArtifactMemberRole::Primary,
+                        component_id: None,
+                        source: PortableSourceIdentity::Digest {
+                            sha256: portable_closure_sha256(std::slice::from_ref(&primary))
+                                .unwrap(),
+                        },
+                        tier: None,
+                        files: vec![primary.clone()],
+                    },
+                    PortableArtifactMember {
+                        role: ArtifactMemberRole::RequiredComponent,
+                        component_id: Some("resident_base/downloads/0".to_owned()),
+                        source: PortableSourceIdentity::Revision {
+                            identity: ArtifactIdentity::pinned(repo, REV_A, "bf16").unwrap(),
+                        },
+                        tier: Some("bf16".into()),
+                        files,
+                    },
+                ],
+            )
+            .unwrap()
+            .with_checkpoint_plan(plan.clone())
+            .unwrap()
+        };
+        let binding = |files| {
+            PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model(files)]).unwrap()
+        };
+        let incomplete = binding(vec![file(encoder, b"weights")]);
+        let complete = binding(vec![file(companion, b"weights"), file(encoder, b"weights")]);
+        let payload = json!({"model": "guardfx_linked_krea", "modelManifestEntry": entry})
+            .as_object()
+            .unwrap()
+            .clone();
+        with_library(&library, || {
+            let attempt = |binding| {
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(binding),
+                )
+            };
+            let Err(error) = attempt(&incomplete) else {
+                panic!("the worker must verify the literal config without an install receipt");
+            };
+            assert!(
+                error.to_string().contains("omits a resident base file"),
+                "{error}"
+            );
+            let guard = attempt(&complete)
+                .expect("the worker verifies linked and resident sources without a receipt");
+            let layers = guard.plan_layers().unwrap();
+            let served = &layers.by_checkpoint[&checkpoint_id][&layer_id];
+            let private_root =
+                std::fs::canonicalize(settings.data_dir.join("models/portable-attempts")).unwrap();
+            assert!(std::fs::canonicalize(served)
+                .unwrap()
+                .starts_with(private_root));
+            assert_eq!(std::fs::read(served).unwrap(), bytes);
+            drop(layers);
+            drop(guard);
+
+            write_receipts(
+                &settings.data_dir,
+                repo,
+                json!([{"repo":repo, "modelId":"guardfx_companions", "variant":"bf16",
+                    "resolvedFiles":[companion, encoder, "bf16/transformer/turnkey.safetensors"],
+                    "snapshotRevision":REV_A}]),
+            );
+            drop(attempt(&complete).expect("a full-tier receipt does not require unused weights"));
+
+            let repo_dir = sceneworks_core::hf_home::safe_repo_dir_name(repo).unwrap();
+            let companion_file =
+                library.join(format!("models--{repo_dir}/snapshots/{REV_A}/{companion}"));
+            std::fs::write(&companion_file, b"changed").unwrap();
+            assert!(
+                attempt(&complete).is_err(),
+                "changed pinned companion bytes must be refused"
+            );
+            std::fs::write(companion_file, b"weights").unwrap();
+
+            let mut changed = bytes.clone();
+            *changed.last_mut().unwrap() = 1;
+            std::fs::write(&checkpoint, changed).unwrap();
+            let Err(error) = attempt(&complete) else {
+                panic!("changed linked bytes must be refused");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("worker checkpoint plan layer bytes are unavailable"),
+                "{error}"
+            );
+        });
+    }
+
     /// An imported checkpoint whose primary file is also its one checkpoint-plan layer (every
     /// managed Krea import) is held ONCE in its route bundle, and a reused bundle is verified
     /// through the host's verdict store, so later jobs read none of its bytes.
@@ -7547,9 +7754,14 @@ mod tests {
                 std::env::consts::OS,
                 Some("q4"),
             );
-            let error =
-                verify_manifest_globs(&route.models[0], &selected, &settings(data.clone()), false)
-                    .unwrap_err();
+            let error = verify_manifest_selectors(
+                &route.models[0],
+                &selected,
+                &settings(data.clone()),
+                false,
+                &[],
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("file set differs"), "{error}");
             drop(scope);
             let error = RuntimeSourceGuard::begin_with_binding(
@@ -10463,7 +10675,8 @@ mod tests {
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
         let (read_repo, file) = match shape {
-            super::ResidentBaseShape::FullTier => (
+            super::ResidentBaseShape::FullTier
+            | super::ResidentBaseShape::KreaImportedCompanions => (
                 "guardfx/resident-base",
                 "bf16/text_encoder/model.safetensors",
             ),
@@ -10478,7 +10691,8 @@ mod tests {
             read_repo,
             match shape {
                 // A primary row's receipts are filtered by `modelId`.
-                super::ResidentBaseShape::FullTier => json!([{
+                super::ResidentBaseShape::FullTier
+                | super::ResidentBaseShape::KreaImportedCompanions => json!([{
                     "repo": read_repo, "modelId": "guardfx_base", "variant": "bf16",
                     "resolvedFiles": [file], "snapshotRevision": REV_C }]),
                 // A co-requisite's are not — and must not be, because whichever sibling card the
@@ -10506,7 +10720,8 @@ mod tests {
     /// `subdir`, one row per component.
     fn resident_base_entry(shape: super::ResidentBaseShape) -> Value {
         match shape {
-            super::ResidentBaseShape::FullTier => json!({
+            super::ResidentBaseShape::FullTier
+            | super::ResidentBaseShape::KreaImportedCompanions => json!({
                 "id": "guardfx_base",
                 "downloads": [
                     { "provider": "huggingface", "repo": "guardfx/resident-base",
