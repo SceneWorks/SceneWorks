@@ -6,6 +6,8 @@ import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import { KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_FINAL_SIZE } from "./krea-tier2-allocation.mjs";
+
 export const KREA_SUITE = "krea-scoped-acceptance";
 export const KREA_BASE_APP = "2aa525dfb2fb1ab889bd6a15f80c0a0cc1df1e2d";
 export const KREA_BASE_ENGINE = "e86b8d5fc493c16b2d9d852e0c9ecbdefee58294";
@@ -22,13 +24,17 @@ const HIRES = { enabled: true, upscaleBy: 1.5, steps: 4, denoisingStrength: 0.5 
 const PROJECTOR_KEYS = ["diffusion_model.txtfusion.projector.lora_down.weight", "diffusion_model.txtfusion.projector.lora_up.weight"];
 const GIB = 1024 ** 3;
 
-export function kreaRoutes(backend) {
+export function kreaRoutes(backend, { allocation = false } = {}) {
   const shared = { backend, kind: "image", mode: "text_to_image", group: null, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20 };
   const body = { mode: shared.mode, prompt: PROMPT, width: 512, height: 512, count: 1, seed: 33602 };
-  return [
+  const routes = [
     { ...shared, id: `${backend}-krea-raw-phases`, model: "krea_2_raw", tier: "q4", proof: "raw", steps: 10, executedSteps: 10, finalSize: 512, body: { ...body, model: "krea_2_raw", negativePrompt: NEGATIVE, loras: [{ id: "krea2_turbo_accel", weight: 1 }], advanced: { mlxQuantize: 4, sampler: "euler", phases: PHASES } } },
     { ...shared, id: `${backend}-krea-imported-bf16-hires`, model: "krea_2_turbo", tier: "bf16", proof: "hires", steps: 12, executedSteps: 10, finalSize: 768, body: { ...body, model: LINKED_MODEL, negativePrompt: "", loras: [], advanced: { mlxQuantize: 0, steps: 8, guidanceScale: 0, sampler: "euler" }, hiresFix: HIRES } },
   ];
+  if (!allocation) return routes;
+  assert.equal(backend, "cuda", "Krea allocation needs the Candle CUDA worker");
+  const hires = routes[1];
+  return [{ ...hires, id: "cuda-krea-imported-bf16-hires-allocation", timeoutMinutes: 30, finalSize: KREA_ALLOCATION_FINAL_SIZE, body: { ...hires.body, width: KREA_ALLOCATION_BASE_SIZE, height: KREA_ALLOCATION_BASE_SIZE, hiresFix: { ...HIRES, upscaleBy: 2 } } }];
 }
 
 export function assertKreaPins(baseApp, baseEngine, headApp, headEngine) {
@@ -134,6 +140,8 @@ export async function stageKreaAssets(hub, price, signal, fetchImpl = fetch) {
     await mkdir(refs, { recursive: true });
     await writeFile(path.join(refs, "main"), revision, { flag: "wx" });
   }
+  const receipt = { ...price, freeBytes, stagedFileCount: price.files.length };
+  if (!price.files.some(({ repo, revision, file }) => repo === ADAPTER.repo && revision === ADAPTER.revision && file === ADAPTER.file)) return receipt;
   const adapter = await open(kreaSnapshotFile(hub, ADAPTER), "r");
   try {
     const prefix = Buffer.alloc(8);
@@ -144,7 +152,7 @@ export async function stageKreaAssets(hub, price, signal, fetchImpl = fetch) {
     assert.equal((await adapter.read(header, 0, length, 8)).bytesRead, length);
     const tensors = JSON.parse(header.toString("utf8"));
     assert.ok(PROJECTOR_KEYS.every((name) => tensors[name]), "exact Raw adapter must exercise the historical projector path");
-    return { ...price, freeBytes, stagedFileCount: price.files.length, adapterProjectorKeys: PROJECTOR_KEYS };
+    return { ...receipt, adapterProjectorKeys: PROJECTOR_KEYS };
   } finally {
     await adapter.close();
   }
@@ -325,7 +333,7 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
     assert.equal(facts?.sourceBinding?.stableToken, `${path.basename(CHECKPOINT.file)}@${CHECKPOINT.bytes}`);
     assert.ok(facts.source?.some(({ codecId }) => codecId === "dense-bf16-v1"), "worker output must identify the loaded BF16 checkpoint codec");
     assert.equal(raw.kreaImportedBase, `${COMPANION.repo}#bf16`);
-    for (const [key, value] of Object.entries(HIRES)) assert.equal(raw.hiresFix?.[key], value, `wrong resolved Hires.fix ${key}`);
+    for (const [key, value] of Object.entries(route.body.hiresFix)) assert.equal(raw.hiresFix?.[key], value, `wrong resolved Hires.fix ${key}`);
   }
   return { libraryCount: library.length, assetId: asset.id, generationSetId: hydrated.generationSetId, width, height, prompt: PROMPT, negativePrompt: route.body.negativePrompt, raw: route.proof === "raw" ? { phasePlan: raw.phases, tier: "q4", repo: raw.repo } : { importedCheckpoint: raw.importedCheckpoint, companion: { ...COMPANION, tier: "bf16" }, hiresFix: raw.hiresFix } };
 }

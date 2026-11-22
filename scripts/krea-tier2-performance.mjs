@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { sha256 } from "./lib/file-sha256.mjs";
+import { kreaAllocationOverlay } from "./krea-tier2-allocation.mjs";
 
 export const SAMPLER_SOURCE_FILE = "crates/sceneworks-worker/src/memory_strategy.rs";
 const BASE_SAMPLER_SOURCE_SHA = "c69878bde04838b8a2b51cbbefba32c22fa5279aea86cd0cec981bd37f63b2cf";
@@ -19,13 +20,18 @@ const OBSERVE = `    let mut krea_performance_sampler = KreaPerformanceSampler::
     let on_progress = &mut observe_krea_progress;
 `;
 
-export async function bindKreaSamplerOverlay(original, side) {
+export async function bindKreaSamplerOverlay(original, side, { allocation = false } = {}) {
   const source = original.toString("utf8").replaceAll("\r\n", "\n");
   const sourceSha256 = sha256(source);
   assert.ok(["base", "head"].includes(side));
   const known = sourceSha256 === (side === "base" ? BASE_SAMPLER_SOURCE_SHA : HEAD_SAMPLER_SOURCE_SHA);
   assert.ok(known, `unreviewed ${side} file for the Krea sampler observer: ${sourceSha256}`);
   assert.equal(source.split(ANCHOR).length, 2, "Krea sampler observer requires exactly one native callback owner");
+  if (allocation) {
+    assert.equal(side, "head", "the wide-im2col allocation witness builds only the corrected candidate");
+    const content = await kreaAllocationOverlay(source, ANCHOR);
+    return { content, sourceSha256, overlaySha256: sha256(content) };
+  }
   const hook = await readFile(SAMPLER_HOOK_FILE, "utf8");
   const [prefix, rest] = ANCHOR.split("\n");
   const materialized = `${source.replace(ANCHOR, `${prefix}\n${OBSERVE}${rest}`)}\n${hook}`;

@@ -45,6 +45,7 @@ import {
   SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedGpuSample,
   kreaSamplerReceipt, kreaPerformanceObservation, compareKreaPerformance,
 } from "./krea-tier2-performance.mjs";
+import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt } from "./krea-tier2-allocation.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -161,8 +162,11 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   fact(["tier2-ab", KREA_SUITE].includes(suite), "unknown Tier 2 suite");
   const krea = suite === KREA_SUITE;
   const perf = env.TIER2_AB_KREA_PERFORMANCE === "true";
+  const allocation = env.TIER2_AB_KREA_ALLOCATION === "true";
   fact(!perf || krea, "Krea performance requires the explicit Krea suite");
-  const routes = krea ? kreaRoutes(backend) : selectRoutes(backend, env.TIER2_AB_ROUTES);
+  fact(!allocation || (krea && backend === "cuda" && !perf), "Krea allocation requires the Candle suite and is separate from performance");
+  if (allocation) assert.equal(inferenceSha, KREA_WIDE_IM2COL_PIN, "wide Krea allocation requires the reviewed CUDA im2col fix");
+  const routes = krea ? kreaRoutes(backend, { allocation }) : selectRoutes(backend, env.TIER2_AB_ROUTES);
   if (krea) {
     assertKreaPins(baseSha, KREA_BASE_ENGINE, headSha, inferenceSha);
     fact(!env.TIER2_AB_ROUTES && !env.TIER2_AB_HUBS, "Krea uses its fixed routes and attempt-owned staging hub");
@@ -173,7 +177,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { suite, krea, perf, backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes,
+  return { suite, krea, perf, allocation, backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes,
     hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
@@ -189,13 +193,16 @@ export function dispatchOptions(inputs, dispatchedSha) {
   try { options = JSON.parse(inputs.moss_options_json || "{}"); } catch { throw new Error("moss_options_json must be a JSON object"); }
   fact(options && typeof options === "object" && !Array.isArray(options), "tier2-ab options must be a JSON object");
   if (options.suite === KREA_SUITE) {
-    fact(Object.keys(options).every((key) => ["suite", "head_sha", "preflight_only", "performance"].includes(key)), "Krea selector accepts suite, head_sha, preflight_only, and performance");
+    fact(Object.keys(options).every((key) => ["suite", "head_sha", "preflight_only", "performance", "allocation"].includes(key)), "Krea selector accepts suite, head_sha, preflight_only, performance, and allocation");
     fact(options.preflight_only === undefined || typeof options.preflight_only === "boolean", "preflight_only must be boolean");
     fact(options.performance === undefined || typeof options.performance === "boolean", "performance must be boolean");
+    fact(options.allocation === undefined || typeof options.allocation === "boolean", "allocation must be boolean");
+    fact(!options.allocation || (inputs.backend === "candle" && !options.performance), "Krea allocation requires Candle and is separate from performance");
+    if (options.allocation) assert.equal(inputs.inference_sha, KREA_WIDE_IM2COL_PIN, "wide Krea allocation requires the reviewed CUDA im2col fix");
     const preflight = options.preflight_only ?? true;
     fact(!inputs.qwen_persistent_weights && (inputs.download_missing === true) === !preflight, "Krea execution requires download_missing; metadata preflight leaves it off");
     assertKreaPins(KREA_BASE_APP, KREA_BASE_ENGINE, options.head_sha, inputs.inference_sha);
-    return { suite: KREA_SUITE, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha, krea_performance: options.performance ?? false };
+    return { suite: KREA_SUITE, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha, krea_performance: options.performance ?? false, krea_allocation: options.allocation ?? false };
   }
   fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "tier2-ab never downloads; leave download_missing and qwen_persistent_weights off");
   const unknown = Object.keys(options).filter((key) => !DISPATCH_OPTION_KEYS.includes(key));
@@ -550,10 +557,12 @@ export function hubMutationAttribution(route) {
 export const HUB_MUTATION_LISTING_LIMIT = 20_000;
 export function exitCodeFor(report) {
   if (report.kind === KREA_SUITE) {
-    if (report.fatal || report.routes.length !== 2) return 1;
+    const expected = report.allocationProtocol ? 1 : 2;
+    if (report.fatal || report.routes.length !== expected) return 1;
     if (report.mode === "preflight") return report.staging?.files?.length > 0 ? 0 : 1;
-    if (report.mode === "stage" || report.mode === "build") return report.summary.ready === 2 ? 0 : 1;
+    if (report.mode === "stage" || report.mode === "build") return report.summary.ready === expected ? 0 : 1;
     const productPassed = report.routes.every((route) => route.status === "ran" && ["equal", "product_pass_oracle_required"].includes(route.verdict));
+    if (report.allocationProtocol) return report.routes.every((route) => route.status === "ran" && route.allocationWitness?.status === "observed") ? 0 : 1;
     return productPassed && (!report.performanceProtocol || report.routes.every((route) => route.performanceComparison?.status === "pass")) ? 0 : 1;
   }
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
@@ -758,6 +767,7 @@ export function renderMarkdown(report) {
   }
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
+  if (report.allocationProtocol) lines.push(`- Allocation witness: ${report.allocationProtocol}.`, "");
   if (report.performanceProtocol) lines.push(`- Performance protocol: ${report.performanceProtocol}; results remain separate from output evidence.`, "");
   if (report.kind === KREA_SUITE && report.staging) lines.push(`- Exact asset inventory: ${report.staging.files.length} files, ${gib(report.staging.bytes)}. ${report.staging.stagedFileCount ? "Digest-verified in the attempt-owned hub." : "Metadata pricing only."}`, "");
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
@@ -773,6 +783,7 @@ export function renderMarkdown(report) {
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
+    if (route.allocationWitness) lines.push(`- Allocation witness: ${route.allocationWitness.status}. See the candidate receipt in report.json.`);
     if (route.performanceComparison) lines.push(`- PERF-1/2: ${route.performanceComparison.status}. ${route.performanceComparison.reason ?? "See six ordered pairs and domain verdicts in report.json."}`);
     if (route.comparison?.observedPerformance && !report.performanceProtocol) {
       const { base, head } = route.comparison.observedPerformance;
@@ -818,14 +829,14 @@ async function preflight(env, cfg, report, signal) {
   if (cfg.krea) {
     assertKreaPins(report.base.sha, report.base.inferencePin, report.head.sha, report.head.inferencePin);
     fact(report.head.inferencePin === cfg.inferenceSha, "candidate checkout does not source-pin the requested inference SHA");
-    for (const side of [report.base, report.head]) {
+    for (const side of cfg.allocation ? [report.head] : [report.base, report.head]) {
       const manifests = ["Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml"];
       const contents = await Promise.all(manifests.map((file) => readFile(path.join(side.checkout, file), "utf8")));
       assertPins(contents, await readFile(path.join(side.checkout, "Cargo.lock"), "utf8"), side.inferencePin);
       const loras = await readFile(path.join(side.checkout, "config", "manifests", "builtin.loras.jsonc"), "utf8");
       assertKreaLoraManifest(JSON.parse(stripJsoncComments(loras)).loras);
-      if (cfg.perf) {
-        const { sourceSha256, overlaySha256 } = await bindKreaSamplerOverlay(await readFile(path.join(side.checkout, SAMPLER_SOURCE_FILE)), side.sha === cfg.baseSha ? "base" : "head");
+      if (cfg.perf || cfg.allocation) {
+        const { sourceSha256, overlaySha256 } = await bindKreaSamplerOverlay(await readFile(path.join(side.checkout, SAMPLER_SOURCE_FILE)), side.sha === cfg.baseSha ? "base" : "head", cfg);
         side.samplerOverlay = { sourceSha256, overlaySha256 };
       }
     }
@@ -860,7 +871,7 @@ async function preflight(env, cfg, report, signal) {
     const stageReceipt = path.join(cfg.work, "scratch", "krea-stage.json");
     if (["preflight", "stage"].includes(report.mode)) {
       report.staging = await priceKreaAssets(inventory, signal);
-      fact(report.routes.every((route) => route.rows?.required?.length), "Krea public catalog no longer provides both exact proof routes");
+      fact(report.routes.every((route) => route.rows?.required?.length), "Krea public catalog no longer provides the exact proof routes");
       if (report.mode === "stage") {
         report.staging = await stageKreaAssets(cfg.hubs[0], report.staging, signal);
         await writeFile(stageReceipt, JSON.stringify(report.staging) + "\n", { flag: "wx" });
@@ -870,7 +881,7 @@ async function preflight(env, cfg, report, signal) {
       report.staging = JSON.parse(await readFile(stageReceipt, "utf8"));
       await assertStagedKreaAssets(cfg.hubs[0], report.staging, inventory);
     }
-    if (report.mode !== "preflight") fact(report.routes.every((route) => route.status === "ready"), "both pinned Krea cases must be eligible to run");
+    if (report.mode !== "preflight") fact(report.routes.every((route) => route.status === "ready"), "all selected pinned Krea cases must be eligible to run");
   }
   for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
     if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
@@ -895,15 +906,16 @@ async function build(env, cfg, report) {
   const built = {};
   // Base first, then head: both share one target, so the second build reuses every unchanged
   // dependency unit. Each binary (plus loose native libraries) is copied out before the next build.
-  for (const [label, dir, sha] of [["base", cfg.baseDir, cfg.baseSha], ["head", cfg.headDir, cfg.headSha]]) {
+  const sides = cfg.allocation ? [["head", cfg.headDir, cfg.headSha]] : [["base", cfg.baseDir, cfg.baseSha], ["head", cfg.headDir, cfg.headSha]];
+  for (const [label, dir, sha] of sides) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
     let result;
-    if (cfg.perf) {
+    if (cfg.perf || cfg.allocation) {
       const file = path.join(dir, SAMPLER_SOURCE_FILE);
       const original = await readFile(file);
-      const overlay = await bindKreaSamplerOverlay(original, label);
+      const overlay = await bindKreaSamplerOverlay(original, label, cfg);
       assert.deepEqual(report[label].samplerOverlay, { sourceSha256: overlay.sourceSha256, overlaySha256: overlay.overlaySha256 });
       try {
         await writeFile(file, overlay.content);
@@ -927,7 +939,7 @@ async function build(env, cfg, report) {
     built[label] = { binary, binarySha256: await fileSha256(binary), samplerOverlay: report[label].samplerOverlay ?? null, metallib, buildSeconds: (Date.now() - started) / 1000 };
     report[label] = { ...report[label], binarySha256: built[label].binarySha256, buildSeconds: built[label].buildSeconds, metallibSha256: metallib?.sha256 ?? null };
   }
-  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, built }, null, 2) + "\n");
+  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, allocation: cfg.allocation, built }, null, 2) + "\n");
   return built;
 }
 
@@ -984,7 +996,7 @@ export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/
 // and SCENEWORKS_FFMPEG_TIMEOUT_SECONDS bounds that ffmpeg. The product reads no ffprobe variable.
 export const FORWARDED_SCENEWORKS_ENV = Object.freeze(["SCENEWORKS_FFMPEG", "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS"]);
 export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
-export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib }) {
+export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib, allocation = false }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
   if (backend === "cuda") {
@@ -996,7 +1008,7 @@ export function childEnvironments(env, { backend, state, hub, xet, workerId, met
   // gated ones are skipped at planning, so the API and worker get no token of any kind.
   base = scrubSecrets(base);
   for (const key of FORWARDED_SCENEWORKS_ENV) if (env[key]) base[key] = env[key];
-  return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1" }) };
+  return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1", ...(allocation ? { SCENEWORKS_CUDA_PROOF_POOL_BYTES: String(KREA_ALLOCATION_POOL_BYTES) } : {}) }) };
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
@@ -1017,7 +1029,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   // run.json is rewritten at every phase transition, so a cancelled job still leaves evidence.
   const persist = () => writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets)).catch(() => {});
   const phase = async (name, fields = {}) => { record.phase = name; progress({ route: route.id, run: label, phase: name, ...fields }); await persist(); };
-  const envs = childEnvironments(env, { backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path });
+  const envs = childEnvironments(env, { backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path, allocation: cfg.allocation });
   const children = [], handles = [], controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason ?? new Error("A/B interrupted"));
   signal.addEventListener("abort", onAbort, { once: true });
@@ -1109,7 +1121,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         fact(memory.gpuUuid === sample.uuid, "physical GPU changed during pre-request admission sampling");
         await delay(200);
       }
-      if (cfg.perf) {
+      if (cfg.perf || cfg.allocation) {
         const uuid = memory.gpuUuid;
         memory.ownedGpuSamples = 0;
         memory.ownedGpuErrors = 0;
@@ -1139,7 +1151,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
       memory.gpuBaselineBytes = Math.max(...baseline);
       if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if (cfg.perf && memory.gpuUuid !== s.uuid) memory.ownedGpuUnavailable = true; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
+      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuUnavailable = true; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     const posted = Date.now();
@@ -1183,7 +1195,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       memory.peakBytes = memory.gpuPeakBytes ?? null;
       memory.peakAboveBaselineBytes = Number.isFinite(memory.gpuPeakBytes) ? Math.max(0, memory.gpuPeakBytes - memory.gpuBaselineBytes) : null;
     }
-    if (cfg.perf) {
+    if (cfg.perf || cfg.allocation) {
       try {
         memory.hostLifetimePeakBytes = cfg.backend === "mlx" ? await sampleKreaMacLifetime(worker.pid) : (await sampleWindowsProcess(worker.pid)).peakWorkingSetBytes;
       } catch (error) {
@@ -1225,7 +1237,13 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       record.productProof = assertKreaOutput({ route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved), width, height, workerId, projectId: project.id });
       record.productProof.imageStats = imageQualityStats(rgba);
       fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
-      if (!cfg.perf) {
+      if (cfg.allocation) {
+        try {
+          record.allocation = kreaAllocationReceipt(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), memory, record.watchdog.capBytes);
+        } catch (error) {
+          record.allocation = { status: "inconclusive", reason: error.message };
+        }
+      } else if (!cfg.perf) {
         const metrics = await wait(async () => { const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`); return value?.sampleMs > 0 && value; }, 30, "Krea native metrics");
         record.performance = kreaPerformance(metrics, route, memory);
       } else {
@@ -1332,10 +1350,10 @@ async function runComparison(env, cfg, report, signal) {
   const scratch = path.join(cfg.work, "scratch"), evidence = path.join(cfg.work, "evidence");
   const recorded = JSON.parse(await readFile(path.join(scratch, "build.json"), "utf8"));
   fact(recorded.baseSha === cfg.baseSha && recorded.headSha === cfg.headSha && recorded.backend === cfg.backend, "build.json belongs to a different base/head/backend");
-  fact(Boolean(recorded.perf) === cfg.perf, "build.json belongs to a different instrumentation mode");
+  fact(Boolean(recorded.perf) === cfg.perf && Boolean(recorded.allocation) === cfg.allocation, "build.json belongs to a different instrumentation mode");
   const built = recorded.built;
-  for (const side of ["base", "head"]) {
-    if (cfg.perf) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
+  for (const side of cfg.allocation ? ["head"] : ["base", "head"]) {
+    if (cfg.perf || cfg.allocation) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
     fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`);
     report[side].binarySha256 = built[side].binarySha256;
   }
@@ -1364,6 +1382,20 @@ async function runComparison(env, cfg, report, signal) {
       if (record.hubMutation.changed) progress({ route: route.id, run: label, phase: "hub_mutation", entries: record.hubMutation.diff.count });
       route.runs.push(record); await writeReport(cfg, report); return record;
     };
+    if (cfg.allocation) {
+      const head = await run("head");
+      const after = await hubFingerprint(route.hub, repos);
+      const hubChanged = JSON.stringify(before.repos) !== JSON.stringify(after.repos);
+      route.status = "ran";
+      route.allocationWitness = hubChanged
+        ? { status: "inconclusive", reason: "pinned allocation witness asset metadata changed during the run" }
+        : (head.allocation ?? { status: "inconclusive", reason: head.error ?? "candidate allocation receipt missing" });
+      if (head.status !== "completed") route.allocationWitness = { status: "inconclusive", reason: head.error ?? "candidate application render did not complete" };
+      route.verdict = route.allocationWitness.status;
+      route.verdictReason = route.allocationWitness.reason;
+      await writeReport(cfg, report);
+      break;
+    }
     const base1 = await run("base#1");
     // A worker that cannot register on the very first run will not register on the next five
     // either (same host, same launch); stop the whole comparison with that verdict.
@@ -1454,13 +1486,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
   if (mode === "cleanup") return cleanup(env, cfg);
+  if (cfg.allocation && mode === "run") fact(/^\d+$/.test(env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ""), "Krea allocation requires the existing exact-UUID CUDA execution guard");
   if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
   const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
+  if (cfg.allocation) report.allocationProtocol = `one cold candidate Candle run at 1120 to 2240, private 64 GiB pool, ${KREA_ALLOCATION_MINUTES}-minute aggregate execution cap`;
   if (cfg.perf) report.performanceProtocol = "cold one-job workers; one priming arm per side and route, then six fixed interleaved AB/BA pairs; 210-minute aggregate execution cap; no allowance beyond 1.02";
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("A/B interrupted by signal"));
-  const runCeiling = cfg.krea && mode === "run" ? setTimeout(() => controller.abort(new Error("Krea run reached its 210-minute ceiling")), 210 * 60_000) : null;
+  const wallMinutes = cfg.allocation ? KREA_ALLOCATION_MINUTES : 210;
+  const runCeiling = cfg.krea && mode === "run" ? setTimeout(() => controller.abort(new Error(`Krea run reached its ${wallMinutes}-minute ceiling`)), wallMinutes * 60_000) : null;
   process.once("SIGTERM", interrupt); process.once("SIGINT", interrupt);
   try {
     await preflight(env, cfg, report, controller.signal);

@@ -41,6 +41,11 @@ on:
         required: false
         type: boolean
         default: false
+      krea_allocation:
+        description: "Opt in to one candidate-only linked Krea allocation witness, Candle only"
+        required: false
+        type: boolean
+        default: false
       routes:
         description: "JSON array of route ids; empty selects the backend's default routes"
         required: false
@@ -88,6 +93,7 @@ jobs:
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}/tier2-ab-head
       TIER2_AB_SUITE: ${{ inputs.suite }}
       TIER2_AB_KREA_PERFORMANCE: ${{ inputs.krea_performance }}
+      TIER2_AB_KREA_ALLOCATION: ${{ inputs.krea_allocation }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -194,6 +200,7 @@ jobs:
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}\tier2-ab-head
       TIER2_AB_SUITE: ${{ inputs.suite }}
       TIER2_AB_KREA_PERFORMANCE: ${{ inputs.krea_performance }}
+      TIER2_AB_KREA_ALLOCATION: ${{ inputs.krea_allocation }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -280,8 +287,13 @@ jobs:
           # peak of run 43287955401 rounded up, + 8 GiB margin) and stable memory.used and
           # utilization. The wrapper logs each refusal reason while it waits; the driver prints
           # "phase=driver_started" once admitted.
-          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=540"
-          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
+          if ($env:TIER2_AB_KREA_ALLOCATION -eq 'true') {
+            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=85"
+            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 85 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
+          } else {
+            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=540"
+            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
+          }
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
         if: ${{ always() }}

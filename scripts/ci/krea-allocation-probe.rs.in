@@ -1,0 +1,33 @@
+// Opt-in allocation witness in a dedicated, cold Candle worker. Snapshots are
+// cumulative within its private stream-ordered pool and never reset per pass.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_allocation_pool(width: u32, height: u32, boundary: &str) {
+    use runtime_cuda::media::candle_core::cuda::proof_pool;
+
+    match proof_pool::snapshot(0) {
+        Ok(Some(pool)) => tracing::info!(
+            event = "sgaf336_krea_allocation_pool",
+            width,
+            height,
+            boundary,
+            logical_ordinal = pool.logical_ordinal,
+            cap_bytes = pool.cap_bytes,
+            used_bytes = pool.used_bytes,
+            used_high_bytes = pool.used_high_bytes,
+            reserved_bytes = pool.reserved_bytes,
+            reserved_high_bytes = pool.reserved_high_bytes,
+            "Cumulative CUDA driver high-water for the private pool"
+        ),
+        result => tracing::warn!(
+            event = "sgaf336_krea_allocation_pool_unavailable",
+            width,
+            height,
+            boundary,
+            error = ?result.err(),
+            "Private proof pool could not be observed"
+        ),
+    }
+}
+
+#[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+fn krea_allocation_pool(_: u32, _: u32, _: &str) {}
