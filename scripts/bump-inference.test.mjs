@@ -12,7 +12,14 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { directInferenceCrates, parseCliArgs, prepareInferencePatches, withInferenceCheckout } from "./bump-inference.mjs";
+import {
+  directInferenceCrates,
+  parseCliArgs,
+  prepareCandleNnPatch,
+  prepareInferencePatches,
+  verifyCandleNnResolution,
+  withInferenceCheckout,
+} from "./bump-inference.mjs";
 import { SECURITY_BACKPORT } from "./ci/zip9-source-overrides.mjs";
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "bump-inference.mjs");
@@ -36,6 +43,29 @@ test("a newer inference pin retires only the exact old engine security overrides
   assert.throws(() => prepareInferencePatches(manifest.replace(
     'mlx-gen = { path = "vendor/zip9-mlx-gen" }', 'mlx-gen = { path = "vendor/unreviewed" }'), SHA),
   /review changed inference security overrides/);
+});
+
+test("the bump mirrors the target Candle NN fork only in the Candle git patch table", () => {
+  const header = '[patch."https://github.com/huggingface/candle"]';
+  const registry = '[patch.crates-io]\nregex = { path = "vendor/clip-regex/regex" }';
+  const older = `${header}\ncandle-core = { path = "vendor/candle-core" }\n${registry}\n`;
+  const newer = older.replace(header, `${header}\ncandle-nn = { path = "vendor/candle-nn" }`);
+  const git = `{ git = "https://github.com/SceneWorks/inference", rev = "${SHA}" }`;
+  const app = `${header}\ncandle-core = ${git}\n[workspace.dependencies]\ncandle-nn = "0.10"\n`;
+  const required = app.replace(header, `${header}\ncandle-nn = ${git}`);
+  assert.equal(prepareCandleNnPatch(app, older, SHA), app);
+  assert.equal(prepareCandleNnPatch(app, newer, SHA), required);
+  assert.equal(prepareCandleNnPatch(required, newer, SHA), required);
+  assert.equal(prepareCandleNnPatch(required, older, SHA), app);
+  const lock = `[[package]]\nname = "candle-nn"\nversion = "0.10.2"\nsource = "git+https://github.com/SceneWorks/inference?rev=${SHA}#${SHA}"\n`;
+  const foreign = lock.replace("SceneWorks/inference", "huggingface/candle");
+  verifyCandleNnResolution(required, lock, SHA);
+  verifyCandleNnResolution(app, foreign, SHA);
+  for (const broken of [foreign, lock + foreign, foreign + lock.replace("[[package]]", "[[patch.unused]]")]) {
+    assert.throws(() => verifyCandleNnResolution(required, broken, SHA), /one resolved candle-nn/);
+  }
+  assert.throws(() => prepareCandleNnPatch(required.replace(git, '{ path = "foreign" }'), newer, SHA),
+    /root Candle .*candle-nn/);
 });
 
 // Stands in for the shallow fetch: records where it was asked to clone and leaves clone-shaped

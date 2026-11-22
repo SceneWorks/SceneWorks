@@ -5,8 +5,8 @@
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
 // The pins live in the core, worker and memory-adapter Cargo.toml manifests. The root Cargo.toml additionally `[patch]`es
-// candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
-// revision. Those revs must move in lockstep with the direct crates. This
+// the Candle crates to their vendored implementations at the same inference revision.
+// Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
 //
 // The direct `mlx-rs` pin (michaeltrefry/mlx-rs, a DIFFERENT url) is intentionally left alone -- but
@@ -42,6 +42,7 @@ import {
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
 } from "../apps/web/src/data/previewSupportDerivation.js";
+import { parseCargoLock } from "./inference-closure-digest.mjs";
 import { validateMemoryContractFacts } from "./lib/memory-contract-reconciliation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -171,16 +172,22 @@ export function prepareInferencePatches(manifestText, sha) {
       "# inference revision. The retired exact-revision security ports remain preserved as historical\n# source evidence in vendor/zip9-source-overrides.json; they are no longer Cargo overrides.");
 }
 
-function verifyCandlePatches(manifestText, sha) {
-  const marker = `[patch."https://github.com/huggingface/candle"]`;
+const CANDLE_PATCH_HEADER = '[patch."https://github.com/huggingface/candle"]';
+
+function candlePatchLines(manifestText) {
   const lines = manifestText.split("\n");
-  const afterMarker = lines.findIndex((line) => line.trim() === marker);
+  const afterMarker = lines.findIndex((line) => line.trim() === CANDLE_PATCH_HEADER);
   const section = [];
   for (let i = afterMarker + 1; afterMarker >= 0 && i < lines.length; i += 1) {
     if (lines[i].trim().startsWith("[")) break;
     section.push(lines[i]);
   }
-  for (const crate of PATCHED_CRATES) {
+  return section;
+}
+
+function verifyCandlePatches(manifestText, sha, crates = PATCHED_CRATES) {
+  const section = candlePatchLines(manifestText);
+  for (const crate of crates) {
     const matches = section.filter((line) =>
       new RegExp(`^${crate}\\s*=`).test(line.trim()));
     const historicalCore = crate === "candle-core" && sha === SECURITY_BACKPORT.engine_revision &&
@@ -190,6 +197,36 @@ function verifyCandlePatches(manifestText, sha) {
         !matches[0].includes(`rev = "${sha}"`)))) {
       throw new Error(`root Candle [patch] must pin exactly one ${crate} at inference ${sha}`);
     }
+  }
+}
+
+// Cargo ignores a dependency workspace's patches. Mirror the typed projection fork only when
+// the target producer vendors it. Repin has already updated any existing app entry to sha.
+export function prepareCandleNnPatch(manifestText, producerManifest, sha) {
+  const declaresNn = (line) => /^\s*candle-nn\s*(?:\.|=)/.test(line);
+  const producerUsesFork = candlePatchLines(producerManifest).some(declaresNn);
+  const appHasPatch = candlePatchLines(manifestText).some(declaresNn);
+  if (appHasPatch) verifyCandlePatches(manifestText, sha, ["candle-nn"]);
+  if (producerUsesFork === appHasPatch) return manifestText;
+
+  const lines = manifestText.split("\n");
+  const header = lines.findIndex((line) => line.trim() === CANDLE_PATCH_HEADER);
+  if (header < 0) throw new Error("missing root Candle [patch]");
+  if (producerUsesFork) {
+    lines.splice(header + 1, 0, `candle-nn = { git = "${INFERENCE_GIT}", rev = "${sha}" }`);
+  } else {
+    const entry = lines.findIndex((line, index) => index > header && declaresNn(line));
+    lines.splice(entry, 1);
+  }
+  return lines.join("\n");
+}
+
+// Cargo can resolve an upstream package while recording the requested patch as unused.
+export function verifyCandleNnResolution(manifestText, lockText, sha) {
+  if (!candlePatchLines(manifestText).some((line) => /^\s*candle-nn\s*=/.test(line))) return;
+  const packages = parseCargoLock(lockText).byName.get("candle-nn") ?? [];
+  if (packages.length !== 1 || packages[0].source !== `git+${INFERENCE_GIT}?rev=${sha}#${sha}`) {
+    throw new Error(`expected exactly one resolved candle-nn from inference at ${sha}`);
   }
 }
 
@@ -1735,11 +1772,10 @@ function main() {
   // from the tree, and `verifyFlux2AuditWindow` needs it to tell a bump that MOVES the pin out of
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
   const previousPin = pinnedRevision(manifests.find((m) => m.path === MANIFEST)?.current ?? "");
-  const cargoPinsAlreadyInManifests = cargoManifestsAlreadyPinned(manifests);
   if (!dryRun) {
     verifyCandlePatches(manifests.find((m) => m.path === ROOT_MANIFEST)?.bumped ?? "", sha);
   }
-  if (cargoPinsAlreadyInManifests) {
+  if (cargoManifestsAlreadyPinned(manifests)) {
     console.log(
       lockHasStaleInferenceRevision(sha)
         ? `bump-inference: manifests already pinned at ${sha}, but the lockfile is STALE; repairing`
@@ -1777,6 +1813,9 @@ function main() {
   // Every step that reads the checkout runs inside the callback: a fetched clone is removed after
   // the audit rescan, or as soon as any step before it throws.
   withInferenceCheckout(sha, explicitRepo, (repo) => {
+    const producerManifest = execFileSync("git", ["-C", repo, "show", `${sha}:Cargo.toml`], { encoding: "utf8" });
+    const root = manifests.find((entry) => entry.path === ROOT_MANIFEST);
+    root.bumped = prepareCandleNnPatch(root.bumped, producerManifest, sha);
     deriveInferenceClosures(sha, repo);
     verifyInferenceClosures(sha);
     for (const m of manifests) {
@@ -1787,7 +1826,8 @@ function main() {
       writeFileSync(m.path, m.bumped);
       console.log(`  wrote ${m.path}`);
     }
-    reconcileCargoLock(sha, cargoPinsAlreadyInManifests);
+    reconcileCargoLock(sha, cargoManifestsAlreadyPinned(manifests));
+    verifyCandleNnResolution(root.bumped, readFileSync(LOCKFILE, "utf8"), sha);
     verifyNoSkew();
     // Historical measurement and inspection artifacts are deliberately not regenerated on a pin
     // bump. Their recorded revisions remain provenance; measurement campaigns run once at epic end.
