@@ -10,7 +10,7 @@ const BASE_SAMPLER_SOURCE_SHA = "c69878bde04838b8a2b51cbbefba32c22fa5279aea86cd0
 // Reviewed at app bed9b3553aaf7f9435bea50254e717dc334f0280.
 const HEAD_SAMPLER_SOURCE_SHA = "75bd47b689482be4aab4a099162cb4623af3af34bd2b6b890f3c9751409cb0f9";
 const SAMPLER_HOOK_FILE = new URL("./ci/krea-perf-timer.rs.in", import.meta.url);
-const HIRES_PROGRESS_HOOK_FILE = new URL("./ci/krea-hires-progress.rs.in", import.meta.url);
+const NATIVE_PROGRESS_HOOK_FILE = new URL("./ci/krea-native-progress.rs.in", import.meta.url);
 const ANCHOR = `) -> gen_core::Result<T> {\n    // A reference render may never take the legacy no-context shortcut`;
 const OBSERVE = `    let mut krea_performance_sampler = KreaPerformanceSampler::new(generator, request);
     let mut observe_krea_progress = |progress| {
@@ -21,18 +21,20 @@ const OBSERVE = `    let mut krea_performance_sampler = KreaPerformanceSampler::
     };
     let on_progress = &mut observe_krea_progress;
 `;
-const OBSERVE_HIRES = `    let mut krea_hires_progress = (generator.descriptor().id == "krea_2_turbo")
-        .then(KreaHiresProgress::default);
-    let mut observe_hires_progress = |progress| {
-        if let Some(trace) = krea_hires_progress.as_mut() {
+const OBSERVE_NATIVE = `    let krea_engine = generator.descriptor().id;
+    let mut krea_native_progress = (krea_engine == "krea_2_turbo"
+        || (krea_engine == "krea_2_raw" && request.phases.is_some()))
+        .then(KreaNativeProgress::default);
+    let mut observe_native_progress = |progress| {
+        if let Some(trace) = krea_native_progress.as_mut() {
             trace.observe(&progress);
         }
         on_progress(progress);
     };
-    let on_progress = &mut observe_hires_progress;
+    let on_progress = &mut observe_native_progress;
 `;
 
-export async function bindKreaSamplerOverlay(original, side, { allocation = false, hiresProgress = false, perf = true } = {}) {
+export async function bindKreaSamplerOverlay(original, side, { allocation = false, nativeProgress = false, perf = true } = {}) {
   const source = original.toString("utf8").replaceAll("\r\n", "\n");
   const sourceSha256 = sha256(source);
   assert.ok(["base", "head"].includes(side));
@@ -45,24 +47,24 @@ export async function bindKreaSamplerOverlay(original, side, { allocation = fals
     return { content, sourceSha256, overlaySha256: sha256(content) };
   }
   const [prefix, rest] = ANCHOR.split("\n");
-  assert.ok(perf || hiresProgress, "Krea overlay needs a selected observer");
-  let materialized = source.replace(ANCHOR, `${prefix}\n${perf ? OBSERVE : ""}${hiresProgress ? OBSERVE_HIRES : ""}${rest}`);
-  if (hiresProgress) {
-    // The frozen Candle path has no request scope. The candidate still uses its applied scope.
+  assert.ok(perf || nativeProgress, "Krea overlay needs a selected observer");
+  let materialized = source.replace(ANCHOR, `${prefix}\n${perf ? OBSERVE : ""}${nativeProgress ? OBSERVE_NATIVE : ""}${rest}`);
+  if (nativeProgress) {
+    // Both branches call the same provider callback. Record the scope when one was configured.
     const direct = "        return run(generator, request, None, on_progress);";
     const scoped = "    if matches!(result, Err(gen_core::Error::ProcessPoisoned(_))) {";
     assert.equal(materialized.split(direct).length, 2, "expected one direct provider return");
     assert.equal(materialized.split(scoped).length, 2, "expected one scoped provider return");
     materialized = materialized.replace(direct, `        let result = run(generator, request, None, on_progress);
-        if let (Ok(_), Some(trace)) = (&result, krea_hires_progress) {
-            trace.publish(request, None, false);
+        if let (Ok(_), Some(trace)) = (&result, krea_native_progress) {
+            trace.publish(krea_engine, request, None, false);
         }
         return result;`);
-    materialized = materialized.replace(scoped, `    if let (Ok(_), Some(trace)) = (&result, krea_hires_progress) {
-        trace.publish(request, Some(context), scope.is_some());
+    materialized = materialized.replace(scoped, `    if let (Ok(_), Some(trace)) = (&result, krea_native_progress) {
+        trace.publish(krea_engine, request, Some(context), scope.is_some());
     }
 ${scoped}`);
-    materialized += `\n${await readFile(HIRES_PROGRESS_HOOK_FILE, "utf8")}`;
+    materialized += `\n${await readFile(NATIVE_PROGRESS_HOOK_FILE, "utf8")}`;
   }
   if (perf) materialized += `\n${await readFile(SAMPLER_HOOK_FILE, "utf8")}`;
   return { content: materialized, sourceSha256, overlaySha256: sha256(materialized) };
@@ -99,32 +101,36 @@ export function kreaSamplerReceipt(log, route) {
   return passes;
 }
 
-export function kreaHiresProgressReceipt(log, route, { requireScope = false } = {}) {
-  assert.equal(route.proof, "hires");
-  const passes = kreaWorkerLogEvents(log).filter(({ event }) => event === "sgaf336_krea_hires_progress");
-  assert.equal(passes.length, 2, "expected two completed native Hires.fix passes");
-  const expected = [
-    [route.body.width, route.body.height, route.body.advanced.steps, 0, 8],
-    [route.finalSize, route.finalSize, route.body.hiresFix.steps, 1, 2],
+export function kreaNativeProgressReceipt(log, route, { requireScope = false } = {}) {
+  assert.ok(route.proof === "raw" || route.proof === "hires");
+  const raw = route.proof === "raw";
+  const passes = kreaWorkerLogEvents(log).filter(({ event }) => event === "sgaf336_krea_native_progress");
+  assert.equal(passes.length, raw ? 1 : 2, raw ? "expected one completed native Raw pass" : "expected two completed native Hires.fix passes");
+  const phaseSteps = raw ? route.body.advanced.phases.map(({ steps }) => steps) : [];
+  const expected = raw ? [[route.body.width, route.body.height, 0, 0, phaseSteps]] : [
+    [route.body.width, route.body.height, route.body.advanced.steps, 0, [8]],
+    [route.finalSize, route.finalSize, route.body.hiresFix.steps, 1, [2]],
   ];
   return passes.map((pass, index) => {
     const [width, height, authoredSteps, referenceCount, steps] = expected[index];
     assert.deepEqual([pass.engine, pass.width, pass.height, pass.authored_steps, pass.reference_count],
-      ["krea_2_turbo", width, height, authoredSteps, referenceCount], "native Hires.fix pass geometry or reference changed");
-    assert.equal(typeof pass.context_present, "boolean", "native Hires.fix pass is missing admission context evidence");
-    assert.equal(typeof pass.scope_configured, "boolean", "native Hires.fix pass is missing scope evidence");
+      [route.model, width, height, authoredSteps, referenceCount], "native Krea pass geometry, engine or reference changed");
+    assert.equal(pass.phase_steps, JSON.stringify(phaseSteps), "native Krea authored phase steps changed");
+    assert.equal(typeof pass.context_present, "boolean", "native Krea pass is missing admission context evidence");
+    assert.equal(typeof pass.scope_configured, "boolean", "native Krea pass is missing scope evidence");
     assert.ok((!requireScope || pass.scope_configured) && (!pass.scope_configured || pass.context_present),
-      "native Hires.fix pass did not configure its required scope");
+      "native Krea pass did not configure its required scope");
     const contextGeometry = [pass.context_width, pass.context_height, pass.context_reference_count];
     assert.deepEqual(contextGeometry, pass.context_present ? [width, height, referenceCount] : [0, 0, 0],
-      "native Hires.fix admission geometry differs from its provider pass");
-    assert.ok(pass.valid === true && pass.decode_count === 1, "native Hires.fix pass needs one decode after its steps");
-    assert.ok(typeof pass.coordinates === "string" && pass.coordinates.length <= 128, "invalid native Hires.fix coordinate record");
+      "native Krea admission geometry differs from its provider pass");
+    assert.ok(pass.valid === true && pass.decode_count === 1, "native Krea pass needs one decode after its steps");
+    assert.ok(typeof pass.coordinates === "string" && pass.coordinates.length <= 128, "invalid native Krea coordinate record");
     const coordinates = JSON.parse(pass.coordinates);
-    assert.deepEqual(coordinates, Array.from({ length: steps }, (_, step) => [step + 1, steps]),
-      "native Hires.fix step coordinates do not match the exact clipped schedule");
+    assert.deepEqual(coordinates, steps.flatMap((total) => Array.from({ length: total }, (_, step) => [step + 1, total])),
+      raw ? "native Raw step coordinates do not match the exact phase schedule"
+        : "native Hires.fix step coordinates do not match the exact clipped schedule");
     return { width, height, authoredSteps, referenceCount, coordinates, decodeCount: pass.decode_count,
-      contextPresent: pass.context_present, scopeConfigured: pass.scope_configured };
+      contextPresent: pass.context_present, scopeConfigured: pass.scope_configured, ...(raw && { phaseSteps }) };
   });
 }
 

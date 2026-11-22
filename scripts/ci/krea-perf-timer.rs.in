@@ -40,7 +40,7 @@ impl KreaPerformanceSampler {
             }
             gen_core::Progress::Step { current, .. } => {
                 // Raw exposes phase-local step numbers. Count Euler ticks here;
-                // the public proof validates their exact ordered numbering/slices.
+                // the native progress receipt separately validates their exact order and slices.
                 self.invalid |= self.started.is_none() || *current == 0;
                 self.steps += 1;
             }

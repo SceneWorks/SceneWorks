@@ -1,13 +1,13 @@
-// Build-only record of native Turbo callbacks before the worker adapts public Hires.fix progress.
+// Build-only record of native Krea callbacks before the worker publishes progress snapshots.
 #[derive(Default)]
-struct KreaHiresProgress {
-    coordinates: [(u32, u32); 8],
+struct KreaNativeProgress {
+    coordinates: [(u32, u32); 10],
     step_count: usize,
     decode_count: u32,
     invalid: bool,
 }
 
-impl KreaHiresProgress {
+impl KreaNativeProgress {
     fn observe(&mut self, progress: &gen_core::Progress) {
         match progress {
             gen_core::Progress::Step { current, total } => {
@@ -25,16 +25,18 @@ impl KreaHiresProgress {
 
     fn publish(
         &self,
+        engine: &str,
         request: &gen_core::GenerationRequest,
         context: Option<&gen_core::MemoryRunContext>,
         scope_configured: bool,
     ) {
         tracing::info!(
-            event = "sgaf336_krea_hires_progress",
-            engine = "krea_2_turbo",
+            event = "sgaf336_krea_native_progress",
+            engine,
             width = request.width,
             height = request.height,
             authored_steps = request.steps.unwrap_or(0),
+            phase_steps = %serde_json::json!(request.phases.iter().flatten().map(|phase| phase.steps).collect::<Vec<_>>()),
             reference_count = request.image_reference_count(),
             context_present = context.is_some(),
             context_width = context.map(|context| context.geometry.width).unwrap_or(0),
@@ -44,7 +46,7 @@ impl KreaHiresProgress {
             coordinates = %serde_json::json!(&self.coordinates[..self.step_count]),
             decode_count = self.decode_count,
             valid = !self.invalid,
-            "Native Hires.fix callbacks observed through successful provider return"
+            "Native Krea callbacks observed through successful provider return"
         );
     }
 }

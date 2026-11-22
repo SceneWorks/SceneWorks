@@ -8,7 +8,7 @@ import { pipeline } from "node:stream/promises";
 
 import { probeCacheFile } from "./h3-finetune-terminal-stage.mjs";
 import { KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_FINAL_SIZE } from "./krea-tier2-allocation.mjs";
-import { kreaHiresProgressReceipt } from "./krea-tier2-performance.mjs";
+import { kreaNativeProgressReceipt } from "./krea-tier2-performance.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 
@@ -456,14 +456,14 @@ export function kreaExpectedStepEvents(route) {
 export function assertKreaEvents(events, route, { nativeLog, requireScope, assetId } = {}) {
   const terminal = events.findIndex((event) => event.status === "completed" && event.publishedAssets === 1);
   assert.ok(terminal >= 0, "worker terminal event with one output missing");
-  const nativePasses = route.proof === "hires" && nativeLog !== undefined
-    ? kreaHiresProgressReceipt(nativeLog, route, { requireScope })
+  const nativePasses = nativeLog !== undefined
+    ? kreaNativeProgressReceipt(nativeLog, route, { requireScope })
     : undefined;
   let lastStep = -1;
   const steps = events.flatMap(({ message, stage, status }, index) => {
     const match = /\bstep (\d+)\/(\d+)\b/i.exec(message ?? "");
     if (!match) return [];
-    if (nativePasses) assert.ok(status === "running" && stage === "generating", "public Hires.fix steps must belong to a running render");
+    if (nativePasses) assert.ok(status === "running" && stage === "generating", "public Krea steps must belong to a running render");
     lastStep = index;
     return [[Number(match[1]), Number(match[2])]];
   });
@@ -475,27 +475,34 @@ export function assertKreaEvents(events, route, { nativeLog, requireScope, asset
   if (nativePasses) {
     // The worker publishes latest-wins progress labels. Native callbacks establish the exact
     // schedule. Every observed public label must still be part of that schedule, in order.
-    const executedSteps = nativePasses.reduce((total, pass) => total + pass.coordinates.length, 0);
-    assert.ok(unique.length > 0 && unique.every(([current, total], index) =>
-      current > 0 && current <= executedSteps && total === route.steps &&
-      (index === 0 || current > unique[index - 1][0])), "public Hires.fix steps must form a nonempty ordered subsequence of native steps");
+    const nativeSteps = nativePasses.flatMap(({ coordinates }) => coordinates);
+    // Both Hires.fix native passes share the one authored denominator on the public stream.
+    const expected = route.proof === "hires" ? nativeSteps.map((_, index) => [index + 1, route.steps]) : nativeSteps;
+    let cursor = 0;
+    assert.ok(unique.length > 0 && unique.every(([current, total]) => {
+      const match = expected.findIndex(([step, count], index) => index >= cursor && step === current && count === total);
+      if (match < 0) return false;
+      cursor = match + 1;
+      return true;
+    }), "public Krea steps must form a nonempty ordered subsequence of native steps");
     // Recovery may publish a completed snapshot before persistence and may repeat the same saved asset.
     assert.ok(assetId && events.filter((event) => event.status === "completed").every((event) =>
       event.publishedAssets === 0 || (event.publishedAssets === 1 && event.publishedAssetId === assetId)),
-    "Hires.fix terminal events must identify the one saved asset");
+    "Krea terminal events must identify the one saved asset");
   } else {
     assert.deepEqual(unique, kreaExpectedStepEvents(route), "public step events must match the authored phase slices or actual clipped schedule");
   }
   const decoding = events.flatMap((event, index) => event.status === "running" && /\bdecoding\b/i.test(event.message ?? "") ? [index] : []);
   if (nativePasses) assert.ok(decoding.every((index) => events[index].stage === "generating"),
-    "public Hires.fix decoding must belong to a running render");
+    "public Krea decoding must belong to a running render");
   // The job stream republishes snapshots while the worker remains in the same stage.
   assert.ok(decoding.length && decoding[0] > lastStep && decoding.at(-1) < terminal &&
     decoding.every((index, offset) => index === decoding[0] + offset), "only one final decoding state may be published");
   assert.ok(events.filter((event) => event.status !== "completed").every((event) => event.publishedAssets === 0), "intermediate output reached public job events");
   return { observedSteps: unique, decodingEvents: 1, decodingUpdates: decoding.length,
     authoredStepSlices: route.proof === "raw" ? PHASES.map(({ steps }) => steps) : [8, 4],
-    executedStepSlices: nativePasses ? nativePasses.map(({ coordinates }) => coordinates.length) : route.proof === "raw" ? [3, 4, 3] : [8, 2],
+    executedStepSlices: nativePasses ? nativePasses.flatMap(({ coordinates }) =>
+      coordinates.filter(([current]) => current === 1).map(([, total]) => total)) : route.proof === "raw" ? [3, 4, 3] : [8, 2],
     ...(nativePasses && { nativePasses }) };
 }
 

@@ -381,8 +381,8 @@ test("native Hires.fix traces permit the public snapshots observed on both Windo
   const [, route] = kreaRoutes("cuda");
   const nativePasses = (scoped) => [8, 2].map((steps, index) => {
     const size = index === 0 ? 512 : 768;
-    return { event: "sgaf336_krea_hires_progress", engine: "krea_2_turbo", width: size, height: size,
-      authored_steps: index === 0 ? 8 : 4, reference_count: index, scope_configured: scoped,
+    return { event: "sgaf336_krea_native_progress", engine: "krea_2_turbo", width: size, height: size,
+      authored_steps: index === 0 ? 8 : 4, phase_steps: "[]", reference_count: index, scope_configured: scoped,
       context_present: scoped, context_width: scoped ? size : 0, context_height: scoped ? size : 0,
       context_reference_count: scoped ? index : 0, decode_count: 1, valid: true,
       coordinates: JSON.stringify(Array.from({ length: steps }, (_, step) => [step + 1, steps])) };
@@ -435,7 +435,45 @@ test("native Hires.fix traces permit the public snapshots observed on both Windo
     assert.throws(() => assertKreaEvents(head, route, { ...headOptions, nativeLog: nativeLog(corrupted) }), error);
   }
   assert.throws(() => assertKreaEvents(head, route, { nativeLog: nativeLog(validPasses.slice(0, 1)) }), /two completed native/);
-  assert.throws(() => assertKreaEvents(jobEvents(RAW).slice(1), RAW, headOptions), /authored phase slices/);
+});
+
+test("Raw accepts ordered phase-local snapshots only after observing all native steps", () => {
+  const [route] = kreaRoutes("cuda");
+  const coordinates = [[1, 3], [2, 3], [3, 3], [1, 4], [2, 4], [3, 4], [4, 4], [1, 3], [2, 3], [3, 3]];
+  const trace = { event: "sgaf336_krea_native_progress", engine: "krea_2_raw", width: 512, height: 512,
+    authored_steps: 0, phase_steps: "[3,4,3]", reference_count: 0, scope_configured: false, context_present: false,
+    context_width: 0, context_height: 0, context_reference_count: 0,
+    coordinates: JSON.stringify(coordinates), decode_count: 1, valid: true };
+  const options = { nativeLog: JSON.stringify(trace), assetId: "asset_saved" };
+  const terminal = { status: "completed", stage: "completed", publishedAssets: 1, publishedAssetId: "asset_saved" };
+  const events = (steps) => [
+    ...steps.map(([current, total]) => ({ status: "running", stage: "generating", message: `Generating step ${current}/${total}.`, publishedAssets: 0 })),
+    { status: "running", stage: "generating", message: "Decoding.", publishedAssets: 0 },
+    terminal,
+  ];
+  const sparse = events([[2, 3], [2, 3], [2, 4], [2, 3]]);
+  const proof = assertKreaEvents(sparse, route, options);
+  assert.deepEqual(proof.observedSteps, [[2, 3], [2, 4], [2, 3]]);
+  assert.deepEqual(proof.executedStepSlices, [3, 4, 3]);
+  assert.deepEqual(proof.nativePasses[0].coordinates, coordinates);
+  assert.doesNotThrow(() => assertKreaEvents([...sparse.slice(0, -1), { ...terminal, publishedAssets: 0 }, terminal, terminal], route, options));
+  assert.throws(() => assertKreaEvents([...sparse, { ...terminal, publishedAssetId: "asset_other" }], route, options), /one saved asset/);
+  assert.throws(() => assertKreaEvents(sparse, route), /authored phase slices/);
+  assert.deepEqual(assertKreaEvents(jobEvents(route), route).observedSteps, coordinates);
+  assert.throws(() => assertKreaEvents(sparse, route, { ...options, nativeLog: "" }), /one completed native Raw pass/);
+  for (const steps of [[], [[2, 4], [2, 3], [3, 4]], [[1, 10]], [[1, 3], [3, 3], [2, 3], [1, 3]]]) {
+    assert.throws(() => assertKreaEvents(events(steps), route, options), /ordered subsequence/);
+  }
+  for (const [change, error] of [
+    [{ engine: "krea_2_turbo" }, /engine/],
+    [{ phase_steps: "[3,3,4]" }, /authored phase steps/],
+    [{ coordinates: JSON.stringify(coordinates.slice(1)) }, /exact phase schedule/],
+    [{ coordinates: JSON.stringify(coordinates.toReversed()) }, /exact phase schedule/],
+    [{ decode_count: 0 }, /one decode/],
+    [{ context_present: true, context_width: 768, context_height: 512 }, /admission geometry/],
+  ]) {
+    assert.throws(() => assertKreaEvents(sparse, route, { ...options, nativeLog: JSON.stringify({ ...trace, ...change }) }), error);
+  }
 });
 
 test("owned SSE opens before the request and keeps only scoped job events across fragmented frames", async () => {
