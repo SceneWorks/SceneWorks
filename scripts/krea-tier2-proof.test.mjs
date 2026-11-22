@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
 import {
-  KREA_APPLE_RAW_PROJECTOR, KREA_LINKED_SOURCE_REPAIR_REVISION, appleRawProjectorReceipt, bindKreaAppleRawProjector,
+  KREA_APPLE_RAW_PROJECTOR, KREA_LINKED_SOURCE_REPAIR_REVISION, appleRawBaselineCargoEnv, appleRawProjectorReceipt, bindKreaAppleRawProjector,
   bindKreaLinkedSourceBuild, reviewedKreaLinkedSourceCandidate, withKreaAppleRawProjector, withKreaLinkedSourceBuild,
 } from "./krea-tier2-linked-source.mjs";
 import {
@@ -92,6 +93,56 @@ test("only paired Apple Raw selects the frozen projector correction", () => {
   assert.deepEqual(HIRES.body.loras, []);
   assert.equal(HIRES.body.advanced.phases, undefined);
   assert.equal(HIRES.body.model, LINKED_MODEL);
+});
+
+test("Apple baseline fetch disables inherited Git credentials and preserves the build environment", async (t) => {
+  const temp = await mkdtemp(path.join(tmpdir(), "krea-cargo-env-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const home = await realpath(temp);
+  const inherited = {
+    HOME: home, PATH: process.env.PATH, PMETAL_MLX_PREBUILT_DIR: "/mlx", PMETAL_METALLIB_PATH: "/mlx/metal",
+    CARGO_HOME: "/cargo", RUSTUP_HOME: "/rustup", MACOSX_DEPLOYMENT_TARGET: "26.2",
+    GIT_CONFIG_GLOBAL: path.join(home, "gitconfig"), GIT_CONFIG_SYSTEM: path.join(home, "system-config"),
+    GIT_CONFIG_COUNT: "3", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: "Authorization: test",
+    GIT_CONFIG_KEY_2: "credential.helper", GIT_CONFIG_VALUE_2: "!invalid",
+    GIT_CONFIG_PARAMETERS: "'http.extraHeader'='Authorization: test'", GIT_DIR: "/other",
+    SSH_AUTH_SOCK: "/agent", SSH_AGENT_PID: "1", GIT_SSH_COMMAND: "custom", GIT_ASKPASS: "custom",
+    GCM_INTERACTIVE: "always", SSH_ASKPASS: "custom", SSH_ASKPASS_REQUIRE: "force", NETRC: "/other/netrc",
+  };
+  await writeFile(inherited.GIT_CONFIG_GLOBAL, "[http]\n\textraHeader = Authorization: synthetic global\n");
+  await writeFile(inherited.GIT_CONFIG_SYSTEM, "[http]\n\textraHeader = Authorization: synthetic system\n");
+  const isolated = await appleRawBaselineCargoEnv(inherited, home);
+  const git = (args, env, input) => spawnSync("git", args, { cwd: home, env, input, encoding: "utf8" });
+  const ambientConfig = git(["config", "--get-all", "http.extraHeader"], {
+    HOME: home, PATH: inherited.PATH, GIT_CONFIG_GLOBAL: inherited.GIT_CONFIG_GLOBAL,
+    GIT_CONFIG_SYSTEM: inherited.GIT_CONFIG_SYSTEM, GIT_CONFIG_PARAMETERS: inherited.GIT_CONFIG_PARAMETERS,
+  });
+  assert.equal(ambientConfig.status, 0);
+  assert.match(ambientConfig.stdout, /Authorization: synthetic system/);
+  assert.match(ambientConfig.stdout, /Authorization: synthetic global/);
+  assert.match(ambientConfig.stdout, /Authorization: test/);
+  assert.equal(git(["config", "--get-all", "http.extraHeader"], isolated).status, 1);
+  assert.equal(git(["config", "--get", "credential.interactive"], isolated).stdout.trim(), "false");
+  assert.equal(git(["init", "--quiet"], isolated).status, 0);
+  assert.equal(git(["config", "credential.helper", "!echo username=ambient; echo password=ambient"], isolated).status, 0);
+  const credentials = git(["credential", "fill"], isolated, "protocol=https\nhost=example.invalid\n\n");
+  assert.notEqual(credentials.status, 0);
+  assert.equal(credentials.stdout, "");
+  for (const key of ["GIT_CONFIG_SYSTEM", "GIT_CONFIG_KEY_2", "GIT_CONFIG_VALUE_2", "GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GCM_INTERACTIVE", "SSH_ASKPASS_REQUIRE", "NETRC"]) {
+    assert.equal(isolated[key], undefined, key);
+  }
+  for (const key of ["HOME", "PATH", "PMETAL_MLX_PREBUILT_DIR", "PMETAL_METALLIB_PATH", "CARGO_HOME", "RUSTUP_HOME", "MACOSX_DEPLOYMENT_TARGET"]) {
+    assert.equal(isolated[key], inherited[key], key);
+  }
+  assert.equal(isolated.CARGO_NET_GIT_FETCH_WITH_CLI, "true");
+  assert.equal(isolated.GIT_TERMINAL_PROMPT, "0");
+  assert.equal(isolated.GIT_ASKPASS, "/usr/bin/false");
+  assert.equal(isolated.SSH_ASKPASS, "/usr/bin/false");
+  const nativeHome = path.join(home, "native-home");
+  await mkdir(nativeHome);
+  await writeFile(path.join(nativeHome, ".netrc"), "fixture");
+  await assert.rejects(appleRawBaselineCargoEnv(inherited, nativeHome), /requires no ambient .netrc/);
+  await assert.rejects(appleRawBaselineCargoEnv({ ...inherited, HOME: nativeHome }, home), /requires no ambient .netrc/);
 });
 
 test("Krea projector binder refuses unpinned, shared and modified Cargo sources", async (t) => {

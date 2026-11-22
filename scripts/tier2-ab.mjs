@@ -53,7 +53,8 @@ import { startKreaWindowsWorkerMemory } from "./lib/krea-windows-worker-memory.m
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 import {
   KREA_LINKED_SOURCE_REPAIR_CHECKOUT, KREA_LINKED_SOURCE_REPAIR_REVISION,
-  appleRawProjectorReceipt, bindKreaAppleRawProjector, bindKreaLinkedSourceBuild, withKreaAppleRawProjector, withKreaLinkedSourceBuild,
+  appleRawBaselineCargoEnv, appleRawProjectorReceipt, bindKreaAppleRawProjector, bindKreaLinkedSourceBuild,
+  withKreaAppleRawProjector, withKreaLinkedSourceBuild,
 } from "./krea-tier2-linked-source.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -834,7 +835,8 @@ export function renderMarkdown(report) {
 }
 
 // ---- side identity, preflight -------------------------------------------------------------------
-async function git(cwd, ...args) { return (await execFile("git", args, { cwd, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })).stdout.trim(); }
+async function gitWithEnv(env, cwd, ...args) { return (await execFile("git", args, { cwd, env, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })).stdout.trim(); }
+const git = (...args) => gitWithEnv(undefined, ...args);
 export function pmetalSource(lock) { return /name = "pmetal-mlx-sys"\nversion = "[^"]+"\nsource = "([^"]+)"/.exec(lock.replace(/\r\n/g, "\n"))?.[1] ?? null; }
 async function sideIdentity(label, dir, sha) {
   const head = await git(dir, "rev-parse", "HEAD"), dirty = await git(dir, "status", "--porcelain");
@@ -988,15 +990,17 @@ async function build(env, cfg, report) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
-    const cargoEnv = { ...scrubSecrets(env), CARGO_TARGET_DIR: target };
-    let projector;
+    let cargoEnv = { ...scrubSecrets(env), CARGO_TARGET_DIR: target };
+    let projector, projectorGit;
     if (label === "base" && report.base.kreaAppleRawProjector) {
       // Keep the locked Git source and its exact package identities. Cargo owns the private checkout.
+      cargoEnv = await appleRawBaselineCargoEnv(cargoEnv);
       cargoEnv.CARGO_HOME = await mkdtemp(path.join(await realpath(scratch), "krea-apple-base-cargo-"));
+      projectorGit = (...args) => gitWithEnv(cargoEnv, ...args);
       const { stdout } = await execFile("cargo", ["metadata", "--locked", "--format-version", "1", "--filter-platform", "aarch64-apple-darwin"], {
         cwd: dir, env: cargoEnv, timeout: 10 * 60_000, maxBuffer: 64 * 1024 ** 2,
       });
-      projector = await bindKreaAppleRawProjector(cargoEnv.CARGO_HOME, JSON.parse(stdout), git);
+      projector = await bindKreaAppleRawProjector(cargoEnv.CARGO_HOME, JSON.parse(stdout), projectorGit);
       assert.deepEqual(projector.receipt, report.base.kreaAppleRawProjector);
     }
     const compile = async () => {
@@ -1020,8 +1024,8 @@ async function build(env, cfg, report) {
     if (result.code !== 0) { await writeFile(path.join(evidence, `build-${label}.tail.log`), await tail(log, 64_000)); throw new Error(`${label} release build failed (${JSON.stringify(result)}); see build-${label}.tail.log`); }
     fact(await git(dir, "status", "--porcelain") === "" && await git(dir, "rev-parse", "HEAD") === sha, `${label} build changed its checkout`);
     if (projector) {
-      fact(await git(projector.base, "status", "--porcelain", "--untracked-files=no") === "" &&
-        await git(projector.base, "rev-parse", "HEAD") === projector.receipt.inferenceRevision, "Apple Krea build changed its frozen inference checkout");
+      fact(await projectorGit(projector.base, "status", "--porcelain", "--untracked-files=no") === "" &&
+        await projectorGit(projector.base, "rev-parse", "HEAD") === projector.receipt.inferenceRevision, "Apple Krea build changed its frozen inference checkout");
     }
     let metallib = null;
     if (cfg.backend === "mlx") {

@@ -132,7 +132,8 @@ test("no credential reaches the compared builds or their processes", async () =>
     assert.deepEqual(Object.keys(child).filter((key) => /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$/i.test(key)), ["SCENEWORKS_CREDENTIALS_DIR"]);
   }
   const source = await readFile(path.join(root, "scripts", "tier2-ab.mjs"), "utf8");
-  assert.match(source, /const cargoEnv = \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/);
+  assert.match(source, /let cargoEnv = \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/);
+  assert.match(source, /if \(label === "base" && report\.base\.kreaAppleRawProjector\) \{[^}]*cargoEnv = await appleRawBaselineCargoEnv\(cargoEnv\)/);
   assert.match(source, /execFile\("cargo", \["metadata", "--locked"[^\n]*\n[^\n]*env: cargoEnv/, "Cargo metadata gets the scrubbed environment");
   assert.match(source, /runLogged\("cargo", args, \{ cwd: dir, env: cargoEnv, log \}\)/, "Cargo build gets the scrubbed environment");
   assert.doesNotMatch(source, /base\.HF_TOKEN\s*=/);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
+import { userInfo } from "node:os";
 import path from "node:path";
 
 import { sha256 } from "./lib/file-sha256.mjs";
@@ -104,6 +105,35 @@ export async function bindKreaLinkedSourceBuild(baseDir, headDir, repairDir, { w
 
 export function appleRawProjectorReceipt(routes) {
   return routes.some(({ backend, proof }) => backend === "mlx" && proof === "raw") ? KREA_APPLE_RAW_PROJECTOR : undefined;
+}
+
+export async function appleRawBaselineCargoEnv(env, accountHome = userInfo().homedir) {
+  // Git's HTTP transport can read .netrc independently of its credential helper. Keep HOME for
+  // rustup and native builds, but do not run the fresh dependency fetch with that credential file.
+  for (const home of new Set([env.HOME, accountHome].filter(Boolean))) {
+    assert.ok(path.isAbsolute(home), "Apple Krea baseline requires an absolute home directory");
+    const netrc = await lstat(path.join(home, ".netrc")).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+      return null;
+    });
+    assert.ok(netrc === null, "Apple Krea baseline Cargo fetch requires no ambient .netrc");
+  }
+  const clean = Object.fromEntries(Object.entries(env).filter(([key]) => !/^(?:GIT_|SSH_|GCM_|NETRC$|NETRC_FILE$)/i.test(key)));
+  return {
+    ...clean,
+    CARGO_NET_GIT_FETCH_WITH_CLI: "true",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    // An empty helper clears the list even if a lower-priority config registered one.
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "credential.interactive",
+    GIT_CONFIG_VALUE_1: "false",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/usr/bin/false",
+    SSH_ASKPASS: "/usr/bin/false",
+  };
 }
 
 export async function bindKreaAppleRawProjector(cargoHome, metadata, git) {
