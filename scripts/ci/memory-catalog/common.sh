@@ -61,7 +61,7 @@ campaign_branch() {
 }
 
 work_dir_unix() {
-  printf '%s/memory-catalog-%s-%s' "$(unix_path "$RUNNER_TEMP")" "$CAMPAIGN" "$GITHUB_RUN_ID"
+  printf '%s/memory-catalog-%s-%s' "$(unix_path "${DEV_HOST_JOB_ROOT:-$RUNNER_TEMP}")" "$CAMPAIGN" "$GITHUB_RUN_ID"
 }
 
 # The Hugging Face hub roots to hand the walk, one per line.

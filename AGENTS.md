@@ -1,5 +1,18 @@
 # SceneWorks Agent Notes
 
+## Host scratch and cleanup
+
+- Use the existing `DEV_HOST_ROOT` (`D:\dev-host` on this Windows host) for new
+  scratch work. Use a task-owned directory under `t/`; use the existing dev-host
+  build slots/cache facilities for reusable build state. Do not create additional
+  drive-root temp, cache or campaign folders.
+- On Windows, model downloads use `E:\huggingface`. Temporary generated model/proof output
+  belongs in task-owned work storage and is removed once its published output is
+  verified. Never sweep the shared Hugging Face cache as task cleanup.
+- At completion, clean up owned disposable output after evidence publication;
+  preserve active work and explain any intentionally retained paths. Use the
+  existing dev-host cleanup tooling for legacy migration and abandoned work.
+
 ## Releases
 
 - Follow [RELEASING.md](RELEASING.md) for the official release, hotfix,

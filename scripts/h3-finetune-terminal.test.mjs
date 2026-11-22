@@ -659,10 +659,25 @@ test('the terminal lane reads weights from the HF hub and writes only under the 
   // The Python root uses the shared link-resolving guard, never a text match that \\.\E: or a junction evades.
   assert.doesNotMatch(workflow, /-like 'E:\*'/);
   assert.match(workflow, /\$guard = 'import \{assertWritePathOffWeights\} from ''\.\/scripts\/h3-finetune-terminal-stage\.mjs''; assertWritePathOffWeights\(process\.env\.H3_WORK_ROOT, \{what: ''Python work root''\}\);'\n\s+node --input-type=module -e \$guard\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw "H3_WRITE_ON_WEIGHTS_VOLUME/);
-  // No code path names a location on the weights volume any more (comments may still explain it).
+  // Windows names the shared cache for reads/downloads; generated work stays off that volume.
   const code = workflow.split('\n').filter(line => !/^\s*(#|\/\/)/.test(line)).join('\n');
-  assert.doesNotMatch(code, /E:\\\\?huggingface/);
+  assert.match(code, /resolved\.HF_HOME = "E:\\\\huggingface"/);
+  assert.match(code, /resolved\.HF_HUB_CACHE = "E:\\\\huggingface\\\\hub"/);
+  assert.match(code, /workRoot \|\|= path\.join\(env\.DEV_HOST_JOB_ROOT, "h3"\)/);
   assert.doesNotMatch(code, /path\.join\(hfHome, "sc26691-private"\)/);
+});
+
+test('assembled Windows campaign setup confines writes to its registered job and keeps model downloads on E', {skip: process.platform !== 'win32'}, async t => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  const block = workflow.slice(workflow.indexOf('      - name: Resolve the campaign work root'), workflow.indexOf('      - name: Fail fast when the adaptive matrix'));
+  const code = /node --input-type=module <<'NODE'\n([\s\S]*?)\n          NODE/.exec(block)?.[1]; assert.ok(code);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'h3-managed-storage-')); t.after(() => rm(root, {recursive:true, force:true}));
+  const work = path.join(root, 'owned'); await mkdir(work);
+  const env = {...process.env, DEV_HOST_JOB_ROOT:work, GITHUB_ENV:path.join(root,'environment'), RUNNER_NAME:'cuda-windows', H3_EXPECTED_RUNNER:'cuda-windows', H3_STAGE_BACKEND:'cuda', H3_STAGE_REQUEST:'{}'};
+  const run = changed => spawnSync(process.execPath,['--input-type=module','-e',code],{cwd:new URL('..',import.meta.url),env:{...env,...changed},encoding:'utf8'});
+  const result = run({}); assert.equal(result.status,0,result.stderr);
+  const exported = await readFile(env.GITHUB_ENV,'utf8'); assert.ok(exported.includes(`H3_WORK_ROOT=${path.join(work,'h3')}`)); assert.ok(exported.includes('HF_HOME=E:\\huggingface'));
+  for (const changed of [{DEV_HOST_JOB_ROOT:''},{H3_STAGE_REQUEST:JSON.stringify({work_root:path.join(root,'escaped')})},{H3_STAGE_REQUEST:JSON.stringify({work_root:'E:\\huggingface\\work'})}]) assert.notEqual(run(changed).status,0);
 });
 
 test('manual workflow is execution-only and uses existing runner/token infrastructure without global locks', async () => {

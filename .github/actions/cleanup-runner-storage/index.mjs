@@ -1,4 +1,5 @@
-import { appendFile, readFile, readdir, lstat } from 'node:fs/promises';
+import { appendFile, readFile, readdir, lstat, writeFile, realpath } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname, resolve, basename, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -39,6 +40,35 @@ export function disposableTargets(workspace, env) {
 
 async function json(path) { return JSON.parse(await readFile(path, 'utf8')); }
 async function exists(path) { try { await lstat(path); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } }
+
+export async function prepareDevHost(env, { run = execute, nonce = randomUUID() } = {}) {
+  if (!env.DEV_HOST_ROOT || !/^\d+$/.test(env.GITHUB_RUN_ID ?? '') || !/^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? '') || !env.GITHUB_JOB || !env.RUNNER_NAME) throw Error('Missing dev-host root or Actions job identity');
+  const root = await realpath(env.DEV_HOST_ROOT);
+  // Windows models remain in the shared Hub cache. Job state must be on D:.
+  if (!/^D:[\\/]/i.test(root)) throw Error('Windows DEV_HOST_ROOT must be on D:');
+  const candidates = [env.DEV_HOST_BIN, resolve(env.LOCALAPPDATA ?? '', 'dev-host/bin/dev-host.exe'), 'C:\\dev-host-tools\\dev-host.exe'].filter(Boolean);
+  let binary;
+  for (const candidate of candidates) if (await exists(candidate)) { binary = candidate; break; }
+  if (!binary) throw Error('Install dev-host 0.1.1 or newer before enabling job storage');
+  const options = { env: { ...env, DEV_HOST_ROOT: root }, windowsHide: true };
+  const version = (await run(binary, ['--version'], options)).stdout.trim();
+  const parts = /^dev-host (\d+)\.(\d+)\.(\d+)$/.exec(version);
+  if (!parts || (Number(parts[1]) === 0 && (Number(parts[2]) === 0 || (Number(parts[2]) === 1 && Number(parts[3]) === 0)))) throw Error(`Unsupported Windows cleanup version: ${version}`);
+  await run(binary, ['check'], options);
+  const session = `actions-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-${nonce}`;
+  const { stdout } = await run(binary, ['env', '--format', 'github', '--project', env.GITHUB_REPOSITORY.split('/').pop(), '--worktree', env.GITHUB_WORKSPACE, '--session', session], options);
+  const values = Object.fromEntries(stdout.trim().split(/\r?\n/).map(line => { const i = line.indexOf('='); return [line.slice(0, i), line.slice(i + 1)]; }));
+  const work = await realpath(values.TMPDIR);
+  if (dirname(work).toLowerCase() !== resolve(root, 't').toLowerCase() || !/^[a-f0-9]{8}$/.test(basename(work))) throw Error('dev-host returned an unexpected job temp directory');
+  if ((await readdir(work)).length) throw Error('dev-host temp entry already contains work; refusing to claim it');
+  const owner = { repository: env.GITHUB_REPOSITORY, run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT, job: env.GITHUB_JOB, runner: env.RUNNER_NAME, nonce };
+  await writeFile(resolve(work, '.actions-owner.json'), JSON.stringify(owner), { flag: 'wx' });
+  const exports = { DEV_HOST_JOB_ROOT: work, TMPDIR: work, TEMP: work, TMP: work, HF_HOME: 'E:\\huggingface', HF_HUB_CACHE: 'E:\\huggingface\\hub', HUGGINGFACE_HUB_CACHE: 'E:\\huggingface\\hub' };
+  // Existing workflows still own their build output consumers; do not silently redirect Cargo.
+  await appendFile(env.GITHUB_ENV, Object.entries(exports).map(([k, v]) => `${k}=${v}\n`).join(''));
+  await appendFile(env.GITHUB_STATE, `dev_host_root=${work}\ndev_host_nonce=${nonce}\n`);
+  return exports;
+}
 
 async function native(mode, path, parent, { dryRun = false } = {}) {
   const payload = Buffer.from(JSON.stringify({ mode, path, parent, dryRun })).toString('base64');
@@ -136,12 +166,17 @@ export async function main(env = process.env) {
     // The barrier coordinates a newly starting model reader with a running deletion.
     if ((await native('barrier', workspace, dirname(workspace))).status !== 'registered') throw Error('Could not register storage safety barrier');
     await appendFile(env.GITHUB_STATE, 'registered=true\n');
+    if (env.INPUT_DEV_HOST === 'true') await prepareDevHost(env);
     return;
   }
   for (const target of disposableTargets(workspace, env)) {
     if (await exists(target)) await native('cargo', target, dirname(target));
   }
   if (env.INPUT_MOSS === 'true' && env.GITHUB_REPOSITORY === 'SceneWorks/SceneWorks') await sweepMoss(workspace, env);
+  if (env.STATE_dev_host_root && await exists(env.STATE_dev_host_root)) {
+    if (env.DEV_HOST_WORK_UPLOADS_COMPLETE === 'true') await native('job-work', env.STATE_dev_host_root, resolve(env.DEV_HOST_ROOT, 't'));
+    else console.log(JSON.stringify({ status: 'skipped', path: env.STATE_dev_host_root, reason: 'Evidence publication not confirmed; retained for recovery and scheduled dev-host retention' }));
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

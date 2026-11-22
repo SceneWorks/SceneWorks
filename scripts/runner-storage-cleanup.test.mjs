@@ -7,7 +7,7 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { disposableTargets, mossOwner, retiredOwners, sweepMoss, runAttempt } from '../.github/actions/cleanup-runner-storage/index.mjs';
+import { disposableTargets, mossOwner, retiredOwners, sweepMoss, runAttempt, prepareDevHost, main } from '../.github/actions/cleanup-runner-storage/index.mjs';
 
 const execute = promisify(execFile);
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '../.github/actions/cleanup-runner-storage');
@@ -37,6 +37,25 @@ test('Windows workflows register post cleanup before cache uploads are registere
       const register = block.indexOf('uses: ./.github/actions/cleanup-runner-storage');
       assert.ok(register >= 0 && register < block.indexOf('uses: Swatinem/rust-cache@'), name);
     }
+  }
+});
+
+test('managed workflows register owned storage and confirm publication before post cleanup', async () => {
+  const repo = resolve(here, '../../..');
+  const names = existsSync(join(repo, '.github/workflows/h3-finetune-terminal.yml')) ? ['h3-finetune-terminal.yml', 'memory-catalog-campaign.yml'] : ['model-inference-proofs.yml'];
+  for (const name of names) {
+    const workflow = await readFile(join(repo, '.github/workflows', name), 'utf8');
+    assert.match(workflow, /dev-host: 'true'/);
+    assert.match(workflow, /DEV_HOST_WORK_UPLOADS_COMPLETE=true/);
+    assert.match(workflow, /steps\.\w+_artifact\.outcome == 'success'/);
+    assert.ok(workflow.indexOf('dev-host:') < workflow.lastIndexOf('uses: actions/upload-artifact@'));
+  }
+  if (names.includes('memory-catalog-campaign.yml')) {
+    const memory = await readFile(join(repo, '.github/workflows/memory-catalog-campaign.yml'), 'utf8');
+    assert.doesNotMatch(memory, /INFERENCE_CLONE_DIR: 'D:\\memory-catalog-inference'/);
+    assert.match(memory, /INFERENCE_CLONE_DIR=\$env:DEV_HOST_ROOT\\cache\\memory-catalog-inference/);
+    assert.match(memory, /ADAPTER=%CARGO_TARGET_DIR%\\release\\memory-candle-adapter\.exe/);
+    assert.ok(memory.indexOf('Keep workflow tooling outside product source checks') < memory.indexOf('Check out workflow-owned storage tooling'));
   }
 });
 
@@ -201,4 +220,43 @@ test('Windows guards reject escaped paths, links, recent model writes and other 
   const blockers = JSON.parse(await powershell(`@((Get-StorageBlocker $fixture.target moss @([pscustomobject]@{ProcessId=2;Name='Runner.Worker.exe';CommandLine='worker';ExecutablePath='C:\\runner\\Runner.Worker.exe'}) 1),(Get-StorageBlocker $fixture.target cargo @([pscustomobject]@{ProcessId=3;Name='test.exe';CommandLine='';ExecutablePath=($fixture.target+'\\debug\\test.exe')}) 1))|ConvertTo-Json -Compress`, data));
   assert.match(blockers[0], /Another Actions/);
   assert.match(blockers[1], /references/);
+});
+
+test('dev-host setup binds a fresh invocation, preserves Cargo consumers and keeps downloads on E', { skip: process.platform !== 'win32' }, async t => {
+  const root = await fixture(t), work = join(root, 't/1234abcd'), binary = join(root, 'dev-host.exe');
+  await mkdir(work, { recursive: true }); await writeFile(binary, 'fixture');
+  const env = { ...process.env, DEV_HOST_ROOT: root, DEV_HOST_BIN: binary, GITHUB_REPOSITORY: 'SceneWorks/test', GITHUB_WORKSPACE: root, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2', GITHUB_JOB: 'proof', RUNNER_NAME: 'runner', GITHUB_ENV: join(root, 'env'), GITHUB_STATE: join(root, 'state'), CARGO_TARGET_DIR: 'existing-target' };
+  const calls = [];
+  const run = async (_binary, args) => { calls.push(args); return { stdout: args[0] === '--version' ? 'dev-host 0.1.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=ignored\nTMPDIR=${work}\nTEMP=${work}\nTMP=${work}\n` }; };
+  const exports = await prepareDevHost(env, { run, nonce: 'owned-invocation' });
+  assert.equal(exports.DEV_HOST_JOB_ROOT, work);
+  assert.equal(exports.HF_HOME, 'E:\\huggingface');
+  assert.equal(exports.HF_HUB_CACHE, 'E:\\huggingface\\hub');
+  assert.doesNotMatch(await readFile(env.GITHUB_ENV, 'utf8'), /CARGO_TARGET_DIR/);
+  assert.equal(JSON.parse(await readFile(join(work, '.actions-owner.json'), 'utf8')).nonce, 'owned-invocation');
+  assert.ok(calls.some(args => args.includes('actions-123-2-owned-invocation')));
+  await assert.rejects(prepareDevHost(env, { run, nonce: 'other-invocation' }), /already contains work/);
+});
+
+test('failed or unconfirmed publication preserves owned job work', { skip: process.platform !== 'win32' }, async t => {
+  const root = await fixture(t), work = join(root, 't/1234abcd'); await mkdir(work, {recursive:true});
+  await writeFile(join(work,'recovery'), 'keep');
+  await main({RUNNER_ENVIRONMENT:'self-hosted', GITHUB_WORKSPACE:root, STATE_registered:'true', STATE_dev_host_root:work, DEV_HOST_ROOT:root});
+  assert.equal(await readFile(join(work,'recovery'),'utf8'), 'keep');
+});
+
+test('job cleanup retains mismatched owners and live files without deleting siblings', { skip: process.platform !== 'win32' }, async t => {
+  const root = await fixture(t), work = join(root, '1234abcd'); await mkdir(work);
+  const owner = { repository: 'SceneWorks/test', run: '123', attempt: '2', job: 'proof', runner: 'runner', nonce: 'owned' };
+  await writeFile(join(work, '.actions-owner.json'), JSON.stringify(owner));
+  await writeFile(join(work, 'a-evidence'), 'keep'); await writeFile(join(work, 'z-live'), 'keep');
+  const setup = `$env:GITHUB_REPOSITORY='SceneWorks/test';$env:GITHUB_RUN_ID='123';$env:GITHUB_RUN_ATTEMPT='2';$env:GITHUB_JOB='proof';$env:RUNNER_NAME='runner';$env:STATE_dev_host_nonce='owned';`;
+  const data = { root, work };
+  assert.equal(await powershell(`${setup}$env:GITHUB_RUN_ATTEMPT='3';try{Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|Out-Null;throw 'allowed'}catch{if($_.Exception.Message -eq 'allowed'){throw};'blocked'}`, data), 'blocked');
+  assert.equal(await powershell(`${setup}$h=[IO.File]::Open(($fixture.work+'\\z-live'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite);try{try{Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|Out-Null;throw 'allowed'}catch{if($_.Exception.Message -eq 'allowed'){throw};'blocked'}}finally{$h.Dispose()}`, data), 'blocked');
+  assert.equal(await readFile(join(work, 'a-evidence'), 'utf8'), 'keep');
+  assert.equal(await powershell(`${setup}$child=Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30') -WorkingDirectory $fixture.work -WindowStyle Hidden -PassThru;try{try{Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|Out-Null;throw 'allowed'}catch{if($_.Exception.Message -eq 'allowed'){throw};'blocked'}}finally{Stop-Process -Id $child.Id -Force}`, data), 'blocked');
+  assert.equal(await readFile(join(work, 'a-evidence'), 'utf8'), 'keep');
+  const result = JSON.parse(await powershell(`${setup}Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|ConvertTo-Json -Compress`, data));
+  assert.equal(result.status, 'removed');
 });
