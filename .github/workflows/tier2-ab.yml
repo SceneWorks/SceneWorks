@@ -125,6 +125,20 @@ jobs:
           path: tier2-ab-head
           fetch-depth: 1
           persist-credentials: false
+      - name: Check out the four reviewed Krea baseline repair files
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.krea_allocation }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5b2c605c9371f7ecdf11dcbd6e76ac5e3d52d957
+          path: tier2-ab-krea-repair
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /apps/rust-api/src/portable_admission.rs
+            /apps/rust-api/src/portable_routes.rs
+            /crates/sceneworks-core/src/model_artifacts/artifact_selection.rs
+            /crates/sceneworks-worker/src/external_library_runtime.rs
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -240,6 +254,20 @@ jobs:
           path: tier2-ab-head
           fetch-depth: 1
           persist-credentials: false
+      - name: Check out the four reviewed Krea baseline repair files
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.krea_allocation }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5b2c605c9371f7ecdf11dcbd6e76ac5e3d52d957
+          path: tier2-ab-krea-repair
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /apps/rust-api/src/portable_admission.rs
+            /apps/rust-api/src/portable_routes.rs
+            /crates/sceneworks-core/src/model_artifacts/artifact_selection.rs
+            /crates/sceneworks-worker/src/external_library_runtime.rs
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22

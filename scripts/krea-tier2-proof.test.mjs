@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
-import { bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild } from "./krea-tier2-linked-source.mjs";
+import {
+  KREA_LINKED_SOURCE_REPAIR_REVISION, bindKreaLinkedSourceBuild,
+  reviewedKreaLinkedSourceCandidate, withKreaLinkedSourceBuild,
+} from "./krea-tier2-linked-source.mjs";
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_RAW_ADAPTER, KREA_RAW_LORA, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
   assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, assertKreaRawAdapterFactors, importKreaRawAdapter, kreaRoutes,
@@ -19,13 +22,51 @@ const [RAW, HIRES] = kreaRoutes("mlx");
 test("Krea source bind refuses an otherwise ordinary checkout with different source bytes", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "krea-source-bind-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const sides = ["base", "head"].map((side) => path.join(dir, side));
+  const sides = ["base", "head", "repair"].map((side) => path.join(dir, side));
   for (const side of sides) {
     const parent = path.join(side, "apps", "rust-api", "src");
     await mkdir(parent, { recursive: true });
     await writeFile(path.join(parent, "portable_admission.rs"), "unknown source");
   }
   await assert.rejects(bindKreaLinkedSourceBuild(...sides), /unexpected Krea linked-source bytes for base/);
+  await assert.rejects(bindKreaLinkedSourceBuild(sides[0], sides[1], sides[1]), /distinct checkouts/);
+});
+
+test("Krea candidate fingerprints must belong to one exact reviewed source set", () => {
+  const original = [
+    "1f96bafdc500cb9c938d176345389a4938b859efd9e7b4d8309d4593c1e06b52",
+    "62405de585a204660319e50130baaf3aa57904131d15c949271c7aeb8e9307d8",
+    "77e579b5d86ec1764130bcddb8de2b39b0d7f9b384cca9a0924bd3fa28784908",
+    "9a84528d02e654b94cc39ca8c962a8d157398069282aa40d9e78d7364d754bb0",
+  ];
+  const integrated = [
+    "9d9191f521d43c3f0850e4d80f305c187b97a3119f3e0681044670a7e61a1676",
+    original[1], original[2],
+    "be3b26400a7babc34ce1bd0f6fabf433cf11d3af62d41766b6439e3a72852d5d",
+  ];
+  assert.equal(reviewedKreaLinkedSourceCandidate(original), KREA_LINKED_SOURCE_REPAIR_REVISION);
+  assert.equal(reviewedKreaLinkedSourceCandidate(integrated), "e98dea13f401500998947e4359ebd56fae113bf9");
+  assert.throws(() => reviewedKreaLinkedSourceCandidate([...original.slice(0, 3), integrated[3]]), /one reviewed source set/);
+  assert.throws(() => reviewedKreaLinkedSourceCandidate(integrated.slice(0, 3)), /one reviewed source set/);
+});
+
+test("paired Krea Actions fetch only the four frozen repair paths on both hosts", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/tier2-ab.yml", import.meta.url), "utf8");
+  const repairs = workflow.split("- name: Check out the four reviewed Krea baseline repair files\n").slice(1);
+  assert.equal(repairs.length, 2);
+  for (const repair of repairs) {
+    const step = repair.slice(0, repair.indexOf("\n      - "));
+    assert.match(step, /if: \$\{\{ inputs\.suite == 'krea-scoped-acceptance' && !inputs\.krea_allocation \}\}/);
+    assert.match(step, /uses: actions\/checkout@[a-f0-9]{40}/);
+    assert.ok(step.includes(`ref: ${KREA_LINKED_SOURCE_REPAIR_REVISION}\n`));
+    assert.match(step, /path: tier2-ab-krea-repair\n\s+fetch-depth: 1\n\s+persist-credentials: false\n\s+sparse-checkout-cone-mode: false/);
+    assert.deepEqual(step.split("sparse-checkout: |\n")[1]?.split("\n").map((entry) => entry.trim()), [
+      "/apps/rust-api/src/portable_admission.rs",
+      "/apps/rust-api/src/portable_routes.rs",
+      "/crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
+      "/crates/sceneworks-worker/src/external_library_runtime.rs",
+    ]);
+  }
 });
 
 test("Krea baseline restores exact checkout bytes after the borrowed-source build fails", async (t) => {
@@ -61,6 +102,7 @@ test("Krea dispatch is opt-in, selects two fixed public routes, and requires exa
   const cfg = resolveConfig(env, { platform: "darwin" });
   assert.deepEqual(cfg.routes, [RAW, HIRES]);
   assert.deepEqual(cfg.hubs, ["/work/scratch/krea-hf/hub"]);
+  assert.equal(cfg.repairDir, "/tier2-ab-krea-repair");
   assert.throws(() => resolveConfig({ ...env, TIER2_AB_BASE_SHA: "3".repeat(40) }, { platform: "darwin" }), /baseline app is frozen/);
   assert.throws(() => resolveConfig({ ...env, TIER2_AB_HUBS: "/other" }, { platform: "darwin" }), /attempt-owned/);
 });

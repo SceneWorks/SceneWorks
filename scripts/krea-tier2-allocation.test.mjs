@@ -20,6 +20,7 @@ test("the opt-in Candle allocation needs one linked Hires route and no Raw weigh
   const env = { TIER2_AB_SUITE: KREA_SUITE, TIER2_AB_BACKEND: "cuda", TIER2_AB_BASE_SHA: KREA_BASE_APP, TIER2_AB_HEAD_SHA: SHA, TIER2_AB_INFERENCE_SHA: KREA_WIDE_IM2COL_PIN, TIER2_AB_BASE_DIR: "E:\\base", TIER2_AB_HEAD_DIR: "E:\\head", TIER2_AB_WORK: "E:\\work", TIER2_AB_KREA_ALLOCATION: "true" };
   const cfg = resolveConfig(env, { platform: "win32" });
   assert.equal(cfg.routes.length, 1);
+  assert.equal(cfg.repairDir, null);
   const [allocation] = cfg.routes;
   const hires = kreaRoutes("cuda")[1];
   assert.deepEqual(allocation.body, { ...hires.body, width: 1120, height: 1120, hiresFix: { ...hires.body.hiresFix, upscaleBy: 2 } });

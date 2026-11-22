@@ -48,7 +48,10 @@ import {
 import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
 import { startKreaWindowsWorkerMemory } from "./lib/krea-windows-worker-memory.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
-import { bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild } from "./krea-tier2-linked-source.mjs";
+import {
+  KREA_LINKED_SOURCE_REPAIR_CHECKOUT, KREA_LINKED_SOURCE_REPAIR_REVISION,
+  bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild,
+} from "./krea-tier2-linked-source.mjs";
 
 const execFile = promisify(execFileCallback);
 const fact = (value, message) => assert.ok(value, message);
@@ -168,6 +171,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   fact(!perf || krea, "Krea performance requires the explicit Krea suite");
   fact(!allocation || (krea && backend === "cuda" && !perf), "Krea allocation requires the Candle suite and is separate from performance");
   if (allocation) assert.equal(inferenceSha, KREA_WIDE_IM2COL_PIN, "wide Krea allocation requires the reviewed CUDA im2col fix");
+  const repairDir = krea && !allocation ? paths.join(paths.dirname(baseDir), KREA_LINKED_SOURCE_REPAIR_CHECKOUT) : null;
   const routes = krea ? kreaRoutes(backend, { allocation }) : selectRoutes(backend, env.TIER2_AB_ROUTES);
   if (krea) {
     assertKreaPins(baseSha, KREA_BASE_ENGINE, headSha, inferenceSha);
@@ -179,7 +183,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { suite, krea, perf, allocation, backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes,
+  return { suite, krea, perf, allocation, backend, baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes,
     hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
@@ -762,7 +766,7 @@ const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / GIB).toFixed(2)} Gi
 const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–");
 export function renderMarkdown(report) {
   const lines = [`# Tier 2 A/B (${report.backend}) — ${report.mode}`, "", `- status: **${report.status}** (exit ${report.exitCode})`, `- base: \`${report.base.sha}\` (inference ${report.base.inferencePin ?? "?"}, binary ${report.base.binarySha256 ?? "not built"})`, `- head: \`${report.head.sha}\` (inference ${report.head.inferencePin ?? "?"}, binary ${report.head.binarySha256 ?? "not built"})`, `- runner: ${report.runner.name ?? "local"} (${report.runner.platform}/${report.runner.arch}, ${gib(report.runner.totalMemoryBytes)} RAM)`, `- window: ${report.startedAt} → ${report.finishedAt ?? "running"}`, `- memory method: ${report.memoryMethod}`, `- fidelity method: decoded content (PNG→RGBA8, WAV→PCM samples, video→ffmpeg RGBA frames + s16le audio); file sha256 recorded separately`, ""];
-  if (report.kreaLinkedSourceBuild) lines.push(`- Krea source admission uses four identical files from repair \`${report.kreaLinkedSourceBuild.repairRevision}\` in both binaries. The proof applies those files to the frozen baseline checkout for its build only. The unmodified baseline refuses the linked checkpoint before generation. Exact source hashes are in the JSON receipt.`, "");
+  if (report.kreaLinkedSourceBuild) lines.push(`- The frozen Krea baseline build uses four files from repair \`${report.kreaLinkedSourceBuild.repairRevision}\`. The candidate uses its own files, verified against the source set reviewed at \`${report.kreaLinkedSourceBuild.candidateReviewRevision}\`. The unmodified baseline refuses the linked checkpoint before generation. Exact source hashes are in the JSON receipt.`, "");
   if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Device-wide diagnostic peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. NVIDIA device-wide readings and process types still govern the device lease.", "");
   if (Array.isArray(report.gpus)) {
     lines.push("| nvidia-smi index | PCI bus | UUID | display attached | used / total | util | processes (C, G, C+G) |", "|---|---|---|---|---|---|---|");
@@ -822,6 +826,17 @@ async function sideIdentity(label, dir, sha) {
 async function tool(command, args) { try { const { stdout, stderr } = await execFile(command, args, { timeout: 20_000, windowsHide: true }); return { available: true, version: `${stdout}${stderr}`.split(/\r?\n/)[0].slice(0, 200) }; } catch (error) { return { available: false, error: error.message.slice(0, 200) }; } }
 async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: true }); return Number(fs.bavail * fs.bsize); } catch { return null; } }
 
+async function readKreaLinkedSourceBuild(cfg) {
+  const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir, cfg.repairDir);
+  const [checkout, revision] = await Promise.all([
+    git(binding.repair, "rev-parse", "--show-toplevel"),
+    git(binding.repair, "rev-parse", "HEAD"),
+  ]);
+  fact(await realpath(checkout) === binding.repair && revision === KREA_LINKED_SOURCE_REPAIR_REVISION,
+    "Krea repair checkout does not match the reviewed revision");
+  return binding;
+}
+
 async function preflight(env, cfg, report, signal) {
   const platform = process.platform;
   if (cfg.backend === "mlx") fact(platform === "darwin" && process.arch === "arm64", "the mlx backend needs a native Apple-silicon Mac");
@@ -837,11 +852,12 @@ async function preflight(env, cfg, report, signal) {
   if (cfg.krea) {
     assertKreaPins(report.base.sha, report.base.inferencePin, report.head.sha, report.head.inferencePin);
     fact(report.head.inferencePin === cfg.inferenceSha, "candidate checkout does not source-pin the requested inference SHA");
-    if (!cfg.allocation) {
-      const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir);
+    if (cfg.repairDir) {
+      const binding = await readKreaLinkedSourceBuild(cfg);
       if (env.GITHUB_ACTIONS === "true") {
         const workspace = await realpath(env.GITHUB_WORKSPACE);
         fact(binding.base === path.join(workspace, "tier2-ab-base"), "Krea source repair requires the attempt-owned workflow baseline checkout");
+        fact(binding.repair === path.join(workspace, KREA_LINKED_SOURCE_REPAIR_CHECKOUT), "Krea source repair requires the attempt-owned sparse checkout");
       }
       report.kreaLinkedSourceBuild = binding.receipt;
     }
@@ -936,7 +952,7 @@ async function build(env, cfg, report) {
   await mkdir(target, { recursive: true }); await mkdir(evidence, { recursive: true });
   const exe = process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api";
   const built = {};
-  const linkedSourceBuild = report.kreaLinkedSourceBuild ? await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir) : null;
+  const linkedSourceBuild = cfg.repairDir ? await readKreaLinkedSourceBuild(cfg) : null;
   if (linkedSourceBuild) assert.deepEqual(linkedSourceBuild.receipt, report.kreaLinkedSourceBuild);
   // Base first, then head: both share one target, so the second build reuses every unchanged
   // dependency unit. Each binary (plus loose native libraries) is copied out before the next build.
@@ -976,7 +992,7 @@ async function build(env, cfg, report) {
     report[label] = { ...report[label], binarySha256: built[label].binarySha256, buildSeconds: built[label].buildSeconds, metallibSha256: metallib?.sha256 ?? null };
   }
   if (linkedSourceBuild) {
-    const restored = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir);
+    const restored = await readKreaLinkedSourceBuild(cfg);
     assert.deepEqual(restored.receipt, linkedSourceBuild.receipt, "Krea source repair changed a checkout");
   }
   await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, allocation: cfg.allocation, kreaLinkedSourceBuild: report.kreaLinkedSourceBuild, built }, null, 2) + "\n");
@@ -1530,13 +1546,15 @@ async function writeReport(cfg, report) {
   await writeFile(path.join(dir, `${reportName(report.mode)}.md`), renderMarkdown(report));
 }
 
-// Workflow cleanup: the attempt-owned work dir and both side checkouts, never a hub root.
+// Workflow cleanup: the attempt-owned work dir and checkouts, never a hub root.
 async function cleanup(env, cfg) {
   const allowedRoots = [env.RUNNER_TEMP, env.GITHUB_WORKSPACE].filter(Boolean);
   fact(allowedRoots.length, "--cleanup needs RUNNER_TEMP or GITHUB_WORKSPACE to bound what it may remove");
   const protectedRoots = [...(cfg.krea ? [] : cfg.hubs), ...defaultHubs(cfg.backend)];
   let failed = 0;
-  for (const target of [cfg.work, cfg.baseDir, cfg.headDir]) {
+  const checkouts = [cfg.baseDir, cfg.headDir];
+  if (cfg.repairDir && env.GITHUB_ACTIONS === "true") checkouts.push(cfg.repairDir);
+  for (const target of [cfg.work, ...checkouts]) {
     try { const result = await removeScratch(target, { allowedRoots, protectedRoots }); progress({ phase: "cleanup", target, removed: result.removed, restored_dirs: result.restoredDirectories, restored_files: result.restoredFiles }); }
     catch (error) { failed++; progress({ phase: "cleanup_failed", target, reason: error.message }); }
   }
