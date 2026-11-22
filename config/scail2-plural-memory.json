@@ -656,5 +656,661 @@
     "receipt_sha256": "750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f",
     "recovery_certificate_sha256": "dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f",
     "runtime": "596.36"
+  },
+  {
+    "accepted": true,
+    "artifact_id": 14733254781,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "mlx",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "SCAIL2_COMPUTE_BF16",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_FFN_SEQ_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_ATTN_QUERY_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_EVAL_PER_BLOCK",
+          "value": null
+        },
+        {
+          "name": "MLX_BFS_MAX_WIDTH",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_OPS_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_MB_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_FAST_SYNCH",
+          "value": null
+        },
+        {
+          "name": "MLX_ENABLE_TF32",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_GPU_ARCH",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 0,
+      "floor_host_bytes": 0,
+      "floor_unified_bytes": 888975360,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "None/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 2,
+      "schedule_bytes": 320,
+      "source_bytes": 112619520,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "67c3280e3d3dea8a07a5f6b231d0b67302e8898be5de0fa71a9b1ce93b2b003a",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 48,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 1944,
+          "mlx_unsplit_ffn": true,
+          "self_attention_query_rows": 0,
+          "self_attention_score_elements": 0,
+          "tokens": 26520
+        }
+      ]
+    },
+    "bounds": {
+      "measurement": "darwin_lifetime_footprint",
+      "mlx_decode_budget_bytes": 30064771072,
+      "unified": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 29213205408,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 29213205408,
+        "review_sha256": "774e9dec1e52a46153f6a325e92454b24f67762c2d0aed2b259a2a26535242e9",
+        "uncertainty_allowance_bytes": 851565664
+      }
+    },
+    "device": "Apple M5 Max",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b93851878ec71fe85a82a4adeb8eb330e7d77b39899b059c87a087b631ae6554",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "macos",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "4127f5a083b757c88418175436bfec4fe12cb502171898ce5544ff852bc70f9d",
+    "runtime": "26B131"
+  },
+  {
+    "accepted": true,
+    "artifact_id": 14733254781,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "mlx",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "SCAIL2_COMPUTE_BF16",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_FFN_SEQ_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_ATTN_QUERY_CHUNK",
+          "value": null
+        },
+        {
+          "name": "MLX_GEN_WAN_EVAL_PER_BLOCK",
+          "value": null
+        },
+        {
+          "name": "MLX_BFS_MAX_WIDTH",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_OPS_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_MAX_MB_PER_BUFFER",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_FAST_SYNCH",
+          "value": null
+        },
+        {
+          "name": "MLX_ENABLE_TF32",
+          "value": null
+        },
+        {
+          "name": "MLX_METAL_GPU_ARCH",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 0,
+      "floor_host_bytes": 0,
+      "floor_unified_bytes": 898560000,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "None/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 6,
+      "schedule_bytes": 320,
+      "source_bytes": 122204160,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "5b0dee676047670ce1bc402ee4a142e50ca32e53e3459b22ff3e83764fb8bca5",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 48,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 8184,
+          "mlx_unsplit_ffn": true,
+          "self_attention_query_rows": 0,
+          "self_attention_score_elements": 0,
+          "tokens": 32760
+        }
+      ]
+    },
+    "bounds": {
+      "measurement": "darwin_lifetime_footprint",
+      "mlx_decode_budget_bytes": 30064771072,
+      "unified": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 30355400040,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 30355400040,
+        "review_sha256": "ed9307d613bff0f797e3c3079b2699257254106047582cf30249d61069df37cb",
+        "uncertainty_allowance_bytes": 0
+      }
+    },
+    "device": "Apple M5 Max",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b93851878ec71fe85a82a4adeb8eb330e7d77b39899b059c87a087b631ae6554",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "macos",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "4127f5a083b757c88418175436bfec4fe12cb502171898ce5544ff852bc70f9d",
+    "runtime": "26B131"
+  },
+  {
+    "accepted": false,
+    "artifact_id": 14735122440,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "cuda",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL",
+          "value": null
+        },
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL_F16",
+          "value": null
+        },
+        {
+          "name": "CUBLAS_WORKSPACE_CONFIG",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 1563494400,
+      "floor_host_bytes": 652953600,
+      "floor_unified_bytes": 0,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "Some(Q4)/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 2,
+      "schedule_bytes": 320,
+      "source_bytes": 112619520,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "67c3280e3d3dea8a07a5f6b231d0b67302e8898be5de0fa71a9b1ce93b2b003a",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 45,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 1944,
+          "mlx_unsplit_ffn": false,
+          "self_attention_query_rows": 942,
+          "self_attention_score_elements": 999273600,
+          "tokens": 26520
+        }
+      ]
+    },
+    "bounds": {
+      "capture_adapter": {
+        "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "luid": "luid_0x00000000_0x0001f603",
+        "node_mask": 1
+      },
+      "device": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 55665754112,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 54995714048,
+        "review_sha256": "95d5e2653c88aaedc1dae537ecdc7c6de2ae528d62212be13e1f2bb665f86b0e",
+        "uncertainty_allowance_bytes": 15168815104
+      },
+      "host": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 57391185920,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 57298911232,
+        "review_sha256": "95d5e2653c88aaedc1dae537ecdc7c6de2ae528d62212be13e1f2bb665f86b0e",
+        "uncertainty_allowance_bytes": 77594624
+      },
+      "measurement": "windows_job_and_wddm"
+    },
+    "count_accepted": true,
+    "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "windows",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+    "runtime": "596.36"
+  },
+  {
+    "accepted": false,
+    "artifact_id": 14735122440,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "cuda",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL",
+          "value": null
+        },
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL_F16",
+          "value": null
+        },
+        {
+          "name": "CUBLAS_WORKSPACE_CONFIG",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 1563494400,
+      "floor_host_bytes": 655349760,
+      "floor_unified_bytes": 0,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "Some(Q4)/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 3,
+      "schedule_bytes": 320,
+      "source_bytes": 115015680,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "1af36034dcf02d44b457d91a6482e5fdf3fe24558c07f33d13acb05f02575329",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 45,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 3504,
+          "mlx_unsplit_ffn": false,
+          "self_attention_query_rows": 890,
+          "self_attention_score_elements": 999648000,
+          "tokens": 28080
+        }
+      ]
+    },
+    "bounds": {
+      "capture_adapter": {
+        "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "luid": "luid_0x00000000_0x0001f603",
+        "node_mask": 1
+      },
+      "device": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 56008708096,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 55364812800,
+        "review_sha256": "fe45b092c4ab38f135793d06200b42c329c9a1ee1dd052bee2959b047752357a",
+        "uncertainty_allowance_bytes": 14126415872
+      },
+      "device_interval": "load_through_completed_rgb",
+      "host": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 57762291712,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 57670017024,
+        "review_sha256": "fe45b092c4ab38f135793d06200b42c329c9a1ee1dd052bee2959b047752357a",
+        "uncertainty_allowance_bytes": 77594624
+      },
+      "measurement": "windows_job_and_wddm"
+    },
+    "count_accepted": false,
+    "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "windows",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+    "recovery_certificate_sha256": "ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d",
+    "runtime": "596.36"
+  },
+  {
+    "accepted": false,
+    "artifact_id": 14735122440,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "cuda",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL",
+          "value": null
+        },
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL_F16",
+          "value": null
+        },
+        {
+          "name": "CUBLAS_WORKSPACE_CONFIG",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 1563494400,
+      "floor_host_bytes": 657745920,
+      "floor_unified_bytes": 0,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "Some(Q4)/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 4,
+      "schedule_bytes": 320,
+      "source_bytes": 117411840,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "d5ea182ecf752df8b26609f8834a6f5a6173079fedac4920aeb7f3d8c0f49c62",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 45,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 5064,
+          "mlx_unsplit_ffn": false,
+          "self_attention_query_rows": 843,
+          "self_attention_score_elements": 999460800,
+          "tokens": 29640
+        }
+      ]
+    },
+    "bounds": {
+      "capture_adapter": {
+        "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "luid": "luid_0x00000000_0x0001f603",
+        "node_mask": 1
+      },
+      "device": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 56846450688,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 55700357120,
+        "review_sha256": "6fa22462971cfb8251ba797fe8fd200fb6997337774c8545646fbcf517cfd035",
+        "uncertainty_allowance_bytes": 15873462272
+      },
+      "host": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 58105208832,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 58012934144,
+        "review_sha256": "6fa22462971cfb8251ba797fe8fd200fb6997337774c8545646fbcf517cfd035",
+        "uncertainty_allowance_bytes": 77594624
+      },
+      "measurement": "windows_job_and_wddm"
+    },
+    "count_accepted": true,
+    "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "windows",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+    "runtime": "596.36"
+  },
+  {
+    "accepted": false,
+    "artifact_id": 14735122440,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "cuda",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL",
+          "value": null
+        },
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL_F16",
+          "value": null
+        },
+        {
+          "name": "CUBLAS_WORKSPACE_CONFIG",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 1563494400,
+      "floor_host_bytes": 660142080,
+      "floor_unified_bytes": 0,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "Some(Q4)/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 5,
+      "schedule_bytes": 320,
+      "source_bytes": 119808000,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "9b75fb1e31e95ce0ddbde92a8211189e6ebaebe2b5739ffaba2c26bd033169ce",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 45,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 6624,
+          "mlx_unsplit_ffn": false,
+          "self_attention_query_rows": 801,
+          "self_attention_score_elements": 999648000,
+          "tokens": 31200
+        }
+      ]
+    },
+    "bounds": {
+      "capture_adapter": {
+        "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "luid": "luid_0x00000000_0x0001f603",
+        "node_mask": 1
+      },
+      "device": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 56679800832,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 56035901440,
+        "review_sha256": "b6e6a2bc767c40bcc99dd8243a01255397fd4ff1c00472767017d043a10718d4",
+        "uncertainty_allowance_bytes": 16209010688
+      },
+      "host": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 58440904704,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 58348630016,
+        "review_sha256": "b6e6a2bc767c40bcc99dd8243a01255397fd4ff1c00472767017d043a10718d4",
+        "uncertainty_allowance_bytes": 77594624
+      },
+      "measurement": "windows_job_and_wddm"
+    },
+    "count_accepted": true,
+    "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "windows",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+    "runtime": "596.36"
+  },
+  {
+    "accepted": false,
+    "artifact_id": 14735122440,
+    "axes": {
+      "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
+      "artifact_tier": "q4",
+      "backend": "cuda",
+      "classifier_free_guidance": true,
+      "driving_stack_bytes": 431308800,
+      "effective_tier": "q4",
+      "execution_policy": [
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL",
+          "value": null
+        },
+        {
+          "name": "CANDLE_DEQUANTIZE_ALL_F16",
+          "value": null
+        },
+        {
+          "name": "CUBLAS_WORKSPACE_CONFIG",
+          "value": null
+        }
+      ],
+      "floor_device_bytes": 1563494400,
+      "floor_host_bytes": 662538240,
+      "floor_unified_bytes": 0,
+      "height": 480,
+      "history_order": 4,
+      "load_policy": "Some(Q4)/Bf16/Resident/EagerMaterialization",
+      "mlx_dpmpp": false,
+      "references": 6,
+      "schedule_bytes": 320,
+      "source_bytes": 122204160,
+      "source_resize_bytes": 0,
+      "source_shape_sha256": "5b0dee676047670ce1bc402ee4a142e50ca32e53e3459b22ff3e83764fb8bca5",
+      "width": 832,
+      "windows": [
+        {
+          "decoded_frames": 45,
+          "history_frames": 0,
+          "latent_frames": 12,
+          "mlx_ffn_chunks": 4,
+          "mlx_ffn_tail": 8184,
+          "mlx_unsplit_ffn": false,
+          "self_attention_query_rows": 763,
+          "self_attention_score_elements": 999835200,
+          "tokens": 32760
+        }
+      ]
+    },
+    "bounds": {
+      "capture_adapter": {
+        "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "luid": "luid_0x00000000_0x0001f603",
+        "node_mask": 1
+      },
+      "device": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 57048903680,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 56405000192,
+        "review_sha256": "48cd7a81bce388e07af4e9e7452f2f9d618c22ae91c9dd3c580c6493f6239185",
+        "uncertainty_allowance_bytes": 15904923648
+      },
+      "device_interval": "load_through_completed_rgb",
+      "host": {
+        "basis": "measured_aggregate",
+        "classified_peak_bytes": 58835017728,
+        "co_live_extra_bytes": 0,
+        "observed_peak_bytes": 58742743040,
+        "review_sha256": "48cd7a81bce388e07af4e9e7452f2f9d618c22ae91c9dd3c580c6493f6239185",
+        "uncertainty_allowance_bytes": 77594624
+      },
+      "measurement": "windows_job_and_wddm"
+    },
+    "count_accepted": true,
+    "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "guard_exit_code": 0,
+    "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "platform": "windows",
+    "post_execution_verified": true,
+    "prompt_tokens": [
+      512,
+      512
+    ],
+    "receipt_sha256": "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+    "runtime": "596.36"
   }
 ]
