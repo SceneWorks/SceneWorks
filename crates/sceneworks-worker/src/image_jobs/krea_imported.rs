@@ -122,9 +122,10 @@ use serde_json::json;
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
 // imported lanes get img2img). Both native backends also claim adapters, Kontext edit, and strict pose
 // conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
-// scale shapes are validated by the inference loader before dequantization; ConvRot descriptors remain
-// on their separate loader arm. Native NVFP4 is deliberately narrower: Candle/NVIDIA t2i + img2img,
-// without adapters, edit, or multi-phase assembly. Pose uses the native control provider.
+// scale shapes are validated by the inference loader before dequantization; imported ConvRot files
+// select the existing Candle named-component loader arm. Native NVFP4 is deliberately narrower:
+// Candle/NVIDIA t2i + img2img, without adapters, edit, or multi-phase assembly. Pose uses the native
+// control provider.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -1076,6 +1077,11 @@ pub(super) async fn generate_krea_imported_control_stream(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
+    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
+        &mut spec,
+        KREA_IMPORTED_CONTROL_ENGINE_ID,
+        std::slice::from_ref(&dit_pin),
+    )?;
     spec = attach_selected_decoder_unprepared(
         spec,
         KREA_IMPORTED_CONTROL_ENGINE_ID,
@@ -1348,8 +1354,13 @@ pub(super) async fn generate_krea_imported_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
 
-    let spec =
+    let mut spec =
         imported_candle_control_load_spec(request, &dit, &base_dir, &control_weights, adapters)?;
+    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
+        &mut spec,
+        KREA_IMPORTED_CONTROL_ENGINE_ID,
+        std::slice::from_ref(&dit_pin),
+    )?;
     let spec = prepare_manifest_text_encoder_with_file_pins(
         spec,
         KREA_IMPORTED_CONTROL_ENGINE_ID,
@@ -1373,8 +1384,16 @@ pub(super) async fn generate_krea_imported_control_stream(
             // only the DiT swapped.
             let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
                 root: base_dir,
-                native_dit: Some(dit),
-                convrot_dit: None,
+                native_dit: (!spec
+                    .components
+                    .contains_key(gen_core::KREA_CONVROT_DIT_COMPONENT))
+                .then_some(dit),
+                convrot_dit: spec
+                    .components
+                    .get(gen_core::KREA_CONVROT_DIT_COMPONENT)
+                    .map(|source| {
+                        crate::weights_source::WeightsSourceExt::path(source).to_path_buf()
+                    }),
                 control: control_weights,
                 adapters: spec.adapters.clone(),
                 branch_tier: gen_core::tier_integrity::control_branch_tier(spec.quantize),
@@ -2336,6 +2355,11 @@ pub(super) async fn generate_krea_imported_stream(
     if !prepared_adapters.specs.is_empty() {
         spec = spec.with_adapters(prepared_adapters.specs);
     }
+    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
+        &mut spec,
+        engine_id,
+        std::slice::from_ref(&dit_pin),
+    )?;
     spec = attach_selected_decoder_unprepared(spec, engine_id, request, settings)?;
     let decoder_pin = selected_decoder_component_pin(&spec, engine_id, request, settings)?;
     spec = prepare_manifest_text_encoder_with_file_pins(

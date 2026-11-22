@@ -1925,6 +1925,11 @@ pub(super) fn checkpoint_plan_load_spec(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
+    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
+        &mut spec,
+        sources.descriptor.id,
+        &sources.pins,
+    )?;
     // Every File token the plan contributed — the primary's file(s) and each component sourced from
     // a plan layer — finalized in one atomic pass on the spec admission and load both use, so no
     // await between selection and load can retarget one of them (sc-18306).

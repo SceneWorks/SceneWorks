@@ -1779,7 +1779,7 @@ pub(super) fn resolve_zimage_edit_init(
 ///    `trueCfgScale` on dev),
 ///  • Kolors img2img (sc-4765) + IP-Adapter-Plus reference (sc-4767), and
 ///  • Ideogram 4 img2img (Remix) + mask inpaint/outpaint (sc-6303).
-/// Every other family (plain t2i, Boogu multi-reference) resolves to the all-`None`/`Vec::new` default.
+/// Plain text-to-image requests use the default empty conditioning.
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 pub(super) struct LaneConditioning {
@@ -1795,26 +1795,26 @@ pub(super) struct LaneConditioning {
     /// Ideogram 4 inpaint/outpaint mask (white = repaint) threaded to `generate_one` as
     /// `Conditioning::Mask`. `None` for every other family / plain img2img.
     pub(super) ideogram_edit_mask: Option<Image>,
-    /// Base FLUX.1 ordinary single-source img2img (`§6.13`) input `(source_image, strength)`,
-    /// distinct from the XLabs IP-Adapter `Conditioning::Reference` path.
+    /// Ordinary img2img input for providers that consume `GenerationRequest::source_image`.
     pub(super) flux_source_image: Option<(Image, f32)>,
 }
 
-/// Resolve an ordinary single-source img2img (`§6.13`) input `(source_image, strength)` for base
-/// FLUX.1 (`flux_schnell`, `flux_dev`) when `sourceAssetId` is supplied in `text_to_image` mode.
+/// These base providers accept a plain img2img source in the single-reference slot.
 #[cfg(native_lane)]
-pub(super) fn supports_eng2_ordinary_img2img_source(model: &str) -> bool {
-    sceneworks_core::options::low_res_start::route_admits_source_asset_for_plain_img2img(model)
+pub(super) fn ordinary_img2img_uses_reference_slot(model: &str) -> bool {
+    matches!(model, "sana_1600m" | "boogu_image")
 }
 
+/// Resolve an ordinary single-source img2img input supplied as `sourceAssetId`.
 #[cfg(native_lane)]
-pub(super) fn resolve_flux1_ordinary_img2img_source(
+pub(super) fn resolve_ordinary_img2img_source(
     request: &ImageRequest,
     settings: &Settings,
     project_path: &Path,
 ) -> WorkerResult<Option<(Image, f32)>> {
-    if !supports_eng2_ordinary_img2img_source(&request.model)
-        || !matches!(request.mode.as_str(), "text_to_image" | "image_generation")
+    if !sceneworks_core::options::low_res_start::route_admits_source_asset_for_plain_img2img(
+        &request.model,
+    ) || !matches!(request.mode.as_str(), "text_to_image" | "image_generation")
     {
         return Ok(None);
     }
@@ -1871,7 +1871,7 @@ pub(super) fn resolve_generic_lane_conditioning(
         };
         let flux_source_image = if init.is_none() && !has_reference && request.mode != "edit_image"
         {
-            resolve_flux1_ordinary_img2img_source(request, settings, project_path)?
+            resolve_ordinary_img2img_source(request, settings, project_path)?
         } else {
             None
         };
@@ -1916,17 +1916,22 @@ pub(super) fn resolve_generic_lane_conditioning(
             ideogram_edit_mask: None,
             flux_source_image: None,
         })
-    } else if supports_eng2_ordinary_img2img_source(&request.model)
-        && !has_reference
+    } else if sceneworks_core::options::low_res_start::route_admits_source_asset_for_plain_img2img(
+        &request.model,
+    ) && !has_reference
         && non_empty(&request.source_asset_id)
         && matches!(request.mode.as_str(), "text_to_image" | "image_generation")
     {
+        let source = resolve_ordinary_img2img_source(request, settings, project_path)?;
+        let (identity_init, flux_source_image) =
+            if ordinary_img2img_uses_reference_slot(&request.model) {
+                (source, None)
+            } else {
+                (None, source)
+            };
         Ok(LaneConditioning {
-            flux_source_image: resolve_flux1_ordinary_img2img_source(
-                request,
-                settings,
-                project_path,
-            )?,
+            identity_init,
+            flux_source_image,
             ..Default::default()
         })
     } else if request.model == "kolors" && request.mode == "edit_image" {
