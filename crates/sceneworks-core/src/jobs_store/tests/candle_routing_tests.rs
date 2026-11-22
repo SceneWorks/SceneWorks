@@ -5493,6 +5493,21 @@ fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
     );
 }
 
+#[test]
+fn builtin_krea_raw_phase_gap_describes_the_supported_lane() {
+    let mut payload = json!({
+        "model": "krea_2_raw",
+        "mode": "text_to_image",
+        "advanced": {"mlxQuantize": 4, "phases": [{"steps": 4}], "usePid": true}
+    });
+    let reason = candle_supported(&image_generate_job(payload.clone())).unwrap_err();
+    assert!(reason.feature.contains("Krea 2 Raw multi-phase"));
+    assert!(reason.detail.contains("from pure noise"));
+    assert!(reason.detail.contains("PiD"));
+    payload["advanced"]["usePid"] = json!(false);
+    assert!(candle_supported(&image_generate_job(payload)).is_ok());
+}
+
 /// Reviewer repro 2. The gate's reference-only-mode refusal applies ONLY to the families that
 /// reserve those modes for a specialized lane (flux2_* / qwen_image_edit* / sensenova_u1_8b*). On
 /// `flux_schnell` has no reserved `style_variations` mode and q4 is admitted, so the same payload

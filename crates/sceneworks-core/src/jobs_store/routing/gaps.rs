@@ -982,6 +982,16 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("sc-5489"),
         ),
+        CandleImageRefusal::Phases if model == "krea_2_raw" => UnsupportedReason::new(
+            Some(model),
+            "unsupported Krea 2 Raw multi-phase combination",
+            &format!(
+                "Candle runs Krea 2 Raw multi-phase text-to-image from pure noise with a non-empty \
+                 phase list on BF16, Q4, or Q8. Multi-phase cannot be combined with image inputs, \
+                 character or control conditioning, PiD, Hires.fix, or Low Resolution Start.{also}"
+            ),
+            Some("SW-7257"),
+        ),
         CandleImageRefusal::Phases => UnsupportedReason::new(
             Some(model),
             "multi-phase schedule (advanced.phases) with no candle lane on this family",
