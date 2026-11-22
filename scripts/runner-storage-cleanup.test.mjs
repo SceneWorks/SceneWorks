@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, link } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
@@ -270,4 +270,18 @@ test('job cleanup retains mismatched owners and live files without deleting sibl
   assert.equal(await readFile(join(work, 'a-evidence'), 'utf8'), 'keep');
   const result = JSON.parse(await powershell(`${setup}Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|ConvertTo-Json -Compress`, data));
   assert.equal(result.status, 'removed');
+});
+
+test('job cleanup deduplicates hard links while preserving readers through any alias', { skip: process.platform !== 'win32' }, async t => {
+  const root=await fixture(t), work=join(root,'1234abcd'); await mkdir(work);
+  const owner={repository:'SceneWorks/test',run:'123',attempt:'2',job:'proof',runner:'runner',nonce:'owned'};
+  await writeFile(join(work,'.actions-owner.json'),JSON.stringify(owner));
+  const source=join(root,'shared-model'); await writeFile(source,'model fixture');
+  await link(source,join(work,'model-first')); await link(source,join(work,'model-second'));
+  const setup=`$env:GITHUB_REPOSITORY='SceneWorks/test';$env:GITHUB_RUN_ID='123';$env:GITHUB_RUN_ATTEMPT='2';$env:GITHUB_JOB='proof';$env:RUNNER_NAME='runner';$env:STATE_dev_host_nonce='owned';`;
+  const data={root,work,source};
+  assert.equal(await powershell(`${setup}$h=[IO.File]::Open($fixture.source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite);try{try{Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|Out-Null;throw 'allowed'}catch{if($_.Exception.Message -eq 'allowed'){throw};'blocked'}}finally{$h.Dispose()}`,data),'blocked');
+  assert.equal(await readFile(join(work,'model-second'),'utf8'),'model fixture');
+  const result=JSON.parse(await powershell(`${setup}Remove-StorageLeaf $fixture.work $fixture.root job-work $false @() 1|ConvertTo-Json -Compress`,data));
+  assert.equal(result.status,'removed'); assert.equal(await readFile(source,'utf8'),'model fixture');
 });

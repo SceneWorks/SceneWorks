@@ -36,19 +36,38 @@ function Get-StorageTree([string]$Path, [bool]$IncludeFiles = $false) {
     return @{ bytes = $bytes; locks = @($locks.ToArray()); files = @($files.ToArray()); directories = @($directories.ToArray()); latest = $latest }
 }
 
-function Assert-IdleJobDirectories($Directories) {
+function Initialize-StorageNative {
     if (-not ('RunnerStorageNative' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class RunnerStorageNative {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FileInformation {
+        public uint Attributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+        public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     public static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
         IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation info);
+    public static string Identity(SafeFileHandle handle) {
+        FileInformation info;
+        if (!GetFileInformationByHandle(handle, out info))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return info.Volume + ":" + info.IndexHigh + ":" + info.IndexLow;
+    }
 }
 '@
     }
+}
+
+function Assert-IdleJobDirectories($Directories) {
+    Initialize-StorageNative
     foreach ($directory in $Directories) {
         # A process's current directory is a directory handle, absent from CIM's
         # command line. Refuse it before removing any child, rather than discovering
@@ -57,6 +76,26 @@ public static class RunnerStorageNative {
         try { if ($handle.IsInvalid) { throw "Job directory is in use or unreadable: $directory" } }
         finally { $handle.Dispose() }
     }
+}
+
+function Add-StorageFileHandle([string]$Path, [IO.FileAccess]$Access, $Seen, $Handles) {
+    Initialize-StorageNative
+    # A metadata-only handle can identify another hard link even while our first
+    # data handle denies new readers/writers. Do not confuse our own guard with
+    # a live consumer, or weaken the exclusive guard by sharing data reads.
+    $probe = [RunnerStorageNative]::CreateFileW($Path, 0, 7, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+    try {
+        if ($probe.IsInvalid) { throw "Cannot identify job file: $Path" }
+        $identity = [RunnerStorageNative]::Identity($probe)
+        if ($Seen.Contains($identity)) { return }
+        $handle = [IO.File]::Open($Path, [IO.FileMode]::Open, $Access, [IO.FileShare]::Delete)
+        try {
+            if ([RunnerStorageNative]::Identity($handle.SafeFileHandle) -ne $identity) { throw "Job file changed during preflight: $Path" }
+            $Handles.Add($handle)
+            $handle = $null
+            [void]$Seen.Add($identity)
+        } finally { if ($handle) { $handle.Dispose() } }
+    } finally { $probe.Dispose() }
 }
 
 function Get-OwnWorker($Processes) {
@@ -143,16 +182,17 @@ function Remove-StorageLeaf([string]$Path, [string]$Parent, [string]$Mode, [bool
     if ($blocker) { return @{ status = 'skipped'; path = $pathFull; reason = $blocker } }
     if ($Mode -eq 'job-work') { Assert-IdleJobDirectories $tree.directories }
     $handles = New-Object 'System.Collections.Generic.List[System.IO.FileStream]'
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
     try {
         foreach ($lock in $tree.locks) {
             # Deny new read/write opens for the duration, but permit deleting the locked
             # directory. An existing Cargo build makes this open fail without touching it.
-            $handles.Add([IO.File]::Open($lock, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Delete))
+            Add-StorageFileHandle $lock ([IO.FileAccess]::ReadWrite) $seen $handles
         }
         # Preflight the complete job tree before removing any file. Keep handles until
         # deletion finishes: an existing reader/writer retains the whole directory.
         foreach ($file in $tree.files) {
-            $handles.Add([IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Delete))
+            Add-StorageFileHandle $file ([IO.FileAccess]::Read) $seen $handles
         }
         # Resolve again just before removal, with LiteralPath and no shell handoff.
         $resolved = (Resolve-Path -LiteralPath $pathFull).ProviderPath.TrimEnd('\')
