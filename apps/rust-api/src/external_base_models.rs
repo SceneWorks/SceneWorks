@@ -22,6 +22,170 @@ pub(crate) use sceneworks_core::external_base_models::{
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn flux2_retry_and_duplicate_keep_verified_precision_with_frozen_source() {
+        use crate::portable_admission::{capture_local_model_entry, portable_authored_options};
+        use crate::tests::support::{create_project, request, test_settings};
+        use axum::http::StatusCode;
+        use sceneworks_core::contracts::{JobType, WorkerCapability};
+        use sceneworks_core::jobs_store::{CreateJob, RegisterWorker};
+        use sceneworks_core::model_artifacts::portable_binding::{
+            canonical_authored_options_sha256, registered_digest_member_claim_id,
+            PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceClaim,
+            PortableSourceProvenance,
+        };
+        use sceneworks_core::source_precision::SourcePrecision;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = models_root(temp.path());
+        let path = root.join("diffusion_models/flux2_dev_fp8mixed.safetensors");
+        write_safetensors(&path, &flux2_dev_dit_inline_scale_keys());
+        let mut settings = test_settings(&temp);
+        settings.external_model_roots = vec![root];
+        settings.candle_required = true;
+        let (app, state) = crate::create_app_with_state(settings).unwrap();
+        let (_, project) = create_project(app.clone(), &"External FLUX.2 replay").await;
+        let id = "external_base_flux2-dev-fp8mixed";
+        let current = crate::models::resolve_model_manifest_entry(&state, id)
+            .await
+            .unwrap();
+        assert_eq!(current["importQuantFormat"], "fp8_e4m3_scalar");
+
+        let mut saved = current.as_object().unwrap().clone();
+        saved.remove("importQuantFormat");
+        saved.remove("sourcePrecision");
+        saved.insert("quant".into(), json!("fp8_inline_scale"));
+        saved.get_mut("components").unwrap()[0]["quant"] = json!("fp8_inline_scale");
+        saved.insert("name".into(), json!("Frozen pre-upgrade carrier"));
+        let project_id = project["id"].as_str().unwrap();
+        let payload = json!({
+            "projectId": project_id, "mode": "text_to_image", "model": id, "prompt": "a fox",
+            "variant": "q4", "advanced": {"quant": "q4", "steps": 12},
+            "modelManifestEntry": saved,
+        });
+        let authored = portable_authored_options(payload.as_object().unwrap());
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            id,
+            "candle",
+            "q4",
+            None,
+            &canonical_authored_options_sha256(&authored).unwrap(),
+            capture_local_model_entry(&state, &current, "modelManifestEntry").unwrap(),
+        )
+        .unwrap();
+        let claims: Vec<_> = model
+            .members
+            .iter()
+            .map(|member| {
+                PortableSourceClaim::new(
+                    registered_digest_member_claim_id(&model, member, &payload).unwrap(),
+                    PortableSourceProvenance::OperatorOverride,
+                    member.files.clone(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let route = PortableRouteBinding::new("candle", "windows", vec![model]).unwrap();
+        let frozen = PortableJobBinding::new(authored, [(route.key(), route)].into()).unwrap();
+        state
+            .jobs_store
+            .register_worker_with_portable_sources(
+                RegisterWorker {
+                    worker_id: "flux2-fixture".into(),
+                    gpu_id: "cuda:0".into(),
+                    gpu_name: None,
+                    capabilities: vec![
+                        WorkerCapability::Gpu,
+                        WorkerCapability::ImageGenerate,
+                        WorkerCapability::Unknown("candle".into()),
+                    ],
+                    loaded_models: Vec::new(),
+                    utilization: None,
+                },
+                Some("windows"),
+                Some(&claims),
+            )
+            .unwrap();
+        let job = state
+            .jobs_store
+            .create_job_with_portable_binding(
+                CreateJob {
+                    job_type: JobType::ImageGenerate,
+                    project_id: Some(project_id.to_owned()),
+                    project_name: None,
+                    payload: payload.as_object().unwrap().clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 0,
+                    initial_status: None,
+                },
+                None,
+                None,
+                Some(&serde_json::to_value(&frozen).unwrap()),
+            )
+            .unwrap();
+        let expected_binding =
+            serde_json::to_value(frozen.with_fixed_source_precision(id).unwrap()).unwrap();
+        let mut expected_entry = saved;
+        expected_entry.insert(
+            "importQuantFormat".into(),
+            current["importQuantFormat"].clone(),
+        );
+        SourcePrecision::project(&mut expected_entry);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{}/{operation}", job.id),
+                json!({"payloadChanges": {}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+            let replay_id = replay["id"].as_str().unwrap();
+            let replay = state.jobs_store.get_job(replay_id).unwrap();
+            assert_eq!(replay.payload["modelManifestEntry"], json!(expected_entry));
+            assert!(replay.payload["variant"].is_null());
+            assert_eq!(replay.payload["advanced"], json!({"steps": 12}));
+            assert_eq!(
+                state.jobs_store.portable_model_binding(replay_id).unwrap(),
+                Some(expected_binding.clone())
+            );
+            let (status, override_error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{}/{operation}", job.id),
+                json!({"payloadChanges": {"advanced": {"quant": "q4"}}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{override_error}");
+            assert_eq!(override_error["context"]["field"], "advanced.quant");
+        }
+
+        // The worker still advertises the admitted bytes. The local replacement has the same
+        // FLUX.2 format and catalog id, but its precision facts cannot be grafted onto that ledger.
+        let mut changed = std::fs::read(&path).unwrap();
+        *changed.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, changed).unwrap();
+        let (status, error) = request(
+            app,
+            "POST",
+            &format!("/api/v1/jobs/{}/retry", job.id),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap()
+                .contains("different bytes"),
+            "{error}"
+        );
+    }
+
     /// Write a safetensors file whose header declares `(name, dtype)` tensors. Only
     /// the header is read, but the declared data must be present or the header is
     /// rejected as truncated (sc-6072).

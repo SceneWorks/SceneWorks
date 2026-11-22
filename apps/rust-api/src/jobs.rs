@@ -2053,7 +2053,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         })
         .and_then(|entry| entry.get("id").and_then(Value::as_str))
         .map(str::to_owned);
-    if let Some(model_id) = fixed_model_id {
+    if let Some(model_id) = &fixed_model_id {
         if persisted.contains_key("variant") {
             // The storage boundary shallow-merges this canonical payload over the old one.
             merged.insert("variant".to_owned(), Value::Null);
@@ -2070,7 +2070,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
                     })?;
                 *binding = serde_json::to_value(
                     frozen
-                        .with_fixed_source_precision(&model_id)
+                        .with_fixed_source_precision(model_id)
                         .map_err(|error| ApiError::bad_request(error.to_string()))?,
                 )
                 .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -2097,7 +2097,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         crate::portable_admission::validate_historical_source_carrier(state, &persisted, &merged)
             .await?;
     }
-    if frozen_portable_binding.is_some() {
+    if let Some(frozen) = &frozen_portable_binding {
         let license_acknowledged = merged
             .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
             .and_then(Value::as_bool)
@@ -2129,13 +2129,23 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // validator below checks authored choices and re-verifies the exact bound sources against
         // current local paths or worker claims; it never treats these old locators as authority.
         if !fresh_portable_selection {
+            let refresh_precision = canonical_selection
+                && fixed_model_id.is_some()
+                && merged.get("model") == persisted.get("model");
             for key in [
                 "modelManifestEntry",
                 "baseModelManifestEntry",
                 "modelManifestEntries",
             ] {
                 if let Some(original) = persisted.get(key) {
-                    merged.insert(key.to_owned(), original.clone());
+                    let restored = match merged.get(key) {
+                        Some(current) if key == "modelManifestEntry" && refresh_precision => {
+                            restore_replay_source_precision(state, original, current, frozen)
+                                .await?
+                        }
+                        _ => original.clone(),
+                    };
+                    merged.insert(key.to_owned(), restored);
                 } else {
                     merged.remove(key);
                 }
@@ -2212,6 +2222,57 @@ async fn validate_and_canonicalize_merged_generation_payload(
         portable_binding,
         fresh_portable_selection,
     ))
+}
+
+/// New source facts can migrate a saved carrier only after verifying their frozen byte identity.
+/// The saved entry still owns every locator, component slot, and plan field used for replay.
+async fn restore_replay_source_precision(
+    state: &AppState,
+    original: &Value,
+    current: &Value,
+    frozen: &Value,
+) -> Result<Value, ApiError> {
+    use sceneworks_core::source_precision::SourcePrecision;
+
+    let mut restored = original.clone();
+    let (Some(old), Some(new)) = (restored.as_object_mut(), current.as_object()) else {
+        return Ok(restored);
+    };
+    let Some(precision) = SourcePrecision::for_entry(new) else {
+        return Ok(restored);
+    };
+    if SourcePrecision::for_entry(old).is_some() {
+        return Ok(restored);
+    }
+    let conflict = || {
+        ApiError::model_artifact_conflict(
+            "Cannot verify source precision for the frozen replay model.".to_owned(),
+            "model_artifact_incomplete",
+        )
+    };
+    if [
+        "id",
+        "type",
+        "family",
+        "catalogScope",
+        "importSourceShape",
+        "importPlan",
+    ]
+    .into_iter()
+    .any(|key| old.get(key) != new.get(key))
+    {
+        return Err(conflict());
+    }
+    let format = new.get("importQuantFormat").ok_or_else(conflict)?;
+    old.insert("importQuantFormat".to_owned(), format.clone());
+    if !SourcePrecision::for_entry(old).is_some_and(|old| old.format() == precision.format()) {
+        return Err(conflict());
+    }
+    let frozen = serde_json::from_value(frozen.clone())
+        .map_err(|error| ApiError::bad_request(format!("Invalid saved source binding: {error}")))?;
+    crate::portable_admission::verify_replay_precision_source(state, current, &frozen).await?;
+    SourcePrecision::project(old);
+    Ok(restored)
 }
 
 /// Replay validation may find only a subset of the original frozen routes currently available.

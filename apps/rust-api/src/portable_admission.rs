@@ -1294,6 +1294,41 @@ pub(crate) async fn validate_frozen_replay_binding(
     .await
 }
 
+/// A current catalog row can supply new precision facts to a frozen replay only if its primary
+/// byte ledger is the one that was admitted. The regular replay check still owns route policy
+/// and availability of every member of the original closure.
+pub(crate) async fn verify_replay_precision_source(
+    state: &AppState,
+    entry: &Value,
+    frozen: &PortableJobBinding,
+) -> Result<(), ApiError> {
+    const SLOT: &str = "modelManifestEntry";
+    frozen
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    let members = capture_local_model_entry_offloaded(state, entry, SLOT).await?;
+    let primary = members
+        .iter()
+        .find(|member| member.role == ArtifactMemberRole::Primary)
+        .ok_or_else(|| incomplete("replay precision has no verified primary source"))?;
+    if !frozen.routes.values().all(|route| {
+        route.models.iter().any(|model| {
+            model.slot == SLOT
+                && entry.get("id").and_then(Value::as_str) == Some(model.model_id.as_str())
+                && model.members.iter().any(|member| {
+                    member.role == ArtifactMemberRole::Primary
+                        && member.source == primary.source
+                        && member.files == primary.files
+                })
+        })
+    }) {
+        return Err(incomplete(
+            "The current source precision belongs to different bytes than the frozen replay source.",
+        ));
+    }
+    Ok(())
+}
+
 async fn validate_frozen_replay_binding_inner(
     state: &AppState,
     job_type: &JobType,
