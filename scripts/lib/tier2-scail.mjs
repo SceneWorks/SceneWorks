@@ -93,21 +93,33 @@ export function scailPackageDigests(index, coverage, source) {
   return { indexSha256: approved(index, "APPROVED_INDEX_SHA256"), coverageSha256: approved(coverage, "APPROVED") };
 }
 
+const partialCaptures = [
+  {
+    artifact:14725116132, receipt:"d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af",
+    revision:"f5c9ff80acd00334fd668e4ecc8d56be3347affd", acceptedCounts:[2,4], intervalCounts:[3,5],
+    certificates:{3:"c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d", 5:"bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"},
+  },
+  {
+    artifact:14735122440, receipt:"d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+    revision:"4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54", acceptedCounts:[2,4,5,6], intervalCounts:[3,6],
+    certificates:{3:"ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d"},
+  },
+];
+
 function acceptedCapture(row, mlx) {
   const a = row.axes;
-  const partialArtifact = row.artifact_id === 14725116132;
-  const partialReceipt = row.receipt_sha256 === "d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af";
-  if (partialArtifact || partialReceipt) {
+  const partial = partialCaptures.find(p => p.artifact === row.artifact_id || p.receipt === row.receipt_sha256);
+  if (partial) {
     const bounds = row.bounds, adapter = bounds.capture_adapter;
-    if (mlx || !partialArtifact || !partialReceipt || row.accepted !== false
-      || row.inference_revision !== "f5c9ff80acd00334fd668e4ecc8d56be3347affd"
+    if (mlx || partial.artifact !== row.artifact_id || partial.receipt !== row.receipt_sha256 || row.accepted !== false
+      || row.inference_revision !== partial.revision
       || adapter?.cuda_uuid !== "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
       || adapter.luid !== "luid_0x00000000_0x0001f603" || adapter.node_mask !== 1
-      || bounds.device.basis !== "measured_aggregate") return false;
-    if ([2, 4].includes(a.references)) return row.count_accepted === true && row.recovery_certificate_sha256 === undefined && bounds.device_interval === undefined;
-    const cert = {3:"c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d", 5:"bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"}[a.references];
-    return cert !== undefined && row.recovery_certificate_sha256 === cert && row.count_accepted === false
-      && bounds.device_interval === "load_through_completed_rgb";
+      || bounds.device.basis !== "measured_aggregate"
+      || bounds.device_interval !== (partial.intervalCounts.includes(a.references) ? "load_through_completed_rgb" : undefined)) return false;
+    if (partial.acceptedCounts.includes(a.references)) return row.count_accepted === true && row.recovery_certificate_sha256 === undefined;
+    const cert = partial.certificates[a.references];
+    return cert !== undefined && row.recovery_certificate_sha256 === cert && row.count_accepted === false;
   }
   if (row.count_accepted !== undefined) return false;
   const archivedArtifact = row.artifact_id === 14719969057;

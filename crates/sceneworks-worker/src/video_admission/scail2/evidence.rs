@@ -259,38 +259,52 @@ impl Capture {
         const FOUR_COUNT_ARTIFACT: u64 = 14_725_116_132;
         const FOUR_COUNT_RECEIPT: &str =
             "d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af";
-        if self.artifact_id == FOUR_COUNT_ARTIFACT || self.receipt_sha256 == FOUR_COUNT_RECEIPT {
-            return self.artifact_id == FOUR_COUNT_ARTIFACT
-                && self.receipt_sha256 == FOUR_COUNT_RECEIPT
-                && self.inference_revision == "f5c9ff80acd00334fd668e4ecc8d56be3347affd"
+        const FIVE_COUNT_ARTIFACT: u64 = 14_735_122_440;
+        const FIVE_COUNT_RECEIPT: &str =
+            "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545";
+        for (artifact, receipt, revision) in [
+            (
+                FOUR_COUNT_ARTIFACT,
+                FOUR_COUNT_RECEIPT,
+                "f5c9ff80acd00334fd668e4ecc8d56be3347affd",
+            ),
+            (
+                FIVE_COUNT_ARTIFACT,
+                FIVE_COUNT_RECEIPT,
+                "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+            ),
+        ] {
+            if self.artifact_id != artifact && self.receipt_sha256 != receipt {
+                continue;
+            }
+            let (certificate, interval) = match (artifact, self.axes.references) {
+                (FOUR_COUNT_ARTIFACT, 2 | 4) | (FIVE_COUNT_ARTIFACT, 2 | 4 | 5) => (None, false),
+                (FIVE_COUNT_ARTIFACT, 6) => (None, true),
+                (FOUR_COUNT_ARTIFACT, 3) => (
+                    Some("c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d"),
+                    true,
+                ),
+                (FOUR_COUNT_ARTIFACT, 5) => (
+                    Some("bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"),
+                    true,
+                ),
+                (FIVE_COUNT_ARTIFACT, 3) => (
+                    Some("ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d"),
+                    true,
+                ),
+                _ => return false,
+            };
+            return self.artifact_id == artifact
+                && self.receipt_sha256 == receipt
+                && self.inference_revision == revision
                 && !self.accepted
+                && self.count_accepted == Some(certificate.is_none())
+                && self.recovery_certificate_sha256.as_deref() == certificate
                 && self.platform == "windows"
                 && matches!(&self.bounds, PhysicalBounds::WindowsJobAndWddm { capture_adapter, device: Envelope::MeasuredAggregate {..}, device_interval,.. }
                     if capture_adapter.cuda_uuid == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
                         && capture_adapter.luid == "luid_0x00000000_0x0001f603" && capture_adapter.node_mask == 1
-                        && device_interval.is_some() == (self.count_accepted == Some(false)))
-                && matches!(
-                    (
-                        self.axes.references,
-                        self.count_accepted,
-                        self.recovery_certificate_sha256.as_deref()
-                    ),
-                    (2 | 4, Some(true), None)
-                        | (
-                            3,
-                            Some(false),
-                            Some(
-                                "c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d"
-                            )
-                        )
-                        | (
-                            5,
-                            Some(false),
-                            Some(
-                                "bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"
-                            )
-                        )
-                );
+                        && device_interval.is_some() == interval);
         }
         if self.count_accepted.is_some() {
             return false;
@@ -448,6 +462,42 @@ fn continuation_keeps_each_original_count_and_its_own_certificate() {
             .unwrap()
             .source_accepted()
     };
+    let mut full = row.clone();
+    full["artifact_id"] = json!(14_735_122_440_u64);
+    full["inference_revision"] = json!("4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54");
+    full["receipt_sha256"] =
+        json!("d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545");
+    for count in 2..=6 {
+        let mut r = full.clone();
+        r["axes"]["references"] = json!(count);
+        r["count_accepted"] = json!(count != 3);
+        if count == 3 {
+            r["recovery_certificate_sha256"] =
+                json!("ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d");
+        }
+        if matches!(count, 3 | 6) {
+            r["bounds"]["device_interval"] = json!("load_through_completed_rgb");
+        }
+        assert!(accepted(&r));
+        let mut crossed = r.clone();
+        crossed["recovery_certificate_sha256"] = json!(certificates[0]);
+        assert!(!accepted(&crossed));
+        let mut crossed = r.clone();
+        crossed["artifact_id"] = row["artifact_id"].clone();
+        assert!(!accepted(&crossed));
+        let mut crossed = r.clone();
+        crossed["count_accepted"] = json!(count == 3);
+        assert!(!accepted(&crossed));
+        if matches!(count, 3 | 6) {
+            r["bounds"]
+                .as_object_mut()
+                .unwrap()
+                .remove("device_interval");
+        } else {
+            r["bounds"]["device_interval"] = json!("load_through_completed_rgb");
+        }
+        assert!(!accepted(&r));
+    }
     for count in 2..=5 {
         let mut r = row.clone();
         r["axes"]["references"] = json!(count);

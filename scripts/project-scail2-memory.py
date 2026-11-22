@@ -242,7 +242,8 @@ def validate_render_scope(scope, end, dedicated, misses, pool, card):
 
 
 def validate_rejected_growth(
-    guard, end, native_pool, card, pool_high, *, completed=False, tied_read=False, fresh_gpu0=False
+    guard, end, native_pool, card, pool_high, *,
+    completed=False, tied_read=False, fresh_gpu0=False, exit_at_zero=False,
 ):
     """A failed read is chargeable only when this Job's verified output pool has retired."""
     mark, zero = end["pool"], end["zero"]
@@ -323,6 +324,28 @@ def validate_rejected_growth(
     if tied_read:
         events = end["rejected_growth"]
         final = events[-1]
+        if exit_at_zero:
+            dedicated = guard["cuda_attribution"]["wddm_dedicated"]["samples"]
+            shared = guard["fit_observation"]["wddm_shared"]["samples"]
+            # Each live poll has an ordered pair of PDH observations, except the final recorded gap.
+            require(
+                len(dedicated) == len(shared) == zero["card_index"] + len(events) - 1
+                and all(d[0] <= s[0] for d, s in zip(dedicated, shared))
+                and all(s[0] < d[0] for s, d in zip(shared, dedicated[1:])),
+                "incomplete paired WDDM observations before the last live read",
+            )
+            terminal_states = (
+                len(events) == 3
+                and exited_at is None
+                and final["after"] == "live"
+                and (zero["before"], zero["after"]) == ("live", "exited_empty")
+            )
+        else:
+            terminal_states = (
+                exited_at == zero["card_index"]
+                and final["after"] == "exited_empty"
+                and zero["before"] == zero["after"] == "exited_empty"
+            )
         require(
             len(events) >= 2
             and [v["card_index"] for v in end["pool_growth"]]
@@ -335,11 +358,10 @@ def validate_rejected_growth(
             and mark["at_ns"] < events[-2]["at_ns"] < final["read_ns"] == last_used
             and 0 < final["child_growth_bytes"] < reserved
             and final["before"] == "live"
-            and final["after"] == "exited_empty"
+            and terminal_states
             and final["detail"] == "CUDA pool proof exceeds concurrent global use"
-            and exited_at == final["next_card_index"] == zero["card_index"]
-            and final["read_ns"] <= final["at_ns"] < zero["at_ns"]
-            and zero["before"] == zero["after"] == "exited_empty",
+            and final["next_card_index"] == zero["card_index"]
+            and final["read_ns"] <= final["at_ns"] < zero["at_ns"],
             "terminal CUDA read does not precede this Job's measured zero",
         )
     validate_post_output_gaps(guard, end, last_used, tied_read=tied_read, fresh_gpu0=fresh_gpu0)
@@ -603,6 +625,7 @@ def windows_device_peak(
     completion=None,
     tied_read=False,
     fresh_gpu0=False,
+    exit_at_zero=False,
 ):
     admission = guard["admission"]
     baseline = byte_count(admission.get("gpuGlobalUsedBaselineBytes"))
@@ -699,7 +722,8 @@ def windows_device_peak(
             validate_render_scope(scope, end, dedicated, misses, pool, card)
             if rejected:
                 validate_rejected_growth(
-                    guard, end, native_pool, card, pool, tied_read=tied_read, fresh_gpu0=fresh_gpu0
+                    guard, end, native_pool, card, pool, tied_read=tied_read, fresh_gpu0=fresh_gpu0,
+                    exit_at_zero=exit_at_zero,
                 )
             elif fresh_gpu0:
                 validate_post_output_gaps(
@@ -753,8 +777,21 @@ FOUR_COUNT_CERTIFICATES = {
 }
 
 
-def partial_count_row(receipt, review, archive, certificates):
-    identity = FOUR_COUNT_CAPTURE
+FIVE_COUNT_CAPTURE = {
+    "run_id": "44969015053",
+    "run_attempt": "1",
+    "artifact_id": "14735122440",
+    "inference_revision": "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54",
+    "plan_sha256": "476e244074871e6e486107e4f65a515bf593a3c593d009c679a7ffbb2b2dee51",
+    "archive_sha256": "ebb9d70b374f2e2e430fe292a6bf0f0d15d9c702142a657158d1bf525f17d388",
+    "receipt_sha256": "d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+}
+FIVE_COUNT_CERTIFICATES = {3: "ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d"}
+
+
+def partial_count_row(receipt, review, archive, certificates, *, five_count=False):
+    identity = FIVE_COUNT_CAPTURE if five_count else FOUR_COUNT_CAPTURE
+    hashes = FIVE_COUNT_CERTIFICATES if five_count else FOUR_COUNT_CERTIFICATES
     count = review["references"]
     require(
         archive
@@ -767,11 +804,11 @@ def partial_count_row(receipt, review, archive, certificates):
         and sha256(json.dumps(receipt["contract"], sort_keys=True, separators=(",", ":")).encode())
         == identity["plan_sha256"]
         and receipt["accepted"] is False
-        and count in (2, 3, 4, 5),
-        "different four-count archive or review",
+        and count in (range(2, 7) if five_count else range(2, 6)),
+        "different partial archive or review",
     )
     record = receipt["counts"][str(count)]
-    if count in (2, 4):
+    if count not in hashes:
         require(
             record["accepted"] is True
             and certificates is None
@@ -786,13 +823,17 @@ def partial_count_row(receipt, review, archive, certificates):
         and "candidate_row_pending_physical_review" not in record,
         "missing original rejected count or separate certificate",
     )
-    cert = json.loads(certificates.read_bytes())[str(count)]
+    certificate_bytes = certificates.read_bytes()
+    document = json.loads(certificate_bytes)
+    cert = document if five_count else document[str(count)]
     digest = sha256((json.dumps(cert, sort_keys=True, separators=(",", ":")) + "\n").encode())
     require(
-        cert["schema"] == "scail2-quiet-gpu0-owned-zero-recovery-v1"
+        cert["schema"] == ("scail2-quiet-gpu0-last-live-recovery-v1" if five_count
+                           else "scail2-quiet-gpu0-owned-zero-recovery-v1")
         and cert["references"] == count
         and cert["capture"] == identity
-        and digest == FOUR_COUNT_CERTIFICATES[count] == review["recovery_certificate_sha256"],
+        and digest == hashes[count] == review["recovery_certificate_sha256"]
+        and (not five_count or sha256(certificate_bytes) == digest),
         "different owned-zero recovery certificate",
     )
     return cert["candidate_row_pending_physical_review"]
@@ -826,8 +867,8 @@ def recovered_row(receipt, review, certificate_path, archive_path):
     return certificate["candidate_row_pending_physical_review"]
 
 
-def validate_fresh_gpu0_plan(receipt, review, guard, record):
-    """Match the verified hosted plan and its original full, accepted GPU0 campaign."""
+def validate_fresh_gpu0_plan(receipt, review, guard, record, *, five_count=False):
+    """Match the hosted five-count GPU0 plan and the original verdict for every count."""
     contract = receipt["contract"]
     request = receipt["request"]
     encode = lambda value: json.dumps(
@@ -836,6 +877,20 @@ def validate_fresh_gpu0_plan(receipt, review, guard, record):
     # The native GPU0 scail2-plural-fit request fixes the 84 GiB device cap,
     # 6 GiB free reserve, 64 GiB Job cap, 250 ms poll and original deadline.
     request_digest = "70d4d02ac74e5c0a9994b5728c4950df050c652bc47263fe3164ea6cbb601722"
+
+    def original_verdict(count, item):
+        if five_count and count == "3":
+            return (
+                item["accepted"] is False
+                and item.get("telemetry_failure") == "incomplete_wddm_samples"
+                and "candidate_row_pending_physical_review" not in item
+            )
+        return (
+            item["accepted"] is True
+            and "candidate_row_pending_physical_review" in item
+            and "telemetry_failure" not in item
+        )
+
     require(
         contract.get("cuda_completion") == "supervisor-owned-windows-job"
         and contract["backend"] == "candle-cuda"
@@ -844,14 +899,9 @@ def validate_fresh_gpu0_plan(receipt, review, guard, record):
         and request == contract["request"]
         and sha256(encode(request) + b"\n") == request_digest
         and review.get("hosted_plan_sha256") == sha256(encode(contract))
-        and receipt["accepted"] is True
+        and receipt["accepted"] is (not five_count)
         and set(receipt["counts"]) == {str(count) for count in contract["counts"]}
-        and all(
-            item["accepted"] is True
-            and "candidate_row_pending_physical_review" in item
-            and "telemetry_failure" not in item
-            for item in receipt["counts"].values()
-        ),
+        and all(original_verdict(count, item) for count, item in receipt["counts"].items()),
         "fresh capture differs from the complete accepted hosted GPU0 plan",
     )
     output = record["native"]["output"]
@@ -897,7 +947,11 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
         "review belongs to a different receipt",
     )
     receipt = json.loads(receipt_bytes)
-    partial = (
+    five_count = (
+        str(review["artifact_id"]) == FIVE_COUNT_CAPTURE["artifact_id"]
+        or review["receipt_sha256"] == FIVE_COUNT_CAPTURE["receipt_sha256"]
+    )
+    partial = five_count or (
         str(review["artifact_id"]) == FOUR_COUNT_CAPTURE["artifact_id"]
         or review["receipt_sha256"] == FOUR_COUNT_CAPTURE["receipt_sha256"]
     )
@@ -947,7 +1001,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
         "capture guard did not complete for this process",
     )
     if partial:
-        row = partial_count_row(receipt, review, archive_path, certificate_path)
+        row = partial_count_row(receipt, review, archive_path, certificate_path, five_count=five_count)
     elif recovery:
         row = recovered_row(receipt, review, certificate_path, archive_path)
     else:
@@ -977,12 +1031,12 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
     if fresh_gpu0:
         require(
             not recovery
-            and not partial
+            and (not partial or five_count)
             and row["platform"] == "windows"
             and str(hw["index"]) == "0",
             "expected an ordinary Windows GPU0 capture",
         )
-        validate_fresh_gpu0_plan(receipt, review, guard, record)
+        validate_fresh_gpu0_plan(receipt, review, guard, record, five_count=five_count)
     if row["platform"] == "macos":
         require(
             (row["device"], row["runtime"]) == (hw["chip"], hw["os_build"])
@@ -1166,6 +1220,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                     completion=completion,
                     tied_read=tied_read,
                     fresh_gpu0=fresh_gpu0,
+                    exit_at_zero=five_count and count == 3,
                 ),
                 admission["childGpuCapBytes"],
             ),

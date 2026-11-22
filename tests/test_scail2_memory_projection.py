@@ -1036,7 +1036,50 @@ def test_owned_zero_requires_both_gauge_gaps_in_the_same_final_cuda_read(changed
             peak()
 
 
-def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_path, monkeypatch):
+@pytest.mark.parametrize("crossed", [None, "earlier_exit", "zero_before", "zero_after", "missing_read", "gauge_ended_late", "wrong_scope", "missing_pdh_pair", "crossed_pair"])
+def test_certified_final_live_read_and_next_owned_zero(crossed):
+    _, guard = windows_guard()
+    scope, pool = with_rejected_reads(guard)
+    end, last, _, shared = set_tied_read(guard, scope)
+    for series in [guard["cuda_attribution"]["wddm_dedicated"], guard["fit_observation"]["wddm_shared"]]:
+        series["samples"][:0] = [[897, 0], [899, 0]]
+    last["after"] = "live"
+    end["zero"]["before"] = "live"
+    previous = end["rejected_growth"][0]
+    end["rejected_growth"].insert(1, dict(previous, read_ns=223, at_ns=224))
+    if crossed == "earlier_exit":
+        last["after"] = "exited_empty"
+    elif crossed == "zero_before":
+        end["zero"]["before"] = "exited_empty"
+    elif crossed == "zero_after":
+        end["zero"]["after"] = "live"
+    elif crossed == "missing_read":
+        end["rejected_growth"].pop(1)
+    elif crossed == "gauge_ended_late":
+        shared["end_ns"] += 1
+    elif crossed == "missing_pdh_pair":
+        guard["fit_observation"]["wddm_shared"]["samples"].pop(0)
+    elif crossed == "crossed_pair":
+        guard["fit_observation"]["wddm_shared"]["samples"][0][0] = 899
+    def validate():
+        tool["validate_rejected_growth"](
+            guard, end, pool, guard["fit_observation"]["card_samples_monotonic_ns_free_owned_or_fallback_bytes"],
+            80, tied_read=True, fresh_gpu0=True, exit_at_zero=crossed != "wrong_scope",
+        )
+    if crossed:
+        with pytest.raises(ValueError):
+            validate()
+    else:
+        validate()
+
+
+@pytest.mark.parametrize("five_count", [False, True])
+def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_path, monkeypatch, five_count):
+    from functools import partial
+
+    prefix = "FIVE_COUNT" if five_count else "FOUR_COUNT"
+    counts = range(2, 7 if five_count else 6)
+    rejected = (3,) if five_count else (3, 5)
     receipt = {"accepted": False, "contract": {"head": "a" * 40}, "counts": {}}
     archive, proofs = tmp_path / "archive.zip", tmp_path / "certificates.json"
     archive.write_bytes(b"original archive")
@@ -1045,23 +1088,23 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
         return json.dumps(v, sort_keys=True, separators=(",", ":")).encode()
 
     identity = dict(
-        tool["FOUR_COUNT_CAPTURE"],
+        tool[prefix + "_CAPTURE"],
         inference_revision=receipt["contract"]["head"],
         plan_sha256=tool["sha256"](compact(receipt["contract"])),
         archive_sha256=tool["sha256"](archive.read_bytes()),
     )
     namespace = tool["partial_count_row"].__globals__
-    monkeypatch.setitem(namespace, "FOUR_COUNT_CAPTURE", identity)
+    monkeypatch.setitem(namespace, prefix + "_CAPTURE", identity)
     certificates, hashes = {}, {}
-    for count in range(2, 6):
+    for count in counts:
         row = {"measured": count}
-        record = {"accepted": count in (2, 4)}
+        record = {"accepted": count not in rejected}
         if record["accepted"]:
             record["candidate_row_pending_physical_review"] = row
         else:
             record["telemetry_failure"] = "incomplete_wddm_samples"
             cert = {
-                "schema": "scail2-quiet-gpu0-owned-zero-recovery-v1",
+                "schema": "scail2-quiet-gpu0-last-live-recovery-v1" if five_count else "scail2-quiet-gpu0-owned-zero-recovery-v1",
                 "capture": identity,
                 "references": count,
                 "candidate_row_pending_physical_review": row,
@@ -1069,9 +1112,9 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
             certificates[str(count)] = cert
             hashes[count] = tool["sha256"](compact(cert) + b"\n")
         receipt["counts"][str(count)] = record
-    monkeypatch.setitem(namespace, "FOUR_COUNT_CERTIFICATES", hashes)
-    proofs.write_bytes(compact(certificates))
-    for count in range(2, 6):
+    monkeypatch.setitem(namespace, prefix + "_CERTIFICATES", hashes)
+    proofs.write_bytes(compact(certificates["3"]) + b"\n" if five_count else compact(certificates))
+    for count in counts:
         review = {
             k: identity[k] for k in ("artifact_id", "receipt_sha256", "run_id", "run_attempt")
         }
@@ -1080,7 +1123,7 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
         if count in hashes:
             review["recovery_certificate_sha256"] = hashes[count]
             source = proofs
-        read = tool["partial_count_row"]
+        read = partial(tool["partial_count_row"], five_count=five_count)
         assert read(receipt, review, archive, source) == {"measured": count}
         for name in ("artifact_id", "receipt_sha256", "run_id", "run_attempt"):
             with pytest.raises(ValueError):
@@ -1091,7 +1134,7 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
             with pytest.raises(ValueError):
                 read(
                     receipt,
-                    dict(review, recovery_certificate_sha256=hashes[8 - count]),
+                    dict(review, recovery_certificate_sha256=hashes.get(8 - count, "b" * 64)),
                     archive,
                     proofs,
                 )

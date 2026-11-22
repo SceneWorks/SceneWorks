@@ -1475,6 +1475,27 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         change(wrong.find(r => r.axes.references === count));
         assert.throws(() => read(wrong, partialCoverage));
       }
+      const latestPin = "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54";
+      const latestCoverage = {...both, coverage:[...both.coverage, {...coverage, capture_revision:latestPin}]};
+      const latest = structuredClone(partial);
+      for (const r of latest) {
+        Object.assign(r, {artifact_id:14735122440, receipt_sha256:"d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+          inference_revision:latestPin, count_accepted:r.axes.references !== 3, accepted:false});
+        if (r.axes.references === 3) r.recovery_certificate_sha256 = "ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d";
+        else delete r.recovery_certificate_sha256;
+        if (![3,6].includes(r.axes.references)) delete r.bounds.device_interval;
+      }
+      assert.deepEqual(read(latest, latestCoverage).map(r => r.references), counts);
+      for (const [count, mutate] of [
+        [3, r => {delete r.recovery_certificate_sha256;}], [3, r => {r.recovery_certificate_sha256 = certificates[3];}],
+        [3, r => {r.count_accepted = true;}], [6, r => {delete r.bounds.device_interval;}],
+        [5, r => {r.bounds.device_interval = "load_through_completed_rgb";}], [2, r => {r.accepted = true; delete r.count_accepted;}],
+        [4, r => {r.artifact_id = 14725116132;}],
+      ]) {
+        const wrong = structuredClone(latest);
+        mutate(wrong.find(r => r.axes.references === count));
+        assert.throws(() => read(wrong, latestCoverage));
+      }
       const joined = read(split, both);
       assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
         split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));
