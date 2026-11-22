@@ -58,6 +58,8 @@ const memory = { gpuUuid: "GPU-2160ecaf-a2b7-7321-87a2-1234567890ab", hostLifeti
 
 test("actual pass context, cumulative native pool counters and owned process peaks keep their own domains", () => {
   const measured = kreaAllocationReceipt(log(receiptFields()), memory, 3200);
+  const workerLog = receiptFields().map((entry) => JSON.stringify(entry)).join("\n");
+  assert.deepEqual(kreaAllocationReceipt(workerLog, memory, 3200), measured);
   assert.equal(measured.status, "observed");
   assert.equal(measured.pool.length, 6);
   assert.ok(measured.ownedGpuPeakBytes > measured.admissions[1].available_additional_bytes);

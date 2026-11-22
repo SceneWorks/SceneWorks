@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { sha256 } from "./lib/file-sha256.mjs";
-import { kreaAllocationOverlay } from "./krea-tier2-allocation.mjs";
+import { kreaAllocationOverlay, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
 
 export const SAMPLER_SOURCE_FILE = "crates/sceneworks-worker/src/memory_strategy.rs";
 const BASE_SAMPLER_SOURCE_SHA = "c69878bde04838b8a2b51cbbefba32c22fa5279aea86cd0cec981bd37f63b2cf";
@@ -63,14 +63,9 @@ export function kreaOwnedGpuSample(csv, ownedPid, uuid) {
 export function kreaSamplerReceipt(log, route) {
   const expected = route.proof === "raw" ? [[512, 512, 10]] : [[512, 512, 8], [768, 768, 2]];
   const desiredEngine = route.proof === "raw" ? "krea_2_raw" : "krea_2_turbo";
-  const passes = log.split(/\r?\n/).flatMap((line) => {
-    try {
-      const { fields } = JSON.parse(line);
-      if (fields?.event !== "sgaf336_krea_sampler") return [];
-      const { engine, width, height, steps, elapsed_ns: elapsedNs, valid } = fields;
-      return [{ engine, width, height, steps, elapsedNs, valid }];
-    } catch { return []; }
-  });
+  const passes = kreaWorkerLogEvents(log)
+    .filter(({ event }) => event === "sgaf336_krea_sampler")
+    .map(({ engine, width, height, steps, elapsed_ns: elapsedNs, valid }) => ({ engine, width, height, steps, elapsedNs, valid }));
   assert.deepEqual(passes.map(({ width, height, steps }) => [width, height, steps]), expected, "expected separate native timing for each actual Krea pass");
   assert.ok(passes.every(({ engine, valid, elapsedNs }) => engine === desiredEngine && valid && Number.isSafeInteger(elapsedNs) && elapsedNs > 0), "native synchronized sampler interval missing or invalid");
   return passes;

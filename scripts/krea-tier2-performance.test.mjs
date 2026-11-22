@@ -40,6 +40,8 @@ const logFor = (passes) => passes.map((fields) => JSON.stringify({ fields: { eve
 
 test("Hires requires independently fenced timings and a persisted terminal SSE, with no metric fallback", () => {
   const passes = kreaSamplerReceipt(logFor(nativePasses()), HIRES);
+  const workerLog = nativePasses().map((entry) => JSON.stringify({ event: "sgaf336_krea_sampler", ...entry })).join("\n");
+  assert.deepEqual(kreaSamplerReceipt(workerLog, HIRES), passes);
   assert.throws(() => kreaSamplerReceipt(logFor(nativePasses().slice(0, 1)), HIRES), /separate native timing/);
   assert.throws(() => kreaSamplerReceipt(logFor(nativePasses().map((pass) => ({ ...pass, valid: false }))), HIRES), /missing or invalid/);
   const memory = { hostLifetimePeakBytes: 100, ownedGpuPeakBytes: 80, gpuUuid: GPU, ownedGpuSamples: 3, ownedGpuErrors: 0 };

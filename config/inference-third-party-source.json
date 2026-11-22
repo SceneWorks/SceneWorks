@@ -1,7 +1,7 @@
 {
   "_comment": "The inference inventory at 2085c382 records 817 provenance candidates and 146 production-Rust crate prefixes. This integration pins the vendored Candle neural-network crate and records its upstream license. The shared Candle checkpoint crate contains SceneWorks checkpoint readers and projection routing. Existing open source classifications remain in the check-license-coverage report.",
-  "inferenceRevision": "2085c382705e4ec275ee93c698c134993673221e",
-  "auditDigest": "cad9db170e5c9002c40ca53194df45347d02a5e044ad7b8eb41e254b1846ea03",
+  "inferenceRevision": "5b7bd9690e084b8fe9ad746b74560cea601e973d",
+  "auditDigest": "617ad3dec6019c0b45ed0d97318308d1362ad0b77601186ae60b4961de1595cd",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "2085c382705e4ec275ee93c698c134993673221e",
+    "revision": "5b7bd9690e084b8fe9ad746b74560cea601e973d",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 817,
-    "populationSha256": "8add7033b518ad45f01750bb61db07c5e170d7151520f9b3f75224bc32cd1c26"
+    "matchedFiles": 815,
+    "populationSha256": "ab9713982e7fca0ee6ac20bf1216a630a6a5d2f712cb367137f5bbdac0e95c3f"
   },
   "portedSourceAreas": [
     {
@@ -1064,7 +1064,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "2085c382705e4ec275ee93c698c134993673221e",
+    "revision": "5b7bd9690e084b8fe9ad746b74560cea601e973d",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 146,
     "cratePopulationSha256": "dd5c31283ab160566bc23f3da7cd8af6f0cda29e0a43d09cd5b1acf8e75049c5"

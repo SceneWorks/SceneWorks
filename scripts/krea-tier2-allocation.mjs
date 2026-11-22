@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 export const KREA_ALLOCATION_POOL_BYTES = 64 * 1024 ** 3;
 export const KREA_ALLOCATION_MINUTES = 55;
-export const KREA_WIDE_IM2COL_PIN = "2085c382705e4ec275ee93c698c134993673221e";
+export const KREA_WIDE_IM2COL_PIN = "5b7bd9690e084b8fe9ad746b74560cea601e973d";
 export const KREA_ALLOCATION_BASE_SIZE = 1120;
 export const KREA_ALLOCATION_FINAL_SIZE = 2240;
 const HOOK_FILE = new URL("./ci/krea-allocation-probe.rs.in", import.meta.url);
@@ -56,13 +56,18 @@ ${indent}}`;
   return `${result}\n${await readFile(HOOK_FILE, "utf8")}`;
 }
 
-export function kreaAllocationReceipt(log, memory, hostCapBytes) {
-  const entries = log.split(/\r?\n/).flatMap((line) => {
+export function kreaWorkerLogEvents(log) {
+  return log.split(/\r?\n/).flatMap((line) => {
     try {
-      const { fields } = JSON.parse(line);
-      return fields ? [fields] : [];
+      const record = JSON.parse(line);
+      const fields = record?.fields ?? record;
+      return typeof fields?.event === "string" ? [fields] : [];
     } catch { return []; }
   });
+}
+
+export function kreaAllocationReceipt(log, memory, hostCapBytes) {
+  const entries = kreaWorkerLogEvents(log);
   const admissions = entries.filter(({ event }) => event === "sgaf336_krea_allocation_admission");
   assert.deepEqual(admissions.map(({ width, height, reference_count }) => [width, height, reference_count]), [[KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_BASE_SIZE, 0], [KREA_ALLOCATION_FINAL_SIZE, KREA_ALLOCATION_FINAL_SIZE, 1]], "Candle worker did not expose both actual provider pass shapes");
   for (const pass of admissions) {

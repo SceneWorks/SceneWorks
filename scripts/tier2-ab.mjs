@@ -45,7 +45,7 @@ import {
   SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedGpuSample,
   kreaSamplerReceipt, kreaPerformanceObservation, compareKreaPerformance,
 } from "./krea-tier2-performance.mjs";
-import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt } from "./krea-tier2-allocation.mjs";
+import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -1074,14 +1074,9 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     for (const name of ["api", "worker"]) {
       const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
       if (name === "worker" && route.proof && text) {
-        record.scopePolicyEvents = text.split(/\r?\n/).flatMap((line) => {
-          try {
-            const { fields } = JSON.parse(line);
-            if (fields?.event !== "generation_memory_policy_applied" || !String(fields.engine).startsWith("krea_2")) return [];
-            const { engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component } = fields;
-            return [{ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }];
-          } catch { return []; }
-        });
+        record.scopePolicyEvents = kreaWorkerLogEvents(text)
+          .filter(({ event, engine }) => event === "generation_memory_policy_applied" && String(engine).startsWith("krea_2"))
+          .map(({ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }) => ({ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }));
       }
       const redacted = redactSensitiveText(text, secrets);
       if (record.status !== "completed") {
