@@ -70,7 +70,13 @@ test("pinned inventory preserves the Raw q4 tier, exact adapter and linked BF16 
   const inventory = kreaAssetInventory(evidence, [RAW, HIRES]);
   assert.equal(inventory.length, 23);
   assert.ok(inventory.some((item) => item.file.match(/^q4\/transformer\/.*\.safetensors$/)));
-  assert.deepEqual(inventory.find(({ file }) => file.startsWith("loras/")), KREA_RAW_ADAPTER);
+  assert.deepEqual(inventory.find(({ file }) => file.startsWith("loras/")), {
+    repo: "Comfy-Org/Krea-2",
+    revision: "952f49d49653cb42e7d6cf7cbfad74738073ec7d",
+    file: "loras/krea2_darkbrush.safetensors",
+    bytes: 469291992,
+    sha256: "f47c4316dd93af66e0518c93b582f459571d4925b519133770c73a52cd5db7c6",
+  });
   assert.deepEqual(RAW.body.loras, [{ id: KREA_RAW_LORA, weight: 1 }]);
   assert.ok(inventory.some((item) => item.file === "bf16/text_encoder/model.safetensors"));
   assert.deepEqual(inventory.filter((item) => item.file.startsWith("bf16/transformer/")).map((item) => item.file), ["bf16/transformer/config.json"]);
