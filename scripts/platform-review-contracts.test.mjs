@@ -1932,7 +1932,7 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
   assert.deepEqual([...events.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]), ["workflow_dispatch"]);
   assert.deepEqual([...events.matchAll(/^ {6}([\w-]+):$/gm)].map((match) => match[1]), ["format"]);
   assert.match(events, /^ {8}default: nvfp4$/m);
-  assert.match(events, /options: \[nvfp4, fp8, convrot, all\]/);
+  assert.match(events, /options: \[nvfp4, fp8, convrot, all, sdxl-fp8-reference\]/);
   assert.doesNotMatch(events, /pull_request|push|schedule|workflow_call/);
   const bridge = workflowJob(ordinary, "imported-nvfp4-worker-smoke");
   const validateBridge = (job) => {

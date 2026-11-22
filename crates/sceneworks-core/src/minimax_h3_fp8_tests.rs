@@ -322,6 +322,12 @@ fn descriptorless_e5_and_legacy_scale_spelling_preserve_their_physical_contract(
     );
     assert_eq!(raw["scaled_fp8"].2, 1f32.to_le_bytes());
     assert!(!raw.contains_key("transformer_blocks.0.attn.to_q.weight_scale"));
-    assert!(!raw.contains_key("transformer_blocks.0.attn.to_q.comfy_quant"));
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&raw["transformer_blocks.0.attn.to_q.comfy_quant"].2).unwrap();
+    assert_eq!(
+        descriptor,
+        json!({"format":"float8_e5m2","full_precision_matrix_mult":true}),
+        "normalization must preserve plain FP8's floating activation contract"
+    );
     assert_eq!(inventory.source_encoding(), Some("fp8_e5m2_scalar"));
 }
