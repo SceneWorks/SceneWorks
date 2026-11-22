@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 export const KREA_ALLOCATION_POOL_BYTES = 64 * 1024 ** 3;
 export const KREA_ALLOCATION_MINUTES = 55;
-export const KREA_WIDE_IM2COL_PIN = "cef3e31c7af51003892c1e99f1856c36ccb93b06";
+export const KREA_WIDE_IM2COL_PIN = "3bb35a17baf0bef896304e149dab6bb6d54e5d0d";
 export const KREA_ALLOCATION_BASE_SIZE = 1120;
 export const KREA_ALLOCATION_FINAL_SIZE = 2240;
 const HOOK_FILE = new URL("./ci/krea-allocation-probe.rs.in", import.meta.url);
