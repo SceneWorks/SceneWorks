@@ -621,7 +621,7 @@ def test_gapless_pdh_still_requires_the_native_pool_and_output_markers_for_faile
         quote(*args, 117, None, pool)
 
 
-def completed_job_fixture():
+def completed_job_fixture(*, tied=False):
     adapter, guard = windows_guard()
     uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
     adapter["cuda_uuid"] = guard["admission"]["cudaDeviceUuid"] = guard["samples"][0][
@@ -659,6 +659,9 @@ def completed_job_fixture():
             ]
         },
     }
+    if tied:
+        set_tied_read(guard, scope)
+        return guard, claim, scope, pool
     del scope["zero_card_index"]
     scope.update(basis="owned-job-completion", terminal_rejected_attempts=4)
     end["zero"] = None
@@ -764,10 +767,8 @@ def test_completed_job_fails_on_unproven_terminal_evidence(change):
         completed_peak(guard, claim, scope, pool)
 
 
-def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
-    tmp_path, monkeypatch
-):
-    guard, claim, summary, pool = completed_job_fixture()
+def completed_capture_fixture(tmp_path, *, tied=False):
+    guard, claim, summary, pool = completed_job_fixture(tied=tied)
     base = tool["RECOVERED_SIX"].copy()
 
     def write(name, data):
@@ -818,7 +819,7 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
         "device": "board",
         "runtime": "runtime",
         "inference_revision": base["inference_revision"],
-        "cuda_completed_job": summary,
+        ("cuda_render_scope" if tied else "cuda_completed_job"): summary,
         "witness": {
             "axes": axes,
             "text_tokens": 512,
@@ -872,6 +873,15 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
         "rationale": "test",
         "domains": {"host": empirical, "device": empirical},
     }
+    return write, guard, claim, summary, base, row, record, capture, receipt, review
+
+
+def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
+    tmp_path, monkeypatch
+):
+    write, guard, claim, summary, base, row, record, capture, receipt, review = (
+        completed_capture_fixture(tmp_path)
+    )
     result = tool["project"](receipt, write("review.json", review))
     assert result["accepted"] is True and "recovery_certificate_sha256" not in result
     assert result["bounds"]["device_interval"] == "load_through_completed_rgb"
@@ -927,6 +937,23 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
         recover()
 
 
+def set_tied_read(guard, scope):
+    o = guard["fit_observation"]
+    end = o["cuda_render_end"]
+    guard["admission"]["pollMillis"] = 250
+    last = end["rejected_growth"][-1]
+    last.update(
+        detail="CUDA pool proof exceeds concurrent global use",
+        global_used_upper_bytes=30,
+        child_growth_bytes=18,
+    )
+    scope.update(terminal_rejected_read_ns=230, terminal_rejected_at_ns=245)
+    d, s = [o["wddm_retry"][g]["events"][0] for g in ("dedicated", "shared")]
+    d.update(start_ns=230, end_ns=235)
+    s.update(start_ns=236, end_ns=245, local_filetime_before=905)
+    return end, last, d, s
+
+
 @pytest.mark.parametrize(
     "changed",
     [
@@ -948,19 +975,7 @@ def test_fresh_job_and_independently_recovered_six_keep_their_original_receipts(
 def test_owned_zero_requires_both_gauge_gaps_in_the_same_final_cuda_read(changed):
     adapter, guard = windows_guard()
     scope, pool = with_rejected_reads(guard)
-    o = guard["fit_observation"]
-    end = o["cuda_render_end"]
-    guard["admission"]["pollMillis"] = 250
-    last = end["rejected_growth"][-1]
-    last.update(
-        detail="CUDA pool proof exceeds concurrent global use",
-        global_used_upper_bytes=30,
-        child_growth_bytes=18,
-    )
-    scope.update(terminal_rejected_read_ns=230, terminal_rejected_at_ns=245)
-    d, s = [o["wddm_retry"][g]["events"][0] for g in ("dedicated", "shared")]
-    d.update(start_ns=230, end_ns=235)
-    s.update(start_ns=236, end_ns=245, local_filetime_before=905)
+    end, last, d, s = set_tied_read(guard, scope)
     if changed == "certificate_time":
         scope["terminal_rejected_read_ns"] += 1
     elif changed == "early_dedicated":
@@ -1072,3 +1087,144 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
         with pytest.raises(ValueError):
             read(receipt, review, archive, source)
         record["accepted"] = not record["accepted"]
+
+
+@pytest.mark.parametrize(
+    "tied", [True, False], ids=["sampled-owned-zero", "no-zero-owned-completion"]
+)
+def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path, tied):
+    write, guard, claim, _, _, _, record, capture, _, review = completed_capture_fixture(
+        tmp_path, tied=tied
+    )
+    digest = tool["sha256"]
+
+    def plan_digest(data):
+        return digest(json.dumps(data, sort_keys=True, separators=(",", ":")).encode())
+
+    policy = {
+        "selection": "scail2-plural-fit",
+        "policy": {
+            "schemaVersion": 1,
+            "deadlineSeconds": 2400,
+            "pollMillis": 250,
+            "termGraceMillis": 2000,
+            "stdoutCapBytes": 4194304,
+            "stderrCapBytes": 4194304,
+            "eventCapBytes": 16777216,
+            "backend": "windows-cuda",
+            "childFootprintCapBytes": 64 << 30,
+            "hostFreeReserveBytes": 8 << 30,
+            "cudaDeviceUuid": claim["device_uuid"],
+            "childGpuCapBytes": 84 << 30,
+            "gpuFreeReserveBytes": 6 << 30,
+        },
+    }
+    contract = capture["contract"]
+    capture["request"] = contract["request"] = policy
+    contract.update(
+        backend="candle-cuda",
+        counts=[6, 2, 3, 4, 5],
+        cuda_completion="supervisor-owned-windows-job",
+    )
+    review["hosted_plan_sha256"] = plan_digest(contract)
+    for n in (2, 3, 4, 5):
+        capture["counts"][str(n)] = {"accepted": True, "candidate_row_pending_physical_review": {}}
+    admission = guard["admission"]
+    admission.update(
+        policy["policy"],
+        originalClaimDeadlineMonotonic=500,
+        policySha256=digest(
+            (json.dumps(policy["policy"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ),
+    )
+    free_reserve = 6 << 30
+    obs = guard["fit_observation"]
+    for value in obs["card_samples_monotonic_ns_free_owned_or_fallback_bytes"]:
+        value[1] += free_reserve
+    for event in guard["samples"]:
+        event["gpuFreeBytes"] += free_reserve
+    end = obs["cuda_render_end"]
+    for event in end["pool_growth"] + end["rejected_growth"]:
+        event["free_bytes"] += free_reserve
+    claim["claim_deadline_monotonic"] = 500
+    record["native"].update(
+        count=6,
+        backend="candle-cuda",
+        output={"width": 832, "height": 480, "frames": 45, "fps": 16, "sha256": "1" * 64},
+    )
+    record["body"] = {
+        "actual_devices": ["candle-cuda"],
+        "body_completed": 1,
+        "successful_libtest_summaries": 1,
+    }
+
+    def project():
+        capture["logs"]["count-6.supervisor.json"]["sha256"] = digest(
+            write("count-6.supervisor.json", guard).read_bytes()
+        )
+        receipt = write("receipt.json", capture)
+        review["receipt_sha256"] = digest(receipt.read_bytes())
+        return tool["project"](receipt, write("review.json", review))
+
+    result = project()
+    assert result["accepted"] is True and "recovery_certificate_sha256" not in result
+    assert result["bounds"]["device_interval"] == "load_through_completed_rgb"
+    assert result["bounds"]["device"]["classified_peak_bytes"] == 110
+    for target, field, invalid in [
+        (review, "hosted_plan_sha256", "0" * 64),
+        (capture["counts"]["4"], "accepted", False),
+        (claim, "claim_deadline_monotonic", 501),
+        (claim["owned_execution_completion"], "owned_pids", [41]),
+        (admission, "childFootprintCapBytes", 1),
+        (guard["samples"][0], "gpuFreeBytes", free_reserve - 1),
+        (record["native"]["output"], "frames", 44),
+        (review["domains"]["device"], "basis", "guarded_ceiling"),
+    ]:
+        original = target[field]
+        target[field] = invalid
+        with pytest.raises(ValueError):
+            project()
+        target[field] = original
+    contract["counts"] = [2, 3, 4, 5]
+    review["hosted_plan_sha256"] = plan_digest(contract)
+    with pytest.raises(ValueError, match="complete accepted hosted"):
+        project()
+
+
+@pytest.mark.parametrize("with_rejections", [False, True])
+def test_fresh_strict_post_output_gaps_bound_both_clocks(with_rejections):
+    adapter, guard = windows_guard()
+    if with_rejections:
+        scope, pool = with_rejected_reads(guard)
+        gross = 117
+    else:
+        scope, pool = render_scope_guard(guard), None
+        gross = 110
+    guard["admission"]["pollMillis"] = 250
+
+    def quote():
+        return tool["windows_device_peak"](
+            guard,
+            {"allocator_peak": 80, "axes": {"floor_device_bytes": 70}},
+            adapter,
+            gross,
+            scope,
+            pool,
+            fresh_gpu0=True,
+        )
+
+    assert quote() == gross
+    for gauge in ("dedicated", "shared"):
+        event = guard["fit_observation"]["wddm_retry"][gauge]["events"][0]
+        for field, wrong in [
+            ("start_ns", 0),
+            ("end_ns", event["start_ns"] - 1),
+            ("local_filetime_after", 903),
+            ("local_filetime_after", 3_000_000),
+            ("local_filetime_after", True),
+        ]:
+            old = event[field]
+            event[field] = wrong
+            with pytest.raises(ValueError):
+                quote()
+            event[field] = old
