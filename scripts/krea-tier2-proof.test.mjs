@@ -635,10 +635,13 @@ test("Raw failure diagnostics report each comparison without exposing artifact m
   const dataRoot = "/runner/private/state/data";
   const locator = `${dataRoot}/models/portable-attempts/${"a".repeat(64)}/bundle/model0/member1/`;
   const proof = rawOutputProof(dataRoot, locator);
-  proof.asset.recipe.loras[0].installedPath = locator;
+  const otherLocator = "/different/private/model";
+  proof.library[0].generationSet.recipe.loras = [structuredClone(proof.sidecar.recipe.loras[0])];
+  proof.library[0].generationSet.recipe.loras[0].source.path = otherLocator;
   proof.share.loras[0].weight = 0.5;
+  assert.throws(() => assertKreaOutput(proof), (error) => error.message.includes(otherLocator));
   assert.deepEqual(kreaRawOutputDiagnostics(proof), {
-    libraryCount: 1, jobAssetMatches: false, generationSetRecipeMatches: true,
+    libraryCount: 1, jobAssetMatches: true, generationSetRecipeMatches: false,
     diskSamplingMatches: true, sharePromptMatches: true, shareLorasMatch: false,
   });
 });

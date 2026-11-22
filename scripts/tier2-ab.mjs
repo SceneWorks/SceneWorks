@@ -1356,11 +1356,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         record.productProof.imageStats = imageQualityStats(rgba);
         fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
       } catch (error) {
-        if (route.proof === "raw") record.rawOutputDiagnostics = {
+        if (route.proof !== "raw") throw error;
+        record.rawOutputDiagnostics = {
           ...kreaRawOutputDiagnostics(outputProof), width, height,
           rgbaSha256: sha256(rgba), channelStdDev: imageQualityStats(rgba).channelStdDev,
         };
-        throw error;
+        throw new Error("Krea Raw output proof failed. See rawOutputDiagnostics.");
       }
     }
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
