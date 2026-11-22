@@ -411,6 +411,22 @@ The system drive holds only source code, apps, toolchains, personal files
     (`cargo build -p dev-host` with the wrapper bypassed), so it never
     depends on itself to build.
 
+- **E15 Only trusted hosts can write the shared storage (r5).**
+  - A network share that holds anything a job runs, builds or loads
+    (checkouts, build output, caches, weights, scratch) must only be
+    writable by authenticated accounts of the in-scope hosts. Guest or
+    anonymous write access is not allowed. Each Mac mounts `/Volumes/Work`
+    and `/Volumes/Models` with its own authenticated account.
+  - Until that holds, the signing runner (`nax-macos`, label `signing`) keeps
+    its runner work folder, build slots and caches on local storage, and
+    SWITCH does not move them onto the share. `release.yml` runs repository
+    npm code and builds while the Apple and Tauri signing secrets are set,
+    so a writable-by-anyone checkout or build folder would let any machine
+    on the network get its own code signed and notarized.
+  - Setting up the accounts and share permissions on Tower is Michael's
+    step (credentials). The check is a test: a guest mount of each share
+    can't create a file.
+
 ## Feature acceptance tests
 
 1. **Nothing lands on the system drive.** On this Mac, run one full CI pass
@@ -559,6 +575,7 @@ The system drive holds only source code, apps, toolchains, personal files
    way dev-host's 4 tests did.
 2. **Automatic remount.** How does each Mac mount `/Volumes/Work` and
    `/Volumes/Models` at boot, and do they come back after a network drop?
+   With E15 the mounts also need each Mac's authenticated account.
    On 2026-11-22 both shares had dropped on this Mac while its runner was
    listening (its pre-job hook would have failed every job), and Michael
    remounted them by hand.

@@ -378,7 +378,10 @@ No two items share both a mechanism and a repo.
 - **Inherits:** E4, E6, E11
 - **Touches:** host filesystems, runner registrations, Codex config on each
   host, `PATH` on each host
-- **Blocked by:** MERGE, CW-1, LW-1
+- **Blocked by:** MERGE, CW-1, LW-1, and E15: the shares accept writes
+  only from the hosts' authenticated accounts (Michael sets these up on
+  Tower). Without that, SWITCH leaves the signing runner's work folder,
+  build slots and caches on local storage.
 
 ### RELNEXT — Dual lock onto `release/next` by hotfix (task, SceneWorks)
 - **Goal:** Lets the old locks retire without waiting for a release.
@@ -473,6 +476,7 @@ one. The other edges into HOST-1 are for the binary and the schedule.
 | E12 | DW-2, DW-3, SW-2, INF-2a, CW-1, LW-1 |
 | E13 | DW-1, SW-2, INF-2a |
 | E14 | DW-2, HOST-1, SW-2, INF-2a |
+| E15 | HOST-1, HOST-3 (authenticated mounts), SWITCH |
 
 Acceptance tests:
 - 3 (SW-1, INF-1)
