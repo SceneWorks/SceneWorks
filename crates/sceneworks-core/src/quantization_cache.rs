@@ -10,6 +10,7 @@ use crate::model_artifacts::{
 use gen_core::{QuantizationArtifact, QuantizationArtifactCache, QuantizationArtifactKey};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 pub struct SavedQuantizations {
     data_dir: PathBuf,
@@ -32,6 +33,15 @@ impl QuantizationArtifact for SavedWeight {
 fn error(error: impl std::fmt::Display) -> gen_core::Error {
     gen_core::Error::Msg(format!("Saved quantization: {error}"))
 }
+fn check_deadline(deadline: Instant) -> std::io::Result<()> {
+    if Instant::now() >= deadline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "saved quantization acquisition deadline exceeded; retry the generation",
+        ));
+    }
+    Ok(())
+}
 impl SavedQuantizations {
     pub fn new(data_dir: &Path, source: PathBuf, owner: String, checkpoint: String) -> Self {
         Self {
@@ -51,11 +61,12 @@ impl SavedQuantizations {
         )
     }
 }
-impl QuantizationArtifactCache for SavedQuantizations {
-    fn materialize(
+impl SavedQuantizations {
+    fn materialize_with_timeout(
         &self,
         key: &QuantizationArtifactKey,
         produce: &mut dyn FnMut(&Path) -> gen_core::Result<()>,
+        wait_timeout: Duration,
     ) -> gen_core::Result<Box<dyn QuantizationArtifact>> {
         let store = {
             let mut slot = self
@@ -101,15 +112,13 @@ impl QuantizationArtifactCache for SavedQuantizations {
         };
         let plan = DerivedArtifactPlan::new(identity, vec![member]).map_err(error)?;
         let cache_key = plan.cache_key().map_err(error)?;
-        let started = std::time::Instant::now();
+        let deadline = Instant::now() + wait_timeout;
         loop {
-            if started.elapsed() > std::time::Duration::from_secs(60) {
-                return Err(error(
-                    "saved weights could not be acquired; retry the generation",
-                ));
-            }
+            check_deadline(deadline).map_err(error)?;
             if let Some(lease) = store
-                .acquire_complete(&cache_key, &resolver, &self.owner)
+                .acquire_complete_with_check(&cache_key, &resolver, &self.owner, &|| {
+                    check_deadline(deadline)
+                })
                 .map_err(error)?
             {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -127,11 +136,6 @@ impl QuantizationArtifactCache for SavedQuantizations {
             {
                 ReservationOutcome::AlreadyComplete(_) => std::thread::yield_now(),
                 ReservationOutcome::Contended => {
-                    if started.elapsed() > std::time::Duration::from_secs(60) {
-                        return Err(error(
-                            "another worker is still saving these weights; retry the generation",
-                        ));
-                    }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 ReservationOutcome::Acquired(reservation) => {
@@ -148,8 +152,12 @@ impl QuantizationArtifactCache for SavedQuantizations {
                         .sync_all()?;
                     reservation.publish_produced(&plan).map_err(error)?;
                     self.writes.fetch_add(1, Ordering::Relaxed);
+                    // Packing itself is not an acquisition wait; give the new lease its own bound.
+                    let deadline = Instant::now() + wait_timeout;
                     let lease = store
-                        .acquire_complete(&cache_key, &resolver, &self.owner)
+                        .acquire_complete_with_check(&cache_key, &resolver, &self.owner, &|| {
+                            check_deadline(deadline)
+                        })
                         .map_err(error)?
                         .ok_or_else(|| error("saved weights disappeared before loading"))?;
                     return Ok(Box::new(SavedWeight {
@@ -162,9 +170,80 @@ impl QuantizationArtifactCache for SavedQuantizations {
     }
 }
 
+impl QuantizationArtifactCache for SavedQuantizations {
+    fn materialize(
+        &self,
+        key: &QuantizationArtifactKey,
+        produce: &mut dyn FnMut(&Path) -> gen_core::Result<()>,
+    ) -> gen_core::Result<Box<dyn QuantizationArtifact>> {
+        self.materialize_with_timeout(key, produce, Duration::from_secs(60))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_active_producer_cannot_hold_a_cache_reader_past_its_deadline() {
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let cache = || {
+            SavedQuantizations::new(
+                data.path(),
+                source.path().to_owned(),
+                "test".into(),
+                "test/checkpoint".into(),
+            )
+        };
+        let writer = cache();
+        let reader = cache();
+        *reader.store.lock().unwrap() = Some(ResolvedCacheStore::open(data.path()).unwrap());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let key = || QuantizationArtifactKey::new("q4-deadline-v1", &[4], b"source", "ggml");
+        let writer_key = key();
+        let producer = std::thread::spawn(move || {
+            let artifact = writer
+                .materialize(&writer_key, &mut |path| {
+                    ready_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(3));
+                    std::fs::write(path, b"packed")?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(std::fs::read(artifact.path()).unwrap(), b"packed");
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut repacked = false;
+        let started = Instant::now();
+        let result = reader.materialize_with_timeout(
+            &key(),
+            &mut |path| {
+                repacked = true;
+                std::fs::write(path, b"unexpected")?;
+                Ok(())
+            },
+            Duration::from_millis(100),
+        );
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        producer.join().unwrap();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "reader waited {elapsed:?}"
+        );
+        assert!(!repacked);
+        assert!(result
+            .err()
+            .expect("reader must time out")
+            .to_string()
+            .contains("deadline"));
+        reader
+            .materialize(&key(), &mut |_| {
+                panic!("retry must reuse the producer's completed output")
+            })
+            .unwrap();
+    }
     #[test]
     fn saved_weights_survive_a_fresh_store_and_changed_inputs_get_new_artifacts() {
         let data = tempfile::tempdir().unwrap();

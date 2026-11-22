@@ -1,6 +1,6 @@
 // Dedicated numerical validation only; ordinary CI may use --prepare for metadata startup checks.
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, openSync, readSync, closeSync, fstatSync, readdirSync } from "node:fs";
-import { resolve, dirname, join, basename, isAbsolute } from "node:path";
+import { resolve, dirname, join, basename, isAbsolute, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { lockedInferenceRevision } from "../select-windows-cargo-cache.mjs";
@@ -17,6 +17,14 @@ const root = resolve(get("--root") ?? "");
 if (!["candle", "mlx"].includes(backend)) throw new Error("--backend must be candle or mlx");
 if (!args.includes("--root") || root === resolve("/")) throw new Error("explicit owned --root required");
 if (process.platform === "win32" && !/^D:[\\/]/i.test(root)) throw new Error("Windows proof outputs must be on D:");
+if (process.env.GITHUB_ACTIONS === "true" && !args.includes("--stage-receipts")) {
+  const managed = process.env.DEV_HOST_ROOT;
+  const task = process.env.DEV_HOST_JOB_ROOT || process.env.TMPDIR;
+  const inside = (base, path) => { const part = relative(base, path); return part !== "" && !part.startsWith("..") && !isAbsolute(part); };
+  if (!managed || !task || !isAbsolute(managed) || !isAbsolute(task) || !inside(resolve(managed), resolve(task)) || !inside(resolve(task), root)) {
+    throw new Error("proof work must use the dev-host allocated task directory");
+  }
+}
 const marker = join(root, ".saved-quantization-proof");
 const owner = `${process.env.GITHUB_RUN_ID ?? "local-metadata"}:${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
 if (existsSync(root) && (!existsSync(marker) || readFileSync(marker, "utf8").trim() !== owner)) {

@@ -466,21 +466,42 @@ where
     tokio::spawn(context.scope(future))
 }
 
-/// Covers route preparation, cache loads, render drives, analysis and training with one observer.
-#[cfg(test)]
+/// Add the verified source's cache without replacing the job's progress session.
+pub(crate) fn with_quantization_cache<F: Future>(
+    cache: Option<Arc<sceneworks_core::quantization_cache::SavedQuantizations>>,
+    future: F,
+) -> impl Future<Output = F::Output> {
+    let future = Box::pin(future);
+    let mut context = Context::capture();
+    context.quantization = cache
+        .as_ref()
+        .map(|cache| gen_core::QuantizationCacheContext::new(cache.clone()))
+        .unwrap_or_default();
+    async move {
+        let result = context.scope_boxed(future).await;
+        note_saved_quantizations(cache.as_deref());
+        result
+    }
+}
+
+fn note_saved_quantizations(
+    cache: Option<&sceneworks_core::quantization_cache::SavedQuantizations>,
+) {
+    if let Some(cache) = cache {
+        let (hits, writes) = cache.counts();
+        tracing::info!(
+            quantization_cache_hits = hits,
+            quantization_cache_writes = writes,
+            "Saved weight quantization reuse"
+        );
+    }
+}
+
+/// Covers route preparation and dispatch with one progress observer and a fresh cache scope.
 pub(crate) fn with_job<F: Future>(
     api: &ApiClient,
     job_id: &str,
     future: F,
-) -> impl Future<Output = F::Output> {
-    with_job_cache(api, job_id, future, None)
-}
-
-pub(crate) fn with_job_cache<F: Future>(
-    api: &ApiClient,
-    job_id: &str,
-    future: F,
-    cache: Option<Arc<sceneworks_core::quantization_cache::SavedQuantizations>>,
 ) -> impl Future<Output = F::Output> {
     // The handler contains the platform's complete job dispatch. Heap-own it before constructing
     // this async state machine, rather than duplicating its inline storage through nested scopes.
@@ -500,10 +521,7 @@ pub(crate) fn with_job_cache<F: Future>(
             let _observer = LoadActivityObserver::new(move |activity| observed.observe(activity));
             Context {
                 activity: LoadActivityContext::capture(),
-                quantization: cache
-                    .as_ref()
-                    .map(|cache| gen_core::QuantizationCacheContext::new(cache.clone()))
-                    .unwrap_or_default(),
+                quantization: gen_core::QuantizationCacheContext::default(),
                 session: Some(session.clone()),
             }
         };
@@ -520,16 +538,7 @@ pub(crate) fn with_job_cache<F: Future>(
             }
         }
         let _close = Close(session.clone(), poster);
-        let result = JOB.scope(session, context.scope_boxed(future)).await;
-        if let Some(cache) = cache {
-            let (hits, writes) = cache.counts();
-            tracing::info!(
-                quantization_cache_hits = hits,
-                quantization_cache_writes = writes,
-                "Saved weight quantization reuse"
-            );
-        }
-        result
+        JOB.scope(session, context.scope_boxed(future)).await
     }
 }
 
@@ -1654,20 +1663,17 @@ mod tests {
         assert!(gen_core::QuantizationCacheContext::capture()
             .cache()
             .is_none());
-        with_job_cache(
-            &api,
-            "cached-job",
-            async move {
-                with_job_cache(
-                    &nested_api,
-                    "uncached-job",
-                    async {
-                        assert!(gen_core::QuantizationCacheContext::capture()
-                            .cache()
-                            .is_none());
-                    },
-                    None,
-                )
+        with_job(&api, "cached-job", async move {
+            assert!(gen_core::QuantizationCacheContext::capture()
+                .cache()
+                .is_none());
+            with_quantization_cache(Some(cache), async move {
+                assert_eq!(current_session().unwrap().job_id, "cached-job");
+                with_job(&nested_api, "uncached-job", async {
+                    assert!(gen_core::QuantizationCacheContext::capture()
+                        .cache()
+                        .is_none());
+                })
                 .await;
                 assert!(gen_core::QuantizationCacheContext::capture()
                     .cache()
@@ -1677,15 +1683,19 @@ mod tests {
                     spawn_blocking(move || {
                         let context = gen_core::QuantizationCacheContext::capture();
                         assert!(Arc::ptr_eq(context.cache().unwrap(), &expected));
+                        assert_eq!(current_session().unwrap().job_id, "cached-job");
                     })
                     .await
                     .unwrap();
                 })
                 .await
                 .unwrap();
-            },
-            Some(cache),
-        )
+            })
+            .await;
+            assert!(gen_core::QuantizationCacheContext::capture()
+                .cache()
+                .is_none());
+        })
         .await;
         assert!(gen_core::QuantizationCacheContext::capture()
             .cache()

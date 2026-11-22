@@ -7603,8 +7603,12 @@ mod tests {
             );
             drop(guard);
             let mut remote_hint = payload.clone();
+            let absent_api_path = temp.path().join("api-host/missing-model");
             remote_hint.get_mut("modelManifestEntry").unwrap()["paths"] =
-                json!({"model":"/api-host/models/q4"});
+                json!({"model": absent_api_path});
+            remote_hint.get_mut("modelManifestEntry").unwrap()["importSourceShape"] =
+                json!("transformer_directory");
+            remote_hint.get_mut("modelManifestEntry").unwrap()["importQuantFormat"] = json!("bf16");
             let guard = RuntimeSourceGuard::begin_with_binding(
                 &JobType::ImageGenerate,
                 &remote_hint,
@@ -7620,7 +7624,27 @@ mod tests {
                     .unwrap()
                     .starts_with(std::fs::canonicalize(&library).unwrap())
             );
-            assert_ne!(selected, "/api-host/models/q4");
+            assert_ne!(Path::new(selected), absent_api_path);
+            // A cold saved quantization must use the guard's worker path, never the absent API hint.
+            use gen_core::QuantizationArtifactCache;
+            let cache = crate::utility_dispatch::saved_quantizations(
+                &JobType::ImageGenerate,
+                &guard,
+                &settings(temp.path().join("data")),
+            )
+            .unwrap();
+            let key =
+                gen_core::QuantizationArtifactKey::new("portable-q4-v1", &[1], b"weights", "ggml");
+            let saved = cache
+                .materialize(&key, &mut |path| {
+                    std::fs::write(path, b"packed")?;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(std::fs::read(saved.path()).unwrap(), b"packed");
+            assert_eq!(cache.counts(), (0, 1));
+            drop(saved);
+            drop(cache);
             assert_eq!(
                 std::fs::read(Path::new(selected).join("a.safetensors")).unwrap(),
                 b"weights"

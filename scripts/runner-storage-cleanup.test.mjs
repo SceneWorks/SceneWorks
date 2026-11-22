@@ -239,6 +239,12 @@ test('dev-host setup binds a fresh invocation, preserves Cargo consumers and kee
   assert.equal(JSON.parse(await readFile(join(work, '.actions-owner.json'), 'utf8')).nonce, 'owned-invocation');
   assert.ok(calls.some(args => args.includes('actions-123-2-owned-invocation')));
   await assert.rejects(prepareDevHost(env, { run, nonce: 'other-invocation' }), /already contains work/);
+  const slotWork = join(root, 't/2345abcd'), target = join(root, 'build/managed-slot');
+  await mkdir(slotWork, { recursive: true }); await mkdir(target, { recursive: true });
+  const slotRun = async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.1.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${target}\nTMPDIR=${slotWork}\n` }); // dev-host: allow-path metadata-only allocator fixture inside the test's managed root
+  const slotExports = await prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: slotRun, nonce: 'managed-slot' });
+  assert.equal(slotExports.CARGO_TARGET_DIR, target);
+  assert.match(await readFile(env.GITHUB_ENV, 'utf8'), /CARGO_TARGET_DIR=/); // dev-host: allow-path asserts an environment export, not a filesystem path
 });
 
 test('failed or unconfirmed publication preserves owned job work', { skip: process.platform !== 'win32' }, async t => {
