@@ -70,7 +70,7 @@ mod tests {
             "candle",
             "q4",
             None,
-            &canonical_authored_options_sha256(&authored).unwrap(),
+            canonical_authored_options_sha256(&authored).unwrap(),
             capture_local_model_entry(&state, &current, "modelManifestEntry").unwrap(),
         )
         .unwrap();
