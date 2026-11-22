@@ -25,6 +25,8 @@ The header contains 264 rank-32 F32 LoRA pairs, including the text-fusion projec
 
 The earlier Raw request selected `loras/krea2_turbo_lora_rank_64_bf16.safetensors`, SHA-256 `db8c5bae0a415d448da9d842111d6e51f7d32e47143a3118eb267e5c4773de87`. Its header contains seven `.diff_b` patches. Both MLX arms refused that mixed adapter with the native merge-only error. The run established the refusal and exact decoded Hires.fix parity for the linked-source-normalized baseline. [Earlier MLX run](https://github.com/SceneWorks/SceneWorks/actions/runs/45030164269)
 
+In paired Hires.fix runs, the baseline API writes the trusted ledger when it admits the first render. After that arm's measurements and teardown, the driver verifies the ledger against all ten staged companion files and installs the same ledger in each later private state before launch. Each receipt records the source job and ledger SHA-256. The API and worker use their normal verification paths with fresh worker and job state.
+
 ## Paired performance option
 
 Set `performance: true` in the existing Krea suite options to run the separate PERF-1/2 comparison. A preflight verifies the sampler observer against independently reviewed baseline and candidate worker-source digests. The performance build temporarily wraps the shared provider progress callback in each attempt-owned checkout and restores the exact source bytes after compiling. The receipt records both the original and resulting source digests plus the binary digest. The functional witness builds without the sampler observer and remains a separate artifact.

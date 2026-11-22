@@ -33,6 +33,7 @@ import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
+import { captureKreaCompanionLedger, replayKreaCompanionLedger } from "./krea-tier2-ledger.mjs";
 import { assertTerminalPhysicalContainment } from "./lib/starvector-terminal-pin-paths.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
@@ -1091,7 +1092,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
 const decodedBuffers = new WeakMap();
 const kreaImportFiles = [path.join("data", "checkpoints"), path.join("config", "manifests", "user.models.jsonc")];
-async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, previousImport }) {
+async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, previousImport, hiresLedger }) {
   const sideCfg = side === "base" ? { dir: cfg.baseDir, sha: cfg.baseSha } : { dir: cfg.headDir, sha: cfg.headSha };
   const slug = `${route.id}-${label.replace("#", "")}`;
   const runRoot = path.join(cfg.work, "scratch", "runs", slug), evidence = path.join(evidenceRoot, "runs", route.id, label.replace("#", ""));
@@ -1150,6 +1151,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const alive = () => { if (controller.signal.aborted) throw controller.signal.reason; };
   const wait = async (probe, seconds, what) => { const end = Math.min(Date.now() + seconds * 1000, deadline); while (Date.now() < end) { alive(); const value = await probe(); if (value) return value; await delay(500); } throw new Error(`${what} timed out`); };
   try {
+    if (hiresLedger && label !== "base#1") record.companionLedger = await replayKreaCompanionLedger(hiresLedger.seed, state);
     // Desktop parent-death contract: API and worker exit gracefully when this sentinel ends.
     const sentinel = await launch("sentinel", process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env);
     envs.api.SCENEWORKS_PARENT_PID = String(sentinel.pid);
@@ -1441,6 +1443,19 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       endpoint?.close();
       await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
     }
+    if (hiresLedger && label === "base#1" && record.jobId) {
+      // Admission already wrote the ledger. Verify it after sampling and owned service teardown.
+      try {
+        hiresLedger.seed = await captureKreaCompanionLedger({ state, hub: plan.hub, staging: hiresLedger.staging, sourceJobId: record.jobId, signal });
+        record.companionLedger = { ...hiresLedger.seed.receipt, mode: "recorded" };
+      } catch (error) {
+        record.companionLedger = { mode: "unavailable", reason: error.message };
+        if (record.status === "completed") {
+          record.status = "error";
+          record.error = `Krea baseline companion ledger verification failed: ${error.message}`;
+        }
+      }
+    }
     await retainServiceLogs();
     record.finishedAt = new Date().toISOString();
     await phase(record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
@@ -1505,10 +1520,11 @@ async function runComparison(env, cfg, report, signal) {
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
     const previousImport = {};
+    const hiresLedger = definition.proof === "hires" && !cfg.allocation ? { staging: report.staging } : null;
     const run = async (label) => {
       const side = label.startsWith("base") ? "base" : "head";
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side, built, evidenceRoot: evidence, secrets, signal, previousImport: previousImport[side] });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side, built, evidenceRoot: evidence, secrets, signal, previousImport: previousImport[side], hiresLedger });
       if (cfg.perf && definition.proof === "hires" && record.status === "completed" && !previousImport[side]) {
         const slug = `${definition.id}-${label.replace("#", "")}`;
         previousImport[side] = { state: path.join(scratch, "runs", slug, "state"), receipt: record.import };
