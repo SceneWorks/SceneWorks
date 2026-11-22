@@ -59,12 +59,12 @@ test('managed workflows register owned storage and confirm publication before po
   }
 });
 
-async function fixture(t) {
-  const path = await mkdtemp(join(tmpdir(), 'runner-storage-test-'));
+async function fixture(t, base = tmpdir()) {
+  const path = await mkdtemp(join(base, 'runner-storage-test-'));
   t.after(async () => {
     const full = resolve(path);
-    assert.equal(dirname(full), resolve(tmpdir()));
-    assert.ok(full.startsWith(join(resolve(tmpdir()), 'runner-storage-test-')));
+    assert.equal(dirname(full), resolve(base));
+    assert.ok(full.startsWith(join(resolve(base), 'runner-storage-test-')));
     await rm(full, { recursive: true, force: true });
   });
   return path;
@@ -223,7 +223,10 @@ test('Windows guards reject escaped paths, links, recent model writes and other 
 });
 
 test('dev-host setup binds a fresh invocation, preserves Cargo consumers and keeps downloads on E', { skip: process.platform !== 'win32' }, async t => {
-  const root = await fixture(t), work = join(root, 't/1234abcd'), binary = join(root, 'dev-host.exe');
+  const managed = process.env.DEV_HOST_ROOT && join(process.env.DEV_HOST_ROOT, 't');
+  const base = managed && existsSync(managed) ? managed : process.env.RUNNER_TEMP || tmpdir();
+  if (!/^D:[\\/]/i.test(base)) { t.skip('A D: fixture directory is required for the Windows host storage policy'); return; }
+  const root = await fixture(t, base), work = join(root, 't/1234abcd'), binary = join(root, 'dev-host.exe');
   await mkdir(work, { recursive: true }); await writeFile(binary, 'fixture');
   const env = { ...process.env, DEV_HOST_ROOT: root, DEV_HOST_BIN: binary, GITHUB_REPOSITORY: 'SceneWorks/test', GITHUB_WORKSPACE: root, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2', GITHUB_JOB: 'proof', RUNNER_NAME: 'runner', GITHUB_ENV: join(root, 'env'), GITHUB_STATE: join(root, 'state'), CARGO_TARGET_DIR: 'existing-target' };
   const calls = [];
