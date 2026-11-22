@@ -793,7 +793,7 @@ class WaitReportingTests(unittest.TestCase):
         code, printed, logged, receipt = self.run_main(82, execute, release)
         self.assertEqual(released, [self.handles])
         self.assertNotIn("error", receipt)
-        self.assertEqual(json.loads(printed.strip().splitlines()[-1])["resource_receipt"].split("/")[-1], "resource-receipt.json")
+        self.assertEqual(Path(json.loads(printed.strip().splitlines()[-1])["resource_receipt"]).name, "resource-receipt.json")
         self.assertIn('"event": "cancel"', logged)
 
     def test_install_skips_missing_signals_tolerates_off_main_thread_and_restores(self):

@@ -24045,7 +24045,7 @@ mod preview_stream_tests {
             GenEvent::Upsampling { .. } => "Upsampling",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            #[cfg(native_lane)]
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
             GenEvent::AssetWritten { .. } => "AssetWritten",
@@ -27099,8 +27099,9 @@ fn write_krea_nvfp4_safetensors(path: &Path) {
 
 /// Feature-end review (sc-11045, epic 11037, major 6) — the DISPATCH half of linked NVFP4 exposure.
 ///
-/// A LINKED copy of a packed NVFP4 checkpoint must be refused a `q4` tier exactly as a managed copy
-/// is. `imported_model_quant` gates on `krea_imported_native_nvfp4`, which reads
+/// A LINKED copy of a packed NVFP4 checkpoint must never receive a load-time `q4` conversion.
+/// Conflicting named tiers are refused; the shared source policy discards legacy bit overrides.
+/// `imported_model_quant` gates on `krea_imported_native_nvfp4`, which reads
 /// `imported_entry_source_codec` off the manifest entry — and until sc-11045 that answered `None`
 /// for every linked entry, because only the managed import branch stamped `importQuantFormat`. The
 /// guard was therefore off for linked copies, and `Quant::Q4` (or `mlxQuantize: 4`) could be handed
@@ -27172,7 +27173,6 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
         json!({ "quantTier": "q8" }),
         json!({ "quant": "q4" }),
         json!({ "quantTier": "bf16" }),
-        json!({ "mlxQuantize": 4 }),
     ] {
         let error = imported_model_quant(&request_with(advanced.clone()), &descriptor, "Linked")
             .expect_err("packed NVFP4 bytes accept no other tier");
@@ -27185,6 +27185,20 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
              provider's advertised-tier check: {message}"
         );
     }
+
+    // A legacy bit count is ignored by shared fixed-source binding, so it cannot select Q4.
+    let legacy = request_with(json!({ "mlxQuantize": 4 }));
+    assert_eq!(legacy.resolved_quant_bits(), None);
+    let native_quant = descriptor
+        .capabilities
+        .supported_quants
+        .contains(&gen_core::Quant::Nvfp4)
+        .then_some(gen_core::Quant::Nvfp4);
+    assert_eq!(
+        imported_model_quant(&legacy, &descriptor, "Linked")
+            .expect("legacy bits retain the verified source's packing"),
+        (native_quant, None)
+    );
 
     // The NEGATIVE CONTROL, and the named mutation made permanent: the SAME compile, the SAME
     // request, stamped with NO classification is exactly what an unstamped linked entry was before

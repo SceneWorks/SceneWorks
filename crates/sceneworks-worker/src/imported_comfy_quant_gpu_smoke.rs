@@ -91,7 +91,8 @@ fn linked_import_location(checkpoint: &Path, hub: &Path) -> (PathBuf, String) {
 
 #[test]
 fn linked_import_approves_one_hub_repository_and_preserves_portable_relative_path() {
-    let hub = std::env::temp_dir().join("checkpoint-fixture-cache");
+    let temp = tempfile::tempdir().expect("linked path fixture tempdir");
+    let hub = temp.path().join("checkpoint-fixture-cache");
     let checkpoint = hub.join("models--publisher--model/snapshots/rev/diffusion/model.safetensors");
     let (root, relative) = linked_import_location(&checkpoint, &hub);
     assert_eq!(root, hub.join("models--publisher--model"));
