@@ -391,14 +391,14 @@ test("native Hires.fix traces permit the public snapshots observed on both Windo
   const publicEvents = (steps, decodes) => [
     ...steps.map((step) => ({ message: `Generating step ${step}/12.`, status: "running", stage: "generating", publishedAssets: 0 })),
     ...Array.from({ length: decodes }, () => ({ message: "Decoding.", status: "running", stage: "generating", publishedAssets: 0 })),
-    { message: "Generated 1 output(s).", status: "completed", stage: "completed", publishedAssets: 1 },
+    { message: "Generated 1 output(s).", status: "completed", stage: "completed", publishedAssets: 1, publishedAssetId: "asset_saved" },
   ];
   // Run 45039550044 saw 7/12 and 9/12 followed by 14 decode snapshots on the baseline.
   // Its candidate saw all ten step labels, with duplicates, followed by three decode snapshots.
   const base = publicEvents([7, 9], 14);
   const head = publicEvents([1, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 10, 10], 3);
-  const baseOptions = { nativeLog: nativeLog(nativePasses(false)) };
-  const headOptions = { nativeLog: nativeLog(nativePasses(true)), requireScope: true };
+  const baseOptions = { nativeLog: nativeLog(nativePasses(false)), assetId: "asset_saved" };
+  const headOptions = { nativeLog: nativeLog(nativePasses(true)), requireScope: true, assetId: "asset_saved" };
   assert.deepEqual(assertKreaEvents(base, route, baseOptions).observedSteps, [[7, 12], [9, 12]]);
   const headProof = assertKreaEvents(head, route, headOptions);
   assert.deepEqual(headProof.executedStepSlices, [8, 2]);
@@ -412,7 +412,13 @@ test("native Hires.fix traces permit the public snapshots observed on both Windo
   }
   const earlyAsset = [{ ...base[0], publishedAssets: 1 }, ...base.slice(1)];
   assert.throws(() => assertKreaEvents(earlyAsset, route, baseOptions), /intermediate output/);
-  assert.throws(() => assertKreaEvents([...base, base.at(-1)], route, baseOptions), /one completed/);
+  const recovering = { ...base.at(-1), publishedAssets: 0, publishedAssetId: undefined };
+  assert.deepEqual(assertKreaEvents([...base.slice(0, -1), recovering, base.at(-1), base.at(-1)], route, baseOptions).observedSteps,
+    [[7, 12], [9, 12]]);
+  const wrongAsset = { ...base.at(-1), publishedAssetId: "asset_other" };
+  assert.throws(() => assertKreaEvents([...base, wrongAsset], route, baseOptions), /one saved asset/);
+  const wrongDecodeStage = base.map((event) => event.message === "Decoding." ? { ...event, stage: "loading_model" } : event);
+  assert.throws(() => assertKreaEvents(wrongDecodeStage, route, baseOptions), /decoding must belong to a running render/);
 
   const validPasses = nativePasses(true);
   const invalidRecords = [
@@ -449,9 +455,10 @@ test("owned SSE opens before the request and keeps only scoped job events across
     return new Response(stream);
   };
   const events = await openKreaEvents(endpoint, "http://127.0.0.1:1234", new AbortController().signal, fetchImpl);
-  for (const id of ["unrelated", "requested"]) output.enqueue(encoder.encode(`event: job.updated\ndata: ${JSON.stringify({ id, status: "completed", payload: "unneeded", result: { assets: [{}] } })}\n\n`));
+  for (const id of ["unrelated", "requested"]) output.enqueue(encoder.encode(`event: job.updated\ndata: ${JSON.stringify({ id, status: "completed", payload: "unneeded", result: { assets: [{ id: "asset_saved" }] } })}\n\n`));
   const rows = await events.collect("requested", async (probe) => { for (let i = 0; i < 10; i++) { if (await probe()) return; await new Promise(setImmediate); } throw new Error("no target update"); });
   assert.deepEqual(rows.map(({ id, status, payload }) => ({ id, status, payload })), [{ id: "requested", status: "completed", payload: undefined }]);
+  assert.equal(rows[0].publishedAssetId, "asset_saved");
   await events.close();
 });
 

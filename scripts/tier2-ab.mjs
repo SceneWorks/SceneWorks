@@ -1345,7 +1345,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const hiresProgress = cfg.hiresProgress && route.proof === "hires";
       const nativeLog = hiresProgress ? await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024) : undefined;
       record.eventProof = assertKreaEvents(record.observedEvents, route, {
-        nativeLog, requireScope: side === "head" && cfg.backend === "cuda",
+        nativeLog, requireScope: side === "head" && cfg.backend === "cuda", assetId: record.productProof.assetId,
       });
       if (cfg.allocation) {
         try {

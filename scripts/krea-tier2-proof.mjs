@@ -404,7 +404,13 @@ export async function openKreaEvents(endpoint, url, signal, fetchImpl = fetch) {
           if (event === "ready") ready();
           if (event !== "job.updated") continue;
           const value = JSON.parse(fields.filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n"));
-          updates.push({ id: value.id, stage: value.stage, status: value.status, message: value.message, backend: value.backend, workerId: value.workerId, publishedAssets: value.result?.assets?.length ?? 0, receivedMonotonicMs: performance.now() });
+          const publishedAssets = value.result?.assets?.length ?? 0;
+          const assetId = publishedAssets === 1 ? value.result.assets[0]?.id : undefined;
+          updates.push({
+            id: value.id, stage: value.stage, status: value.status, message: value.message, backend: value.backend,
+            workerId: value.workerId, publishedAssets, receivedMonotonicMs: performance.now(),
+            publishedAssetId: typeof assetId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(assetId) ? assetId : undefined,
+          });
         }
         assert.ok(pending.length < 16 * 1024 * 1024 && updates.length < 1024, "owned job event stream exceeded the evidence limit");
       }
@@ -447,7 +453,7 @@ export function kreaExpectedStepEvents(route) {
     : Array.from({ length: route.executedSteps }, (_, index) => [index + 1, route.steps]);
 }
 
-export function assertKreaEvents(events, route, { nativeLog, requireScope } = {}) {
+export function assertKreaEvents(events, route, { nativeLog, requireScope, assetId } = {}) {
   const terminal = events.findIndex((event) => event.status === "completed" && event.publishedAssets === 1);
   assert.ok(terminal >= 0, "worker terminal event with one output missing");
   const nativePasses = route.proof === "hires" && nativeLog !== undefined
@@ -473,11 +479,16 @@ export function assertKreaEvents(events, route, { nativeLog, requireScope } = {}
     assert.ok(unique.length > 0 && unique.every(([current, total], index) =>
       current > 0 && current <= executedSteps && total === route.steps &&
       (index === 0 || current > unique[index - 1][0])), "public Hires.fix steps must form a nonempty ordered subsequence of native steps");
-    assert.equal(events.filter((event) => event.status === "completed").length, 1, "expected one completed Hires.fix update");
+    // Recovery may publish a completed snapshot before persistence and may repeat the same saved asset.
+    assert.ok(assetId && events.filter((event) => event.status === "completed").every((event) =>
+      event.publishedAssets === 0 || (event.publishedAssets === 1 && event.publishedAssetId === assetId)),
+    "Hires.fix terminal events must identify the one saved asset");
   } else {
     assert.deepEqual(unique, kreaExpectedStepEvents(route), "public step events must match the authored phase slices or actual clipped schedule");
   }
   const decoding = events.flatMap((event, index) => event.status === "running" && /\bdecoding\b/i.test(event.message ?? "") ? [index] : []);
+  if (nativePasses) assert.ok(decoding.every((index) => events[index].stage === "generating"),
+    "public Hires.fix decoding must belong to a running render");
   // The job stream republishes snapshots while the worker remains in the same stage.
   assert.ok(decoding.length && decoding[0] > lastStep && decoding.at(-1) < terminal &&
     decoding.every((index, offset) => index === decoding[0] + offset), "only one final decoding state may be published");
