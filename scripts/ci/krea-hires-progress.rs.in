@@ -1,0 +1,50 @@
+// Build-only record of native Turbo callbacks before the worker adapts public Hires.fix progress.
+#[derive(Default)]
+struct KreaHiresProgress {
+    coordinates: [(u32, u32); 8],
+    step_count: usize,
+    decode_count: u32,
+    invalid: bool,
+}
+
+impl KreaHiresProgress {
+    fn observe(&mut self, progress: &gen_core::Progress) {
+        match progress {
+            gen_core::Progress::Step { current, total } => {
+                if self.decode_count != 0 || self.step_count == self.coordinates.len() {
+                    self.invalid = true;
+                } else {
+                    self.coordinates[self.step_count] = (*current, *total);
+                    self.step_count += 1;
+                }
+            }
+            gen_core::Progress::Decoding => self.decode_count += 1,
+            _ => {}
+        }
+    }
+
+    fn publish(
+        &self,
+        request: &gen_core::GenerationRequest,
+        context: Option<&gen_core::MemoryRunContext>,
+        scope_configured: bool,
+    ) {
+        tracing::info!(
+            event = "sgaf336_krea_hires_progress",
+            engine = "krea_2_turbo",
+            width = request.width,
+            height = request.height,
+            authored_steps = request.steps.unwrap_or(0),
+            reference_count = request.image_reference_count(),
+            context_present = context.is_some(),
+            context_width = context.map(|context| context.geometry.width).unwrap_or(0),
+            context_height = context.map(|context| context.geometry.height).unwrap_or(0),
+            context_reference_count = context.map(|context| context.geometry.reference_count).unwrap_or(0),
+            scope_configured,
+            coordinates = %serde_json::json!(&self.coordinates[..self.step_count]),
+            decode_count = self.decode_count,
+            valid = !self.invalid,
+            "Native Hires.fix callbacks observed through successful provider return"
+        );
+    }
+}

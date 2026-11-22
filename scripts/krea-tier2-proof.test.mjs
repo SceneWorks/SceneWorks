@@ -377,6 +377,61 @@ test("queue proof accepts repeated snapshots of the final decoding state only", 
   assert.throws(() => assertKreaEvents(events, HIRES), /intermediate output/);
 });
 
+test("native Hires.fix traces permit the public snapshots observed on both Windows arms", () => {
+  const [, route] = kreaRoutes("cuda");
+  const nativePasses = (scoped) => [8, 2].map((steps, index) => {
+    const size = index === 0 ? 512 : 768;
+    return { event: "sgaf336_krea_hires_progress", engine: "krea_2_turbo", width: size, height: size,
+      authored_steps: index === 0 ? 8 : 4, reference_count: index, scope_configured: scoped,
+      context_present: scoped, context_width: scoped ? size : 0, context_height: scoped ? size : 0,
+      context_reference_count: scoped ? index : 0, decode_count: 1, valid: true,
+      coordinates: JSON.stringify(Array.from({ length: steps }, (_, step) => [step + 1, steps])) };
+  });
+  const nativeLog = (passes) => passes.map((fields) => JSON.stringify({ fields })).join("\r\n");
+  const publicEvents = (steps, decodes) => [
+    ...steps.map((step) => ({ message: `Generating step ${step}/12.`, status: "running", stage: "generating", publishedAssets: 0 })),
+    ...Array.from({ length: decodes }, () => ({ message: "Decoding.", status: "running", stage: "generating", publishedAssets: 0 })),
+    { message: "Generated 1 output(s).", status: "completed", stage: "completed", publishedAssets: 1 },
+  ];
+  // Run 45039550044 saw 7/12 and 9/12 followed by 14 decode snapshots on the baseline.
+  // Its candidate saw all ten step labels, with duplicates, followed by three decode snapshots.
+  const base = publicEvents([7, 9], 14);
+  const head = publicEvents([1, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 10, 10], 3);
+  const baseOptions = { nativeLog: nativeLog(nativePasses(false)) };
+  const headOptions = { nativeLog: nativeLog(nativePasses(true)), requireScope: true };
+  assert.deepEqual(assertKreaEvents(base, route, baseOptions).observedSteps, [[7, 12], [9, 12]]);
+  const headProof = assertKreaEvents(head, route, headOptions);
+  assert.deepEqual(headProof.executedStepSlices, [8, 2]);
+  assert.equal(headProof.decodingUpdates, 3);
+  assert.deepEqual(headProof.nativePasses[1].coordinates, [[1, 2], [2, 2]]);
+  assert.throws(() => assertKreaEvents(base, route), /clipped schedule/);
+  assert.throws(() => assertKreaEvents(base, route, { nativeLog: "" }), /two completed native/);
+  assert.throws(() => assertKreaEvents(base, route, { ...baseOptions, requireScope: true }), /required scope/);
+  for (const steps of [[], [9, 7], [0, 9], [7, 11], [7, 9, 7]]) {
+    assert.throws(() => assertKreaEvents(publicEvents(steps, 1), route, baseOptions), /ordered subsequence/);
+  }
+  const earlyAsset = [{ ...base[0], publishedAssets: 1 }, ...base.slice(1)];
+  assert.throws(() => assertKreaEvents(earlyAsset, route, baseOptions), /intermediate output/);
+  assert.throws(() => assertKreaEvents([...base, base.at(-1)], route, baseOptions), /one completed/);
+
+  const validPasses = nativePasses(true);
+  const invalidRecords = [
+    [{ coordinates: "[[1,2],[1,2]]" }, /exact clipped schedule/],
+    [{ coordinates: "[[1,4],[2,4]]" }, /exact clipped schedule/],
+    [{ valid: false }, /one decode/],
+    [{ decode_count: 2 }, /one decode/],
+    [{ width: 512 }, /pass geometry/],
+    [{ reference_count: 0 }, /pass geometry/],
+    [{ context_reference_count: 0 }, /admission geometry/],
+  ];
+  for (const [wrong, error] of invalidRecords) {
+    const corrupted = [validPasses[0], { ...validPasses[1], ...wrong }];
+    assert.throws(() => assertKreaEvents(head, route, { ...headOptions, nativeLog: nativeLog(corrupted) }), error);
+  }
+  assert.throws(() => assertKreaEvents(head, route, { nativeLog: nativeLog(validPasses.slice(0, 1)) }), /two completed native/);
+  assert.throws(() => assertKreaEvents(jobEvents(RAW).slice(1), RAW, headOptions), /authored phase slices/);
+});
+
 test("owned SSE opens before the request and keeps only scoped job events across fragmented frames", async () => {
   const encoder = new TextEncoder();
   let output;

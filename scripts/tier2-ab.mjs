@@ -190,6 +190,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   if (allocation) assert.equal(inferenceSha, KREA_WIDE_IM2COL_PIN, "wide Krea allocation requires the reviewed CUDA im2col fix");
   const repairDir = krea && !allocation ? paths.join(paths.dirname(baseDir), KREA_LINKED_SOURCE_REPAIR_CHECKOUT) : null;
   const routes = krea ? kreaRoutes(backend, { allocation }) : selectRoutes(backend, env.TIER2_AB_ROUTES);
+  const hiresProgress = krea && !allocation && routes.some(({ proof }) => proof === "hires");
   if (krea) {
     assertKreaPins(baseSha, KREA_BASE_ENGINE, headSha, inferenceSha);
     fact(!env.TIER2_AB_ROUTES && !env.TIER2_AB_HUBS, "Krea uses its fixed routes and attempt-owned staging hub");
@@ -200,7 +201,7 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { suite, krea, perf, allocation, backend, baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes, managedJobRoot, kreaCacheHub,
+  return { suite, krea, perf, allocation, hiresProgress, backend, baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes, managedJobRoot, kreaCacheHub,
     hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
@@ -882,7 +883,7 @@ async function preflight(env, cfg, report, signal) {
       const manifests = ["Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml"];
       const contents = await Promise.all(manifests.map((file) => readFile(path.join(side.checkout, file), "utf8")));
       assertPins(contents, await readFile(path.join(side.checkout, "Cargo.lock"), "utf8"), side.inferencePin);
-      if (cfg.perf || cfg.allocation) {
+      if (cfg.perf || cfg.allocation || cfg.hiresProgress) {
         const { sourceSha256, overlaySha256 } = await bindKreaSamplerOverlay(await readFile(path.join(side.checkout, SAMPLER_SOURCE_FILE)), side.sha === cfg.baseSha ? "base" : "head", cfg);
         side.samplerOverlay = { sourceSha256, overlaySha256 };
       }
@@ -980,7 +981,7 @@ async function build(env, cfg, report) {
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
     const compile = async () => {
       const cargo = () => runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
-      if (!cfg.perf && !cfg.allocation) return cargo();
+      if (!cfg.perf && !cfg.allocation && !cfg.hiresProgress) return cargo();
       const file = path.join(dir, SAMPLER_SOURCE_FILE);
       const original = await readFile(file);
       const overlay = await bindKreaSamplerOverlay(original, label, cfg);
@@ -1341,7 +1342,11 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
     fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
     if (route.proof) {
-      record.eventProof = assertKreaEvents(record.observedEvents, route);
+      const hiresProgress = cfg.hiresProgress && route.proof === "hires";
+      const nativeLog = hiresProgress ? await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024) : undefined;
+      record.eventProof = assertKreaEvents(record.observedEvents, route, {
+        nativeLog, requireScope: side === "head" && cfg.backend === "cuda",
+      });
       if (cfg.allocation) {
         try {
           record.allocation = kreaAllocationReceipt(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), memory, record.watchdog.capBytes);
@@ -1357,7 +1362,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
             const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`);
             return value?.totalMs > 0 && value;
           }, 30, "Krea native memory metrics");
-          const passes = kreaSamplerReceipt(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route);
+          const passes = kreaSamplerReceipt(nativeLog ?? await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route);
           record.performance = kreaPerformanceObservation({ route, passes, postedMonotonicMs, events: record.observedEvents, memory, metrics: nativeMetrics, machine: os.hostname() });
         } catch (error) {
           record.performance = { eligibility: "inconclusive", reason: error.message };
@@ -1454,7 +1459,7 @@ async function runComparison(env, cfg, report, signal) {
   assert.deepEqual(recorded.kreaLinkedSourceBuild, report.kreaLinkedSourceBuild, "build used a different Krea linked-source repair");
   const built = recorded.built;
   for (const side of cfg.allocation ? ["head"] : ["base", "head"]) {
-    if (cfg.perf || cfg.allocation) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
+    if (cfg.perf || cfg.allocation || cfg.hiresProgress) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
     fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`);
     report[side].binarySha256 = built[side].binarySha256;
   }

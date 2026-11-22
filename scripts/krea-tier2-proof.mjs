@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 
 import { probeCacheFile } from "./h3-finetune-terminal-stage.mjs";
 import { KREA_ALLOCATION_BASE_SIZE, KREA_ALLOCATION_FINAL_SIZE } from "./krea-tier2-allocation.mjs";
+import { kreaHiresProgressReceipt } from "./krea-tier2-performance.mjs";
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { assertTerminalPhysicalContainment, ensureTerminalPhysicalDirectory } from "./lib/starvector-terminal-pin-paths.mjs";
 
@@ -446,13 +447,17 @@ export function kreaExpectedStepEvents(route) {
     : Array.from({ length: route.executedSteps }, (_, index) => [index + 1, route.steps]);
 }
 
-export function assertKreaEvents(events, route) {
+export function assertKreaEvents(events, route, { nativeLog, requireScope } = {}) {
   const terminal = events.findIndex((event) => event.status === "completed" && event.publishedAssets === 1);
   assert.ok(terminal >= 0, "worker terminal event with one output missing");
+  const nativePasses = route.proof === "hires" && nativeLog !== undefined
+    ? kreaHiresProgressReceipt(nativeLog, route, { requireScope })
+    : undefined;
   let lastStep = -1;
-  const steps = events.flatMap(({ message }, index) => {
+  const steps = events.flatMap(({ message, stage, status }, index) => {
     const match = /\bstep (\d+)\/(\d+)\b/i.exec(message ?? "");
     if (!match) return [];
+    if (nativePasses) assert.ok(status === "running" && stage === "generating", "public Hires.fix steps must belong to a running render");
     lastStep = index;
     return [[Number(match[1]), Number(match[2])]];
   });
@@ -461,13 +466,26 @@ export function assertKreaEvents(events, route) {
   // schedule at floor(4 * (1 - 0.5)) = 2. Its two emitted ticks are numbered 9 and 10.
   // Raw calls the native solver on separate phase slices. Both pinned engines forward
   // their numbering unchanged, so every phase's first Step starts at 1 on the public wire.
-  assert.deepEqual(unique, kreaExpectedStepEvents(route), "public step events must match the authored phase slices or actual clipped schedule");
+  if (nativePasses) {
+    // The worker publishes latest-wins progress labels. Native callbacks establish the exact
+    // schedule. Every observed public label must still be part of that schedule, in order.
+    const executedSteps = nativePasses.reduce((total, pass) => total + pass.coordinates.length, 0);
+    assert.ok(unique.length > 0 && unique.every(([current, total], index) =>
+      current > 0 && current <= executedSteps && total === route.steps &&
+      (index === 0 || current > unique[index - 1][0])), "public Hires.fix steps must form a nonempty ordered subsequence of native steps");
+    assert.equal(events.filter((event) => event.status === "completed").length, 1, "expected one completed Hires.fix update");
+  } else {
+    assert.deepEqual(unique, kreaExpectedStepEvents(route), "public step events must match the authored phase slices or actual clipped schedule");
+  }
   const decoding = events.flatMap((event, index) => event.status === "running" && /\bdecoding\b/i.test(event.message ?? "") ? [index] : []);
   // The job stream republishes snapshots while the worker remains in the same stage.
   assert.ok(decoding.length && decoding[0] > lastStep && decoding.at(-1) < terminal &&
     decoding.every((index, offset) => index === decoding[0] + offset), "only one final decoding state may be published");
   assert.ok(events.filter((event) => event.status !== "completed").every((event) => event.publishedAssets === 0), "intermediate output reached public job events");
-  return { observedSteps: unique, decodingEvents: 1, decodingUpdates: decoding.length, authoredStepSlices: route.proof === "raw" ? PHASES.map(({ steps }) => steps) : [8, 4], executedStepSlices: route.proof === "raw" ? [3, 4, 3] : [8, 2] };
+  return { observedSteps: unique, decodingEvents: 1, decodingUpdates: decoding.length,
+    authoredStepSlices: route.proof === "raw" ? PHASES.map(({ steps }) => steps) : [8, 4],
+    executedStepSlices: nativePasses ? nativePasses.map(({ coordinates }) => coordinates.length) : route.proof === "raw" ? [3, 4, 3] : [8, 2],
+    ...(nativePasses && { nativePasses }) };
 }
 
 function publicKreaRawAsset(sidecar, route, adapterImport, dataRoot) {
@@ -570,5 +588,5 @@ export function kreaPerformance(metrics, route, memory) {
   assert.equal(metrics.imageCount, 1);
   assert.ok(Number.isFinite(metrics.sampleMs) && metrics.sampleMs > 0, "native sampleMs is missing");
   assert.ok(memory.samples > 0 && memory.peakBytes > 0, "observed memory peak and sample count are required");
-  return { secondsPerObservedStep: metrics.sampleMs / (1000 * route.executedSteps), sampleMs: metrics.sampleMs, authoredSteps: route.steps, executedSteps: route.executedSteps, memory, method: "worker sampleMs divided by actual step events; Hires.fix includes the interval between its two sampling passes" };
+  return { secondsPerObservedStep: metrics.sampleMs / (1000 * route.executedSteps), sampleMs: metrics.sampleMs, authoredSteps: route.steps, executedSteps: route.executedSteps, memory, method: "worker sampleMs divided by validated executed steps; Hires.fix includes the interval between its two sampling passes" };
 }
