@@ -27515,9 +27515,13 @@ fn candle_checkpoint_plan_refuses_a_tokenizer_destination_outside_app_data() {
     fx.settings.backend_candle_enabled = true;
     install_sdxl_clip_tokenizer_assets(&fx.settings);
     let checkpoint_id = fx.compile("communityxl.safetensors", &sdxl_fused_entries());
-    let staging = fx.settings.data_dir.join("cache/sdxl-imported-components");
+    let staging = fx
+        .settings
+        .data_dir
+        .join("cache")
+        .join("sdxl-imported-components");
     std::fs::create_dir_all(&staging).unwrap();
-    let outside = fx.library_dir.join("outside");
+    let outside = fx._library.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
     let escaped = staging.join("clip-l");
     #[cfg(windows)]
