@@ -178,6 +178,98 @@ const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
 const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
 #[test]
+fn builtin_krea_raw_candle_claim_requires_pure_noise_and_an_explicit_phase_list() {
+    let worker = gpu_worker(CANDLE_CAPS);
+    let payload = json!({
+        "model": "krea_2_raw", "mode": "text_to_image",
+        "loras": [{"id": "darkbrush", "weight": 1.0}],
+        "advanced": {"mlxQuantize": 4, "phases": [
+            {"steps": 3, "guidance": 0},
+            {"steps": "4", "guidance": "1.0", "loras": [{"index": "0", "weight": "0.75"}]},
+            {"steps": 3, "guidance": 0}
+        ]}
+    });
+    for tier in [json!(null), json!(0), json!(4), json!(8)] {
+        let mut accepted = payload.clone();
+        accepted["advanced"]["mlxQuantize"] = tier;
+        let job = image_generate_job(accepted);
+        assert_eq!(
+            image_job_candle_lane(&job),
+            Some(CandleImageLane::KreaMultiPhase)
+        );
+        assert!(worker_supports_job(&worker, &job));
+        assert!(!worker_supports_job(
+            &gpu_worker_with_status(CANDLE_CAPS, "unhealthy"),
+            &job
+        ));
+    }
+    assert_eq!(
+        image_job_candle_lane(&image_edit_job(payload.clone())),
+        None
+    );
+
+    for (field, values) in [
+        (
+            "/model",
+            vec![json!("krea_2_turbo"), json!("krea_2_raw_custom")],
+        ),
+        ("/mode", vec![json!("edit_image"), json!("image_to_image")]),
+        ("/advanced/phases", vec![json!([]), json!({})]),
+        ("/advanced/mlxQuantize", vec![json!("bogus")]),
+    ] {
+        for value in values {
+            let mut refused = payload.clone();
+            *refused.pointer_mut(field).unwrap() = value;
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(refused.clone())),
+                None,
+                "{refused}"
+            );
+        }
+    }
+    for (field, value) in [
+        ("sourceAssetId", json!("source")),
+        ("referenceAssetId", json!("reference")),
+        ("referenceAssetIds", json!(["reference"])),
+        ("maskAssetId", json!("mask")),
+        ("characterId", json!("character")),
+        ("hiresFix", json!({"enabled": true})),
+        ("variant", json!("int8-convrot")),
+    ] {
+        let mut refused = payload.clone();
+        refused[field] = value;
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(refused.clone())),
+            None,
+            "{refused}"
+        );
+    }
+    for (field, value) in [
+        ("poses", json!([{"id": "pose", "keypoints": []}])),
+        ("controlMode", json!("canny")),
+        ("usePid", json!(true)),
+        ("lowResStart", json!({"version": 1, "k": 1})),
+        ("quantTier", json!("fp8r")),
+        ("convRot", json!(true)),
+    ] {
+        let mut refused = payload.clone();
+        refused["advanced"][field] = value;
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(refused.clone())),
+            None,
+            "{refused}"
+        );
+    }
+
+    let mut ordinary = payload;
+    ordinary["advanced"]["phases"] = Value::Null;
+    assert_eq!(
+        image_job_candle_lane(&image_generate_job(ordinary)),
+        Some(CandleImageLane::TextToImage)
+    );
+}
+
+#[test]
 fn moss_edit_candle_named_lane_and_claim_share_ordered_reference_contract() {
     let worker = gpu_worker(CANDLE_CAPS);
     for model in ["moss_image_base", "moss_image_sft"] {

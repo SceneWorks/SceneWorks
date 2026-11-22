@@ -5995,6 +5995,149 @@ async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
 }
 
 #[tokio::test]
+async fn builtin_krea_raw_phases_create_and_claim_on_windows_with_the_local_adapter() {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let manifest_dir = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    write_empty_sibling_manifests(&manifest_dir);
+    let raw = sceneworks_core::builtin_manifests::builtin_model_entry("krea_2_raw").unwrap();
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        json!({"schemaVersion": 1, "models": [raw]}).to_string(),
+    )
+    .unwrap();
+    let file = temp.path().join("data/loras/raw-phases.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    write_test_safetensors_with_keys(
+        &file,
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.weight".into(),
+        ],
+    );
+    const ADAPTER: &str = "raw_phases_fixture";
+    std::fs::write(
+        manifest_dir.join("user.loras.jsonc"),
+        json!({"schemaVersion": 1, "loras": [{
+            "id": ADAPTER, "name": "Raw phase fixture", "family": "krea_2",
+            "compatibility": {"families": ["krea_2"]},
+            "source": {"provider": "local", "path": "loras/raw-phases.safetensors"}
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let mut settings = test_settings(&temp);
+    settings.host_os = "windows".to_owned();
+    settings.candle_required = true;
+    let (app, state) = jobs_fixture_app_with_pinned_metadata(settings).unwrap();
+    let (status, project) = create_project(app.clone(), "Raw phases proof fixture").await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let project_id = project["id"].as_str().unwrap();
+    let body = json!({
+        "projectId": project_id, "model": "krea_2_raw", "mode": "text_to_image",
+        "prompt": "mist over hills", "width": 512, "height": 512, "count": 1, "seed": 33602,
+        "loras": [{"id": ADAPTER, "weight": 1.0}],
+        "advanced": {"mlxQuantize": 4, "sampler": "euler", "phases": [
+            {"steps": 3, "guidance": 0},
+            {"steps": 4, "guidance": 1, "loras": [{"index": 0, "weight": 0.75}]},
+            {"steps": 3, "guidance": 0}
+        ]}
+    });
+    let route = TestPortableRoute::CandleWindows;
+    let registration = portable_test_worker_registration(
+        "krea-raw-windows",
+        &["gpu", "candle", "image_generate"],
+        route,
+    );
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, refused) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap()
+            .contains("complete local source closure"),
+        "{refused}"
+    );
+
+    let files = vec![PortableArtifactFile {
+        relative_path: file.file_name().unwrap().into(),
+        size_bytes: std::fs::metadata(&file).unwrap().len(),
+        sha256: format!(
+            "sha256:{}",
+            sceneworks_core::hashing::sha256_file(&file).unwrap()
+        ),
+    }];
+    let ledger = portable_file_ledger_sha256(&files).unwrap();
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora", ADAPTER, None, &ledger,
+    )
+    .unwrap();
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .unwrap();
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "krea-raw-windows".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[claim]),
+        )
+        .unwrap();
+
+    let (status, created) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["catalogScope"],
+        "builtin"
+    );
+    let binding = state
+        .jobs_store
+        .portable_model_binding(id)
+        .unwrap()
+        .unwrap();
+    let windows = &binding["routes"]["candle:windows"];
+    assert_eq!(
+        windows["expectedProvider"]["providerId"], "krea_2_raw",
+        "{windows}"
+    );
+    let (status, claimed) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("krea-raw-windows", route),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let claimed = &claimed["job"];
+    assert_eq!(claimed["id"], id);
+    assert_eq!(
+        claimed["payload"]["advanced"]["phases"],
+        body["advanced"]["phases"]
+    );
+    assert_eq!(claimed["payload"]["loras"][0]["id"], ADAPTER);
+}
+
+#[tokio::test]
 async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
