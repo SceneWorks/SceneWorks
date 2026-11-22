@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "fe1dfc6892b2c474613f2bc9de35c778a43b9d53",
+  "inferenceRevision": "cef3e31c7af51003892c1e99f1856c36ccb93b06",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -700,7 +700,7 @@
     },
     "candle:krea_2_raw": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "18b487ba7dc50bf0fd4b874784bc507cf06320879faaeaa2ccdc5265a54261bf",
+      "digest": "83295bd195030825c9c2687617ebbacf1a780ba7f294ed512f7a59de023bd1db",
       "sharedContractDigest": "be3bfe6e494f7fb41030b2e46a5863773daee225d3f9c72f3c0afdbd773c9884",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -746,7 +746,7 @@
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "0a9cdd69bd8027f105e6b39ce21876c697996dce8cac678dd5221fa239b74710",
+      "digest": "88503fd51c78b75b66b5c58e3b3bcd800b3b011350bb0e25b627e35e6f2f22d6",
       "sharedContractDigest": "be3bfe6e494f7fb41030b2e46a5863773daee225d3f9c72f3c0afdbd773c9884",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -792,7 +792,7 @@
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "3d7e321e7eed9dd0b3741bddf9f8ac243282b8b7c4a5423f0dbbc233ea801835",
+      "digest": "4de5625c540d7607854262bdf39b72cbc1fdcb6f7c5d4046ecdcd5b26d9886a7",
       "sharedContractDigest": "be3bfe6e494f7fb41030b2e46a5863773daee225d3f9c72f3c0afdbd773c9884",
       "closureCrates": [
         "crates/contracts/core-llm",

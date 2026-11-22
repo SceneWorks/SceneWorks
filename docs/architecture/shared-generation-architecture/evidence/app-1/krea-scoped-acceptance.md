@@ -27,7 +27,7 @@ The scoring method is the six-pair procedure from inference `b2452ead6`. For bot
 
 ## Production-shape Candle allocation witness
 
-Set `allocation: true` in the Krea suite options with `backend=candle` and candidate inference SHA `fe1dfc6892b2c474613f2bc9de35c778a43b9d53`, which includes the wide CUDA im2col fix. Enable `download_missing` and set `preflight_only: false` for the render. The driver stages only the existing linked BF16 checkpoint and its companion files. It builds and runs the corrected candidate once. The frozen baseline remains a catalog check for this mode and runs at smaller geometries in the separate fidelity and timing profiles.
+Set `allocation: true` in the Krea suite options with `backend=candle` and candidate inference SHA `cef3e31c7af51003892c1e99f1856c36ccb93b06`, which includes the wide CUDA im2col and Krea Control scope fixes. Enable `download_missing` and set `preflight_only: false` for the render. The driver stages only the existing linked BF16 checkpoint and its companion files. It builds and runs the corrected candidate once. The frozen baseline remains a catalog check for this mode and runs at smaller geometries in the separate fidelity and timing profiles.
 
 The candidate uses the original prompt and seed at 1120² base and 2240² refinement. The public request authors eight base and four refinement steps at denoising strength 0.5, so the worker emits ten executed ticks. The public file and library checks require one final 2240² PNG. The existing exact-device lease requires 75,776 MiB free device memory. The arm has five minutes for claim and thirty for execution, a 55-minute driver ceiling, and an 85-minute lease budget including admission wait.
 
