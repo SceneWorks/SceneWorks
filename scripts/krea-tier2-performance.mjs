@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { KREA_WDDM_SOURCE, kreaWindowsDedicatedPeak } from "./lib/krea-windows-worker-memory.mjs";
 import { sha256 } from "./lib/file-sha256.mjs";
 import { kreaAllocationOverlay, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
 
@@ -38,26 +39,24 @@ export async function bindKreaSamplerOverlay(original, side, { allocation = fals
   return { content: materialized, sourceSha256, overlaySha256: sha256(materialized) };
 }
 
-// Match `scripts/media_campaign_supervisor.py::_compute_app_rows`, then retain only this
-// worker PID on the admitted device. No global-used fallback for a performance decision.
-export function kreaOwnedGpuSample(csv, ownedPid, uuid) {
+// NVIDIA can still identify compute applications and their GPU UUID on WDDM.
+// Dedicated process bytes come solely from the separate PDH observation.
+export function kreaOwnedCudaAttachment(csv, ownedPid, uuid) {
   const uuidPattern = /^GPU-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
   assert.ok(uuidPattern.test(uuid) && Number.isSafeInteger(ownedPid) && ownedPid > 0);
   const seen = new Set();
-  let sample = { attached: false, bytes: null };
+  let attached = false;
   for (const line of csv.trim().split(/\r?\n/).filter(Boolean)) {
-    const [pid, memory, device, ...unexpected] = line.split(",").map((value) => value.trim());
+    const [pid, device, ...unexpected] = line.split(",").map((value) => value.trim());
     assert.ok(unexpected.length === 0 && /^\d{1,10}$/.test(pid) && Number(pid) > 0 && uuidPattern.test(device), "invalid compute-app process/UUID row");
     const identity = `${pid}/${device.toLowerCase()}`;
     assert.ok(!seen.has(identity), "duplicate compute-app process/UUID row");
     seen.add(identity);
     if (Number(pid) !== ownedPid) continue;
     assert.equal(device.toLowerCase(), uuid.toLowerCase(), "the owned worker appeared on an unleased device");
-    const bytes = ["N/A", "[N/A]"].includes(memory) ? null : (/^\d+$/.test(memory) ? Number(memory) * 1024 ** 2 : NaN);
-    assert.ok(bytes === null || Number.isSafeInteger(bytes), "invalid compute-app memory row");
-    sample = { attached: true, bytes };
+    attached = true;
   }
-  return sample;
+  return attached;
 }
 
 export function kreaSamplerReceipt(log, route) {
@@ -90,6 +89,10 @@ export function compareKreaPerformance(pairs, backend) {
   const positive = (value) => Number.isFinite(value) && value > 0;
   if (!ordered.every(({ secondsPerOuterStep, productSeconds, hostPeakBytes, devicePeakBytes }) => positive(secondsPerOuterStep) && positive(productSeconds) && Number.isSafeInteger(hostPeakBytes) && hostPeakBytes > 0 && Number.isSafeInteger(devicePeakBytes) && devicePeakBytes > 0)) return { status: "inconclusive", reason: "invalid timing or memory sample" };
   if (new Set(ordered.map(({ device }) => device)).size !== 1) return { status: "inconclusive", reason: "device changed between pairs" };
+  if (backend === "cuda" && (!ordered.every(({ deviceSource, wddmAdapter }) => deviceSource === KREA_WDDM_SOURCE && wddmAdapter)
+    || new Set(ordered.map(({ wddmAdapter }) => `${wddmAdapter.luid}/${wddmAdapter.physical_node}`)).size !== 1)) {
+    return { status: "inconclusive", reason: "Windows device accounting source or adapter changed between arms" };
+  }
   const timing = (field) => {
     const pairRatios = pairs.map(({ base, head }) => head.performance[field] / base.performance[field]);
     const sorted = [...pairRatios].sort((a, b) => a - b);
@@ -100,7 +103,7 @@ export function compareKreaPerformance(pairs, backend) {
     const [basePeakBytes, headPeakBytes] = sides.map((side) => Math.max(...pairs.map((pair) => pair[side].performance[field])));
     return { status: 100n * BigInt(headPeakBytes) <= 102n * BigInt(basePeakBytes) ? "pass" : "fail", basePeakBytes, headPeakBytes, ratio: headPeakBytes / basePeakBytes };
   };
-  const results = { secondsPerOuterStep: timing("secondsPerOuterStep"), productSeconds: timing("productSeconds"), hostOrUnifiedPeak: peak("hostPeakBytes"), deviceOrAllocatorPeak: peak("devicePeakBytes") };
+  const results = { secondsPerOuterStep: timing("secondsPerOuterStep"), productSeconds: timing("productSeconds"), hostOrUnifiedPeak: peak("hostPeakBytes"), deviceOrAllocatorPeak: { ...peak("devicePeakBytes"), ...(backend === "cuda" ? { source: KREA_WDDM_SOURCE, physicalResidencyClaim: false } : {}) } };
   const statuses = Object.values(results).map(({ status }) => status);
   return { status: statuses.includes("fail") ? "fail" : statuses.includes("inconclusive") ? "inconclusive" : "pass", backend, ceiling: CEILING, intervalCoverage: KREA_PERF_COVERAGE, ...results };
 }
@@ -110,13 +113,14 @@ export function kreaPerformanceObservation({ route, passes, postedMonotonicMs, e
   assert.ok(Number.isFinite(productEnd) && productEnd > postedMonotonicMs, "persisted terminal SSE measurement missing");
   const hostPeakBytes = memory.hostLifetimePeakBytes;
   const mlx = route.backend === "mlx";
-  const devicePeakBytes = mlx ? metrics.peakMemoryBytes : memory.ownedGpuPeakBytes;
+  const dedicated = mlx ? null : kreaWindowsDedicatedPeak(memory);
+  const devicePeakBytes = mlx ? metrics.peakMemoryBytes : dedicated.peakBytes;
   const device = mlx ? machine : memory.gpuUuid;
-  assert.ok(device && [hostPeakBytes, devicePeakBytes].every((value) => Number.isSafeInteger(value) && value > 0), "matched resident memory peaks are incomplete");
-  if (!mlx) assert.ok(memory.ownedGpuSamples >= 3 && memory.ownedGpuErrors === 0 && !memory.ownedGpuUnavailable, "CUDA PID-specific sample missing or N/A");
+  assert.ok(device && [hostPeakBytes, devicePeakBytes].every((value) => Number.isSafeInteger(value) && value > 0), "matched memory peaks are incomplete");
   const secondsPerOuterStep = passes.reduce((total, { elapsedNs }) => total + elapsedNs, 0) / (1e9 * route.executedSteps);
   assert.ok(Number.isFinite(secondsPerOuterStep) && secondsPerOuterStep > 0);
   return { eligibility: "valid", secondsPerOuterStep, passes, productSeconds: (productEnd - postedMonotonicMs) / 1000, hostPeakBytes, devicePeakBytes, device,
     hostSource: mlx ? "Darwin proc_pid_rusage lifetime physical footprint of worker" : "Windows PeakWorkingSet64 of worker",
-    deviceSource: mlx ? "MLX allocator native high-water reset per job" : "nvidia-smi compute-app sample maximum for owned worker PID and admitted GPU UUID" };
+    deviceSource: mlx ? "MLX allocator native high-water reset per job" : KREA_WDDM_SOURCE,
+    ...(dedicated ? { wddmAdapter: dedicated.adapter, physicalResidencyClaim: false } : {}) };
 }

@@ -42,10 +42,11 @@ import {
   assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaPerformance,
 } from "./krea-tier2-proof.mjs";
 import {
-  SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedGpuSample,
+  SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedCudaAttachment,
   kreaSamplerReceipt, kreaPerformanceObservation, compareKreaPerformance,
 } from "./krea-tier2-performance.mjs";
 import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
+import { startKreaWindowsWorkerMemory } from "./lib/krea-windows-worker-memory.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -760,7 +761,7 @@ const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / GIB).toFixed(2)} Gi
 const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–");
 export function renderMarkdown(report) {
   const lines = [`# Tier 2 A/B (${report.backend}) — ${report.mode}`, "", `- status: **${report.status}** (exit ${report.exitCode})`, `- base: \`${report.base.sha}\` (inference ${report.base.inferencePin ?? "?"}, binary ${report.base.binarySha256 ?? "not built"})`, `- head: \`${report.head.sha}\` (inference ${report.head.inferencePin ?? "?"}, binary ${report.head.binarySha256 ?? "not built"})`, `- runner: ${report.runner.name ?? "local"} (${report.runner.platform}/${report.runner.arch}, ${gib(report.runner.totalMemoryBytes)} RAM)`, `- window: ${report.startedAt} → ${report.finishedAt ?? "running"}`, `- memory method: ${report.memoryMethod}`, `- fidelity method: decoded content (PNG→RGBA8, WAV→PCM samples, video→ffmpeg RGBA frames + s16le audio); file sha256 recorded separately`, ""];
-  if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Memory peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. WDDM reports no per-process GPU memory, so admission and attribution use device memory.used/free and the driver's process types.", "");
+  if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Device-wide diagnostic peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. NVIDIA device-wide readings and process types still govern the device lease.", "");
   if (Array.isArray(report.gpus)) {
     lines.push("| nvidia-smi index | PCI bus | UUID | display attached | used / total | util | processes (C, G, C+G) |", "|---|---|---|---|---|---|---|");
     for (const gpu of report.gpus) { const count = (type) => gpu.processes.filter((row) => row.type === type).length; lines.push(`| ${gpu.index} | ${gpu.pciBusId} | ${gpu.uuid} | ${gpu.displayAttached} | ${gpu.memoryUsed} / ${gpu.memoryTotal} | ${gpu.utilization} | C ${count("C")} (${gpu.processes.filter((row) => row.type === "C").map((row) => `${row.name}:${row.pid}`).join(" ")}), G ${count("G")}, C+G ${count("C+G")} |`); }
@@ -768,6 +769,9 @@ export function renderMarkdown(report) {
   }
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
+  if (report.backend === "cuda" && report.kind === KREA_SUITE && (report.allocationProtocol || report.performanceProtocol)) {
+    lines.push("- Krea Windows memory uses sampled PDH dedicated-process accounting for the owned worker and leased CUDA adapter. Device-wide samples and the private CUDA pool have separate accounting domains.", "");
+  }
   if (report.allocationProtocol) lines.push(`- Allocation witness: ${report.allocationProtocol}.`, "");
   if (report.performanceProtocol) lines.push(`- Performance protocol: ${report.performanceProtocol}; results remain separate from output evidence.`, "");
   if (report.kind === KREA_SUITE && report.staging) lines.push(`- Exact asset inventory: ${report.staging.files.length} files, ${gib(report.staging.bytes)}. ${report.staging.stagedFileCount ? "Digest-verified in the attempt-owned hub." : "Metadata pricing only."}`, "");
@@ -1060,7 +1064,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     child.done = new Promise((resolve) => { child.once("error", (error) => resolve({ error: error.message })); child.once("exit", (code, sig) => resolve({ code, signal: sig })); });
     return child;
   };
-  let endpoint, apiUrl, job, accepted, events, samplers = [], sampling = false;
+  let endpoint, apiUrl, job, accepted, events, dedicatedMemory, samplers = [], sampling = false;
   const runStarted = Date.now();
   // Outer backstop only; the claim and execution bounds below stop a run first and say why.
   const runMinutes = claimMinutes + route.timeoutMinutes + 15;
@@ -1162,26 +1166,20 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       }
       if (cfg.perf || cfg.allocation) {
         const uuid = memory.gpuUuid;
-        memory.ownedGpuSamples = 0;
-        memory.ownedGpuErrors = 0;
-        memory.ownedGpuUnavailable = false;
-        memory.ownedGpuPeakBytes = 0;
+        dedicatedMemory = startKreaWindowsWorkerMemory({ pid: worker.pid, executable: built[side].binary, gpuUuid: uuid, env });
+        memory.wddmDedicated = dedicatedMemory.record;
+        await dedicatedMemory.ready();
+        fact(!exited(worker), "owned worker exited before the Windows memory observer armed");
         samplers.push((async () => {
           while (sampling) {
             try {
-              const args = ["--query-compute-apps=pid,used_gpu_memory,gpu_uuid", "--format=csv,noheader,nounits"];
+              // NVIDIA identifies the worker and rejects any unleased UUID.
+              // Its unavailable WDDM byte field is not part of the measurement.
+              const args = ["--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader,nounits"];
               const { stdout } = await execFile(smi, args, { timeout: 10_000, windowsHide: true });
-              const row = kreaOwnedGpuSample(stdout, worker.pid, uuid);
-              if (row.attached && row.bytes === null) memory.ownedGpuUnavailable = true;
-              if (row.bytes > 0) {
-                if (memory.ownedGpuMissingAfterAttach) memory.ownedGpuUnavailable = true;
-                memory.ownedGpuSamples++;
-                memory.ownedGpuPeakBytes = Math.max(memory.ownedGpuPeakBytes, row.bytes);
-              } else if (!row.attached && memory.ownedGpuSamples > 0) {
-                memory.ownedGpuMissingAfterAttach = true;
-              }
-            } catch {
-              memory.ownedGpuErrors++;
+              if (kreaOwnedCudaAttachment(stdout, worker.pid, uuid)) dedicatedMemory.markActive();
+            } catch (error) {
+              memory.ownedGpuIdentityError ??= error.message;
             }
             await delay(500);
           }
@@ -1190,7 +1188,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
       memory.gpuBaselineBytes = Math.max(...baseline);
       if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuUnavailable = true; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
+      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuIdentityError ??= "physical GPU changed while sampling"; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     const posted = Date.now();
@@ -1228,7 +1226,9 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     }
     record.timing.enqueueToCompleteSeconds = (Date.now() - posted) / 1000;
     await phase("completed", { side, job: accepted.id, total_s: record.timing.enqueueToCompleteSeconds.toFixed(1) });
-    sampling = false; await Promise.all(samplers); samplers = [];
+    sampling = false;
+    await dedicatedMemory?.finish();
+    await Promise.all(samplers); samplers = [];
     if (cfg.backend === "cuda") {
       memory.peakBytes = memory.gpuPeakBytes ?? null;
       memory.peakAboveBaselineBytes = Number.isFinite(memory.gpuPeakBytes) ? Math.max(0, memory.gpuPeakBytes - memory.gpuBaselineBytes) : null;
@@ -1318,6 +1318,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     sampling = false;
     try {
       await events?.close().catch(() => {});
+      await dedicatedMemory?.close();
       await Promise.all(samplers);
       if (record.status !== "completed" && apiUrl) {
         // The owned endpoint gate refuses requests once the watchdog has aborted.

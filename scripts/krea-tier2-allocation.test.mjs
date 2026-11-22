@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { childEnvironments, dispatchOptions, exitCodeFor, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
 import { KREA_ALLOCATION_POOL_BYTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt } from "./krea-tier2-allocation.mjs";
+import { kreaWindowsMemoryFixture } from "./lib/krea-windows-worker-memory-fixture.mjs";
 import { CHECKPOINT, KREA_BASE_APP, KREA_SUITE, kreaAssetInventory, kreaExpectedStepEvents, kreaRoutes } from "./krea-tier2-proof.mjs";
 
 const SHA = "1".repeat(40);
@@ -54,7 +55,7 @@ function receiptFields() {
 }
 
 const log = (fields) => fields.map((entry) => JSON.stringify({ fields: entry })).join("\n");
-const memory = { gpuUuid: "GPU-2160ecaf-a2b7-7321-87a2-1234567890ab", hostLifetimePeakBytes: 3000, ownedGpuPeakBytes: 2400, ownedGpuSamples: 3, ownedGpuErrors: 0, ownedGpuUnavailable: false };
+const memory = kreaWindowsMemoryFixture({ peakBytes: 2400, hostPeakBytes: 3000 });
 
 test("actual pass context, cumulative native pool counters and owned process peaks keep their own domains", () => {
   const measured = kreaAllocationReceipt(log(receiptFields()), memory, 3200);
@@ -66,7 +67,7 @@ test("actual pass context, cumulative native pool counters and owned process pea
   const noContext = receiptFields();
   noContext[0].context_present = false;
   assert.throws(() => kreaAllocationReceipt(log(noContext), memory, 3200), /context is missing/);
-  assert.throws(() => kreaAllocationReceipt(log(receiptFields()), { ...memory, ownedGpuUnavailable: true }, 3200), /incomplete or N\/A/);
+  assert.throws(() => kreaAllocationReceipt(log(receiptFields()), { ...memory, wddmDedicated: null }, 3200), /incomplete/);
   assert.throws(() => kreaAllocationReceipt(log(receiptFields()), memory, 2000), /containment limit/);
   const bad = receiptFields();
   bad.at(-1).reserved_high_bytes = KREA_ALLOCATION_POOL_BYTES + 1;

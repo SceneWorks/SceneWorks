@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { dispatchOptions } from "./tier2-ab.mjs";
+import { KREA_WDDM_SOURCE } from "./lib/krea-windows-worker-memory.mjs";
+import { kreaWindowsMemoryFixture } from "./lib/krea-windows-worker-memory-fixture.mjs";
 import { KREA_SUITE, kreaRoutes } from "./krea-tier2-proof.mjs";
 import {
-  KREA_PERF_ORDER, bindKreaSamplerOverlay, compareKreaPerformance, kreaOwnedGpuSample,
+  KREA_PERF_ORDER, bindKreaSamplerOverlay, compareKreaPerformance, kreaOwnedCudaAttachment,
   kreaPerformanceObservation, kreaSamplerReceipt,
 } from "./krea-tier2-performance.mjs";
 
@@ -21,13 +23,12 @@ test("performance arming is opt-in and the overlay rejects unreviewed source", a
   for (const side of ["base", "head"]) await assert.rejects(bindKreaSamplerOverlay(Buffer.from("unexpected"), side), /unreviewed/);
 });
 
-test("CUDA measurement binds numeric process memory to both exact worker PID and GPU UUID", () => {
-  assert.deepEqual(kreaOwnedGpuSample(`37, 921, ${GPU}\n9, [N/A], ${GPU}\n8, 1000, ${OTHER}`, 37, GPU), { attached: true, bytes: 921 * 1024 ** 2 });
-  assert.deepEqual(kreaOwnedGpuSample(`37, [N/A], ${GPU}`, 37, GPU), { attached: true, bytes: null });
-  assert.deepEqual(kreaOwnedGpuSample(`9, 9999, ${GPU}`, 37, GPU), { attached: false, bytes: null });
-  assert.throws(() => kreaOwnedGpuSample(`37, 921, ${OTHER}`, 37, GPU), /unleased device/);
-  assert.throws(() => kreaOwnedGpuSample(`37, 921, ${GPU}\n37, 912, ${GPU}`, 37, GPU), /duplicate/);
-  assert.throws(() => kreaOwnedGpuSample(`37, 92a, ${GPU}`, 37, GPU), /invalid/);
+test("NVIDIA compute app attests the exact worker PID and leased UUID", () => {
+  assert.equal(kreaOwnedCudaAttachment(`37, ${GPU}\n9, ${GPU}\n8, ${OTHER}`, 37, GPU), true);
+  assert.equal(kreaOwnedCudaAttachment(`9, ${GPU}`, 37, GPU), false);
+  assert.throws(() => kreaOwnedCudaAttachment(`37, ${OTHER}`, 37, GPU), /unleased device/);
+  assert.throws(() => kreaOwnedCudaAttachment(`37, ${GPU}\n37, ${GPU}`, 37, GPU), /duplicate/);
+  assert.throws(() => kreaOwnedCudaAttachment(`37, 92a, ${GPU}`, 37, GPU), /invalid/);
 });
 
 function nativePasses() {
@@ -44,7 +45,7 @@ test("Hires requires independently fenced timings and a persisted terminal SSE, 
   assert.deepEqual(kreaSamplerReceipt(workerLog, HIRES), passes);
   assert.throws(() => kreaSamplerReceipt(logFor(nativePasses().slice(0, 1)), HIRES), /separate native timing/);
   assert.throws(() => kreaSamplerReceipt(logFor(nativePasses().map((pass) => ({ ...pass, valid: false }))), HIRES), /missing or invalid/);
-  const memory = { hostLifetimePeakBytes: 100, ownedGpuPeakBytes: 80, gpuUuid: GPU, ownedGpuSamples: 3, ownedGpuErrors: 0 };
+  const memory = kreaWindowsMemoryFixture({ gpuUuid: GPU });
   const proof = { route: HIRES, passes, postedMonotonicMs: 1000, memory, metrics: { peakMemoryBytes: 98 }, events: [
     { status: "completed", publishedAssets: 0, receivedMonotonicMs: 11500 },
     { status: "completed", publishedAssets: 1, receivedMonotonicMs: 16500 },
@@ -54,12 +55,20 @@ test("Hires requires independently fenced timings and a persisted terminal SSE, 
   assert.equal(result.productSeconds, 15.5);
   assert.equal(result.devicePeakBytes, 80);
   assert.throws(() => kreaPerformanceObservation({ ...proof, events: proof.events.slice(0, 1) }), /persisted terminal/);
-  assert.throws(() => kreaPerformanceObservation({ ...proof, memory: { ...memory, ownedGpuUnavailable: true } }), /N\/A/);
-  assert.throws(() => kreaPerformanceObservation({ ...proof, memory: { ...memory, ownedGpuPeakBytes: null } }), /incomplete/);
+  assert.equal(result.physicalResidencyClaim, false);
+  assert.equal(result.deviceSource, KREA_WDDM_SOURCE);
+  assert.throws(() => kreaPerformanceObservation({ ...proof, memory: { ...memory, ownedGpuIdentityError: "wrong UUID" } }), /incomplete/);
+  assert.throws(() => kreaPerformanceObservation({ ...proof, memory: { ...memory, wddmDedicated: null } }), /incomplete/);
+  const mlx = kreaPerformanceObservation({ ...proof, route: { ...HIRES, backend: "mlx" }, machine: "mac", memory: { hostLifetimePeakBytes: 100 } });
+  assert.equal(mlx.devicePeakBytes, 98);
+  assert.equal(mlx.deviceSource, "MLX allocator native high-water reset per job");
+  assert.equal(mlx.wddmAdapter, undefined);
 });
 
 function arm(ratio, memory = 102, device = GPU) {
-  return { status: "completed", requestSha256: SHA, performance: { eligibility: "valid", device, secondsPerOuterStep: ratio, productSeconds: 100 * ratio, hostPeakBytes: memory, devicePeakBytes: memory } };
+  const wddmAdapter = kreaWindowsMemoryFixture({ gpuUuid: device }).wddmDedicated.rows[0].adapter;
+  return { status: "completed", requestSha256: SHA, performance: { eligibility: "valid", device, deviceSource: KREA_WDDM_SOURCE,
+    wddmAdapter, secondsPerOuterStep: ratio, productSeconds: 100 * ratio, hostPeakBytes: memory, devicePeakBytes: memory } };
 }
 
 function six(ratios, memory = 102) {
@@ -83,4 +92,13 @@ test("frozen six-pair method passes wholly below the ceiling, fails wholly above
   pairs[0].head.status = "completed";
   pairs[0].head = arm(1, 100, OTHER);
   assert.equal(compareKreaPerformance(pairs, "cuda").status, "inconclusive");
+});
+
+test("CUDA memory compares one predeclared accounting method and adapter across all arms", () => {
+  const pairs = six(Array(6).fill(1));
+  pairs[0].head.performance.deviceSource = "nvidia-smi";
+  assert.match(compareKreaPerformance(pairs, "cuda").reason, /accounting source/);
+  pairs[0].head.performance.deviceSource = KREA_WDDM_SOURCE;
+  pairs[1].head.performance.wddmAdapter = { ...pairs[1].head.performance.wddmAdapter, luid: "luid_0x00000000_0x0001e267" };
+  assert.match(compareKreaPerformance(pairs, "cuda").reason, /adapter changed/);
 });

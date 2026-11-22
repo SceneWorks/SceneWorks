@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { kreaWindowsDedicatedPeak } from "./lib/krea-windows-worker-memory.mjs";
 
 export const KREA_ALLOCATION_POOL_BYTES = 64 * 1024 ** 3;
 export const KREA_ALLOCATION_MINUTES = 55;
@@ -96,9 +97,9 @@ export function kreaAllocationReceipt(log, memory, hostCapBytes) {
     usedHigh = used_high_bytes;
     reservedHigh = reserved_high_bytes;
   }
-  const { gpuUuid, hostLifetimePeakBytes, ownedGpuPeakBytes, ownedGpuSamples, ownedGpuErrors, ownedGpuUnavailable } = memory;
-  assert.ok(gpuUuid && Number.isSafeInteger(ownedGpuPeakBytes) && ownedGpuPeakBytes > 0 && ownedGpuSamples >= 3 && ownedGpuErrors === 0 && !ownedGpuUnavailable, "CUDA PID/UUID attribution is incomplete or N/A");
+  const { gpuUuid, hostLifetimePeakBytes } = memory;
+  const { peakBytes: ownedGpuPeakBytes, samples: ownedGpuSamples, source: deviceSource, adapter: wddmAdapter } = kreaWindowsDedicatedPeak(memory);
   assert.ok(Number.isSafeInteger(hostLifetimePeakBytes) && hostLifetimePeakBytes > 0 && hostLifetimePeakBytes <= hostCapBytes, "Windows worker lifetime working set is unavailable or exceeds the worker host containment limit");
-  return { status: "observed", gpuUuid, admissions, pool, ownedGpuPeakBytes, ownedGpuSamples, hostLifetimePeakBytes, hostCapBytes, poolCapBytes: KREA_ALLOCATION_POOL_BYTES,
-    budgetBasis: "Candle predicted additional bytes versus available additional bytes, private pool absolute counters versus its own cap, and Windows worker working set versus the worker containment limit. The sampled PID/UUID device peak is reported without applying additional-device-byte admission as an absolute limit." };
+  return { status: "observed", gpuUuid, admissions, pool, ownedGpuPeakBytes, ownedGpuSamples, deviceSource, wddmAdapter, physicalResidencyClaim: false, hostLifetimePeakBytes, hostCapBytes, poolCapBytes: KREA_ALLOCATION_POOL_BYTES,
+    budgetBasis: "Candle predicted additional bytes versus available additional bytes, private pool absolute counters versus its own cap, and Windows worker working set versus the worker containment limit. The sampled Windows dedicated-process peak is reported without applying additional-device-byte admission as an absolute limit." };
 }
