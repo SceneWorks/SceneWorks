@@ -11,6 +11,7 @@ if [[ ! "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] || [[ "$(git rev-parse HEAD)" != "$BASE
 fi
 WORK_DIR="$(work_dir_unix)"
 WORK_DIR_NATIVE="$(native_path "$WORK_DIR")"
+printf 'WORK_DIR_NATIVE=%s\n' "$WORK_DIR_NATIVE" >> "$GITHUB_ENV"
 mkdir -p "$WORK_DIR"
 args=(--backend candle --adapter "$ADAPTER" --inference-repo "$INFERENCE_REPO"
   --work-dir "$WORK_DIR_NATIVE" --campaign "$CAMPAIGN")

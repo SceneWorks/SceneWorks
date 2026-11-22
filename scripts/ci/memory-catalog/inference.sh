@@ -53,13 +53,12 @@ fi
 echo "pinned inference revision: $PIN"
 
 # WHERE THE PERSISTENT CLONE LIVES. $INFERENCE_CLONE_DIR wins (the workflow sets it per lane); the
-# fallbacks are the same paths, chosen so a runner that never sets it still gets a persistent dir
-# rather than a per-job one. On the Windows box that is D:, where the runner already keeps its other
-# per-runner caches and where there is room for a 500 MB clone; if D: is somehow absent, $HOME is a
-# correct if less conventional home for it.
+# Windows uses the managed persistent cache and refuses an unset DEV_HOST_ROOT;
+# macOS keeps its existing location until that host's dev-host adoption is complete.
 if [[ -z "${INFERENCE_CLONE_DIR:-}" ]]; then
-  if command -v cygpath >/dev/null 2>&1 && [[ -d /d ]]; then
-    INFERENCE_CLONE_DIR="/d/memory-catalog-inference"
+  if command -v cygpath >/dev/null 2>&1; then
+    : "${DEV_HOST_ROOT:?Windows inference object cache requires DEV_HOST_ROOT}"
+    INFERENCE_CLONE_DIR="${DEV_HOST_ROOT}/cache/memory-catalog-inference"
   else
     INFERENCE_CLONE_DIR="${HOME}/memory-catalog-inference"
   fi

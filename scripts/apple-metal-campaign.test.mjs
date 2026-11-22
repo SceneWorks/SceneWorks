@@ -277,7 +277,7 @@ test("app start/reload uses the same binary-bound private shader without changin
 
 function assertCampaignSources(workflow, inference, launcher) {
   assert.match(workflow, /CARGO_TARGET_DIR: \$\{\{ github.workspace \}\}\/\.\.\/cargo-target/);
-  assert.match(workflow, /ADAPTER=%GITHUB_WORKSPACE%\\target\\release\\memory-candle-adapter\.exe/);
+  assert.match(workflow, /ADAPTER=%CARGO_TARGET_DIR%\\release\\memory-candle-adapter\.exe/);
   assert.match(workflow, /--message-format=json-render-diagnostics[^\n]*[\s\S]*bind-metallib\.mjs/);
   assert.doesNotMatch(inference, /checkout --force|reset --hard|clean -ffdx|rev-parse FETCH_HEAD|rm -rf/);
   assert.match(inference, /source-worktree\.mjs prepare/);

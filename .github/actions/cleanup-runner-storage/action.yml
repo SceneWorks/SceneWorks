@@ -1,6 +1,9 @@
 name: Clean completed Windows build storage
 description: Remove disposable job targets after cache uploads; optionally retire inactive private MOSS copies.
 inputs:
+  dev-host:
+    description: Own this Windows job's temporary files under DEV_HOST_ROOT and remove them after uploads
+    default: 'false'
   moss:
     description: Sweep completed private MOSS run caches on this listener
     default: 'false'

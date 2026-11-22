@@ -60,5 +60,24 @@ log. The broad activity checks deliberately prefer retaining uncertain data.
 No production deletion runs from a developer shell. The PowerShell library mode
 exists for fixture tests and read-only inspection; tests use temporary folders.
 
+## Managed Windows job work (`dev-host: 'true'`)
+
+The migrated campaign/proof jobs require the installed `dev-host` CLI (Windows
+0.1.1 or newer) and the runner's `DEV_HOST_ROOT`. The CLI chooses a fresh `t/`
+directory for each invocation. This action records its exact repository, run,
+attempt, job, runner and a nonce before exporting `DEV_HOST_JOB_ROOT` and the
+process temp variables. It keeps model downloads in `E:\huggingface` and does
+not change `CARGO_TARGET_DIR` implicitly. Migrated consumers explicitly put
+their disposable builds/runtime state under `DEV_HOST_JOB_ROOT`.
+
+The workflow sets `DEV_HOST_WORK_UPLOADS_COMPLETE=true` only after its evidence
+uploads succeed. The post action then removes only that invocation's ordinary
+directory, after cache post actions. Failed publication retains work for recovery
+and scheduled retention. Ownership mismatches, links, referenced
+processes and held Cargo locks retain it. A killed runner leaves an entry for
+the existing scheduled `dev-host cleanup`; no additional scheduled sweeper is
+installed. The small persistent memory-catalog Git object cache belongs under
+`DEV_HOST_ROOT/cache/`, outside job work, and is intentionally reused.
+
 Run `node --test scripts/runner-storage-cleanup.test.mjs` for retention/API tests
 and, on Windows, actual lock, junction and filesystem deletion tests.
