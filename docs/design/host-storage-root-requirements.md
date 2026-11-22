@@ -245,6 +245,14 @@ The system drive holds only source code, apps, toolchains, personal files
     - The root sits on the intended volume. On macOS its device ID differs
       from `/`'s; on Windows `D:` is a mounted fixed volume.
     - The `.dev-host-root` marker, written once at setup, is present.
+    - **Every other share the host needs is mounted (r5).** The root's
+      `dev-host.conf` lists them, one `required_mount = <path>` line each.
+      On the Macs that is `/Volumes/Models`, which holds the HF hub cache.
+      For each one, the check verifies that the path is a mount point
+      whose device differs from `/`'s. Otherwise a dropped `Models` share
+      would pass the check while `Work` stays up, and jobs would fail
+      later, at model loading, or write into an empty local folder. The
+      paths live in the config, not in `dev-host`'s source (E14).
 
     If any check fails, it exits non-zero within 10 s, naming the missing
     mount. Nothing creates the root or any folder above a verified root.
@@ -420,6 +428,9 @@ The system drive holds only source code, apps, toolchains, personal files
    - `dev-host check`, the `cargo` shim and the lock helper all fail the
      same way;
    - nothing is created under the plain folder or in `<repo>/target`.
+
+   Repeat on a Mac with only `/Volumes/Models` unmounted and `/Volumes/Work`
+   still up: the same checks fail, naming `/Volumes/Models` (r5).
 
    On Windows, where `D:` is internal and never missing, rename the
    marker instead: the pre-job hook and the lock helper fail naming the

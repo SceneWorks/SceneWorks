@@ -126,8 +126,10 @@ No two items share both a mechanism and a repo.
   - `dev-host cleanup` deletes only inside this host's `hosts/<host>/`,
     applies the E9 budgets to that folder, and only measures the shared
     `weights/`, `cache/` and campaign evidence.
-  - `dev-host check` also verifies that `hosts/<host>/` exists, and fails
-    naming it when it doesn't (setup creates it; nothing else does).
+  - `dev-host check` also verifies that `hosts/<host>/` exists, and that
+    every `required_mount` listed in `dev-host.conf` (on the Macs,
+    `/Volumes/Models`) is a mounted share. It fails naming whichever is
+    missing (setup creates `hosts/<host>/`; nothing else does).
 - **Inherits:** E2, E3, E4, E5, E8, E9, E13
 - **Touches:** `crates/dev-host`
 - **Blocked by:** none
