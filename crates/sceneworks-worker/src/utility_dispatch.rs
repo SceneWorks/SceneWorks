@@ -204,7 +204,7 @@ pub(crate) fn saved_quantizations(
                 .map(std::path::PathBuf::from)
                 .filter(|path| path.is_absolute())
                 .unwrap_or_else(|| settings.data_dir.clone());
-            let checkpoint = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+            let checkpoint = sceneworks_core::quantization_cache::source_identity(entry)
                 .map(str::to_owned)
                 .unwrap_or_else(|| owner.clone());
             std::sync::Arc::new(

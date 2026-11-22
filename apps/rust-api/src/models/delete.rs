@@ -89,12 +89,11 @@ pub(super) async fn reconcile_deleted_source(
     }
 }
 
-/// Drop the plan-store documents and cached derivatives a deleted LINKED model owned.
+/// Drop the plan-store documents and cached derivatives a deleted import owned.
 ///
-/// Keyed on `importPlan.checkpointId` — the same discriminator the scheduler and the worker's
-/// route selection use — so a model that is not plan-backed does nothing here. Never touches the
-/// linked library and never removes the approved root: only this checkpoint's record, plan,
-/// bindings and derivatives.
+/// Plan-backed imports use their checkpoint identity; older dense imports use their model ID,
+/// matching saved quantization provenance. Only plan-backed entries invalidate plan documents.
+/// Never touches the linked library or removes its approved root.
 ///
 /// Failures become warnings rather than failing the delete: the manifest entry is already gone by
 /// this point, so refusing here would leave the catalog and the plan store disagreeing with no way
@@ -102,11 +101,15 @@ pub(super) async fn reconcile_deleted_source(
 pub(super) async fn forget_linked_checkpoint(state: &AppState, entry: &Value) -> Vec<String> {
     let Some(checkpoint_id) = entry
         .as_object()
-        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .and_then(sceneworks_core::quantization_cache::source_identity)
         .map(str::to_owned)
     else {
         return Vec::new();
     };
+    let has_plan = entry
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .is_some();
     let manifest = state
         .settings
         .config_dir
@@ -116,7 +119,7 @@ pub(super) async fn forget_linked_checkpoint(state: &AppState, entry: &Value) ->
             if entries.iter().any(|entry| {
                 entry
                     .as_object()
-                    .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+                    .and_then(sceneworks_core::quantization_cache::source_identity)
                     == Some(checkpoint_id.as_str())
             }) =>
         {
@@ -132,8 +135,15 @@ pub(super) async fn forget_linked_checkpoint(state: &AppState, entry: &Value) ->
     }
     let data_dir = state.settings.data_dir.clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
-            .invalidate_checkpoint(&checkpoint_id)
+        let store =
+            sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?;
+        if has_plan {
+            store.invalidate_checkpoint(&checkpoint_id).map(|_| ())
+        } else {
+            store
+                .remove_derivatives_for_checkpoint(&checkpoint_id)
+                .map(|_| ())
+        }
     })
     .await;
     match outcome {

@@ -7,10 +7,18 @@ use crate::model_artifacts::{
     ArtifactFile, ArtifactIdentity, ArtifactMemberRole, ArtifactSourceLibrary,
     ModelArtifactResolver, ResolvedBundleMember,
 };
-use gen_core::{QuantizationArtifact, QuantizationArtifactCache, QuantizationArtifactKey};
+pub use gen_core::{QuantizationArtifact, QuantizationArtifactCache, QuantizationArtifactKey};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// The same provenance must be used when saving and deleting an import's derivatives.
+pub fn source_identity(entry: &crate::contracts::JsonObject) -> Option<&str> {
+    crate::jobs_store::checkpoint_plan_checkpoint_id(entry).or_else(|| {
+        crate::source_precision::SourcePrecision::dense_import(entry)?;
+        entry.get("id").and_then(serde_json::Value::as_str)
+    })
+}
 
 pub struct SavedQuantizations {
     data_dir: PathBuf,
