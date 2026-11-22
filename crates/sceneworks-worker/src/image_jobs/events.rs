@@ -293,10 +293,7 @@ pub(super) async fn consume_gen_events_with_disclosure(
     // The measured three-fact set of this job's load, once the producing lane sends one
     // (sc-11045). `None` for every lane that holds no runtime handle — those assets keep whatever
     // the route stamped pre-load (including the honest `no-runtime-receipt` materialization).
-    #[cfg(native_lane)]
-    let mut measured_checkpoint_facts: Option<Value> = None;
-    #[cfg(not(native_lane))]
-    let measured_checkpoint_facts: Option<Value> = None;
+    let mut measured_checkpoint_facts = None;
     // Per-image provenance facts (sc-25681), keyed by image index until that image is written.
     let mut pending_image_facts: std::collections::HashMap<usize, JsonObject> =
         std::collections::HashMap::new();
@@ -548,12 +545,10 @@ pub(super) async fn consume_gen_events_with_disclosure(
                 // A measured fact set from the loaded handle supersedes the route's pre-load stamp
                 // (whose materialization is honestly `no-runtime-receipt`): same three facts, now
                 // with what the load actually materialized (sc-11045).
-                if let Some(facts) = measured_checkpoint_facts.as_ref() {
-                    image_raw_settings.insert(
-                        crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY.to_owned(),
-                        facts.clone(),
-                    );
-                }
+                crate::checkpoint_weight_facts_host::insert_facts_into_raw_settings(
+                    &mut image_raw_settings,
+                    measured_checkpoint_facts.as_ref(),
+                );
                 // Encode + write the asset PNG off the async runtime thread (sc-8909 / F-107).
                 let plan_for_task = plan.clone();
                 let adapter_for_task = adapter_label.to_owned();
@@ -694,6 +689,11 @@ pub(super) async fn consume_gen_events_with_disclosure(
         effective_steps,
         total as u32,
         tier_dir.as_deref(),
+    );
+    crate::checkpoint_weight_facts_host::record_checkpoint_metrics(
+        &mut metrics,
+        &plan.request.model_manifest_entry,
+        measured_checkpoint_facts.as_slice(),
     );
     if let Some(phase) = phase_timer.into_metrics(Instant::now()) {
         metrics.load_ms = phase.load_ms;

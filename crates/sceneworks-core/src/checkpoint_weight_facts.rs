@@ -784,14 +784,7 @@ impl CheckpointWeightFactsV1 {
         };
         let native_tensors = tensors(ExecutionRepresentation::NativePacked);
         let dense_tensors = tensors(ExecutionRepresentation::DenseFallback);
-        Some(match (native_tensors, dense_tensors) {
-            (0, _) => ExecutionMix::DenseFallback,
-            (_, 0) => ExecutionMix::NativePacked,
-            (native_tensors, dense_tensors) => ExecutionMix::Mixed {
-                native_tensors,
-                dense_tensors,
-            },
-        })
+        Some(ExecutionMix::from_counts(native_tensors, dense_tensors))
     }
 
     /// The single representation label to render for a codec, or `None` when unknown. Never
@@ -828,6 +821,18 @@ pub enum ExecutionMix {
 }
 
 impl ExecutionMix {
+    /// Summarize the counts for one codec, which may span multiple measured sources.
+    pub fn from_counts(native_tensors: usize, dense_tensors: usize) -> Self {
+        match (native_tensors, dense_tensors) {
+            (0, _) => Self::DenseFallback,
+            (_, 0) => Self::NativePacked,
+            (native_tensors, dense_tensors) => Self::Mixed {
+                native_tensors,
+                dense_tensors,
+            },
+        }
+    }
+
     /// The value a telemetry column carries and a client renders.
     ///
     /// The two pure arms are the engine's own row labels, unchanged — every existing consumer and

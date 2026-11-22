@@ -1075,6 +1075,8 @@ pub struct GenerationMetrics {
     pub model: Option<String>,
     /// Normalized quant label: "bf16" / "q8" / "q4" / "int8-convrot" / "nvfp4".
     ///
+    /// Fixed-source imports generally have no selectable tier to report. NVFP4 retains its
+    /// established tier identity.
     /// This is the **request/tier** identity — which variant was selected. It is deliberately NOT
     /// the answer to "what did this host execute": a checkpoint stored NVFP4 reports
     /// `quantLabel: "nvfp4"` on a pre-Blackwell box too, where the run took the dense BF16

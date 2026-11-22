@@ -1372,7 +1372,7 @@ impl ComfyuiWanReceipts {
         sources: &[gen_core::SourceBinding],
         primary: &'a serde_json::Map<String, Value>,
         low: &'a serde_json::Map<String, Value>,
-    ) -> Option<&'a serde_json::Map<String, Value>> {
+    ) -> Option<(bool, &'a serde_json::Map<String, Value>)> {
         // Each ComfyUI expert is one prepared file. Auxiliary weights can also use a matching
         // codec, so the engine's observed source binding must identify the correct expert.
         let [source] = sources else { return None };
@@ -1381,9 +1381,9 @@ impl ComfyuiWanReceipts {
                 && source.target_fingerprint() == pin.target_fingerprint()
         };
         if matches(&self.high) {
-            Some(primary)
+            Some((true, primary))
         } else if matches(&self.low) {
-            Some(low)
+            Some((false, low))
         } else {
             None
         }
@@ -1543,22 +1543,16 @@ mod comfyui_checkpoint_receipt_tests {
         });
         let primary = entry.as_object().unwrap();
         let secondary = comfyui_wan_low_expert_entry(primary).unwrap();
-        assert_eq!(
-            scoped
-                .expert_entry(&binding(&high), primary, &secondary)
-                .unwrap()
-                .get("importQuantFormat")
-                .and_then(Value::as_str),
-            Some("fp8_e4m3_scalar")
-        );
-        assert_eq!(
-            scoped
-                .expert_entry(&binding(&low), primary, &secondary)
-                .unwrap()
-                .get("importQuantFormat")
-                .and_then(Value::as_str),
-            Some("fp8_e5m2_scalar")
-        );
+        let (is_high, entry) = scoped
+            .expert_entry(&binding(&high), primary, &secondary)
+            .unwrap();
+        assert!(is_high);
+        assert_eq!(entry["importQuantFormat"], "fp8_e4m3_scalar");
+        let (is_high, entry) = scoped
+            .expert_entry(&binding(&low), primary, &secondary)
+            .unwrap();
+        assert!(!is_high);
+        assert_eq!(entry["importQuantFormat"], "fp8_e5m2_scalar");
         assert!(scoped
             .expert_entry(&binding(&te), primary, &secondary)
             .is_none());
@@ -3042,12 +3036,13 @@ pub(super) async fn generate_video_using(
     // The fitted-curve identity uses the catalog family, not the provider descriptor's internal
     // family. Resolve it exactly like the asset path's `resolve_family`, without re-parsing the
     // entire payload into another `VideoRequest` merely for this admission-only key.
-    let admission_manifest_entry = job
+    let manifest_entry = job
         .payload
         .get("modelManifestEntry")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let admission_manifest_entry = manifest_entry.clone();
     let admission_model_family =
         super::resolve_catalog_video_family(&admission_model_id, &admission_manifest_entry);
     // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
@@ -3502,14 +3497,17 @@ pub(super) async fn generate_video_using(
                 } else {
                     run_loaded_video_generation(generator, input, &cancel, &mut on_progress)
                 };
+                let mut primary_checkpoint_facts = None;
+                let mut low_checkpoint_facts = None;
+                let mut same_codec_experts = false;
                 if result.is_ok() {
                     // Read this generator's receipts after lazy component loads and the actual
                     // forward. Keep each physical source binding; one primary getter cannot
                     // describe a normalized multi-shard checkpoint or its inherited components.
-                    if sceneworks_core::jobs_store::imported_entry_source_codec(
-                        &admission_manifest_entry,
-                    )
-                    .is_some()
+                    if let Some(primary_codec) =
+                        sceneworks_core::jobs_store::imported_entry_source_codec(
+                            &admission_manifest_entry,
+                        )
                     {
                         let source_facts = match &comfyui_receipts {
                             Some(receipts) => receipts.scope.try_snapshots().map_err(|error| {
@@ -3523,30 +3521,66 @@ pub(super) async fn generate_video_using(
                         let low_entry = comfyui_receipts
                             .as_ref()
                             .and_then(|_| comfyui_wan_low_expert_entry(&admission_manifest_entry));
+                        same_codec_experts = low_entry
+                            .as_ref()
+                            .and_then(sceneworks_core::jobs_store::imported_entry_source_codec)
+                            == Some(primary_codec);
                         let receipts: Vec<_> = source_facts
                             .into_iter()
                             .filter_map(|facts| {
-                                let entry = match &comfyui_receipts {
-                                    Some(receipts) => receipts.expert_entry(
-                                        facts.source_bindings(),
+                                let (entry, primary, same_codec_low) = match &comfyui_receipts {
+                                    Some(receipts) => {
+                                        let (high, entry) = receipts.expert_entry(
+                                            facts.source_bindings(),
+                                            &admission_manifest_entry,
+                                            low_entry.as_ref().unwrap_or(&admission_manifest_entry),
+                                        )?;
+                                        (entry, high, !high && same_codec_experts)
+                                    }
+                                    None => (
                                         &admission_manifest_entry,
-                                        low_entry.as_ref().unwrap_or(&admission_manifest_entry),
-                                    )?,
-                                    None => &admission_manifest_entry,
+                                        h3_receipt.as_ref().is_some_and(|receipt| {
+                                            receipt
+                                                .binds_transformer_receipt(facts.source_bindings())
+                                        }),
+                                        false,
+                                    ),
                                 };
-                                let codec = sceneworks_core::jobs_store::imported_entry_source_codec(entry)?;
-                                if !facts.source().declares(codec) { return None; }
-                                let sources: Vec<_> = facts.source_bindings().iter()
-                                    .map(|binding| binding.canonical_path().to_path_buf()).collect();
-                                if sources.is_empty() { return None; }
+                                let codec =
+                                    sceneworks_core::jobs_store::imported_entry_source_codec(
+                                        entry,
+                                    )?;
+                                if !facts.source().declares(codec) {
+                                    return None;
+                                }
+                                let sources: Vec<_> = facts
+                                    .source_bindings()
+                                    .iter()
+                                    .map(|binding| binding.canonical_path().to_path_buf())
+                                    .collect();
+                                if sources.is_empty() {
+                                    return None;
+                                }
                                 let single_source = match sources.as_slice() {
                                     [source] => Some(source.as_path()),
                                     _ => None,
                                 };
-                                let measured = crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-                                    entry, single_source, Some(facts),
-                                )?;
-                                Some(serde_json::json!({"sourcePaths":sources,"checkpointWeightFacts":measured}))
+                                let measured =
+                                    crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                                        entry,
+                                        single_source,
+                                        Some(facts),
+                                    )?;
+                                let log = serde_json::json!({
+                                    "sourcePaths": sources,
+                                    "checkpointWeightFacts": measured,
+                                });
+                                if primary {
+                                    primary_checkpoint_facts = Some(measured);
+                                } else if same_codec_low {
+                                    low_checkpoint_facts = Some(measured);
+                                }
+                                Some(log)
                             })
                             .collect();
                         tracing::info!(event = "checkpoint_weight_materialization",
@@ -3570,7 +3604,16 @@ pub(super) async fn generate_video_using(
                         tracing::error!(%error, "H3 proof-pool observation failed after generation error");
                     }
                 }
-                result
+                // The phase record has one codec. Include both Wan experts when the verified
+                // primary codec describes both, and leave it unmeasured if either is missing.
+                result.map(|decoded| {
+                    let facts = match (primary_checkpoint_facts, low_checkpoint_facts) {
+                        (Some(primary), Some(low)) => vec![primary, low],
+                        (Some(primary), None) if !same_codec_experts => vec![primary],
+                        _ => Vec::new(),
+                    };
+                    (decoded, facts)
+                })
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let result = match comfyui_load {
@@ -3888,9 +3931,19 @@ pub(super) async fn generate_video_using(
         .and_then(|value| value.as_str())
         .map(str::to_owned);
     let mut metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
-    if let Ok(decoded) = &result {
+    let measured_facts = result
+        .as_ref()
+        .map(|(_, facts)| facts.as_slice())
+        .unwrap_or_default();
+    crate::checkpoint_weight_facts_host::record_checkpoint_metrics(
+        &mut metrics,
+        &manifest_entry,
+        measured_facts,
+    );
+    let result = result.map(|(decoded, _)| {
         record_video_veda_metrics(&mut metrics, decoded.veda_execution.as_ref());
-    }
+        decoded
+    });
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }

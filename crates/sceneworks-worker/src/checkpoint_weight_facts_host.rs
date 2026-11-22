@@ -32,13 +32,15 @@
 
 use std::path::Path;
 
-#[cfg(test)]
-use sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use sceneworks_core::checkpoint_weight_facts::{
     CheckpointWeightFactsV1, ExecutionRepresentation, MaterializationFact,
     MaterializationUnavailable, MaterializedCodecFact, NativeExecutionCapabilityFact,
     SourceBindingFact, SourceCodecFact,
 };
+#[cfg(any(test, native_lane))]
+use sceneworks_core::checkpoint_weight_facts::{ExecutionMix, NVFP4_CODEC_ID};
+#[cfg(any(test, native_lane))]
+use sceneworks_core::contracts::GenerationMetrics;
 use serde_json::{Map, Value};
 
 /// This host's native-execution declaration, rendered from the startup compute-cap probe.
@@ -330,48 +332,40 @@ pub(crate) fn insert_facts_into_raw_settings(
     }
 }
 
-/// The telemetry pair `(source_codec, execution_representation)` for
-/// [`sceneworks_core::contracts::GenerationMetrics`].
-///
-/// A `generation_metrics` row is one flat record per run, so it reports the checkpoint's **primary**
-/// source codec — the first (and, for every source SceneWorks classifies from a header, the only)
-/// inventory row — and that codec's representation. A load storing several codecs keeps the full
-/// per-codec breakdown in the asset receipt, which is not flattened.
-///
-/// Both halves are `None` without facts. The second is `None` whenever the load was not measured,
-/// and that stays `None`: an absent representation means "not measured", which the stats surface
-/// renders as unknown rather than as dense. A load that ran PART of the codec packed and part dense
-/// carries the distinct `"mixed:<packed>/<dense>"` value rather than either pure label — see
-/// [`sceneworks_core::checkpoint_weight_facts::ExecutionMix`].
-/// Gated to the lanes that build image metrics at all: `image_jobs/base.rs` is included only where
-/// a media backend is linked, so on the "neither" build (no MLX, no candle) there is no metrics
-/// producer to call this and an ungated definition would be a dead-code error on that PR lane.
+/// Record the classified primary codec and execution from receipts bound to all relevant sources.
+/// Inventories can also include dense tensors, so their row order cannot establish the codec.
 #[cfg(any(test, native_lane))]
-pub(crate) fn facts_metrics_pair(
-    facts: Option<&CheckpointWeightFactsV1>,
-) -> (Option<String>, Option<String>) {
-    let Some(facts) = facts else {
-        return (None, None);
-    };
-    let Some(entry) = facts.source().first() else {
-        return (None, None);
-    };
-    (
-        Some(entry.codec_id.clone()),
-        facts.representation_label(&entry.codec_id),
-    )
-}
-
-/// The telemetry pair for a request's model-manifest entry — the whole producer in one call, for
-/// the cross-platform metrics path.
-/// Gated with [`facts_metrics_pair`], its only consumer's consumer.
-#[cfg(any(test, native_lane))]
-pub(crate) fn manifest_entry_metrics_pair(
+pub(crate) fn record_checkpoint_metrics(
+    metrics: &mut GenerationMetrics,
     entry: &Map<String, Value>,
-) -> (Option<String>, Option<String>) {
-    facts_metrics_pair(
-        imported_checkpoint_facts(entry, None, materialization_from_runtime(None)).as_ref(),
-    )
+    facts: &[CheckpointWeightFactsV1],
+) {
+    let Some(codec) = sceneworks_core::jobs_store::imported_entry_source_codec(entry) else {
+        return;
+    };
+    if sceneworks_core::source_precision::SourcePrecision::for_entry(entry).is_some() {
+        // Fixed-source imports have no selectable conversion tier. Keep the established NVFP4
+        // tier spelling on NVFP4 sources, as documented by GenerationMetrics.
+        metrics.quant_label = (codec == NVFP4_CODEC_ID).then(|| "nvfp4".to_owned());
+        metrics.quant_bits = None;
+    }
+    metrics.source_codec = Some(codec.to_owned());
+    metrics.execution_representation = facts
+        .iter()
+        .try_fold((0, 0), |(packed, dense), source| {
+            let tensors = |representation| {
+                source
+                    .materialized_as(codec, representation)
+                    .map_or(0, |row| row.tensor_count)
+            };
+            let source_packed = tensors(ExecutionRepresentation::NativePacked);
+            let source_dense = tensors(ExecutionRepresentation::DenseFallback);
+            // A receipt with no observations for this codec contributes no execution claim.
+            (source_packed > 0 || source_dense > 0)
+                .then_some((packed + source_packed, dense + source_dense))
+        })
+        .filter(|&(packed, dense)| packed > 0 || dense > 0)
+        .map(|(packed, dense)| ExecutionMix::from_counts(packed, dense).label());
 }
 
 #[cfg(test)]
@@ -558,40 +552,31 @@ mod tests {
     }
 
     #[test]
-    fn the_metrics_pair_reports_the_source_and_leaves_the_representation_absent() {
-        let facts = imported_checkpoint_facts(
-            &entry(Some("nvfp4")),
-            None,
-            materialization_from_runtime(None),
-        )
-        .expect("facts");
-        let (source_codec, representation) = facts_metrics_pair(Some(&facts));
-        assert_eq!(source_codec.as_deref(), Some(NVFP4_CODEC_ID));
-        assert_eq!(representation, None);
-
-        // No facts at all: both halves absent, never a tier substituted for the codec.
-        assert_eq!(facts_metrics_pair(None), (None, None));
-    }
-
-    /// The whole metrics producer, as `image_settings_metrics` calls it.
-    #[test]
-    fn the_manifest_entry_metrics_pair_reports_the_codec_and_no_representation() {
-        assert_eq!(
-            manifest_entry_metrics_pair(&entry(Some("nvfp4"))),
-            (Some(NVFP4_CODEC_ID.to_owned()), None),
-            "the stored codec is reported; the unmeasured representation stays absent"
-        );
-        assert_eq!(
-            manifest_entry_metrics_pair(&entry(Some("int8_tensorwise_per_row"))),
-            (Some("int8-per-row-v1".to_owned()), None)
-        );
-        // A builtin / unclassified entry contributes neither field to the telemetry row.
-        assert_eq!(manifest_entry_metrics_pair(&entry(None)), (None, None));
-        // And a TIER stamp never becomes a source codec.
-        assert_eq!(
-            manifest_entry_metrics_pair(&entry(Some("q4"))),
-            (None, None)
-        );
+    fn classified_unmeasured_metrics_keep_only_proven_source_and_tier_facts() {
+        for (format, codec, tier, bits) in [
+            (Some("nvfp4"), Some(NVFP4_CODEC_ID), Some("nvfp4"), None),
+            (
+                Some("int8_tensorwise_per_row"),
+                Some("int8-per-row-v1"),
+                None,
+                None,
+            ),
+            (None, None, Some("q8"), Some(8)),
+            (Some("q4"), None, Some("q8"), Some(8)),
+        ] {
+            let mut catalog_entry = entry(format);
+            catalog_entry.insert("importSourceShape".to_owned(), json!("transformer_file"));
+            let mut metrics = GenerationMetrics {
+                quant_label: Some("q8".to_owned()),
+                quant_bits: Some(8),
+                ..Default::default()
+            };
+            record_checkpoint_metrics(&mut metrics, &catalog_entry, &[]);
+            assert_eq!(metrics.source_codec.as_deref(), codec, "{format:?}");
+            assert_eq!(metrics.execution_representation, None, "{format:?}");
+            assert_eq!(metrics.quant_label.as_deref(), tier, "{format:?}");
+            assert_eq!(metrics.quant_bits, bits, "{format:?}");
+        }
     }
 
     #[test]
@@ -618,13 +603,77 @@ mod tests {
         )
         .expect("a dense-fallback receipt is valid on every host");
 
-        let (source_codec, representation) = facts_metrics_pair(Some(&facts));
-        assert_eq!(source_codec.as_deref(), Some(NVFP4_CODEC_ID));
+        let mut metrics = GenerationMetrics::default();
+        record_checkpoint_metrics(&mut metrics, &entry(Some("nvfp4")), &[facts]);
+        assert_eq!(metrics.source_codec.as_deref(), Some(NVFP4_CODEC_ID));
         assert_eq!(
-            representation.as_deref(),
+            metrics.execution_representation.as_deref(),
             Some("dense-fallback"),
             "the source stays NVFP4 while the execution says dense — the two facts, separately"
         );
+    }
+
+    #[test]
+    fn source_owned_fp8_metrics_report_the_measured_codec_even_with_dense_tensors_first() {
+        use sceneworks_core::checkpoint_weight_facts::{
+            DENSE_BF16_CODEC_ID, FP8_E4M3_SCALAR_CODEC_ID,
+        };
+
+        let codec = FP8_E4M3_SCALAR_CODEC_ID;
+        let mut catalog_entry = entry(Some("fp8_e4m3_scalar"));
+        catalog_entry.insert("importSourceShape".to_owned(), json!("transformer_file"));
+        let observed = |fp8, count| {
+            let row = |codec: &str, representation, tensor_count| MaterializedCodecFact {
+                codec_id: codec.to_owned(),
+                representation,
+                tensor_count,
+                source_bytes: tensor_count as u64,
+                resident_bytes: tensor_count as u64,
+            };
+            let mut inventory = vec![SourceCodecFact::counted(DENSE_BF16_CODEC_ID, 174, 174)];
+            let mut rows = vec![row(
+                DENSE_BF16_CODEC_ID,
+                ExecutionRepresentation::DenseFallback,
+                174,
+            )];
+            if let Some(fp8) = fp8 {
+                inventory.push(SourceCodecFact::counted(codec, count, count as u64));
+                rows.push(row(codec, fp8, count));
+            }
+            CheckpointWeightFactsV1::try_new(
+                None,
+                NativeExecutionCapabilityFact::new([codec]).unwrap(),
+                inventory,
+                MaterializationFact::Reported {
+                    rows,
+                    complete: true,
+                },
+            )
+            .unwrap()
+        };
+        let packed = observed(Some(ExecutionRepresentation::NativePacked), 256);
+        let dense = observed(Some(ExecutionRepresentation::DenseFallback), 128);
+        let unrelated = observed(None, 0);
+        let mut metrics = GenerationMetrics {
+            quant_label: Some("q8".to_owned()),
+            quant_bits: Some(8),
+            ..Default::default()
+        };
+        record_checkpoint_metrics(&mut metrics, &catalog_entry, std::slice::from_ref(&packed));
+        assert_eq!(metrics.quant_label, None);
+        assert_eq!(metrics.quant_bits, None);
+        assert_eq!(metrics.source_codec.as_deref(), Some(codec));
+        assert_eq!(
+            metrics.execution_representation.as_deref(),
+            Some("native-packed")
+        );
+        record_checkpoint_metrics(&mut metrics, &catalog_entry, &[packed.clone(), dense]);
+        assert_eq!(
+            metrics.execution_representation.as_deref(),
+            Some("mixed:256/128")
+        );
+        record_checkpoint_metrics(&mut metrics, &catalog_entry, &[packed, unrelated]);
+        assert_eq!(metrics.execution_representation, None);
     }
 
     /// A validated engine fact set for a **mixed-policy NVFP4 load**: one projection executed the

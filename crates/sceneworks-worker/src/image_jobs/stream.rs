@@ -18,10 +18,10 @@ use crate::heartbeat_while_blocking;
 use crate::ApiClient;
 use crate::JsonObject;
 use crate::Settings;
-#[cfg(native_lane)]
-use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
+#[cfg(native_lane)]
+use sceneworks_core::checkpoint_weight_facts::CheckpointWeightFactsV1;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static FLUX_OWNER_TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -88,7 +88,7 @@ pub(super) enum GenEvent {
     //
     #[cfg(native_lane)]
     CheckpointWeightFacts {
-        facts: Value,
+        facts: CheckpointWeightFactsV1,
     },
     /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
     /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
@@ -144,9 +144,7 @@ impl ImportedCheckpointPublisher {
             &self.primary,
             available,
         ) {
-            let _ = tx.blocking_send(GenEvent::CheckpointWeightFacts {
-                facts: crate::checkpoint_weight_facts_host::facts_receipt_object(&facts),
-            });
+            let _ = tx.blocking_send(GenEvent::CheckpointWeightFacts { facts });
         }
     }
 }
