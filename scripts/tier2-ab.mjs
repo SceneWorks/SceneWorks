@@ -1169,7 +1169,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         dedicatedMemory = startKreaWindowsWorkerMemory({ pid: worker.pid, executable: built[side].binary, gpuUuid: uuid, env });
         memory.wddmDedicated = dedicatedMemory.record;
         await dedicatedMemory.ready();
-        fact(!exited(worker), "owned worker exited before the Windows memory observer armed");
+        fact(worker.exitCode === null && worker.signalCode === null, "owned worker exited before the Windows memory observer armed");
         samplers.push((async () => {
           while (sampling) {
             try {
