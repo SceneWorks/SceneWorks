@@ -470,7 +470,42 @@ export function assertKreaEvents(events, route) {
   return { observedSteps: unique, decodingEvents: 1, decodingUpdates: decoding.length, authoredStepSlices: route.proof === "raw" ? PHASES.map(({ steps }) => steps) : [8, 4], executedStepSlices: route.proof === "raw" ? [3, 4, 3] : [8, 2] };
 }
 
-export function assertKreaOutput({ route, job, asset, library, sidecar, share, width, height, workerId, projectId }) {
+function publicKreaRawAsset(sidecar, route, adapterImport, dataRoot) {
+  assert.equal(adapterImport?.adapterId, KREA_RAW_LORA);
+  assert.equal(adapterImport.scope, "project");
+  assert.deepEqual(adapterImport.source, KREA_RAW_ADAPTER, "Raw output must use the pinned project adapter import");
+  const loras = sidecar.recipe?.loras;
+  assert.ok(Array.isArray(loras) && loras.length === 1, "Raw disk recipe must retain the selected adapter");
+  const [adapter] = loras;
+  assert.deepEqual({ id: adapter.id, weight: adapter.weight }, route.body.loras[0]);
+  assert.equal(adapter.scope, adapterImport.scope);
+  assert.equal(adapter.source?.provider, "local");
+  assert.equal(adapter.source.repo, null);
+
+  const locator = adapter.installedPath;
+  assert.ok(typeof dataRoot === "string", "Raw output must identify the owned data directory");
+  const paths = path.posix.isAbsolute(dataRoot) ? path.posix : path.win32;
+  const separator = paths === path.win32 ? /[\\/]/ : "/";
+  assert.ok(paths.isAbsolute(dataRoot) && typeof locator === "string" && paths.isAbsolute(locator) &&
+    !locator.includes("\0") && !locator.split(separator).some((part) => part === ".." || part === "."),
+  "Raw disk adapter locator must be an absolute bundle path");
+  const member = paths.relative(paths.toNamespacedPath(dataRoot), paths.toNamespacedPath(locator)).split(paths.sep).join("/");
+  assert.match(member, /^models\/portable-attempts\/[a-f0-9]{64}\/bundle\/model0\/member1$/, "Raw disk adapter locator must identify the owned portable bundle member");
+
+  // job_redaction.rs removes these five physical locators from the pinned LoRA row.
+  // The persisted generation set retains them and every other asset field must agree.
+  const publicAsset = structuredClone(sidecar);
+  const [publicAdapter] = publicAsset.recipe.loras;
+  for (const key of ["installedPath", "modelPath", "path", "sourcePath"]) {
+    assert.ok(adapter[key] === locator, `Raw disk adapter ${key} must match its installed locator`);
+    delete publicAdapter[key];
+  }
+  assert.ok(adapter.source.path === locator, "Raw disk adapter source.path must match its installed locator");
+  delete publicAdapter.source.path;
+  return publicAsset;
+}
+
+export function assertKreaOutput({ route, job, asset, library, sidecar, share, width, height, workerId, projectId, adapterImport, dataRoot }) {
   assert.equal(job.workerId, workerId);
   assert.equal(job.result?.model, route.body.model);
   assert.equal(job.payload?.prompt, PROMPT);
@@ -487,7 +522,11 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
   assert.equal(hydrated.generationSet?.jobId, job.id);
   assert.equal(hydrated.generationSet?.id, hydrated.generationSetId);
   assert.equal(job.result?.generationSetId, hydrated.generationSetId);
-  assert.deepEqual(asset, sidecar, "API asset and exact disk sidecar must agree");
+  if (route.proof === "raw") {
+    assert.deepEqual(asset, publicKreaRawAsset(sidecar, route, adapterImport, dataRoot), "public Raw job asset must equal its exact redacted disk sidecar");
+  } else {
+    assert.deepEqual(asset, sidecar, "API asset and exact disk sidecar must agree");
+  }
   assert.deepEqual(hydrated.generationSet?.recipe, sidecar.recipe, "generation set must preserve persisted recipe");
   assert.equal(hydrated.generationSet.prompt, PROMPT);
   assert.equal(sidecar.recipe?.prompt, PROMPT);
@@ -504,6 +543,7 @@ export function assertKreaOutput({ route, job, asset, library, sidecar, share, w
   if (route.proof === "raw") {
     assert.equal(job.payload?.model, "krea_2_raw");
     assert.deepEqual(job.payload?.loras?.map(({ id, weight }) => ({ id, weight })), route.body.loras);
+    assert.deepEqual(share.loras, [{ name: path.posix.basename(KREA_RAW_ADAPTER.file, ".safetensors"), weight: route.body.loras[0].weight, hash: KREA_RAW_ADAPTER.sha256 }], "PNG workflow must contain the exact shareable adapter attribution");
     assert.equal(raw.repo, RAW.repo);
     assert.equal(raw.samplingRegime, "krea_2_raw_multiphase");
     assert.equal(raw.multiPhase, true);

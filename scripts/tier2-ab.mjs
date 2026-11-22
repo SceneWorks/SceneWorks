@@ -1326,7 +1326,10 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const sidecar = JSON.parse(await readFile(sidecarFile, "utf8"));
       const { imageQualityStats, readWorkflowShareFromPng } = await import("./pag-acceptance.mjs");
       const { width, height, rgba } = decodePng(saved);
-      record.productProof = assertKreaOutput({ route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved), width, height, workerId, projectId: project.id });
+      record.productProof = assertKreaOutput({
+        route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved),
+        width, height, workerId, projectId: project.id, adapterImport: record.adapterImport, dataRoot: path.join(stateReal, "data"),
+      });
       record.productProof.imageStats = imageQualityStats(rgba);
       fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
     }

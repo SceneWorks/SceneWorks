@@ -453,6 +453,75 @@ test("the linked stamp and sole final output bind the actual authored request an
   assert.throws(() => assertKreaOutput({ ...proof, share: { prompt: "changed" } }), /prompt|changed/);
 });
 
+function rawOutputProof(dataRoot, locator) {
+  const body = RAW.body;
+  const publicAdapter = {
+    id: KREA_RAW_LORA, name: "Krea Darkbrush phase proof", weight: 1, scope: "project",
+    source: { provider: "local", repo: null }, presetManaged: false, triggerWords: [],
+  };
+  const diskAdapter = {
+    ...publicAdapter, installedPath: locator, modelPath: locator, path: locator, sourcePath: locator,
+    source: { ...publicAdapter.source, path: locator },
+  };
+  const raw = {
+    repo: "SceneWorks/krea-2-raw-mlx", samplingRegime: "krea_2_raw_multiphase", realModelInference: true,
+    multiPhase: true, mlxQuantize: 4, numInferenceSteps: 10, phases: structuredClone(body.advanced.phases),
+  };
+  const recipe = { model: body.model, seed: body.seed, prompt: body.prompt, rawAdapterSettings: raw, loras: [diskAdapter] };
+  const sidecar = { id: "asset", file: { width: 512, height: 512 }, recipe };
+  const asset = { ...sidecar, recipe: { ...recipe, loras: [publicAdapter] } };
+  const libraryAsset = {
+    ...sidecar, projectId: "p", lineage: { jobId: "job" }, generationSetId: "set",
+    generationSet: { id: "set", jobId: "job", recipe, prompt: body.prompt },
+  };
+  const share = {
+    prompt: body.prompt, negativePrompt: body.negativePrompt,
+    loras: [{ name: "krea2_darkbrush", weight: 1, hash: KREA_RAW_ADAPTER.sha256 }],
+  };
+  return structuredClone({
+    route: RAW, dataRoot, width: 512, height: 512, asset, library: [libraryAsset], sidecar, share,
+    workerId: "worker", projectId: "p", adapterImport: { adapterId: KREA_RAW_LORA, scope: "project", source: KREA_RAW_ADAPTER },
+    job: { id: "job", workerId: "worker", payload: body, result: { model: body.model, generationSetId: "set", assets: [asset], assetIds: [asset.id] } },
+  });
+}
+
+test("Raw compares the exact public job projection while keeping the full generation-set recipe", () => {
+  const segments = ["models", "portable-attempts", "a".repeat(64), "bundle", "model0", "member1"];
+  const dataRoot = "/runner/run/state/data";
+  const locator = `${path.posix.join(dataRoot, ...segments)}/`;
+  const proof = rawOutputProof(dataRoot, locator);
+  assert.deepEqual(assertKreaOutput(proof).raw.phasePlan, RAW.body.advanced.phases);
+  assert.deepEqual(proof.sidecar.recipe.loras, proof.library[0].generationSet.recipe.loras);
+  assert.equal(proof.sidecar.recipe.loras[0].source.path, locator);
+
+  const windowsRoot = "D:\\runner\\run\\state\\data";
+  const windowsLocator = path.win32.toNamespacedPath(path.win32.join(windowsRoot, ...segments));
+  assert.equal(assertKreaOutput(rawOutputProof(windowsRoot, windowsLocator)).raw.tier, "q4");
+
+  function rejects(change, message) {
+    const altered = rawOutputProof(dataRoot, locator);
+    change(altered);
+    assert.throws(() => assertKreaOutput(altered), message);
+  }
+  for (const key of ["installedPath", "modelPath", "path", "sourcePath"]) {
+    rejects(({ asset }) => { asset.recipe.loras[0][key] = locator; }, /exact redacted disk sidecar/);
+    rejects(({ sidecar }) => { delete sidecar.recipe.loras[0][key]; }, /absolute bundle path|must match its installed locator/);
+  }
+  rejects(({ asset }) => { asset.recipe.loras[0].source.path = locator; }, /exact redacted disk sidecar/);
+  rejects(({ asset }) => { asset.recipe.loras[0].weight = 0.75; }, /exact redacted disk sidecar/);
+  rejects(({ asset }) => { delete asset.recipe.loras[0].triggerWords; }, /exact redacted disk sidecar/);
+  rejects(({ asset, library }) => { library[0].generationSet.recipe = asset.recipe; }, /generation set must preserve persisted recipe/);
+  rejects(({ sidecar }) => { delete sidecar.recipe.loras[0].source.path; }, /source.path must match its installed locator/);
+  rejects(({ sidecar }) => { sidecar.recipe.loras[0].sourcePath = `${locator}/other`; }, /sourcePath must match its installed locator/);
+  assert.throws(() => assertKreaOutput(rawOutputProof(`${dataRoot}-other`, locator)), /owned portable bundle member/);
+  assert.throws(() => assertKreaOutput(rawOutputProof(dataRoot, locator.replace("/bundle/", "/bundle/../bundle/"))), /absolute bundle path/);
+  assert.throws(() => assertKreaOutput(rawOutputProof(dataRoot, locator.replace("/member1/", "/member2/"))), /owned portable bundle member/);
+  rejects(({ adapterImport }) => { adapterImport.source.sha256 = "b".repeat(64); }, /pinned project adapter import/);
+  rejects(({ share }) => { share.loras[0].path = locator; }, /exact shareable adapter attribution/);
+  rejects(({ share }) => { share.loras[0].hash = "b".repeat(64); }, /exact shareable adapter attribution/);
+  rejects(({ sidecar }) => { sidecar.recipe.rawAdapterSettings.phases[1].loras[0].weight = 0.5; }, /0.75/);
+});
+
 test("a skipped, refused or incomparable arm cannot pass the Krea product suite", () => {
   const pass = { status: "ran", verdict: "equal" };
   assert.equal(exitCodeFor({ kind: KREA_SUITE, mode: "run", routes: [pass, pass] }), 0);
