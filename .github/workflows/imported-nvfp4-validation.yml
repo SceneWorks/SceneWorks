@@ -15,6 +15,10 @@ permissions:
 
 jobs:
   imported-checkpoint-worker-smoke:
+    # Preserve every dispatched request; the physical UUID guard owns exclusion.
+    concurrency:
+      group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 300
     defaults:
