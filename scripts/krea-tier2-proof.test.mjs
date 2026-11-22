@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
+import { bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild } from "./krea-tier2-linked-source.mjs";
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, CHECKPOINT, LINKED_MODEL, assertKreaEvents,
   assertKreaImportStamp, assertKreaEnhancementRefused, assertKreaOutput, kreaRoutes,
@@ -14,6 +15,32 @@ import {
 const HEAD = "1".repeat(40);
 const PIN = "2".repeat(40);
 const [RAW, HIRES] = kreaRoutes("mlx");
+
+test("Krea source bind refuses an otherwise ordinary checkout with different source bytes", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "krea-source-bind-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sides = ["base", "head"].map((side) => path.join(dir, side));
+  for (const side of sides) {
+    const parent = path.join(side, "apps", "rust-api", "src");
+    await mkdir(parent, { recursive: true });
+    await writeFile(path.join(parent, "portable_admission.rs"), "unknown source");
+  }
+  await assert.rejects(bindKreaLinkedSourceBuild(...sides), /unexpected Krea linked-source bytes for base/);
+});
+
+test("Krea baseline restores exact checkout bytes after the borrowed-source build fails", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "krea-source-restore-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const base = await realpath(dir);
+  const replaced = { file: "guard.rs", original: Buffer.from("original\r\n"), repaired: Buffer.from("repaired\n") };
+  const file = path.join(base, replaced.file);
+  await writeFile(file, replaced.original);
+  await assert.rejects(withKreaLinkedSourceBuild({ base, replacements: [replaced] }, async () => {
+    assert.deepEqual(await readFile(file), replaced.repaired);
+    throw new Error("fixture build failed");
+  }), /fixture build failed/);
+  assert.deepEqual(await readFile(file), replaced.original);
+});
 
 function inputs(options = {}, over = {}) {
   return { profile: "tier2-ab", backend: "mlx", ref: HEAD, inference_sha: PIN, moss_options_json: JSON.stringify({ suite: KREA_SUITE, head_sha: HEAD, ...options }), ...over };

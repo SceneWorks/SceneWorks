@@ -48,6 +48,7 @@ import {
 import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
 import { startKreaWindowsWorkerMemory } from "./lib/krea-windows-worker-memory.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
+import { bindKreaLinkedSourceBuild, withKreaLinkedSourceBuild } from "./krea-tier2-linked-source.mjs";
 
 const execFile = promisify(execFileCallback);
 const fact = (value, message) => assert.ok(value, message);
@@ -761,6 +762,7 @@ const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / GIB).toFixed(2)} Gi
 const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–");
 export function renderMarkdown(report) {
   const lines = [`# Tier 2 A/B (${report.backend}) — ${report.mode}`, "", `- status: **${report.status}** (exit ${report.exitCode})`, `- base: \`${report.base.sha}\` (inference ${report.base.inferencePin ?? "?"}, binary ${report.base.binarySha256 ?? "not built"})`, `- head: \`${report.head.sha}\` (inference ${report.head.inferencePin ?? "?"}, binary ${report.head.binarySha256 ?? "not built"})`, `- runner: ${report.runner.name ?? "local"} (${report.runner.platform}/${report.runner.arch}, ${gib(report.runner.totalMemoryBytes)} RAM)`, `- window: ${report.startedAt} → ${report.finishedAt ?? "running"}`, `- memory method: ${report.memoryMethod}`, `- fidelity method: decoded content (PNG→RGBA8, WAV→PCM samples, video→ffmpeg RGBA frames + s16le audio); file sha256 recorded separately`, ""];
+  if (report.kreaLinkedSourceBuild) lines.push(`- Krea source admission uses four identical files from repair \`${report.kreaLinkedSourceBuild.repairRevision}\` in both binaries. The proof applies those files to the frozen baseline checkout for its build only. The unmodified baseline refuses the linked checkpoint before generation. Exact source hashes are in the JSON receipt.`, "");
   if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Device-wide diagnostic peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. NVIDIA device-wide readings and process types still govern the device lease.", "");
   if (Array.isArray(report.gpus)) {
     lines.push("| nvidia-smi index | PCI bus | UUID | display attached | used / total | util | processes (C, G, C+G) |", "|---|---|---|---|---|---|---|");
@@ -834,6 +836,14 @@ async function preflight(env, cfg, report, signal) {
   if (cfg.krea) {
     assertKreaPins(report.base.sha, report.base.inferencePin, report.head.sha, report.head.inferencePin);
     fact(report.head.inferencePin === cfg.inferenceSha, "candidate checkout does not source-pin the requested inference SHA");
+    if (!cfg.allocation) {
+      const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir);
+      if (env.GITHUB_ACTIONS === "true") {
+        const workspace = await realpath(env.GITHUB_WORKSPACE);
+        fact(binding.base === path.join(workspace, "tier2-ab-base"), "Krea source repair requires the attempt-owned workflow baseline checkout");
+      }
+      report.kreaLinkedSourceBuild = binding.receipt;
+    }
     for (const side of cfg.allocation ? [report.head] : [report.base, report.head]) {
       const manifests = ["Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml"];
       const contents = await Promise.all(manifests.map((file) => readFile(path.join(side.checkout, file), "utf8")));
@@ -927,6 +937,8 @@ async function build(env, cfg, report) {
   await mkdir(target, { recursive: true }); await mkdir(evidence, { recursive: true });
   const exe = process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api";
   const built = {};
+  const linkedSourceBuild = report.kreaLinkedSourceBuild ? await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir) : null;
+  if (linkedSourceBuild) assert.deepEqual(linkedSourceBuild.receipt, report.kreaLinkedSourceBuild);
   // Base first, then head: both share one target, so the second build reuses every unchanged
   // dependency unit. Each binary (plus loose native libraries) is copied out before the next build.
   const sides = cfg.allocation ? [["head", cfg.headDir, cfg.headSha]] : [["base", cfg.baseDir, cfg.baseSha], ["head", cfg.headDir, cfg.headSha]];
@@ -934,21 +946,23 @@ async function build(env, cfg, report) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
-    let result;
-    if (cfg.perf || cfg.allocation) {
+    const compile = async () => {
+      const cargo = () => runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+      if (!cfg.perf && !cfg.allocation) return cargo();
       const file = path.join(dir, SAMPLER_SOURCE_FILE);
       const original = await readFile(file);
       const overlay = await bindKreaSamplerOverlay(original, label, cfg);
       assert.deepEqual(report[label].samplerOverlay, { sourceSha256: overlay.sourceSha256, overlaySha256: overlay.overlaySha256 });
       try {
         await writeFile(file, overlay.content);
-        result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+        return await cargo();
       } finally {
         await writeFile(file, original);
       }
-    } else {
-      result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
-    }
+    };
+    const result = label === "base" && linkedSourceBuild
+      ? await withKreaLinkedSourceBuild(linkedSourceBuild, compile)
+      : await compile();
     if (result.code !== 0) { await writeFile(path.join(evidence, `build-${label}.tail.log`), await tail(log, 64_000)); throw new Error(`${label} release build failed (${JSON.stringify(result)}); see build-${label}.tail.log`); }
     fact(await git(dir, "status", "--porcelain") === "" && await git(dir, "rev-parse", "HEAD") === sha, `${label} build changed its checkout`);
     let metallib = null;
@@ -962,7 +976,11 @@ async function build(env, cfg, report) {
     built[label] = { binary, binarySha256: await fileSha256(binary), samplerOverlay: report[label].samplerOverlay ?? null, metallib, buildSeconds: (Date.now() - started) / 1000 };
     report[label] = { ...report[label], binarySha256: built[label].binarySha256, buildSeconds: built[label].buildSeconds, metallibSha256: metallib?.sha256 ?? null };
   }
-  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, allocation: cfg.allocation, built }, null, 2) + "\n");
+  if (linkedSourceBuild) {
+    const restored = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir);
+    assert.deepEqual(restored.receipt, linkedSourceBuild.receipt, "Krea source repair changed a checkout");
+  }
+  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, allocation: cfg.allocation, kreaLinkedSourceBuild: report.kreaLinkedSourceBuild, built }, null, 2) + "\n");
   return built;
 }
 
@@ -1392,6 +1410,7 @@ async function runComparison(env, cfg, report, signal) {
   const recorded = JSON.parse(await readFile(path.join(scratch, "build.json"), "utf8"));
   fact(recorded.baseSha === cfg.baseSha && recorded.headSha === cfg.headSha && recorded.backend === cfg.backend, "build.json belongs to a different base/head/backend");
   fact(Boolean(recorded.perf) === cfg.perf && Boolean(recorded.allocation) === cfg.allocation, "build.json belongs to a different instrumentation mode");
+  assert.deepEqual(recorded.kreaLinkedSourceBuild, report.kreaLinkedSourceBuild, "build used a different Krea linked-source repair");
   const built = recorded.built;
   for (const side of cfg.allocation ? ["head"] : ["base", "head"]) {
     if (cfg.perf || cfg.allocation) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
