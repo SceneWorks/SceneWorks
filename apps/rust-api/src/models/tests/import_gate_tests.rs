@@ -10,20 +10,11 @@ fn write_safetensors(path: &FsPath, entries: &[(&str, &str)]) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("parent dir");
     }
-    let mut header = serde_json::Map::new();
-    for (index, (key, dtype)) in entries.iter().enumerate() {
-        let start = index * 4;
-        header.insert(
-            (*key).to_owned(),
-            json!({ "dtype": dtype, "shape": [1], "data_offsets": [start, start + 4] }),
-        );
-    }
-    let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("header json");
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&header_bytes);
-    bytes.extend(std::iter::repeat_n(0_u8, entries.len() * 4));
-    std::fs::write(path, bytes).expect("write safetensors");
+    std::fs::write(
+        path,
+        crate::tests::support::test_safetensors_bytes_with_typed_keys(entries),
+    )
+    .expect("write safetensors");
 }
 
 /// A ComfyUI-native dense-bf16 Krea 2 DiT: the unique `txtfusion.` tower + BFL-style `blocks.*`
@@ -97,6 +88,11 @@ fn legacy_source_shape_backfill_uses_the_exact_loader_structure() {
     let mut krea = legacy_user_entry("krea_2", &krea_dir);
     stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
     assert_eq!(krea["importSourceShape"], json!("transformer_file"));
+    for old_label in ["fp8_e4m3", "scaled_fp8_companion", "comfy_quant_packed"] {
+        krea.insert("importQuantFormat".into(), json!(old_label));
+        stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
+        assert_eq!(krea["importQuantFormat"], "bf16");
+    }
 
     let sdxl_file = models.join("imports/sdxl.safetensors");
     write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());

@@ -229,7 +229,7 @@ impl MiniMaxH3ImportAssembly {
         let source_encoding = match plan.context.get("sourceEncoding") {
             None => None,
             Some(Value::String(value))
-                if matches!(value.as_str(), "convrot_int8" | "asym_w4a8_int8") =>
+                if crate::minimax_h3_codec::source_codec_id(value).is_some() =>
             {
                 Some(value.clone())
             }

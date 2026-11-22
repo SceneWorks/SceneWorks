@@ -1,4 +1,4 @@
-//! Structural guard for the vendored candle-core, multi-arch candle-kernels and
+//! Structural guard for vendored candle-core/candle-nn, multi-arch candle-kernels and
 //! candle-metal-kernels `[patch]` entries.
 //!
 //! candle-kernels compiles the GGUF quant/moe kernels into a static `libmoe.a` of SASS with a
@@ -23,7 +23,14 @@ const UPSTREAM_CANDLE: &str = "github.com/huggingface/candle";
 const INFERENCE_REPO: &str = "git+https://github.com/SceneWorks/inference";
 /// candle-metal-kernels carries the upstream rank > 4 strided-reduce fix (inference sc-25909) and
 /// is compiled by the macOS runtime through candle-core's Metal backend.
-const PATCHED_CRATES: [&str; 3] = ["candle-kernels", "candle-core", "candle-metal-kernels"];
+// candle-nn carries the typed native projection hook; an upstream copy would silently bypass the
+// shared encoded-weight loader for stock Linear consumers.
+const PATCHED_CRATES: [&str; 4] = [
+    "candle-kernels",
+    "candle-core",
+    "candle-nn",
+    "candle-metal-kernels",
+];
 
 /// `(name, source)` for every `[[package]]` block in a Cargo.lock. Path dependencies have no
 /// `source` line and yield `None`. `[[patch.unused]]` blocks are ignored — an unused patch is
@@ -211,6 +218,11 @@ source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e
 
 [[package]]
 name = "candle-metal-kernels"
+version = "0.10.2"
+source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
+
+[[package]]
+name = "candle-nn"
 version = "0.10.2"
 source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
 

@@ -116,6 +116,8 @@ pub const DENSE_F16_CODEC_ID: &str = "dense-f16-v1";
 pub const DENSE_F32_CODEC_ID: &str = "dense-f32-v1";
 /// FP8 E4M3 with a scalar scale.
 pub const FP8_E4M3_SCALAR_CODEC_ID: &str = "fp8-e4m3-scalar-v1";
+/// Publisher FP8 E4M3 codes with one original F32 scale per output row.
+pub const FP8_E4M3_ROWWISE_CODEC_ID: &str = "fp8-e4m3-rowwise-v1";
 /// FP8 E5M2 with a scalar scale.
 pub const FP8_E5M2_SCALAR_CODEC_ID: &str = "fp8-e5m2-scalar-v1";
 /// Microscaling FP8.
@@ -131,6 +133,7 @@ pub const KNOWN_CODEC_IDS: &[&str] = &[
     DENSE_F16_CODEC_ID,
     DENSE_F32_CODEC_ID,
     FP8_E4M3_SCALAR_CODEC_ID,
+    FP8_E4M3_ROWWISE_CODEC_ID,
     FP8_E5M2_SCALAR_CODEC_ID,
     GGUF_CONTAINER_CODEC_ID,
     INT8_PER_ROW_CODEC_ID,
@@ -196,11 +199,9 @@ impl fmt::Display for ExecutionRepresentation {
 ///
 /// # Who may construct a non-empty one
 ///
-/// Only code rendering an actual **probe** of the host. In this repository that is the worker's
-/// candle lane (`crate::checkpoint_weight_facts_host`), which renders the `nvidia-smi` compute-cap
-/// probe `discover_gpu` already performs at startup. Every dense-only host — macOS/MLX, CPU, a
-/// non-candle build, an unprobed host — uses [`Self::dense_only`], which says *why* the set is
-/// empty.
+/// Only code rendering a backend-owned **probe** of the host. The worker renders its startup CUDA
+/// observation through the shared backend policy; measured receipts carry the actual loaded
+/// backend's capability. An unprobed backend uses [`Self::dense_only`] rather than guessing.
 ///
 /// The AC3 guarantee (a host below the native floor cannot produce facts labelling its run native)
 /// rests entirely on this being a rendering of a probe rather than an assertion by a consumer who
@@ -783,14 +784,7 @@ impl CheckpointWeightFactsV1 {
         };
         let native_tensors = tensors(ExecutionRepresentation::NativePacked);
         let dense_tensors = tensors(ExecutionRepresentation::DenseFallback);
-        Some(match (native_tensors, dense_tensors) {
-            (0, _) => ExecutionMix::DenseFallback,
-            (_, 0) => ExecutionMix::NativePacked,
-            (native_tensors, dense_tensors) => ExecutionMix::Mixed {
-                native_tensors,
-                dense_tensors,
-            },
-        })
+        Some(ExecutionMix::from_counts(native_tensors, dense_tensors))
     }
 
     /// The single representation label to render for a codec, or `None` when unknown. Never
@@ -827,6 +821,18 @@ pub enum ExecutionMix {
 }
 
 impl ExecutionMix {
+    /// Summarize the counts for one codec, which may span multiple measured sources.
+    pub fn from_counts(native_tensors: usize, dense_tensors: usize) -> Self {
+        match (native_tensors, dense_tensors) {
+            (0, _) => Self::DenseFallback,
+            (_, 0) => Self::NativePacked,
+            (native_tensors, dense_tensors) => Self::Mixed {
+                native_tensors,
+                dense_tensors,
+            },
+        }
+    }
+
     /// The value a telemetry column carries and a client renders.
     ///
     /// The two pure arms are the engine's own row labels, unchanged — every existing consumer and

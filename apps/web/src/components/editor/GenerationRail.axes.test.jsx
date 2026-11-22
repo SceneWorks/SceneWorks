@@ -3,7 +3,8 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, setInput } from "../../testUtils/dom.js";
 
-vi.mock("../generationStudio.jsx", () => ({
+vi.mock("../generationStudio.jsx", async (importOriginal) => ({
+  ...await importOriginal(),
   LoraPickerSection: () => null,
 }));
 

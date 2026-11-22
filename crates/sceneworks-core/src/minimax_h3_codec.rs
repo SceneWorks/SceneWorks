@@ -32,6 +32,9 @@ use crate::checkpoint_derivative::{
 use crate::checkpoint_plan_store::ResolvedCheckpointV1;
 use crate::lora_family::read_safetensors_header;
 
+#[path = "minimax_h3_fp8.rs"]
+mod fp8;
+
 pub const H3_MAPPING_ID: &str = "minimax-h3-native-v1";
 pub const H3_CONFIG_FILE: &str = "config.json";
 pub const H3_INDEX_FILE: &str = "diffusion_pytorch_model.safetensors.index.json";
@@ -622,6 +625,13 @@ struct Tensor {
     offset: u64,
     /// Ordered source byte ranges relative to the tensor payload. Empty only for zero-size data.
     ranges: Vec<(u64, u64)>,
+    edit: fp8::PayloadEdit,
+}
+
+impl Tensor {
+    fn output_bytes(&self) -> u64 {
+        self.edit.output_bytes(&self.ranges)
+    }
 }
 
 /// Verified copy schedule; pruning values are streamed through bounded buffers, never retained.
@@ -636,6 +646,7 @@ pub struct H3SourceInventory {
     pub convrot_int8: bool,
     /// Packed codebook W4A8, possibly mixed with ConvRot INT8 projections.
     pub w4a8_int8: bool,
+    fp8: Option<crate::base_weights::QuantFormat>,
     /// Content identity of the reduced centered-curve AdaLN topology this source actually carries.
     /// Present only when the source stores the direct table instead of the timestep MLP.
     pub pruning: Option<H3PruningBinding>,
@@ -821,9 +832,33 @@ impl H3SourceInventory {
             Some((grid, rank)) => config.pruned_shapes(grid, rank)?,
             None => config.shapes()?,
         };
-        let quantized = convrot_outputs(
-            &headers, &weights, &physical, native, &config, qkv_layout, &expected,
+        let encoded = fp8::schedule(
+            &weights,
+            &headers,
+            &physical,
+            &fp8::Geometry {
+                native,
+                config: &config,
+                layout: qkv_layout,
+                expected: &expected,
+            },
+            check,
         )?;
+        let fp8 = encoded.format;
+        expected.extend(
+            encoded
+                .tensors
+                .iter()
+                .map(|(name, tensor)| (name.clone(), tensor.shape.clone())),
+        );
+        tensors.extend(encoded.tensors);
+        let quantized = if fp8.is_some() {
+            BTreeMap::new()
+        } else {
+            convrot_outputs(
+                &headers, &weights, &physical, native, &config, qkv_layout, &expected,
+            )?
+        };
         for outputs in quantized.values() {
             for (logical, shape, _) in outputs {
                 // The packed projection's physical shape is [out, in/2]; the codec already
@@ -837,7 +872,7 @@ impl H3SourceInventory {
             file.read_exact(&mut len).map_err(|e| e.to_string())?;
             let body = 8 + u64::from_le_bytes(len);
             for (key, entry) in header.as_object().ok_or("invalid H3 header")? {
-                if key == "__metadata__" {
+                if key == "__metadata__" || encoded.consumed.contains(key) {
                     continue;
                 }
                 let dtype = entry
@@ -930,6 +965,7 @@ impl H3SourceInventory {
                             shape: logical_shape,
                             offset: body + start,
                             ranges,
+                            edit: fp8::PayloadEdit::Copy,
                         },
                     );
                 }
@@ -993,16 +1029,23 @@ impl H3SourceInventory {
             config,
             native,
             requires_normalization: requires_normalization || pruning.is_some(),
-            convrot_int8: tensors.keys().any(|key| key.ends_with(".weight_scale")),
-            w4a8_int8: tensors.keys().any(|key| key.ends_with(".weight_s_rel")),
+            fp8,
+            convrot_int8: quantized.keys().any(|key| key.ends_with(".weight_scale")),
+            w4a8_int8: quantized.keys().any(|key| key.ends_with(".weight_s_rel")),
             pruning,
             sources,
             tensors,
         })
     }
 
+    pub(crate) fn fp8_encoding(&self) -> Option<crate::base_weights::QuantFormat> {
+        self.fp8
+    }
+
     pub fn source_encoding(&self) -> Option<&'static str> {
-        if self.w4a8_int8 {
+        if let Some(format) = self.fp8 {
+            Some(format.as_str())
+        } else if self.w4a8_int8 {
             Some("asym_w4a8_int8")
         } else if self.convrot_int8 {
             Some("convrot_int8")
@@ -1020,14 +1063,11 @@ impl H3SourceInventory {
             // 2: native fused QKV defaults to the contiguous ComfyUI layout (sc-26691). Version 1
             // derivatives split it per-head interleaved and must never be served again.
             adapter_version: "2".into(),
-            codec_id: if self.w4a8_int8 {
-                crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
-            } else if self.convrot_int8 {
-                crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
-            } else {
-                "dense-f16-bf16-f32"
-            }
-            .into(),
+            codec_id: self
+                .source_encoding()
+                .and_then(source_codec_id)
+                .unwrap_or("dense-f16-bf16-f32")
+                .into(),
             codec_version: "2".into(),
             backend: "portable".into(),
             outputs,
@@ -1043,7 +1083,7 @@ impl H3SourceInventory {
     }
 
     /// Emit directly from seekable sources through a fixed 1 MiB buffer. Payload allocations are
-    /// independent of model/tensor size; only small tensor headers and the output index are resident.
+    /// bounded by the copy buffer and, for reordered MXFP8, one projection’s input/output scale planes.
     pub fn produce(&self, outputs: &CheckpointDerivativeOutputs<'_>) -> Result<(), String> {
         self.produce_with_check(outputs, &|| Ok(()))
     }
@@ -1059,8 +1099,8 @@ impl H3SourceInventory {
         let total_payload_bytes = self
             .tensors
             .values()
-            .flat_map(|tensor| tensor.ranges.iter())
-            .try_fold(0u64, |sum, &(_, bytes)| sum.checked_add(bytes))
+            .map(Tensor::output_bytes)
+            .try_fold(0u64, |sum, bytes| sum.checked_add(bytes))
             .ok_or("H3 normalization payload size overflow")?;
         let mut copied_payload_bytes = 0u64;
         let copy_checkpoint = |copied_payload_bytes| {
@@ -1087,7 +1127,7 @@ impl H3SourceInventory {
             let selected: Vec<_> = self.tensors.iter().filter(|(_, t)| t.source == i).collect();
             let mut offset = 0u64;
             for (name, tensor) in &selected {
-                let len: u64 = tensor.ranges.iter().map(|(_, len)| len).sum();
+                let len = tensor.output_bytes();
                 header.insert((*name).clone(),json!({"dtype":tensor.dtype,"shape":tensor.shape,"data_offsets":[offset,offset+len]}));
                 index.insert((*name).clone(), json!(shard_name));
                 offset += len;
@@ -1100,6 +1140,15 @@ impl H3SourceInventory {
                 .map_err(|e| e.to_string())?;
             let mut input = File::open(path).map_err(|e| e.to_string())?;
             for (_, tensor) in selected {
+                if tensor
+                    .edit
+                    .write_replacement(&mut input, &mut out, tensor.offset, &|| {
+                        copy_checkpoint(copied_payload_bytes)
+                    })?
+                {
+                    copied_payload_bytes += tensor.output_bytes();
+                    continue;
+                }
                 for &(start, len) in &tensor.ranges {
                     input
                         .seek(SeekFrom::Start(tensor.offset + start))
@@ -1125,6 +1174,16 @@ impl H3SourceInventory {
                         remaining -= take as u64;
                     }
                 }
+                if let fp8::PayloadEdit::Pad(mut remaining) = tensor.edit {
+                    buffer.fill(0);
+                    while remaining > 0 {
+                        copy_checkpoint(copied_payload_bytes)?;
+                        let n = remaining.min(buffer.len() as u64) as usize;
+                        out.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+                        remaining -= n as u64;
+                        copied_payload_bytes += n as u64;
+                    }
+                }
             }
             total += offset;
         }
@@ -1140,6 +1199,30 @@ impl H3SourceInventory {
         )
         .map_err(|e| e.to_string())?;
         check().map_err(|error| error.to_string())
+    }
+}
+
+pub(crate) fn is_fp8_parameter(key: &str, dtype: Option<&str>) -> bool {
+    matches!(dtype, Some("F8_E4M3" | "F8_E5M2"))
+        && !matches!(
+            key.rsplit('.').next(),
+            Some("weight_scale" | "weight_s_rel" | "scaled_fp8")
+        )
+}
+
+/// Stable source proof carried by a verified H3 assembly and its normalized derivative.
+pub(crate) fn source_codec_id(label: &str) -> Option<&'static str> {
+    use crate::base_weights::QuantFormat as Q;
+    match Q::from_label(label) {
+        Some(
+            format @ (Q::Fp8E4M3Scalar
+            | Q::Fp8E5M2Scalar
+            | Q::Fp8E4M3Rowwise
+            | Q::Mxfp8
+            | Q::ConvRotInt8),
+        ) => format.source_codec_id(),
+        _ if label == "asym_w4a8_int8" => Some(crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID),
+        _ => None,
     }
 }
 

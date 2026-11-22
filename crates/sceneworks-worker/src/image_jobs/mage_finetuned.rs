@@ -524,6 +524,10 @@ pub(super) async fn generate_mage_finetuned_stream(
         .collect();
     let total = work.len();
 
+    let checkpoint = super::stream::ImportedCheckpointPublisher::new(
+        &request.model_manifest_entry,
+        &transformer.weights,
+    );
     let mut spec = components.into_iter().fold(
         LoadSpec::new(WeightsSource::Dir(transformer.directory)),
         |spec, (id, source)| spec.with_component(id, source),
@@ -603,7 +607,7 @@ pub(super) async fn generate_mage_finetuned_stream(
                 );
             }
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
                 move |_index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
@@ -679,6 +683,7 @@ pub(super) async fn generate_mage_finetuned_stream(
                                     "Fine-tuned Mage-Flow checkpoint produced no image".to_owned(),
                                 )
                             })?;
+                            checkpoint.publish(&tx, model);
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

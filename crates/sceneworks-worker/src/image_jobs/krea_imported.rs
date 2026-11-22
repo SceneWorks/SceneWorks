@@ -122,8 +122,8 @@ use serde_json::json;
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
 // imported lanes get img2img). Both native backends also claim adapters, Kontext edit, and strict pose
 // conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
-// scale shapes are validated by the inference loader before dequantization; imported ConvRot files
-// select the existing Candle named-component loader arm. Native NVFP4 is deliberately narrower:
+// scale shapes and packed formats are validated by the shared inference checkpoint loader.
+// Native NVFP4 is deliberately narrower:
 // Candle/NVIDIA t2i + img2img, without adapters, edit, or multi-phase assembly. Pose uses the native
 // control provider.
 
@@ -159,7 +159,9 @@ fn krea_imported_native_nvfp4(request: &ImageRequest) -> bool {
 
 /// Resolve the exact imported source shape and operation through the live provider registry. An
 /// absent row is an explicit refusal; sibling routes for the family are never unioned.
-fn krea_imported_descriptor(request: &ImageRequest) -> Option<gen_core::ModelDescriptor> {
+pub(super) fn krea_imported_descriptor(
+    request: &ImageRequest,
+) -> Option<gen_core::ModelDescriptor> {
     crate::inference_runtime::imported_model_descriptor(
         "krea_2",
         gen_core::ImportedModelSource::TransformerFile,
@@ -1065,6 +1067,8 @@ pub(super) async fn generate_krea_imported_control_stream(
     // The actual imported assembly is the fit/cache/provider source of truth: primary File DiT, base
     // snapshot companion, control overlay, and adapters. The provider reports the File's own bytes;
     // it does not relabel a directory-tier rung-4 measurement as imported evidence.
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &dit_pin);
     let mut spec = LoadSpec::new(WeightsSource::File(dit))
         .with_component(
             gen_core::BASE_SNAPSHOT_COMPONENT,
@@ -1077,11 +1081,6 @@ pub(super) async fn generate_krea_imported_control_stream(
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        KREA_IMPORTED_CONTROL_ENGINE_ID,
-        std::slice::from_ref(&dit_pin),
-    )?;
     spec = attach_selected_decoder_unprepared(
         spec,
         KREA_IMPORTED_CONTROL_ENGINE_ID,
@@ -1142,6 +1141,7 @@ pub(super) async fn generate_krea_imported_control_stream(
             // pose. Hand the reporting copy to the first evaluation and silenced copies to the rest,
             // so every pose is still floored by a granted switch while the event fires once.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            let facts_tx = tx.clone();
             drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -1197,6 +1197,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                     })
                     .transpose()?
                     .flatten();
+                checkpoint.publish(&facts_tx, model);
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
@@ -1354,13 +1355,10 @@ pub(super) async fn generate_krea_imported_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
 
-    let mut spec =
+    let checkpoint =
+        super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &dit_pin);
+    let spec =
         imported_candle_control_load_spec(request, &dit, &base_dir, &control_weights, adapters)?;
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        KREA_IMPORTED_CONTROL_ENGINE_ID,
-        std::slice::from_ref(&dit_pin),
-    )?;
     let spec = prepare_manifest_text_encoder_with_file_pins(
         spec,
         KREA_IMPORTED_CONTROL_ENGINE_ID,
@@ -1384,16 +1382,8 @@ pub(super) async fn generate_krea_imported_control_stream(
             // only the DiT swapped.
             let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
                 root: base_dir,
-                native_dit: (!spec
-                    .components
-                    .contains_key(gen_core::KREA_CONVROT_DIT_COMPONENT))
-                .then_some(dit),
-                convrot_dit: spec
-                    .components
-                    .get(gen_core::KREA_CONVROT_DIT_COMPONENT)
-                    .map(|source| {
-                        crate::weights_source::WeightsSourceExt::path(source).to_path_buf()
-                    }),
+                native_dit: Some(dit),
+                convrot_dit: None,
                 control: control_weights,
                 adapters: spec.adapters.clone(),
                 branch_tier: gen_core::tier_integrity::control_branch_tier(spec.quantize),
@@ -1491,6 +1481,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                     })
                     .transpose()?
                     .flatten();
+                checkpoint.publish_from(&facts_tx, || model.checkpoint_weight_facts());
                 Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
             })
         },
@@ -2120,6 +2111,7 @@ pub(super) fn drive_krea_imported_mlx_items<E>(
     hires_fix: Option<HiresFixPlan>,
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     cancel: CancelFlag,
+    source_context: Option<&super::stream::ImportedCheckpointPublisher>,
     mut evaluate_request: E,
 ) -> WorkerResult<()>
 where
@@ -2204,8 +2196,67 @@ where
             if !facts.is_empty() {
                 let _ = facts_tx.blocking_send(GenEvent::ImageFacts { index, facts });
             }
+            if let Some(checkpoint) = source_context {
+                checkpoint.publish(&facts_tx, generator);
+            }
             Ok(Some((seed, out_width, out_height, pixels)))
         },
+    )
+}
+
+/// Assemble the pinned load spec shared by execution and metadata-only route preflight.
+pub(super) fn prepare_krea_imported_load_spec(
+    request: &ImageRequest,
+    settings: &Settings,
+    engine_id: &str,
+    base_dir: &Path,
+    quant: Option<Quant>,
+    sources: PreparedKreaImportedSources,
+) -> WorkerResult<LoadSpec> {
+    let PreparedKreaImportedSources {
+        dit_pin,
+        prepared_adapters,
+    } = sources;
+    let mut spec = LoadSpec::new(WeightsSource::File(dit_pin.loader_path().to_path_buf()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base_dir.to_path_buf()),
+        );
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    if !prepared_adapters.specs.is_empty() {
+        spec = spec.with_adapters(prepared_adapters.specs);
+    }
+    spec = attach_selected_decoder_unprepared(spec, engine_id, request, settings)?;
+    let decoder_pin = selected_decoder_component_pin(&spec, engine_id, request, settings)?;
+    prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        engine_id,
+        request,
+        settings,
+        std::iter::once(dit_pin)
+            .chain(prepared_adapters.pins)
+            .chain(decoder_pin),
+        "Krea 2 imported source preparation failed",
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn prepare_krea_imported_candle_floor(
+    request: &ImageRequest,
+    settings: &Settings,
+    base_dir: &Path,
+    spec: &LoadSpec,
+) -> WorkerResult<super::base_admission::CachedCandleBaseFloorAdmission> {
+    let companions = imported_base_snapshot_companions(base_dir, spec.text_encoder.is_some());
+    let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    prepare_cached_candle_base_floor(
+        &request.model,
+        "Krea imported",
+        settings,
+        spec,
+        &companion_refs,
     )
 }
 
@@ -2234,11 +2285,7 @@ pub(super) async fn generate_krea_imported_stream(
     } = target;
     let PreparedFileDispatch { plan, sources } = dispatch;
     let request = &plan.request;
-    let PreparedKreaImportedSources {
-        dit_pin,
-        prepared_adapters,
-    } = sources;
-    let dit = dit_pin.loader_path().to_path_buf();
+    let dit = sources.dit_pin.loader_path();
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first" error.
     let base_dir = resolve_krea_imported_base_tier(settings)?;
     let is_edit = request.mode == "edit_image";
@@ -2269,7 +2316,7 @@ pub(super) async fn generate_krea_imported_stream(
     // await. Build only the edit conditioning here; the handler must never re-pin its selected stack.
     let edit_conditioning =
         resolve_krea_imported_edit_conditioning(request, settings, project_path)?;
-    let adapter_count = prepared_adapters.specs.len();
+    let adapter_count = sources.prepared_adapters.specs.len();
     let conditioning = edit_conditioning.unwrap_or_else(|| krea_imported_conditioning(img2img));
 
     let phase_specs = request_has_multiphase(request)
@@ -2300,7 +2347,7 @@ pub(super) async fn generate_krea_imported_stream(
     let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
     let text_style_gain = resolve_text_style_gain(request);
     let mut raw_settings =
-        krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit.as_path()));
+        krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit));
     raw_settings.insert(
         "mlxQuantize".to_owned(),
         quant_bits.map(Value::from).unwrap_or(Value::Null),
@@ -2341,54 +2388,15 @@ pub(super) async fn generate_krea_imported_stream(
     // the load materializes, on the blocking thread, so the drive closure re-assembles the three
     // facts there and streams the finished receipt object back over the event channel. `dit` is
     // about to move into the LoadSpec.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let dit_for_facts = dit.clone();
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let manifest_entry_for_facts = request.model_manifest_entry.clone();
-    let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
-        gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(base_dir.clone()),
+    let checkpoint = super::stream::ImportedCheckpointPublisher::new(
+        &request.model_manifest_entry,
+        &sources.dit_pin,
     );
-    if let Some(quant) = quant {
-        spec = spec.with_quant(quant);
-    }
-    if !prepared_adapters.specs.is_empty() {
-        spec = spec.with_adapters(prepared_adapters.specs);
-    }
-    super::krea_checkpoint_routing::route_imported_krea_checkpoint(
-        &mut spec,
-        engine_id,
-        std::slice::from_ref(&dit_pin),
-    )?;
-    spec = attach_selected_decoder_unprepared(spec, engine_id, request, settings)?;
-    let decoder_pin = selected_decoder_component_pin(&spec, engine_id, request, settings)?;
-    spec = prepare_manifest_text_encoder_with_file_pins(
-        spec,
-        engine_id,
-        request,
-        settings,
-        std::iter::once(dit_pin)
-            .chain(prepared_adapters.pins)
-            .chain(decoder_pin),
-        "Krea 2 imported source preparation failed",
-    )?;
+    let spec =
+        prepare_krea_imported_load_spec(request, settings, engine_id, &base_dir, quant, sources)?;
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let cold_admission = {
-        // The base snapshot is only a companion: its own transformer is replaced by `dit` and must
-        // not be double-priced. A selected encoder is already represented by the spec's prepared
-        // contract receipt, so only admit the bundled encoder dir for the default path. Shared with
-        // the plan-driven route so both are admitted on the identical floor (sc-20634).
-        let companions = imported_base_snapshot_companions(&base_dir, spec.text_encoder.is_some());
-        let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        prepare_cached_candle_base_floor(
-            &request.model,
-            "Krea imported",
-            settings,
-            &spec,
-            &companion_refs,
-        )?
-    };
+    let cold_admission = prepare_krea_imported_candle_floor(request, settings, &base_dir, &spec)?;
     #[cfg(target_os = "macos")]
     let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
         engine_id,
@@ -2437,6 +2445,7 @@ pub(super) async fn generate_krea_imported_stream(
                 hires_fix,
                 tx,
                 cancel,
+                Some(&checkpoint),
                 crate::mlx_fit_gate::evaluate_request,
             )
         },
@@ -2521,19 +2530,7 @@ pub(super) async fn generate_krea_imported_stream(
                     // of the pre-load `no-runtime-receipt` version (sc-11045). Sent after every image
                     // on purpose: publication is last-write-wins engine-side, so the latest event
                     // always describes the most recent materialization.
-                    if let Some(facts) =
-                        crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
-                            &manifest_entry_for_facts,
-                            Some(dit_for_facts.as_path()),
-                            model.checkpoint_weight_facts(),
-                        )
-                    {
-                        let _ = facts_tx.blocking_send(GenEvent::CheckpointWeightFacts {
-                            facts: crate::checkpoint_weight_facts_host::facts_receipt_object(
-                                &facts,
-                            ),
-                        });
-                    }
+                    checkpoint.publish(&facts_tx, model);
                     Ok(Some((seed, out_width, out_height, pixels)))
                 },
             )

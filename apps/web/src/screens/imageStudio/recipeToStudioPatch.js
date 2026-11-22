@@ -7,7 +7,7 @@ import { isFlux3ImageModel } from "../../modelEligibility.js";
 import { orderCaption, validateCaption } from "../../ideogramCaption.js";
 import { workflowPoseRecords } from "../../poseLibrary.js";
 import { noPresetId } from "../../presetUtils.js";
-import { quantizeTier } from "../../quantTier.js";
+import { quantizeTier, sourcePrecisionLabel } from "../../quantTier.js";
 import { finiteRecipeNumber, recipeImageDimensionIntent, recipeLoraSelection, recipeResolution } from "../../recipeFields.js";
 import { irisControlsFromRecord } from "../../irisRestore.js";
 import { h3ImageSamplerFromRecipe, lowResStartFromRecipe, pagFromRecipe } from "./samplingControls.js";
@@ -31,8 +31,8 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   const settings = recipe.normalizedSettings ?? {};
   const rawSettings = recipe.rawAdapterSettings ?? {};
   const replayPromptBatch = typeof rawSettings.appearancePrompt === "string" && Array.isArray(rawSettings.appearancePromptBatch) ? rawSettings.appearancePromptBatch : rawSettings.promptBatch;
-  const restoredTier = rawSettings.quantTier ??
-    (rawSettings.convRot === true ? "int8-convrot" : quantizeTier(rawSettings.mlxQuantize));
+  const restoredTier = sourcePrecisionLabel(recipeModel) ? null : (rawSettings.quantTier ??
+    (rawSettings.convRot === true ? "int8-convrot" : quantizeTier(rawSettings.mlxQuantize)));
   values.recipeTierRequest = restoredTier ? { model: recipe.model, tier: restoredTier } : null;
   // Restore the authoring document, never the worker's rounded/locked caption table.
   values.flux3Layout = rawSettings.flux3_layout ?? rawSettings.flux3Layout?.authoring ?? { version: 1, boxes: [] };

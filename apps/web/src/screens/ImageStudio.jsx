@@ -157,7 +157,7 @@ import {
 } from "../modelEligibility.js";
 import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
-import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, suggestTier, tierPickerOptions } from "../quantTier.js";
+import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, sourcePrecisionLabel, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { BATCH_EXPAND_MAX, H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
@@ -626,7 +626,7 @@ export function ImageStudio() {
   // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
   // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
   const [pickedBf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
-  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
+  const [savedRecipeTierRequest, setRecipeTierRequest] = useState(null);
   // Transparency / RGBA output (sc-24113): on emits `advanced.transparentBackground: true`, which
   // the worker's `qwen_alpha` adapter turns into a four-channel decode and the sc-24111 egress path
   // writes as a genuinely transparent PNG. Sticky pref, default off; the toggle only RENDERS when
@@ -1070,7 +1070,15 @@ export function ImageStudio() {
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
-  const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
+  const fixedSource = Boolean(sourcePrecisionLabel(selectedModel));
+  const fixedRecipeSource = Boolean(savedRecipeTierRequest && sourcePrecisionLabel(
+    imageModels.find((entry) => entry.id === savedRecipeTierRequest.model),
+  ));
+  const recipeTierRequest = fixedRecipeSource ? null : savedRecipeTierRequest;
+  useEffect(() => {
+    if (fixedRecipeSource) setRecipeTierRequest(null);
+  }, [fixedRecipeSource]);
+  const precisionToggle = !fixedSource && Boolean(selectedModel?.ui?.precisionToggle);
   const precisionReplay = precisionToggle && recipeTierRequest?.model === model &&
     ["bf16", "q8"].includes(recipeTierRequest?.tier);
   const bf16Precision = precisionReplay ? recipeTierRequest.tier === "bf16" : pickedBf16Precision;

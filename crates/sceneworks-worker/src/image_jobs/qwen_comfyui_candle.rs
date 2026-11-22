@@ -25,23 +25,9 @@ use crate::WorkerError;
 use crate::WorkerResult;
 use serde_json::json;
 
-// Candle (Windows/CUDA) in-place ComfyUI Qwen-Image txt2img route (epic 10451 Phase 2b, sc-10670 +
-// sc-10830). Renders a user's existing ComfyUI Qwen-Image DiT — read in place, no copy, no
-// re-download — via `runtime_cuda::providers::qwen_image::load_from_comfyui_dit`, which strips the
-// `model.diffusion_model.` prefix and upcasts the plain `fp8_e4m3fn` DiT to bf16 in memory (candle-gen
-// sc-10670). The tree's **VAE** is also read in place when the API folded it into the row (sc-10830:
-// native WAN-VAE keys → diffusers remap); when absent it falls back to the snapshot VAE. The tree's
-// Qwen2.5-VL text encoders are themselves scaled-fp8 (sc-10671), so the **text encoder** + tokenizer
-// are still sourced from a resident SceneWorks Qwen-Image snapshot (the same tier tree the registry
-// `qwen_image` path loads).
-//
-// The model id is an `external_base_*` catalog row (assembled by the API's `external_base_models`);
-// its `modelManifestEntry` carries `family:"qwen-image"`, `usable:true`, `quant:"fp8_e4m3"`, and a
-// `components[]` list whose `transformer` entry is the DiT path (and, when present, a `vae` entry is
-// the tree VAE path read in place).
-//
-// **Candle-only**, but the imported assembly now uses the registered `qwen_image` provider and its
-// normal cache/fit/residency lifecycle (sc-18306).
+// The registered Qwen-Image provider remaps the ComfyUI transformer's names and constructs
+// projections from its shared checkpoint reader. The resident snapshot supplies the text
+// encoder and tokenizer. An available in-place VAE replaces the snapshot VAE.
 
 /// The adapter/engine id recorded on candle ComfyUI Qwen-Image assets + telemetry (distinct from the
 /// registry `candle` qwen txt2img and the `qwen_edit`/`qwen_control` lanes).
@@ -390,6 +376,10 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let checkpoint = super::stream::ImportedCheckpointPublisher::new(
+        &request.model_manifest_entry,
+        &paths.transformer,
+    );
     request
         .reject_active_pag("ComfyUI Qwen-Image")
         .map_err(WorkerError::InvalidPayload)?;
@@ -515,6 +505,7 @@ pub(super) async fn generate_candle_qwen_comfyui_stream(
                                 index,
                                 facts,
                             });
+                            checkpoint.publish(&tx, model);
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

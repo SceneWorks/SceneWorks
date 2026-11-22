@@ -291,6 +291,7 @@ pub mod limits;
 pub mod payload_util;
 pub mod request_validation;
 pub mod sensenova_validation;
+pub mod source_precision;
 pub mod video_eligibility;
 pub mod video_request;
 pub mod yue2_validation;

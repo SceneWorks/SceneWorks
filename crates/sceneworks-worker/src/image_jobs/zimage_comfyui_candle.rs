@@ -347,6 +347,10 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         sources: paths,
     } = dispatch;
     let request = &plan.request;
+    let checkpoint = super::stream::ImportedCheckpointPublisher::new(
+        &request.model_manifest_entry,
+        &paths.transformer,
+    );
     request
         .reject_active_pag("ComfyUI Z-Image")
         .map_err(WorkerError::InvalidPayload)?;
@@ -460,6 +464,7 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                                 index,
                                 facts,
                             });
+                            checkpoint.publish(&tx, model);
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

@@ -3,7 +3,7 @@ import { candleVideoTierPickerAvailable } from "../../modelEligibility.js";
 import { useCallback, useEffect, useMemo } from "react";
 import { useQuantTierPicker } from "../../components/generationStudio.jsx";
 import { videoModelServesMode } from "../../modelEligibility.js";
-import { allPossibleTiers, installedTiers, suggestTier, tierLabel, tierPickerOptions, tierQuantize } from "../../quantTier.js";
+import { allPossibleTiers, installedTiers, sourcePrecisionLabel, suggestTier, tierLabel, tierPickerOptions, tierQuantize } from "../../quantTier.js";
 import { useHostMemory } from "../../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../../hostMemory.js";
 
@@ -13,7 +13,7 @@ export function useVideoExecutionTier({
   selectedModel,
   model,
   preferencesHydrated,
-  recipeTierRequest,
+  recipeTierRequest: savedRecipeTierRequest,
   videoModels,
   macVideoModels,
   mode,
@@ -29,16 +29,24 @@ export function useVideoExecutionTier({
   // `macGating` is the worker `mlx_required` master switch, so the menu reflects the
   // manifest's `mlx.limits` override on Mac/MLX and `candle.limits` on the candle build.
   const activeBackend = macGating ? "mlx" : "candle";
+  const fixedSource = Boolean(sourcePrecisionLabel(selectedModel));
+  const fixedRecipeSource = Boolean(savedRecipeTierRequest && sourcePrecisionLabel(
+    videoModels.find((item) => item.id === savedRecipeTierRequest.modelId),
+  ));
+  const recipeTierRequest = fixedRecipeSource ? null : savedRecipeTierRequest;
+  useEffect(() => {
+    if (fixedRecipeSource) setRecipeTierRequest(null);
+  }, [fixedRecipeSource, setRecipeTierRequest]);
 
   // The same hosted q4/q8/bf16 matrices drive both native video backends. Candle Wan tiers must use
   // this explicit picker too: sending the unrelated Torch GGUF `advanced.quantization` field to the
   // Candle worker would otherwise be ignored and silently replaced by its default tier.
   const nativeTierLane =
-    activeBackend === "mlx" ||
-    (activeBackend === "candle" && candleVideoTierPickerAvailable(selectedModel));
+    !fixedSource && (activeBackend === "mlx" ||
+    (activeBackend === "candle" && candleVideoTierPickerAvailable(selectedModel)));
 
   const scail2CandleTierLane =
-    activeBackend === "candle" && selectedModel?.family === "scail2" && selectedModel?.type === "video";
+    !fixedSource && activeBackend === "candle" && selectedModel?.family === "scail2" && selectedModel?.type === "video";
 
   // A Video Studio-only projection: retain the complete catalog object for every non-tier concern,
   // but narrow every tier vocabulary the shared picker understands. The original model object still
@@ -235,7 +243,7 @@ export function useVideoExecutionTier({
     }
   }, [recipeTierRequest, replayTierBlockMessage, model, selectedModel?.id, macVideoModels, baseExecutionTierBlockMessage, nativeTierLane, availableTiers, quantTier, setRecipeModelNotice, setRecipeTierRequest, handleTierChange]);
 
-  const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
+  const showTorchQuantization = !fixedSource && activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
 
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;

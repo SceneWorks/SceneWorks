@@ -1,3 +1,4 @@
+import { SourcePrecisionField } from "../components/generationStudio.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
@@ -325,6 +326,7 @@ export function SimpleVideoStudio() {
               hour render at full canvas), so a Simple user picked the model on its name alone.
               Below the attribution, which is a licence obligation and outranks it. */}
           <ModelDescription model={selectedModel} />
+          <SourcePrecisionField model={selectedModel} className="su-field" labelClassName="su-field-label" />
           <SheetSelect
             kind="grid"
             label="Resolution"

@@ -63,6 +63,25 @@ function offState(overrides = {}) {
 
 const flux3 = (id) => ({ id, family: "flux3", type: "image" });
 
+it.each([
+  ["fp8_e4m3_scalar", "Scaled FP8 (E4M3)"],
+  ["int8-convrot", "INT8-ConvRot"],
+  ["nvfp4", "NVFP4"],
+])("uses the %s source even with saved conversion controls", (format, label) => {
+  const selectedModel = { sourcePrecision: { format, label } };
+  for (const quantTier of ["q4", "q8", "bf16", "int8-convrot", "nvfp4", "fp8r"]) {
+    const advanced = buildImageJobAdvanced(offState({
+      selectedModel, quantTier, tierExplicit: true, showTierPicker: true,
+    }));
+    for (const key of ["quantTier", "mlxQuantize", "mlxQuantizeExplicit", "convRot"]) {
+      expect(advanced).not.toHaveProperty(key);
+    }
+  }
+  expect(buildImageJobAdvanced(offState({
+    selectedModel, precisionToggle: true, bf16Precision: true,
+  }))).not.toHaveProperty("mlxQuantize");
+});
+
 describe("buildImageJobAdvanced", () => {
   it.each(["flux3_klein", "flux3_klein_base", "flux3_custom"])("emits original nondefault layout and ordered attachment ids for %s", (model) => {
     const flux3Layout = { version: 1, boxes: [

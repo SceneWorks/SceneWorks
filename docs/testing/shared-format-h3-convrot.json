@@ -1,0 +1,2382 @@
+{
+  "schemaVersion": 1,
+  "scope": "One existing H3 independent FL2VA functional case; not the historical complete campaign.",
+  "provenance": {
+    "actionsRun": "https://github.com/SceneWorks/SceneWorks/actions/runs/41379549283",
+    "caseId": "cuda.reduced.real-independent-fl2va",
+    "meaning": "Original source, component, license-acknowledgment and sampling bindings retained; refreshed source and native execution receipts required."
+  },
+  "source": {
+    "repo": "PulpCut/MiniMax-H3-Turbo-INT8-ConvRot",
+    "revision": "e47c20aa569b03dabc37808f4f978a3988b959f7",
+    "file": "minimax_h3_fl2va_pruned_turbo_int8_convrot.safetensors",
+    "bytes": 20970379854
+  },
+  "binding": {
+    "label": "source",
+    "model": {
+      "modelId": "imported_sc26691_independent_pulpcut_merge_fl2va",
+      "sha256": "9ad5c98b533894c122050d32804a14f49fca8edc16c52564a281cdc5825ac934",
+      "baseModel": "minimax_h3",
+      "partition": "fl2va",
+      "topology": "pruned",
+      "sourceKind": "file",
+      "sourceFormat": "native-single",
+      "componentTier": "q4",
+      "components": [
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+          "file": "q4/text_encoder/chat_template.json",
+          "bytes": 5499,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "de4a0698c7bbd69501e6a9d33db628a7efbfb2494e6ef3fa620775fc1898daa3",
+          "file": "q4/text_encoder/config.json",
+          "bytes": 1533,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "file": "q4/text_encoder/merges.txt",
+          "bytes": 1671839,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "c559e8d35a308cee213ad6bafb64ac0d122e137592aba00a212484627aa5b6a7",
+          "file": "q4/text_encoder/model-00001-of-00014.safetensors",
+          "bytes": 1387288599,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "e9fcd69cb2face5254040ab97262f5af77fdf849482ffa3872b5758d80214c05",
+          "file": "q4/text_encoder/model-00002-of-00014.safetensors",
+          "bytes": 1371461650,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "91b3758bb16937db2724cbf12975159281f7cdb20c106532c4f05a1a18d082e4",
+          "file": "q4/text_encoder/model-00003-of-00014.safetensors",
+          "bytes": 1371461784,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "409800b9a40d3dc31ef5dba6a83768e8bb6c4083c2a9d7261697f4a768270c61",
+          "file": "q4/text_encoder/model-00004-of-00014.safetensors",
+          "bytes": 1371461807,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "ae9e6aa4a32f15d2b1968fb5dc2720ec6b6034b8287705b377f3e9ada560acd5",
+          "file": "q4/text_encoder/model-00005-of-00014.safetensors",
+          "bytes": 1371461807,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "cfc65313e11a6f15b4054341bd99529b99072628797a9ebd7b55f34ab5fb7e34",
+          "file": "q4/text_encoder/model-00006-of-00014.safetensors",
+          "bytes": 1371461773,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "7ad216929f6202d5acb9f43f5dfbbc689884b111091601f2696267f10c28bf73",
+          "file": "q4/text_encoder/model-00007-of-00014.safetensors",
+          "bytes": 1371461749,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "87d6f7be840e2351bcad0178b545f17da56c470a2098e5fdbf76ae175d431f0d",
+          "file": "q4/text_encoder/model-00008-of-00014.safetensors",
+          "bytes": 1371461783,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "beb4a89fec21e42cb0e38c5e43fcf7d53ce12e7b37fe3cf35e4463bd56e05900",
+          "file": "q4/text_encoder/model-00009-of-00014.safetensors",
+          "bytes": 1371461791,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "0cb90e23220629cf6e143d110fa0af40a7b6337935fd5fad42ce6fc9bc8ea8eb",
+          "file": "q4/text_encoder/model-00010-of-00014.safetensors",
+          "bytes": 1371461753,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "03c4d31a65a13aa10ef36c9119869a041da3fb4a22897159126789087b9851ee",
+          "file": "q4/text_encoder/model-00011-of-00014.safetensors",
+          "bytes": 1371461793,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "41e834d49b8a25640280fe743580845be5c04e5f464f817ca95e30dc297c0b9d",
+          "file": "q4/text_encoder/model-00012-of-00014.safetensors",
+          "bytes": 1371461795,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "16ac1bb814c35022f223c4233575d3b7d129b36f017bc503302f083f5181ef3f",
+          "file": "q4/text_encoder/model-00014-of-00014.safetensors",
+          "bytes": 2237658755,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "c0ebdb88ae2619daf0cfb59c49e5ac222cc861bbb1cfe989250d647d85fcabb3",
+          "file": "q4/text_encoder/model.safetensors.index.json",
+          "bytes": 187240,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "file": "q4/text_encoder/preprocessor_config.json",
+          "bytes": 390,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+          "file": "q4/text_encoder/tokenizer.json",
+          "bytes": 7032403,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+          "file": "q4/text_encoder/tokenizer_config.json",
+          "bytes": 11003,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+          "file": "q4/text_encoder/video_preprocessor_config.json",
+          "bytes": 385,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "text_encoder",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "file": "q4/text_encoder/vocab.json",
+          "bytes": 2776833,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/text_encoder",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "componentId": "text_encoder",
+              "subdir": "q4/text_encoder",
+              "files": [
+                "q4/text_encoder/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18722713964
+            }
+          }
+        },
+        {
+          "id": "tokenizer",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "file": "tokenizer/merges.txt",
+          "bytes": 1671839,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "tokenizer",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "tokenizer",
+              "subdir": "tokenizer",
+              "files": [
+                "tokenizer/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 11492078
+            }
+          }
+        },
+        {
+          "id": "tokenizer",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+          "file": "tokenizer/tokenizer.json",
+          "bytes": 7032403,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "tokenizer",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "tokenizer",
+              "subdir": "tokenizer",
+              "files": [
+                "tokenizer/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 11492078
+            }
+          }
+        },
+        {
+          "id": "tokenizer",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+          "file": "tokenizer/tokenizer_config.json",
+          "bytes": 11003,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "tokenizer",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "tokenizer",
+              "subdir": "tokenizer",
+              "files": [
+                "tokenizer/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 11492078
+            }
+          }
+        },
+        {
+          "id": "tokenizer",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "file": "tokenizer/vocab.json",
+          "bytes": 2776833,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "tokenizer",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "tokenizer",
+              "subdir": "tokenizer",
+              "files": [
+                "tokenizer/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 11492078
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "9208a8892c74a15dcac6828039a528ba13ba2eac0b708ee7d26caef59237ee8d",
+          "file": "q4/transformer_ref/config.json",
+          "bytes": 613,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "135c2385128d55c8d24545df51d8559fe01ebb7eeab874bbc6ff3519870908e0",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00001-of-00014.safetensors",
+          "bytes": 1488457995,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "db1eb4a340a1e6de8f2e348e99c1f2e3f5a850eb20618274b00befaa5ecdde70",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00002-of-00014.safetensors",
+          "bytes": 1323111315,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "ba39b6f2433a8d20c99deb391a3d982558369d4d032e10bda37e584929261c26",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00003-of-00014.safetensors",
+          "bytes": 1388138401,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "0285fb9c042a0489a3a8fc8930bd2318ea3b93b79c2e97e8285f56124f71d32b",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00004-of-00014.safetensors",
+          "bytes": 1284962984,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "7f7e9ad2cdb9d0218a87ac64f563873a40997504e68593d43a4019326839f66b",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00005-of-00014.safetensors",
+          "bytes": 1323111403,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "f7c64537b4296924e8aadbc6f4c9453d3e849516c4d58f456659f54959cc7d32",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00006-of-00014.safetensors",
+          "bytes": 1388138485,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "9dc0ad25c2f2fac359f9392c0d1bc0775a4fa5d565835f291d6bcad4160b57a8",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00007-of-00014.safetensors",
+          "bytes": 1284962964,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "c349b98e55a893d470de799da5e40abcc7fe8ef604a44cbfcd8239a5add4afbd",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00008-of-00014.safetensors",
+          "bytes": 1323111415,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "89b0f48ee58607a5ed365bc4064f8b0fb70246142abe769424ecbc10b59acdd8",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00009-of-00014.safetensors",
+          "bytes": 1388138421,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "c5e8921445e261025dc8d71bdad33a22702fd42ff1ae8f8cc0646ff2be203323",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00010-of-00014.safetensors",
+          "bytes": 1284962958,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "680561463571a4286b3c40a72cf542dc26b7154fedfc7e55c2396f737fac2e4f",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00011-of-00014.safetensors",
+          "bytes": 1323111395,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "f740a39db16f12573b3d4901609acf3d1053c8ba481ef5fb0ae28078b74c4ea2",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00012-of-00014.safetensors",
+          "bytes": 1388138445,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "309ac31e6ca0115bd30f20256444a3e9f29490db951dc2c97b42bbdd2cf8daef",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00013-of-00014.safetensors",
+          "bytes": 1284963008,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "f0c927209827ec4543eae80967aa7645a9515e8ce46a1b818396fedbb9afa2c0",
+          "file": "q4/transformer_ref/diffusion_pytorch_model-00014-of-00014.safetensors",
+          "bytes": 1306661489,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "transformer_ref",
+          "source": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "sha256": "542bc4173b101061381a489ece8580bc8ce41205f419c1ec5ead980ae7ba3ee9",
+          "file": "q4/transformer_ref/diffusion_pytorch_model.safetensors.index.json",
+          "bytes": 138492,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "q4/transformer_ref",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "SceneWorks/minimax-h3-mlx",
+              "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+              "variant": "q4",
+              "coRequisite": true,
+              "files": [
+                "q4/transformer_ref/*"
+              ],
+              "platforms": [
+                "macos",
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 18780109783
+            }
+          }
+        },
+        {
+          "id": "video_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+          "file": "vae/config.json",
+          "bytes": 2011,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "video_vae",
+              "subdir": "vae",
+              "files": [
+                "vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 10415635127
+            }
+          }
+        },
+        {
+          "id": "video_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+          "file": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+          "bytes": 5061033024,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "video_vae",
+              "subdir": "vae",
+              "files": [
+                "vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 10415635127
+            }
+          }
+        },
+        {
+          "id": "video_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+          "file": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+          "bytes": 4955986528,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "video_vae",
+              "subdir": "vae",
+              "files": [
+                "vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 10415635127
+            }
+          }
+        },
+        {
+          "id": "video_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+          "file": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+          "bytes": 398539336,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "video_vae",
+              "subdir": "vae",
+              "files": [
+                "vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 10415635127
+            }
+          }
+        },
+        {
+          "id": "video_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+          "file": "vae/diffusion_pytorch_model.safetensors.index.json",
+          "bytes": 74228,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "video_vae",
+              "subdir": "vae",
+              "files": [
+                "vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 10415635127
+            }
+          }
+        },
+        {
+          "id": "audio_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+          "file": "audio_vae/config.json",
+          "bytes": 2271,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "audio_vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "audio_vae",
+              "subdir": "audio_vae",
+              "files": [
+                "audio_vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 605431611
+            }
+          }
+        },
+        {
+          "id": "audio_vae",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+          "file": "audio_vae/diffusion_pytorch_model.safetensors",
+          "bytes": 605429340,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "audio_vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "audio_vae",
+              "subdir": "audio_vae",
+              "files": [
+                "audio_vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 605431611
+            }
+          }
+        },
+        {
+          "id": "fl2va_audio_vae_config",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771",
+          "file": "FL2VA/audio_vae/config.json",
+          "bytes": 1973,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "FL2VA/audio_vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "fl2va_audio_vae_config",
+              "subdir": "FL2VA/audio_vae",
+              "files": [
+                "FL2VA/audio_vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 605461455
+            }
+          }
+        },
+        {
+          "id": "fl2va_audio_vae_config",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e",
+          "file": "FL2VA/audio_vae/config.yaml",
+          "bytes": 91,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "FL2VA/audio_vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "fl2va_audio_vae_config",
+              "subdir": "FL2VA/audio_vae",
+              "files": [
+                "FL2VA/audio_vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 605461455
+            }
+          }
+        },
+        {
+          "id": "fl2va_audio_vae_config",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff",
+          "file": "FL2VA/audio_vae/metadata.json",
+          "bytes": 440,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "FL2VA/audio_vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "fl2va_audio_vae_config",
+              "subdir": "FL2VA/audio_vae",
+              "files": [
+                "FL2VA/audio_vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 605461455
+            }
+          }
+        },
+        {
+          "id": "fl2va_audio_vae_config",
+          "source": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "sha256": "37dddc2f3e6d5d5139d823d5ea283bbf304dadcb885b1ccda818aa13dade5ea2",
+          "file": "FL2VA/audio_vae/model.safetensors",
+          "bytes": 605429308,
+          "tier": "q4",
+          "licenseAcknowledged": true,
+          "provenance": {
+            "componentSubdir": "FL2VA/audio_vae",
+            "catalogDownload": {
+              "provider": "huggingface",
+              "repo": "MiniMaxAI/MiniMax-H3",
+              "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+              "coRequisite": true,
+              "componentId": "fl2va_audio_vae_config",
+              "subdir": "FL2VA/audio_vae",
+              "files": [
+                "FL2VA/audio_vae/*"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "estimatedSizeBytes": 605461455
+            }
+          }
+        }
+      ],
+      "supportedModes": [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame"
+      ],
+      "lineage": {
+        "source": "PulpCut/MiniMax-H3-Turbo-INT8-ConvRot",
+        "revision": "e47c20aa569b03dabc37808f4f978a3988b959f7",
+        "kind": "trained-turbo-delta-merge-requant-not-independent-full-training"
+      }
+    },
+    "licenseAuthority": {
+      "kind": "operator-scoped-binding",
+      "acknowledged": true,
+      "operatorInput": {
+        "acknowledged": true,
+        "assetSets": [
+          "singularity",
+          "hybrid",
+          "pulpcut",
+          "turbo",
+          "speech"
+        ],
+        "licenseIds": [
+          "MiniMax-H3-Community-License-Agreement",
+          "Apache-2.0",
+          "CC-BY-4.0"
+        ],
+        "inheritedLicenseIds": [
+          "MiniMax-H3-Community-License-Agreement"
+        ],
+        "includeSelectedComponents": true
+      },
+      "inputSha256": "7f59f1109e7bdfaefd625b68e79784dad645298a6e9e3c389403177af6b32f4e",
+      "subjects": [
+        {
+          "role": "source",
+          "sha256": "9ad5c98b533894c122050d32804a14f49fca8edc16c52564a281cdc5825ac934",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "casebook-asset",
+            "assetSet": "pulpcut",
+            "repo": "PulpCut/MiniMax-H3-Turbo-INT8-ConvRot",
+            "revision": "e47c20aa569b03dabc37808f4f978a3988b959f7",
+            "file": "minimax_h3_fl2va_pruned_turbo_int8_convrot.safetensors"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "de4a0698c7bbd69501e6a9d33db628a7efbfb2494e6ef3fa620775fc1898daa3",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "c559e8d35a308cee213ad6bafb64ac0d122e137592aba00a212484627aa5b6a7",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "e9fcd69cb2face5254040ab97262f5af77fdf849482ffa3872b5758d80214c05",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "91b3758bb16937db2724cbf12975159281f7cdb20c106532c4f05a1a18d082e4",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "409800b9a40d3dc31ef5dba6a83768e8bb6c4083c2a9d7261697f4a768270c61",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "ae9e6aa4a32f15d2b1968fb5dc2720ec6b6034b8287705b377f3e9ada560acd5",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "cfc65313e11a6f15b4054341bd99529b99072628797a9ebd7b55f34ab5fb7e34",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "7ad216929f6202d5acb9f43f5dfbbc689884b111091601f2696267f10c28bf73",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "87d6f7be840e2351bcad0178b545f17da56c470a2098e5fdbf76ae175d431f0d",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "beb4a89fec21e42cb0e38c5e43fcf7d53ce12e7b37fe3cf35e4463bd56e05900",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "0cb90e23220629cf6e143d110fa0af40a7b6337935fd5fad42ce6fc9bc8ea8eb",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "03c4d31a65a13aa10ef36c9119869a041da3fb4a22897159126789087b9851ee",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "41e834d49b8a25640280fe743580845be5c04e5f464f817ca95e30dc297c0b9d",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "16ac1bb814c35022f223c4233575d3b7d129b36f017bc503302f083f5181ef3f",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "c0ebdb88ae2619daf0cfb59c49e5ac222cc861bbb1cfe989250d647d85fcabb3",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "licenseId": "Apache-2.0",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "text_encoder"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "9208a8892c74a15dcac6828039a528ba13ba2eac0b708ee7d26caef59237ee8d",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "135c2385128d55c8d24545df51d8559fe01ebb7eeab874bbc6ff3519870908e0",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "db1eb4a340a1e6de8f2e348e99c1f2e3f5a850eb20618274b00befaa5ecdde70",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "ba39b6f2433a8d20c99deb391a3d982558369d4d032e10bda37e584929261c26",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "0285fb9c042a0489a3a8fc8930bd2318ea3b93b79c2e97e8285f56124f71d32b",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "7f7e9ad2cdb9d0218a87ac64f563873a40997504e68593d43a4019326839f66b",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "f7c64537b4296924e8aadbc6f4c9453d3e849516c4d58f456659f54959cc7d32",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "9dc0ad25c2f2fac359f9392c0d1bc0775a4fa5d565835f291d6bcad4160b57a8",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "c349b98e55a893d470de799da5e40abcc7fe8ef604a44cbfcd8239a5add4afbd",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "89b0f48ee58607a5ed365bc4064f8b0fb70246142abe769424ecbc10b59acdd8",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "c5e8921445e261025dc8d71bdad33a22702fd42ff1ae8f8cc0646ff2be203323",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "680561463571a4286b3c40a72cf542dc26b7154fedfc7e55c2396f737fac2e4f",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "f740a39db16f12573b3d4901609acf3d1053c8ba481ef5fb0ae28078b74c4ea2",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "309ac31e6ca0115bd30f20256444a3e9f29490db951dc2c97b42bbdd2cf8daef",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "f0c927209827ec4543eae80967aa7645a9515e8ce46a1b818396fedbb9afa2c0",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "542bc4173b101061381a489ece8580bc8ce41205f419c1ec5ead980ae7ba3ee9",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "transformer_ref"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "video_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "video_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "video_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "video_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "video_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "audio_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "audio_vae"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "fl2va_audio_vae_config"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "fl2va_audio_vae_config"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "fl2va_audio_vae_config"
+          }
+        },
+        {
+          "role": "component",
+          "sha256": "37dddc2f3e6d5d5139d823d5ea283bbf304dadcb885b1ccda818aa13dade5ea2",
+          "licenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedLicenseId": "MiniMax-H3-Community-License-Agreement",
+          "inheritedAcknowledged": true,
+          "attribution": "MiniMax H3",
+          "acknowledged": true,
+          "origin": {
+            "kind": "catalog-component",
+            "modelId": "minimax_h3",
+            "componentId": "fl2va_audio_vae_config"
+          }
+        }
+      ]
+    },
+    "mode": "text_to_video",
+    "sampling": {
+      "width": 1088,
+      "height": 544,
+      "fps": 24,
+      "duration": 5.166666666666667,
+      "steps": 8,
+      "schedulerShift": 12,
+      "audioSchedulerShift": 3,
+      "contractSource": "Pinned publisher declares eight steps; shifts explicitly selected by the operator, not asserted as a published trained recipe"
+    },
+    "adapters": []
+  },
+  "geometry": {
+    "mode": "text_to_video",
+    "prompt": "A red cube slides right across a white table, synchronized soft impacts.",
+    "seed": 314159,
+    "duration": 5.166666666666667,
+    "fps": 24,
+    "width": 1088,
+    "height": 544
+  },
+  "extraComponents": [
+    {
+      "source": "SceneWorks/minimax-h3-mlx",
+      "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+      "file": "q4/transformer/config.json",
+      "sha256": "9208a8892c74a15dcac6828039a528ba13ba2eac0b708ee7d26caef59237ee8d"
+    }
+  ]
+}

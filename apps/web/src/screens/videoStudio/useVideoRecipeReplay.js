@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { noPresetId } from "../../presetUtils.js";
 import { VIDEO_MODES } from "../../modelEligibility.js";
 import { recipeReferenceResize } from "../../minimaxH3ReferenceResize.js";
-import { quantizeTier } from "../../quantTier.js";
+import { quantizeTier, sourcePrecisionLabel } from "../../quantTier.js";
 import { finiteRecipeNumber, recipeLoraSelection, recipeRequestedResolution } from "../../recipeFields.js";
 import { restoreVedaSettings } from "../../vedaControls.js";
 
@@ -207,7 +207,8 @@ export function useVideoRecipeReplay({
     // tier is selectable on the active backend. It deliberately does NOT write picker state here:
     // same-model q4/q8 SCAIL Candle replays used to escape the narrowed tier set through this setter,
     // then serialize no mlxQuantize and silently run bf16.
-    const recipeTier = quantizeTier(rawSettings.mlxQuantize);
+    const recipeTier = sourcePrecisionLabel(videoModels.find((item) => item.id === recipe.model))
+      ? null : quantizeTier(rawSettings.mlxQuantize);
     if (recipeTier) {
       const recipeTierModelId = recipe.model && recipeModelAvailable ? recipe.model : model;
       setRecipeTierRequest({
