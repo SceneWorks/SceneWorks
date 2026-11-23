@@ -154,10 +154,9 @@ impl SavedQuantizations {
                         reservation.discard().map_err(error)?;
                         return Err(failure);
                     }
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(&path)?
-                        .sync_all()?;
+                    let file = std::fs::OpenOptions::new().write(true).open(&path)?;
+                    crate::fsutil::sync_file(&file)?;
+                    drop(file);
                     reservation.publish_produced(&plan).map_err(error)?;
                     self.writes.fetch_add(1, Ordering::Relaxed);
                     // Packing itself is not an acquisition wait; give the new lease its own bound.
