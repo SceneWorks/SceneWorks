@@ -1579,6 +1579,7 @@
               ],
               "id": "low_res_start",
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_control_conditioning"
               ],
               "memory_effect": {
@@ -1610,6 +1611,10 @@
               },
               "parameters": null,
               "reasons": [
+                {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'flux1_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
                 {
                   "code": "conflicts_with_pass0_control_conditioning",
                   "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
@@ -1720,6 +1725,7 @@
               ],
               "id": "low_res_start",
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_reference_conditioning"
               ],
               "memory_effect": {
@@ -1751,6 +1757,10 @@
               },
               "parameters": null,
               "reasons": [
+                {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'flux1_dev_pulid' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
                 {
                   "code": "conflicts_with_pass0_reference_conditioning",
                   "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
@@ -6776,6 +6786,7 @@
                 ],
                 "id": "low_res_start",
                 "inapplicability_reasons": [
+                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_control_conditioning"
                 ],
                 "memory_effect": {
@@ -6807,6 +6818,10 @@
                 },
                 "parameters": null,
                 "reasons": [
+                  {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'flux1_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
                   {
                     "code": "conflicts_with_pass0_control_conditioning",
                     "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
@@ -6917,6 +6932,7 @@
                 ],
                 "id": "low_res_start",
                 "inapplicability_reasons": [
+                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_reference_conditioning"
                 ],
                 "memory_effect": {
@@ -6948,6 +6964,10 @@
                 },
                 "parameters": null,
                 "reasons": [
+                  {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'flux1_dev_pulid' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
                   {
                     "code": "conflicts_with_pass0_reference_conditioning",
                     "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
