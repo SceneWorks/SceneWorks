@@ -2479,7 +2479,7 @@ pub(super) fn run_loaded_video_generation(
     )
 }
 
-#[cfg(native_lane)]
+#[cfg(all(test, native_lane))]
 pub(super) fn run_prepared_video_generation(
     generator: &dyn Generator,
     request: &mut GenerationRequest,

@@ -39,8 +39,11 @@ pub(crate) use bernini::*;
 mod wan_vace;
 pub(crate) use wan_vace::*;
 
+// Only the native lanes (and tests) seal or price SCAIL-2 carriers.
+#[cfg(any(native_lane, test))]
 #[path = "video_admission/scail2.rs"]
 mod scail2;
+#[cfg(any(native_lane, test))]
 pub(crate) use scail2::*;
 
 #[path = "video_admission/krea.rs"]
