@@ -132,7 +132,10 @@ test("no credential reaches the compared builds or their processes", async () =>
     assert.deepEqual(Object.keys(child).filter((key) => /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$/i.test(key)), ["SCENEWORKS_CREDENTIALS_DIR"]);
   }
   const source = await readFile(path.join(root, "scripts", "tier2-ab.mjs"), "utf8");
-  assert.match(source, /env: \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/, "the cargo build gets the scrubbed environment");
+  assert.match(source, /let cargoEnv = \{ \.\.\.scrubSecrets\(env\), CARGO_TARGET_DIR: target \}/);
+  assert.match(source, /if \(label === "base" && report\.base\.kreaAppleRawProjector\) \{[^}]*cargoEnv = await appleRawBaselineCargoEnv\(cargoEnv\)/);
+  assert.match(source, /execFile\("cargo", \["metadata", "--locked"[^\n]*\n[^\n]*env: cargoEnv/, "Cargo metadata gets the scrubbed environment");
+  assert.match(source, /runLogged\("cargo", args, \{ cwd: dir, env: cargoEnv, log \}\)/, "Cargo build gets the scrubbed environment");
   assert.doesNotMatch(source, /base\.HF_TOKEN\s*=/);
   // A gated repository needs a credential for head's pinned-metadata admission, so it is skipped.
   const models = await readCatalog(root);
@@ -152,6 +155,25 @@ test("win32 launch: API and worker hold a stdin pipe and the worker gets the can
   for (const [key, value] of Object.entries({ SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu", SCENEWORKS_WORKER_ID: "w1-utility", SCENEWORKS_API_PORT: "0", SCENEWORKS_WORKER_CHILD: "1" })) assert.equal(api[key], value, key);
   assert.equal(api.SCENEWORKS_API_URL, undefined);
   assert.deepEqual(processState({ label: "worker", pid: 9, exitCode: 3, signalCode: null }), { pid: 9, alive: false, exitCode: 3, signal: null, stdin: "pipe" });
+});
+
+test("paired Krea Hires pins the Hugging Face origin for both Windows child processes", () => {
+  const host = {
+    SCENEWORKS_HUGGINGFACE_BASE_URL: "https://alternate.invalid",
+    Sceneworks_HuggingFace_Base_Url: "https://alternate.invalid",
+    sceneworks_huggingface_base_url: "https://alternate.invalid",
+    HF_ENDPOINT: "https://alternate.invalid",
+    Hf_Endpoint: "https://alternate.invalid",
+    hf_endpoint: "https://alternate.invalid",
+  };
+  const options = { backend: "cuda", state: "/s", hub: "/h/hub", xet: "/x", workerId: "w", metallib: null };
+  const envs = childEnvironments(host, { ...options, pairedKreaHires: true });
+  for (const child of [envs.api, envs.worker("http://127.0.0.1:1")]) {
+    const origins = Object.entries(child).filter(([key]) =>
+      ["SCENEWORKS_HUGGINGFACE_BASE_URL", "HF_ENDPOINT"].includes(key.toUpperCase()));
+    assert.deepEqual(origins, [["SCENEWORKS_HUGGINGFACE_BASE_URL", "https://huggingface.co"]]);
+  }
+  assert.equal(childEnvironments(host, options).api.SCENEWORKS_HUGGINGFACE_BASE_URL, undefined);
 });
 
 test("job polling: claim bound before a worker attaches, execution bound after, terminal states stop at once", () => {
@@ -537,6 +559,7 @@ setInterval(() => { try { process.kill(parent, 0); } catch { process.exit(0); } 
 const childStdinShutdown = (onEnd) => { if (env.SCENEWORKS_WORKER_CHILD === "1") { process.stdin.on("end", onEnd); process.stdin.on("error", onEnd); process.stdin.resume(); } };
 if (env.SCENEWORKS_WORKER_ONLY === "1") {
   if (mode.workerExit) process.exit(mode.workerExit);
+  if (mode.fail) console.log("fake worker failure detail");
   childStdinShutdown(() => { const req = http.request(env.SCENEWORKS_API_URL + "/fake/offline", { method: "POST" }, (res) => { res.resume(); res.on("end", () => process.exit(0)); }); req.on("error", () => process.exit(0)); req.end(env.SCENEWORKS_WORKER_ID); });
   const register = () => { const req = http.request(env.SCENEWORKS_API_URL + "/fake/register", { method: "POST" }, (res) => res.resume()); req.on("error", () => setTimeout(register, 100)); req.end(env.SCENEWORKS_WORKER_ID); };
   register(); return;
@@ -681,7 +704,16 @@ test("--run drives fake base/head services through the stop rule and writes evid
   assert.ok(blobRoute.runs[1].hubMutation.diff.entries.some((item) => item.path.includes("linked.bin#entry/target/")));
   // A failed job stops immediately with the served error.
   const failed = await scenario("failed", 0, { fail: true });
-  assert.match(failed.report.routes[0].runs.find((run) => run.label === "head").error, /^job failed: model_artifact_incomplete: fake refusal/);
+  const failedHead = failed.report.routes[0].runs.find((run) => run.label === "head");
+  assert.equal(failed.status, 1);
+  assert.equal(failedHead.status, "error");
+  assert.match(failedHead.error, /^job failed: model_artifact_incomplete: fake refusal/);
+  assert.equal(failedHead.diagnostics.lastJob.status, "failed");
+  assert.equal(failedHead.diagnostics.lastJob.error, "model_artifact_incomplete: fake refusal");
+  assert.ok(failedHead.diagnostics.workerLogTail.includes("fake worker failure detail"));
+  assert.equal(failedHead.cancelRequested, undefined);
+  assert.ok(failedHead.cleanup.every((child) => child.exited));
+  assert.match(failed.stdout, /run=head phase=run_error_pending_cleanup .*last_status=failed/);
   // Cleanup restores write permission only inside scratch, never through a link, then removes it.
   const cleanupEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: sides.base.sha, TIER2_AB_HEAD_SHA: sides.head.sha, TIER2_AB_BASE_DIR: sides.base.repo, TIER2_AB_HEAD_DIR: sides.head.repo, TIER2_AB_WORK: equal.work, TIER2_AB_HUBS: hub, RUNNER_TEMP: dir, GITHUB_WORKSPACE: dir };
   const blocked = spawnSync("rm", ["-rf", equal.work], { encoding: "utf8" });
@@ -738,8 +770,9 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
     assert.match(item, /--preflight-only/); assert.match(item, /--build-only/); assert.match(item, /--run/);
     assert.match(item, /if: \$\{\{ !inputs\.preflight_only \}\}/);
     assert.match(item, /actions\/upload-artifact@[0-9a-f]{40}/);
-    assert.match(item, /name: Remove every scratch directory[\s\S]*if: \$\{\{ always\(\) \}\}/);
   }
+  assert.match(mlx, /name: Remove every scratch directory\s+if: \$\{\{ always\(\) \}\}/);
+  assert.match(cuda, /name: Remove every scratch directory\s+if: \$\{\{ always\(\) && inputs\.suite != 'krea-scoped-acceptance' \}\}/);
   assert.match(mlx, /metal_execution_entry [0-9]+ node tier2-ab-driver\/scripts\/tier2-ab\.mjs --run/);
   assert.match(mlx, /node tier2-ab-driver\/scripts\/tier2-ab\.mjs --cleanup/); assert.match(cuda, /node tier2-ab-driver\\scripts\\tier2-ab\.mjs --cleanup/);
   assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
@@ -754,4 +787,21 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(cuda, /vcvars64\.bat/);
   assert.doesNotMatch(reusable, /download_missing|--download-missing|hf download|huggingface-cli/);
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
+});
+
+test("Windows Krea keeps runtime until the registered post action verifies published evidence", async () => {
+  const reusable = await workflowText("tier2-ab.yml");
+  const mlx = job(reusable, "mlx"), cuda = job(reusable, "cuda");
+  assert.doesNotMatch(mlx, /dev-host|DEV_HOST_JOB_ROOT/);
+  const registration = cuda.indexOf("./tier2-ab-driver/.github/actions/cleanup-runner-storage");
+  assert.ok(registration > cuda.indexOf("name: Check out the dispatched driver"));
+  assert.ok(registration < cuda.indexOf("name: Prepare the Rust toolchain"));
+  assert.match(cuda, /Register disposable Windows Krea storage\s+if: \$\{\{ inputs\.suite == 'krea-scoped-acceptance' \}\}[\s\S]*dev-host: 'true'/);
+  assert.match(cuda, /TIER2_AB_WORK=\$env:DEV_HOST_JOB_ROOT\\tier2-ab/);
+  assert.match(cuda, /\$env:RUNNER_TEMP = Join-Path \$env:TIER2_AB_WORK 'evidence'/);
+  assert.match(cuda, /steps\.krea-evidence\.outcome == 'success'/);
+  assert.match(cuda, /steps\.krea-evidence\.outputs\.artifact-id/);
+  assert.match(cuda, /steps\.krea-evidence\.outputs\.artifact-digest/);
+  assert.match(cuda, /Missing Windows Krea driver evidence[\s\S]*DEV_HOST_WORK_UPLOADS_COMPLETE=true/);
+  assert.match(cuda, /DEV_HOST_WORK_UPLOADS_COMPLETE: "false"/);
 });

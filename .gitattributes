@@ -53,6 +53,7 @@
 *.ps1           text diff
 *.py            text diff
 *.rs            text diff
+*.rs.in         text diff
 *.scss          text diff
 *.sh            text diff
 *.sha256        text diff

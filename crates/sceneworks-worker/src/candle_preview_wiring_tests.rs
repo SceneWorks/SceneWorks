@@ -364,16 +364,13 @@ fn bespoke_candle_requests_bind_a_live_preview_sink() {
     }
 }
 
-/// The imported-checkpoint lanes build the shared `GenerationRequest` with a struct-update entry,
-/// so the rest-init sweep below (bespoke `*Request` types only) cannot see them lose `preview`.
-/// Each lane must name a live `preview` in at least one of its `GenerationRequest` literals; the
-/// retired capability matrix held this for its imported-family preview cells (sc-18481).
+/// These imported-checkpoint lanes bind the sink in a `GenerationRequest` literal. The rest-init
+/// sweep below (bespoke `*Request` types only) cannot see them lose `preview`.
 ///
 /// Failing mutation: drop `preview,` from `mage_finetuned.rs`'s `GenerationRequest` literal.
 #[test]
 fn imported_checkpoint_lanes_bind_a_live_preview_sink() {
     for file in [
-        "krea_imported.rs",
         "sdxl_imported.rs",
         "mage_finetuned.rs",
         "checkpoint_plan.rs",
@@ -395,6 +392,60 @@ fn imported_checkpoint_lanes_bind_a_live_preview_sink() {
             );
         }
     }
+}
+
+/// Imported Krea binds the sink after building the shared request. Check the Candle callbacks and
+/// each corresponding request assignment, including both passes of Hires.fix.
+#[test]
+fn imported_krea_checkpoint_lanes_forward_the_live_preview_sink() {
+    let code = source_for("krea_imported.rs");
+    let (_, candle_items) = code
+        .rsplit_once("drive_gen_items(")
+        .expect("imported Krea Candle stream must drive its generation items");
+    let compact = |source: &str| collapse(source).replace(' ', "");
+    let candle_items = compact(candle_items);
+    assert!(
+        candle_items.starts_with("tx,work,move|index,(seed,item),preview,on_progress|"),
+        "imported Krea must bind the live sink supplied by the Candle item driver"
+    );
+    let (_, items) = candle_items
+        .split_once("matchitem{KreaImportedItem::Multiphase(render)=>")
+        .expect("imported Krea Candle stream must dispatch multi-phase items");
+    let (phases, items) = items
+        .split_once("KreaImportedItem::Hires(render)=>")
+        .expect("imported Krea Candle stream must dispatch Hires.fix items");
+    let (hires, ordinary) = items
+        .split_once("KreaImportedItem::Ordinary(prompt)=>")
+        .expect("imported Krea Candle stream must dispatch ordinary items");
+    for (operation, arm, call) in [
+        ("multi-phase", phases, ".generate("),
+        ("Hires.fix", hires, "render.generate("),
+        ("ordinary", ordinary, "krea_imported_generate_one("),
+    ] {
+        let args = arm
+            .split_once(call)
+            .unwrap_or_else(|| panic!("imported Krea {operation} must call {call}"))
+            .1;
+        assert!(
+            args.contains(",preview,&cancel,on_progress"),
+            "imported Krea {operation} must forward the Candle item's live preview sink"
+        );
+    }
+    let code = compact(&code);
+    assert!(
+        code.contains(
+            "request.preview=preview;request.cancel=cancel.clone();render_krea_imported_pass("
+        ),
+        "ordinary imported Krea must bind the sink before rendering"
+    );
+    assert!(
+        code.contains("forrequestin&mutrequests{request.memory=request_memory;request.preview=preview.clone();"),
+        "imported Krea Hires.fix must bind the sink to both passes"
+    );
+    assert!(
+        compact(&source_for("krea_multiphase.rs")).contains("self.request.preview=preview;"),
+        "imported Krea multi-phase must bind the sink to the planned request"
+    );
 }
 
 /// The sweep: nothing under `src/image_jobs/` may default a `preview` field, including lanes not yet

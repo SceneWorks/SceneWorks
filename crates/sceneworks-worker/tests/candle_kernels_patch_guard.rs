@@ -21,8 +21,8 @@ use std::path::Path;
 
 const UPSTREAM_CANDLE: &str = "github.com/huggingface/candle";
 const INFERENCE_REPO: &str = "git+https://github.com/SceneWorks/inference";
-/// candle-metal-kernels carries the upstream rank > 4 strided-reduce fix (inference sc-25909) and
-/// is compiled by the macOS runtime through candle-core's Metal backend.
+// candle-metal-kernels carries the upstream rank > 4 strided-reduce fix (inference sc-25909) and
+// is compiled by the macOS runtime through candle-core's Metal backend.
 // candle-nn carries the typed native projection hook; an upstream copy would silently bypass the
 // shared encoded-weight loader for stock Linear consumers.
 const PATCHED_CRATES: [&str; 4] = [
@@ -150,7 +150,7 @@ fn candle_kernels_resolves_through_the_inference_patch() {
         .iter()
         .any(|(name, source)| name == "candle-core" && source.is_some())
     {
-        // After the terminal pin, all three Candle patches resolve directly through that one
+        // After the terminal pin, all four Candle patches resolve directly through that one
         // inference revision. The frozen ZIP9 manifest remains historical provenance only.
         check_lock(&lock).unwrap_or_else(|message| panic!("{message}"));
         return;
@@ -246,6 +246,18 @@ fn guard_rejects_upstream_or_missing_candle_metal_kernels() {
     assert!(check_lock(&missing)
         .unwrap_err()
         .contains("exactly one candle-metal-kernels"));
+}
+
+#[test]
+fn guard_rejects_upstream_candle_nn() {
+    let upstream = GOOD_LOCK.replacen(
+        "name = \"candle-nn\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/SceneWorks/inference",
+        "name = \"candle-nn\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/huggingface/candle",
+        1,
+    );
+    assert!(check_lock(&upstream)
+        .unwrap_err()
+        .contains("candle-nn resolves from upstream candle"));
 }
 
 #[test]
@@ -374,7 +386,7 @@ fn guard_rejects_candle_core_source_or_revision_skew() {
     assert!(check_lock(&skew).unwrap_err().contains("skews"));
 }
 
-// Retain the epic's duplicate-resolution mutant coverage for both vendored patches.
+// Cover duplicate resolutions for every vendored patch.
 #[test]
 fn guard_rejects_duplicate_patched_resolutions() {
     for crate_name in PATCHED_CRATES {

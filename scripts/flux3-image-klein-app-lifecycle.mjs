@@ -252,9 +252,10 @@ export function ownedApiController({ url, state, api, controller, fetchImpl = fe
     verify,
     // Terminal acceptance needs rejected status/body and ordinary multipart asset uploads.
     // Keep exactly the same per-request nonce-path/readiness/exit ownership gate.
-    async exchange(method, route, body, { multipart = false } = {}) {
+    async exchange(method, route, body, { multipart = false, onRequest } = {}) {
       await requireOwned();
       try {
+        onRequest?.();
         const response = await fetchImpl(url + route, { method, redirect: "error", headers: multipart ? undefined : { "content-type": "application/json" }, body: body === undefined ? undefined : multipart ? body : JSON.stringify(body), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) });
         const value = await response.json(); alive();
         return { status: response.status, body: value };

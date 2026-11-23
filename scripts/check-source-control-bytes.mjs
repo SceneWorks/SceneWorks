@@ -67,6 +67,7 @@ export const SOURCE_EXTENSIONS = new Set([
   ".ps1",
   ".py",
   ".rs",
+  ".rs.in",
   ".scss",
   ".sh",
   ".sha256",
@@ -112,9 +113,8 @@ export const SOURCE_BASENAMES = new Set([
 const ALLOWED_C0_BYTES = new Set([0x09, 0x0a, 0x0d]);
 
 export function isTrackedSourcePath(file) {
-  return (
-    SOURCE_EXTENSIONS.has(extname(file)) || SOURCE_BASENAMES.has(basename(file))
-  );
+  const extension = file.endsWith(".rs.in") ? ".rs.in" : extname(file);
+  return SOURCE_EXTENSIONS.has(extension) || SOURCE_BASENAMES.has(basename(file));
 }
 
 export function findUnexpectedControlBytes(contents) {

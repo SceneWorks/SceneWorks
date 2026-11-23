@@ -560,6 +560,9 @@ jobs:
       base_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).base_sha }}
       head_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).head_sha }}
       backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).backend }}
+      suite: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).suite || '' }}
+      krea_performance: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).krea_performance == true }}
+      krea_allocation: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).krea_allocation == true }}
       routes: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).routes }}
       hubs: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).hubs }}
       inference_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).inference_sha }}
