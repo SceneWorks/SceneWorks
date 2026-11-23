@@ -4,6 +4,12 @@ The catalog exposes `moss_image_base` and `moss_image_sft` as native text-to-ima
 
 SFT's **8-step acceleration** starts OFF. Its two explicit policies are `unmerged_bf16` (BF16 backbone with the published FP32 residual/time/modulation operations) and `full_fp32` (the published already distilled FP32 transformer, without a second LoRA). Both select a trained prefix of 1–8 steps, defaulting to 8. Installing components or requesting eight ordinary steps never enables acceleration.
 
+## Full checkpoint imports
+
+MOSS-Image Base finetunes such as Serenity can be imported as BF16 or verified ConvRot INT8 transformer files. The shared checkpoint-plan route binds the imported weights to the existing `moss_image_base` loader, its architecture configuration, and the normal text encoder/tokenizer/VAE components. The imported model keeps its own identity, sampling controls, and source digest; the original Base transformer weights are not loaded.
+
+This import binding supports ordinary text-to-image generation. Published DMD acceleration modes and additional LoRA/LoKr adapters are unavailable for this binding. The completed job's execution receipt records the actual imported transformer SHA-256 under `provider_choices.assets`.
+
 ## Adapter training
 
 Training Studio exposes **MOSS-Image Base LoRA / LoKr** and **MOSS-Image SFT LoRA / LoKr**. Each trains transformer adapters while keeping the parent weights, text encoder and VAE frozen.

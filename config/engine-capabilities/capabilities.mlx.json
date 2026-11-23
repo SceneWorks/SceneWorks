@@ -1672,6 +1672,19 @@
       "registryCached": true
     },
     {
+      "family": "moss-image",
+      "source": "transformer_file",
+      "operation": "generate",
+      "providerId": "moss_image_base",
+      "conditioning": [],
+      "supportsLora": false,
+      "supportsLokr": false,
+      "supportedQuants": [],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": false,
+      "registryCached": true
+    },
+    {
       "family": "sdxl",
       "source": "fused_checkpoint",
       "operation": "edit",

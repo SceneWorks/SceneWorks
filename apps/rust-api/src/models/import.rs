@@ -872,6 +872,19 @@ pub(crate) async fn queue_model_import_job(
         ensure_license_acknowledged_for_source(&state, &repos, None, payload.license_acknowledged)
             .await?;
         Some((base, rows, selected_tier))
+    } else if let Some(family) = payload.family.as_deref() {
+        let declaration = json!({"family": family, "baseModel": payload.base_model});
+        match sceneworks_core::checkpoint_loader::bound_base(
+            declaration.as_object().expect("declaration"),
+        )
+        .map_err(ApiError::bad_request)?
+        {
+            Some(base) => {
+                let rows = sceneworks_core::checkpoint_loader::component_downloads(&base);
+                Some((base, rows, "bf16".to_owned()))
+            }
+            None => None,
+        }
     } else {
         None
     };
@@ -942,6 +955,8 @@ pub(crate) async fn queue_model_import_job(
             object.insert("importComponentTier".to_owned(), json!(tier));
         }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
+        sceneworks_core::checkpoint_loader::apply_bound_base_defaults(object)
+            .map_err(ApiError::bad_request)?;
     }
     if let Some(entry) = manifest_entry.as_object() {
         ensure_inherited_component_licenses_acknowledged(

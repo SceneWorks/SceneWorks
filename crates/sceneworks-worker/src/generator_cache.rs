@@ -1133,6 +1133,9 @@ pub(crate) async fn with_cached_generator_for_request_after_cold_admission<R>(
     load_error_context: impl Into<String>,
     incoming_reclaimable_weight_bytes: u64,
     cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
     run: impl FnOnce(
             &dyn Generator,
             MemoryCacheState,
@@ -1155,7 +1158,7 @@ where
         load_error_context,
         incoming_reclaimable_weight_bytes,
         cold_admission,
-        crate::inference_runtime::load,
+        load_generator,
         run,
     )
     .await

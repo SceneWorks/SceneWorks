@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn reusable_loader_footprint_excludes_replaced_weights_in_both_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("base");
+    let shared = temp.path().join("shared");
+    let imported = temp.path().join("serenity.safetensors");
+    let text = shared.join("text_encoder/model.safetensors");
+    let vae = shared.join("vae/model.safetensors");
+    for (path, bytes) in [
+        (base.join("transformer/model.safetensors"), 9000),
+        (shared.join("transformer/model.safetensors"), 8000),
+        (imported.clone(), 100),
+        (text.clone(), 200),
+        (vae.clone(), 300),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![0_u8; bytes]).unwrap();
+    }
+    let mut spec = LoadSpec::new(WeightsSource::Dir(base))
+        .with_checkpoint_component("transformer", WeightsSource::File(imported.clone()))
+        .with_component("moss-shared-snapshot", WeightsSource::Dir(shared));
+    spec.prepare_with_file_pins(
+        [imported, text, vae]
+            .iter()
+            .map(|path| gen_core::PinnedWeightsFile::pin(path).unwrap()),
+    )
+    .unwrap();
+    let consumed = PerComponentBytes {
+        dit: 1000,
+        text_encoder: 200,
+        vae: 300,
+    };
+    for (total, encoder, _) in [
+        spec_component_bytes_with_provider_footprint("moss_image_base", &spec, Some(consumed)),
+        spec_component_bytes_with_provider_footprint_checked(
+            "moss_image_base",
+            &spec,
+            Some(consumed),
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(
+            total, 1500,
+            "provider footprint owns the decoded imported component and selected companion closure"
+        );
+        assert_eq!(encoder, 200);
+    }
+}
+
+#[test]
 fn flux3_cfg_source_allowance_tracks_forward_rows_not_jobs_weights_or_decode() {
     assert_eq!(flux3_conditioning_forward_batch("flux3_klein_base"), 2);
     assert_eq!(flux3_conditioning_forward_batch("flux3_klein"), 1);

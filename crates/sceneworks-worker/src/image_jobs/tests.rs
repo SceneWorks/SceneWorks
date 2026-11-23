@@ -23769,6 +23769,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
             "start_cached_gen_stream_after_cold_admission_with_placement(",
+            "start_cached_gen_stream_after_cold_admission_with_placement_using(",
             "start_cached_gen_stream_with_request_state_using(",
             "start_cached_gen_stream_with_request_state_using_owned(",
             "start_cached_gen_stream_with_request_state_using_prepared(",

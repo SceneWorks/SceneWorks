@@ -134,6 +134,13 @@ function mossAsset(output = "images") {
 }
 
 describe("background MOSS edit regeneration", () => {
+  it("checks a finetune's bound MOSS component requirements before enqueue", async () => {
+    const source = { ...mossAsset(), recipe: { ...mossAsset().recipe, model: "serenity", mode: "text_to_image", prompt: "a pine forest", rawAdapterSettings: { mossImage: { acceleration: "unmerged_bf16" } } } };
+    apiFetch.mockReset();
+    const opts = options({ asset: source, models: [{ id: "serenity", policyModel: "moss_image_base", conditionalPurposes: {} }] });
+    await expect(regenerateImage(opts)).rejects.toThrow("exact selected MOSS component");
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
   it.each(["images", "latents"])("preserves the complete B2/count2 %s recipe without generic mask fields or output receipts", async (output) => {
     apiFetch.mockReset().mockResolvedValueOnce({ id: "new-moss" });
     const source = mossAsset(output), before = JSON.stringify(source), request = imageRecipeRequest(source);
