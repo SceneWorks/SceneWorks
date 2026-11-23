@@ -6,7 +6,7 @@ on:
       mode:
         type: choice
         default: inspect
-        options: [inspect, repair]
+        options: [inspect, repair, filesystem]
 
 permissions:
   contents: read
@@ -60,6 +60,27 @@ jobs:
           print('exit',p.get('code'))
           for line in p.get('stdout','').splitlines():
               if any(line.strip().startswith(k) for k in ('pid =','state =','program =','path =','working directory =')):print(line)
+          PY
+      - name: Verify file and directory flush semantics in owned managed storage
+        if: ${{ inputs.mode == 'filesystem' }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import fcntl,json,os,pathlib,subprocess,tempfile
+          binary=pathlib.Path.home()/'.local/bin/dev-host' # dev-host: allow-path installed allocator
+          text=subprocess.check_output([str(binary),'env','--format','github','--project','SceneWorks','--worktree',os.environ['GITHUB_WORKSPACE'],'--session','fsync-'+os.environ['GITHUB_RUN_ID']],text=True)
+          assigned=dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+          with tempfile.TemporaryDirectory(dir=assigned['TMPDIR']) as folder:
+              path=pathlib.Path(folder)/'file'
+              path.write_bytes(b'flush probe')
+              for kind,target in [('file',path),('directory',path.parent)]:
+                  fd=os.open(target,os.O_RDONLY)
+                  try:
+                      for operation,call in [('fsync',lambda:os.fsync(fd)),('fullfsync',lambda:fcntl.fcntl(fd,getattr(fcntl,'F_FULLFSYNC',51)))]:
+                          try:call();result='success'
+                          except OSError as e:result={'errno':e.errno,'error':e.strerror}
+                          print(json.dumps({'kind':kind,'operation':operation,'result':result}))
+                  finally:os.close(fd)
           PY
       - name: Install and persist verified managed storage
         if: ${{ inputs.mode == 'repair' }}
