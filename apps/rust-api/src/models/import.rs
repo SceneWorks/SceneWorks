@@ -999,53 +999,7 @@ pub(crate) async fn queue_model_import_job(
         payload.insert("repairExpectedBinding".into(), binding);
     }
     if let Some((base, rows, _)) = import_components {
-        // sc-26687 / sc-26690: the SAME inherited-component gate at the DOWNLOAD boundary. Closing
-        // only the generation door would still let an unacknowledged component's bytes land, so a
-        // resident component is fetched only once its own terms are acknowledged. Idempotent with
-        // the generation-admission gate in `create_generation_job_with_status`.
-        if let Some(entry) = payload.get("manifestEntry").and_then(Value::as_object) {
-            ensure_inherited_component_licenses_acknowledged(
-                &state,
-                entry,
-                payload
-                    .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            )
-            .await?;
-        }
-        for row in rows {
-            // The import worker fetches this literal config through the shared installer only if
-            // inspection finds no source-owned claim. It writes no primary download receipt.
-            if row.get("componentId").and_then(Value::as_str) == Some("import_transformer_config") {
-                continue;
-            }
-            if imported_component_presence(&state.settings.data_dir, &row)
-                == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
-                continue;
-            }
-            let component = build_model_download_job_payload(
-                &base,
-                &model_id,
-                &row,
-                None,
-                false,
-                payload
-                    .get("licenseAcknowledged")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                &state.settings.data_dir,
-            )?;
-            create_generation_job(
-                state.clone(),
-                JobType::ModelDownload,
-                None,
-                None,
-                component,
-                "auto".to_owned(),
-            )
-            .await?;
-        }
+        queue_import_component_downloads(&state, &payload, &base, &rows, None).await?;
     }
     let job = create_generation_job(
         state,
@@ -1057,6 +1011,110 @@ pub(crate) async fn queue_model_import_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// The same acquisition and license boundary serves queue-time detection and the durable
+/// completion handoff for remote sources whose family was unknown until transfer finished.
+async fn queue_import_component_downloads(
+    state: &AppState,
+    payload: &JsonObject,
+    base: &Value,
+    rows: &[Value],
+    parent_job_id: Option<&str>,
+) -> Result<Vec<String>, ApiError> {
+    let license_acknowledged = payload
+        .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Some(entry) = payload.get("manifestEntry").and_then(Value::as_object) {
+        ensure_inherited_component_licenses_acknowledged(state, entry, license_acknowledged)
+            .await?;
+    }
+    let model_id = payload
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("Import has no modelId"))?;
+    let mut jobs = Vec::new();
+    for row in rows {
+        // Source-owned H3 config is handled by inspection through the shared installer.
+        if row.get("componentId").and_then(Value::as_str) == Some("import_transformer_config")
+            || imported_component_presence(&state.settings.data_dir, row)
+                == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
+            continue;
+        }
+        ensure_license_acknowledged_for_source_inner(
+            state,
+            &[row.get("repo").and_then(Value::as_str)],
+            None,
+            license_acknowledged,
+            base.get("id").and_then(Value::as_str),
+        )
+        .await?;
+        let component = build_model_download_job_payload(
+            base,
+            model_id,
+            row,
+            None,
+            false,
+            license_acknowledged,
+            &state.settings.data_dir,
+        )?;
+        let id = parent_job_id
+            .map(|parent| {
+                sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(
+                    &json!({"importJob":parent,"component":row}),
+                )
+                .map(|digest| format!("import-component-{}", digest.trim_start_matches("sha256:")))
+                .map_err(|error| ApiError::internal(error.to_string()))
+            })
+            .transpose()?;
+        let job = crate::generation::create_generation_job_with_binding_once(
+            state.clone(),
+            JobType::ModelDownload,
+            None,
+            None,
+            component,
+            "auto".to_owned(),
+            (None, None, id),
+        )
+        .await?;
+        jobs.push(job.id);
+    }
+    Ok(jobs)
+}
+
+pub(crate) async fn acquire_autodetected_import_components(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Result<Option<Vec<String>>, ApiError> {
+    if job.job_type != JobType::ModelImport
+        || job.status != JobStatus::Completed
+        || job.payload.get("family").and_then(Value::as_str).is_some()
+    {
+        return Ok(None);
+    }
+    let Some(family) = job.result.get("family").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let mut payload = job.payload.clone();
+    let Some(entry) = payload
+        .get_mut("manifestEntry")
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(None);
+    };
+    entry.insert("family".into(), json!(family));
+    sceneworks_core::checkpoint_loader::apply_bound_base_defaults(entry)
+        .map_err(ApiError::bad_request)?;
+    let Some(base) =
+        sceneworks_core::checkpoint_loader::bound_base(entry).map_err(ApiError::bad_request)?
+    else {
+        return Ok(None);
+    };
+    let rows = sceneworks_core::checkpoint_loader::component_downloads(&base);
+    queue_import_component_downloads(state, &payload, &base, &rows, Some(&job.id))
+        .await
+        .map(Some)
 }
 
 // The detector establishes architecture, never whether a fine-tune was trained for first/last

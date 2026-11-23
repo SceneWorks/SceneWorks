@@ -4,6 +4,156 @@ use super::support::*;
 use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
 use sceneworks_worker::minimax_h3_import_fixture as fixture;
 
+/// Remote sources have no header at admission. Exercise their accepted terminal handoff with
+/// the worker's detected family, an empty cache, and a crash after child enqueue but before CAS.
+#[tokio::test]
+async fn remote_autodetected_import_acquires_base_components_once_after_completion() {
+    let _cache = isolate_hf_cache();
+    for (fail_after_enqueue, cancel_before_completion) in
+        [(false, false), (true, false), (false, true)]
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = test_settings(&temp);
+        manifests(&settings, json!([]));
+        let (app, state) = create_app_with_state(settings.clone()).unwrap();
+        let (status, created) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({"sourceUrl":"https://example.com/serenity.safetensors", "type":"image",
+                "name":"Remote Serenity", "licenseAcknowledged":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert!(created["payload"]["family"].is_null());
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(
+            state.jobs_store.list_jobs(None, None, 100).unwrap().len(),
+            1,
+            "unknown families cannot acquire an arbitrary base before detection"
+        );
+        state
+            .jobs_store
+            .register_worker(RegisterWorker {
+                worker_id: "remote-import-worker".into(),
+                gpu_id: "cpu".into(),
+                gpu_name: None,
+                capabilities: vec![sceneworks_core::contracts::WorkerCapability::ModelImport],
+                loaded_models: vec![],
+                utilization: None,
+            })
+            .unwrap();
+        assert_eq!(
+            state
+                .jobs_store
+                .claim_next_job("remote-import-worker")
+                .unwrap()
+                .unwrap()
+                .id,
+            id
+        );
+        let declaration = json!({"family":sceneworks_core::model_family::MOSS_IMAGE});
+        let base = sceneworks_core::checkpoint_loader::bound_base(declaration.as_object().unwrap())
+            .unwrap()
+            .unwrap();
+        let rows = sceneworks_core::checkpoint_loader::component_downloads(&base);
+        assert!(!rows.is_empty());
+        for row in &rows {
+            let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+                sceneworks_core::hf_home::model_source_library(&settings.data_dir),
+            );
+            assert!(
+                resolver
+                    .discover_source_snapshot(
+                        row["repo"].as_str().unwrap(),
+                        row["revision"].as_str()
+                    )
+                    .is_err(),
+                "base cache must start empty"
+            );
+        }
+        *state.test_hooks.progress_side_effects_fail_once.lock() = fail_after_enqueue;
+        let endpoint = format!("/api/v1/jobs/{id}/progress");
+        let progress = json!({"workerId":"remote-import-worker", "status":"completed",
+            "stage":"completed", "progress":1, "message":"Imported detected checkpoint",
+            "result":{"modelId":created["payload"]["modelId"],
+                "family":sceneworks_core::model_family::MOSS_IMAGE}});
+        if cancel_before_completion {
+            let (status, canceled) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/cancel"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{canceled}");
+            let (status, acknowledged) = request(app.clone(), "POST", &endpoint,
+                json!({"workerId":"remote-import-worker", "status":"canceled",
+                    "stage":"canceled", "progress":0, "message":"Import cancellation acknowledged"})).await;
+            assert_eq!(status, StatusCode::OK, "{acknowledged}");
+            let (status, rejected) = request(app, "POST", &endpoint, progress).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+            assert_eq!(
+                state.jobs_store.list_jobs(None, None, 100).unwrap().len(),
+                1,
+                "a stale completion after cancel cannot enqueue companions"
+            );
+            continue;
+        }
+        let (status, completed) = request(app.clone(), "POST", &endpoint, progress.clone()).await;
+        assert_eq!(
+            status,
+            if fail_after_enqueue {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::OK
+            },
+            "{completed}"
+        );
+        let children = state
+            .jobs_store
+            .list_jobs(None, None, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.job_type == crate::JobType::ModelDownload)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            children.len(),
+            rows.len(),
+            "the full pinned closure is acquired"
+        );
+        for row in &rows {
+            assert!(
+                children
+                    .iter()
+                    .any(|child| child.payload.get("repo") == row.get("repo")
+                        && child.payload.get("revision") == row.get("revision")
+                        && child.payload.get("files") == row.get("files")),
+                "{row}"
+            );
+        }
+        if fail_after_enqueue {
+            crate::jobs::recover_pending_terminal_progress_side_effects_once(&state)
+                .await
+                .unwrap();
+        }
+        let (status, recovered) = request(app, "POST", &endpoint, progress).await;
+        assert_eq!(status, StatusCode::OK, "{recovered}");
+        assert_eq!(
+            recovered["result"]["componentJobIds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            rows.len()
+        );
+        assert_eq!(
+            state.jobs_store.list_jobs(None, None, 100).unwrap().len(),
+            rows.len() + 1,
+            "recovery and repeated completion must reuse the same children"
+        );
+    }
+}
+
 fn manifests(settings: &crate::Settings, models: Value) {
     let dir = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&dir).unwrap();

@@ -3385,6 +3385,11 @@ async fn apply_progress_side_effects(
     // accumulated training-sample history into the submitted object.
     let accepted_result = job.result.clone();
     let mut result = accepted_result.clone();
+    if let Some(component_jobs) =
+        crate::models::acquire_autodetected_import_components(state, &job).await?
+    {
+        result.insert("componentJobIds".into(), json!(component_jobs));
+    }
     // On a completing real training run, register the produced adapter as a
     // SceneWorks LoRA after authoritative completion acceptance, then fold the
     // registration outcome into the persisted result (story 1418).
