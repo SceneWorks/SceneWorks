@@ -189,7 +189,7 @@ impl ProducedFile {
         file.flush()?;
         // Durable before attested: no attestation (and so no content receipt redeemed from it) may
         // ever describe bytes the OS still only holds in its cache. A failed sync records nothing.
-        file.sync_all()?;
+        crate::fsutil::sync_file(&file)?;
         #[cfg(test)]
         record_close_step("sync_all");
         let backdated = self

@@ -914,6 +914,7 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) {
+    object.remove("sourceConversion");
     sceneworks_core::source_precision::SourcePrecision::project(object);
     if object.get("catalogScope").and_then(Value::as_str) != Some("builtin")
         && object.get("type").and_then(Value::as_str) == Some("video")
@@ -1269,6 +1270,24 @@ pub(super) fn project_imported_operation_surface(
         runtime_quant_tiers.push(Value::String("bf16".to_owned()));
     }
     if !runtime_quant_tiers.is_empty() {
+        if let Some((format, label)) =
+            sceneworks_core::source_precision::SourcePrecision::dense_import(object)
+        {
+            let targets: Vec<_> = runtime_quant_tiers
+                .iter()
+                .filter(|tier| matches!(tier.as_str(), Some("q4" | "q8")))
+                .cloned()
+                .collect();
+            if !targets.is_empty() {
+                object.insert(
+                    "sourceConversion".to_owned(),
+                    json!({
+                        "sourceFormat": format, "sourceLabel": label, "targetTiers": targets,
+                        "persistence": "resolved_artifact_cache",
+                    }),
+                );
+            }
+        }
         object.insert(
             "runtimeQuantTiers".to_owned(),
             Value::Array(runtime_quant_tiers),

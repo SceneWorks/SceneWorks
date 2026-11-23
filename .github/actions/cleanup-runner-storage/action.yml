@@ -4,6 +4,9 @@ inputs:
   dev-host:
     description: Own this Windows job's temporary files under DEV_HOST_ROOT and remove them after uploads
     default: 'false'
+  cargo-slot:
+    description: Export the dev-host managed Cargo build slot for jobs that opt in
+    default: 'false'
   moss:
     description: Sweep completed private MOSS run caches on this listener
     default: 'false'

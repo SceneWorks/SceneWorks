@@ -4190,7 +4190,7 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), Resolved
 fn write_synced_file(path: &Path, body: &[u8]) -> Result<(), ResolvedCacheError> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(body)?;
-    file.sync_all()?;
+    crate::fsutil::sync_file(&file)?;
     Ok(())
 }
 
@@ -4259,14 +4259,8 @@ fn sync_tree_with_check(
     Ok(())
 }
 
-#[cfg(unix)]
 fn sync_dir(path: &Path) -> Result<(), ResolvedCacheError> {
-    File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> Result<(), ResolvedCacheError> {
+    crate::fsutil::sync_directory(path)?;
     Ok(())
 }
 

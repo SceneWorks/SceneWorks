@@ -1930,9 +1930,9 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
   assert.equal(defaults.run_imported_nvfp4_proof, "false");
   const events = standalone.slice(standalone.indexOf("\non:\n") + 1, standalone.indexOf("\npermissions:"));
   assert.deepEqual([...events.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]), ["workflow_dispatch"]);
-  assert.deepEqual([...events.matchAll(/^ {6}([\w-]+):$/gm)].map((match) => match[1]), ["format"]);
+  assert.deepEqual([...events.matchAll(/^ {6}([\w-]+):$/gm)].map((match) => match[1]), ["format", "cache_backend", "mac_runner"]);
   assert.match(events, /^ {8}default: nvfp4$/m);
-  assert.match(events, /options: \[nvfp4, fp8, convrot, all, sdxl-fp8-reference\]/);
+  assert.match(events, /options: \[nvfp4, fp8, convrot, all, sdxl-fp8-reference, quantization-cache\]/);
   assert.doesNotMatch(events, /pull_request|push|schedule|workflow_call/);
   const bridge = workflowJob(ordinary, "imported-nvfp4-worker-smoke");
   const validateBridge = (job) => {

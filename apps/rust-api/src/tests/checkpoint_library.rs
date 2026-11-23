@@ -469,6 +469,96 @@ async fn deleting_a_linked_model_forgets_its_plan_but_never_the_library() {
         .is_some());
 }
 
+#[tokio::test]
+async fn deleting_a_dense_import_without_a_plan_reclaims_its_saved_quantization() {
+    use sceneworks_core::quantization_cache::{
+        source_identity, QuantizationArtifactCache, QuantizationArtifactKey, SavedQuantizations,
+    };
+
+    let _hf = isolate_hf_cache();
+    for active in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        seed_manifests(&temp.path().join("config"));
+        let settings = test_settings(&temp);
+        let source = settings
+            .data_dir
+            .join("models/imports/legacy/model.safetensors");
+        write_krea_native_file(&source);
+        let entry = json!({
+            "id": "legacy_dense", "name": "Legacy dense", "type": "image",
+            "family": "krea_2", "catalogScope": "user", "downloads": [],
+            "importSourceShape": "transformer_file", "importQuantFormat": "bf16",
+            "paths": {"model": source},
+        });
+        let checkpoint = source_identity(entry.as_object().unwrap()).unwrap();
+        let saved = SavedQuantizations::new(
+            &settings.data_dir,
+            source.clone(),
+            "legacy_dense".into(),
+            checkpoint.into(),
+        );
+        let key = QuantizationArtifactKey::new("delete-q4-v1", &[2, 2], b"weights", "ggml");
+        let mut artifact = Some(
+            saved
+                .materialize(&key, &mut |path| {
+                    std::fs::write(path, b"packed")?;
+                    Ok(())
+                })
+                .unwrap(),
+        );
+        let packed = artifact.as_ref().unwrap().path().to_owned();
+        if !active {
+            drop(artifact.take());
+        }
+        // Another model's packed weights must survive this deletion.
+        let other = SavedQuantizations::new(
+            &settings.data_dir,
+            source.clone(),
+            "other".into(),
+            "other".into(),
+        );
+        let other_key = QuantizationArtifactKey::new("delete-q4-v1", &[2, 2], b"other", "ggml");
+        let other_artifact = other
+            .materialize(&other_key, &mut |path| {
+                std::fs::write(path, b"other-packed")?;
+                Ok(())
+            })
+            .unwrap();
+        let other_path = other_artifact.path().to_owned();
+        drop(other_artifact);
+        std::fs::write(
+            settings.config_dir.join("manifests/user.models.jsonc"),
+            serde_json::to_vec(&json!({"schemaVersion": 1, "models": [entry]})).unwrap(),
+        )
+        .unwrap();
+        let app = create_app(settings).unwrap();
+        let (status, body) = request(
+            app,
+            "DELETE",
+            "/api/v1/models/legacy_dense?permanent=true",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["removedManifestEntry"], true, "{body}");
+        assert_eq!(packed.exists(), active, "{body}");
+        assert!(
+            other_path.is_file(),
+            "another model's saved weights were removed"
+        );
+        if active {
+            assert!(
+                body["warnings"].as_array().unwrap().iter().any(|warning| {
+                    warning
+                        .as_str()
+                        .is_some_and(|text| text.contains("cached derivatives"))
+                }),
+                "{body}"
+            );
+        }
+    }
+}
+
 /// Every plan-store refusal reaches the client as a typed code, not as prose or a 500.
 ///
 /// Failing mutation: map every `CheckpointPlanError` to one status in `plan_error_to_api_error`
