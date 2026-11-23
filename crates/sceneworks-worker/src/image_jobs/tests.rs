@@ -26262,14 +26262,14 @@ fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
     };
     for marker in [
         "MlxRequestPlan::try_for_spec_and_manifest(",
-        "start_cached_gen_stream_with_request_state(",
+        "start_cached_gen_stream_with_request_state_using(",
         "crate::mlx_fit_gate::evaluate_request(",
         "WarmPolicyOnce::new(warm_policy)",
     ] {
         assert!(
             live(marker),
-            "the plan route's MLX arm must reach `{marker}` — the seam the legacy Krea imported \
-             lane uses for the same weights"
+            "the plan route's MLX arm must reach `{marker}` — the injected-loader wrapper of \
+             the same request-state cache transaction used by the legacy Krea imported lane"
         );
     }
     // `start_cached_gen_stream(` is the bare seam, which declines the warm policy outright. The
