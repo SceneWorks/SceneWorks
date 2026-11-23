@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "e0ede894a07a60f512a02d912b01a8f09297a93a",
+    "inferenceRevision": "d179bfdbdaf864ef9e6281c67f55dc40b91ba564",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -6519,11 +6519,16 @@
                 },
                 "reasons": [
                   {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'flux1_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
+                  {
                     "code": "conflicts_with_pass0_control_conditioning",
                     "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
                   }
                 ],
                 "inapplicability_reasons": [
+                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_control_conditioning"
                 ]
               },
@@ -6660,11 +6665,16 @@
                 },
                 "reasons": [
                   {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'flux1_dev_pulid' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
+                  {
                     "code": "conflicts_with_pass0_reference_conditioning",
                     "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
                   }
                 ],
                 "inapplicability_reasons": [
+                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_reference_conditioning"
                 ]
               }
@@ -7444,11 +7454,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'flux1_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_control_conditioning",
                 "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_control_conditioning"
             ]
           },
@@ -9923,11 +9938,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'flux2_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_control_conditioning",
                 "message": "route 'flux2_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_control_conditioning"
             ]
           },
@@ -12687,9 +12707,9 @@
             "version": 1,
             "class": "recipe",
             "classification": "recipe",
-            "applicable": true,
-            "supported": true,
-            "available": true,
+            "applicable": false,
+            "supported": false,
+            "available": false,
             "parameter_schema": {
               "version": 1,
               "k": {
@@ -12710,26 +12730,7 @@
                 "default": 0.5
               }
             },
-            "parameters": {
-              "version": 1,
-              "k": {
-                "type": "step_index",
-                "required": true,
-                "min": 1,
-                "max_exclusive": "executed_steps",
-                "range": "1..executed_steps",
-                "max": 7,
-                "default_executed_steps": 8
-              },
-              "scale": {
-                "type": "float_range",
-                "required": false,
-                "min": 0.25,
-                "max": 0.9,
-                "inclusive": true,
-                "default": 0.5
-              }
-            },
+            "parameters": null,
             "conflicts": [
               "phases",
               "pass0_reference_conditioning",
@@ -12755,8 +12756,15 @@
               "introduces_pass_boundary": false,
               "retains_single_pass_schedule": true
             },
-            "reasons": [],
-            "inapplicability_reasons": []
+            "reasons": [
+              {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'krea_2_turbo' does not support clean-estimate spatial resize and re-noise phase transitions"
+              }
+            ],
+            "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition"
+            ]
           },
           "pag": {
             "id": "pag",
@@ -21252,11 +21260,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'pulid_flux' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_reference_conditioning",
                 "message": "route 'pulid_flux' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_reference_conditioning"
             ]
           },
@@ -22076,11 +22089,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'qwen_image_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_control_conditioning",
                 "message": "route 'qwen_image_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_control_conditioning"
             ]
           },
@@ -22488,11 +22506,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'qwen_image_edit' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_edit_conditioning",
                 "message": "route 'qwen_image_edit' requires pass-0 edit conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_edit_conditioning"
             ]
           },
@@ -31652,11 +31675,16 @@
                 },
                 "reasons": [
                   {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
+                  {
                     "code": "conflicts_with_pass0_control_conditioning",
                     "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
                   }
                 ],
                 "inapplicability_reasons": [
+                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_control_conditioning"
                 ]
               }
@@ -32445,11 +32473,16 @@
                 },
                 "reasons": [
                   {
+                    "code": "missing_clean_estimate_renoise_transition",
+                    "message": "route 'z_image_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                  },
+                  {
                     "code": "conflicts_with_pass0_control_conditioning",
                     "message": "route 'z_image_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
                   }
                 ],
                 "inapplicability_reasons": [
+                  "missing_clean_estimate_renoise_transition",
                   "conflicts_with_pass0_control_conditioning"
                 ]
               }
@@ -32989,11 +33022,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'z_image_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_control_conditioning",
                 "message": "route 'z_image_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_control_conditioning"
             ]
           },
@@ -33400,11 +33438,16 @@
             },
             "reasons": [
               {
+                "code": "missing_clean_estimate_renoise_transition",
+                "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+              },
+              {
                 "code": "conflicts_with_pass0_control_conditioning",
                 "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
               }
             ],
             "inapplicability_reasons": [
+              "missing_clean_estimate_renoise_transition",
               "conflicts_with_pass0_control_conditioning"
             ]
           },
@@ -38323,11 +38366,16 @@
               },
               "reasons": [
                 {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'flux1_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
+                {
                   "code": "conflicts_with_pass0_control_conditioning",
                   "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
                 }
               ],
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_control_conditioning"
               ]
             },
@@ -38464,11 +38512,16 @@
               },
               "reasons": [
                 {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'flux1_dev_pulid' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
+                {
                   "code": "conflicts_with_pass0_reference_conditioning",
                   "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
                 }
               ],
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_reference_conditioning"
               ]
             }
@@ -39194,11 +39247,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'flux1_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_control_conditioning",
               "message": "route 'flux1_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_control_conditioning"
           ]
         },
@@ -39907,11 +39965,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'flux1_dev_pulid' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_reference_conditioning",
               "message": "route 'flux1_dev_pulid' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_reference_conditioning"
           ]
         },
@@ -41728,11 +41791,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'flux2_dev_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_control_conditioning",
               "message": "route 'flux2_dev_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_control_conditioning"
           ]
         },
@@ -46451,9 +46519,9 @@
           "version": 1,
           "class": "recipe",
           "classification": "recipe",
-          "applicable": true,
-          "supported": true,
-          "available": true,
+          "applicable": false,
+          "supported": false,
+          "available": false,
           "parameter_schema": {
             "version": 1,
             "k": {
@@ -46474,26 +46542,7 @@
               "default": 0.5
             }
           },
-          "parameters": {
-            "version": 1,
-            "k": {
-              "type": "step_index",
-              "required": true,
-              "min": 1,
-              "max_exclusive": "executed_steps",
-              "range": "1..executed_steps",
-              "max": 7,
-              "default_executed_steps": 8
-            },
-            "scale": {
-              "type": "float_range",
-              "required": false,
-              "min": 0.25,
-              "max": 0.9,
-              "inclusive": true,
-              "default": 0.5
-            }
-          },
+          "parameters": null,
           "conflicts": [
             "phases",
             "pass0_reference_conditioning",
@@ -46519,8 +46568,15 @@
             "introduces_pass_boundary": false,
             "retains_single_pass_schedule": true
           },
-          "reasons": [],
-          "inapplicability_reasons": []
+          "reasons": [
+            {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'krea_2_turbo' does not support clean-estimate spatial resize and re-noise phase transitions"
+            }
+          ],
+          "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition"
+          ]
         },
         "pag": {
           "id": "pag",
@@ -53587,11 +53643,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'pulid_flux' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_reference_conditioning",
               "message": "route 'pulid_flux' requires pass-0 reference/identity conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_reference_conditioning"
           ]
         },
@@ -55049,11 +55110,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'qwen_image_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_control_conditioning",
               "message": "route 'qwen_image_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_control_conditioning"
           ]
         },
@@ -55408,11 +55474,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'qwen_image_edit' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_edit_conditioning",
               "message": "route 'qwen_image_edit' requires pass-0 edit conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_edit_conditioning"
           ]
         },
@@ -63101,11 +63172,16 @@
               },
               "reasons": [
                 {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'z_image_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
+                {
                   "code": "conflicts_with_pass0_control_conditioning",
                   "message": "route 'z_image_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
                 }
               ],
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_control_conditioning"
               ]
             }
@@ -63593,11 +63669,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'z_image_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_control_conditioning",
               "message": "route 'z_image_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_control_conditioning"
           ]
         },
@@ -64202,11 +64283,16 @@
               },
               "reasons": [
                 {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
+                {
                   "code": "conflicts_with_pass0_control_conditioning",
                   "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
                 }
               ],
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_control_conditioning"
               ]
             }
@@ -64694,11 +64780,16 @@
           },
           "reasons": [
             {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
               "code": "conflicts_with_pass0_control_conditioning",
               "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
             }
           ],
           "inapplicability_reasons": [
+            "missing_clean_estimate_renoise_transition",
             "conflicts_with_pass0_control_conditioning"
           ]
         },
