@@ -7,6 +7,13 @@ const launch = (rawAdapterSettings = {}, extra = {}) => ({ id: "launch", view: "
   recipe: { model: "new", prompt: "composed prompt", rawAdapterSettings, normalizedSettings: {}, ...extra } });
 
 describe("recipeToStudioPatch", () => {
+  it.each(["Scaled FP8 (E4M3)", "INT8-ConvRot", "NVFP4"])("upgrades %s recipes to their source precision", (label) => {
+    const request = launch({ quantTier: "q8", mlxQuantize: 8, mlxQuantizeExplicit: true, steps: 12 });
+    const known = { ...context, models: [{ id: "new", sourcePrecision: { label } }] };
+    expect(recipeToStudioPatch(request, known).values).toMatchObject({ recipeTierRequest: null, stepsOverride: 12 });
+    expect(recipeToStudioPatch(request, context).values.recipeTierRequest).toEqual({ model: "new", tier: "q8" });
+    expect(request.recipe.rawAdapterSettings.mlxQuantize).toBe(8);
+  });
   it("normalizes a replay without mutating its source or clearing absent reference selections", () => {
     const request = launch({ styleId: "style", stylePrompt: "original prompt", strength: 0, usePid: true });
     const before = structuredClone(request);

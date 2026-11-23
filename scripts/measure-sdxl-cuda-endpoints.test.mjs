@@ -3,7 +3,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
-import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { readFile, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -295,6 +295,21 @@ test("only the manual SDXL profile omits historical inference anchor queries", a
   assert.deepEqual(wanted(""), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
   const workflow = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
   assert.match(workflow, /MEMORY_CAMPAIGN_PROFILE: \$\{\{ inputs\.profile \|\| 'catalog' \}\}/);
+});
+
+test("both SDXL profiles export managed work for the artifact upload without branch.sh", async t => {
+  const root=await mkdtemp(path.join(tmpdir(),'sdxl-artifact-handoff-'));
+  t.after(async()=>{assert.equal(path.dirname(path.resolve(root)),path.resolve(tmpdir()));await rm(root,{recursive:true,force:true});});
+  const script=fileURLToPath(new URL('./ci/memory-catalog/sdxl-endpoints.sh',import.meta.url));
+  for(const profile of ['sdxl-cuda-endpoints','sdxl-cuda-admitted-replay']) {
+    const environment=path.join(root,`${profile}.env`),work=path.join(root,profile);
+    const result=spawnSync('bash',['-c','git() { printf "%s\\n" "$BASE_REF"; }; node() { printf "metadata-only measurement stub\\n"; }; source "$0"',script],{
+      env:{...process.env,BASE_REF:'a'.repeat(40),CAMPAIGN:'unit-artifact',GITHUB_RUN_ID:'123',GITHUB_ENV:environment,DEV_HOST_JOB_ROOT:work,RUNNER_TEMP:path.join(root,'legacy'),MEMORY_CAMPAIGN_PROFILE:profile,ADAPTER:'fixture',INFERENCE_REPO:'fixture',HF_CACHE_INPUT:'',SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE:'',DEFAULT_HF_CACHE:'E:/huggingface/hub'},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    const exported=await readFile(environment,'utf8');
+    assert.ok(exported.includes('WORK_DIR_NATIVE='));
+    assert.ok(exported.replaceAll('\\','/').includes(`${profile}/memory-catalog-unit-artifact-123`), exported);
+  }
 });
 
 // CI_IMPACT: four tiny source-directory fixtures prove all actual SDXL assembly roles are bound.

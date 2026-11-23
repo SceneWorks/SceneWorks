@@ -302,6 +302,11 @@ pub fn resolve(
         advanced["confidence"] = json!(controls.confidence);
         advanced["segment"] = json!(controls.segment);
     }
+    if crate::source_precision::applies_to(kind)
+        && crate::source_precision::fixed_precision(entry).is_some()
+    {
+        crate::source_precision::clear_precision_selectors(&mut resolved);
+    }
     Ok(resolved)
 }
 fn resolved_values(kind: &str, payload: &JsonObject, entry: &JsonObject) -> JsonObject {
@@ -355,6 +360,9 @@ pub fn validate(
         return crate::training_validation::validate(kind, payload, entry);
     }
     validate_shape(kind, payload)?;
+    if crate::source_precision::applies_to(kind) {
+        crate::source_precision::validate(payload, entry)?;
+    }
     if kind == "audio" && payload.contains_key("yue2") {
         return Ok(());
     }

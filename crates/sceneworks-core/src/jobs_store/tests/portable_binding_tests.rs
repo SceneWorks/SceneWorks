@@ -753,6 +753,93 @@ fn retry_and_duplicate_cannot_replace_a_frozen_portable_binding() {
 }
 
 #[test]
+fn retry_migrates_fixed_source_precision_without_rebinding_artifact_members() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    for format in ["fp8_e4m3_scalar", "convrot_int8", "nvfp4"] {
+        let entry = json!({
+            "id": "example", "type": "image", "catalogScope": "user",
+            "importSourceShape": "transformer_file", "importQuantFormat": format,
+        });
+        let authored = json!({"model": "example", "variant": "q8", "advanced": {"mlxQuantize": 8}});
+        let previous: PortableJobBinding = serde_json::from_value(binding()).unwrap();
+        let mut routes = previous.routes;
+        for model in routes.values_mut().flat_map(|route| &mut route.models) {
+            model.variant = "q8".to_owned();
+            model.authored_options_sha256 = canonical_authored_options_sha256(&authored).unwrap();
+            let member = &mut model.members[0];
+            member.source = PortableSourceIdentity::Digest {
+                sha256: crate::model_artifacts::portable_binding::portable_closure_sha256(
+                    &member.files,
+                )
+                .unwrap(),
+            };
+        }
+        let previous = PortableJobBinding::new(authored.clone(), routes).unwrap();
+        let migrated = previous
+            .clone()
+            .with_fixed_source_precision("example")
+            .unwrap();
+        let mut creation = request();
+        creation.job_type = JobType::ImageGenerate;
+        creation.payload = authored.as_object().unwrap().clone();
+        creation
+            .payload
+            .insert("modelManifestEntry".to_owned(), entry.clone());
+        let original = store
+            .create_job_with_portable_binding(
+                creation,
+                None,
+                None,
+                Some(&serde_json::to_value(&previous).unwrap()),
+            )
+            .unwrap();
+        let mut payload = original.payload.clone();
+        crate::source_precision::canonicalize_for_entry(
+            &mut payload,
+            entry.as_object().unwrap(),
+            Some(&Default::default()),
+        )
+        .unwrap();
+        payload.insert("variant".to_owned(), Value::Null);
+        let request = || RetryJob {
+            payload_changes: payload.clone(),
+        };
+        let mut wrong_routes = migrated.routes.clone();
+        let wrong_member = &mut wrong_routes.values_mut().next().unwrap().models[0].members[0];
+        wrong_member.files[0].sha256 = format!("sha256:{}", "d".repeat(64));
+        wrong_member.source = PortableSourceIdentity::Digest {
+            sha256: crate::model_artifacts::portable_binding::portable_closure_sha256(
+                &wrong_member.files,
+            )
+            .unwrap(),
+        };
+        let wrong =
+            PortableJobBinding::new(migrated.authored_options.clone(), wrong_routes).unwrap();
+        assert!(store
+            .retry_job_with_portable_binding(
+                &original.id,
+                request(),
+                None,
+                None,
+                Some(&serde_json::to_value(wrong).unwrap()),
+            )
+            .is_err());
+        let migrated = serde_json::to_value(migrated).unwrap();
+        let replay = store
+            .retry_job_with_portable_binding(&original.id, request(), None, None, Some(&migrated))
+            .unwrap();
+        assert!(replay.payload["variant"].is_null());
+        assert!(replay.payload["advanced"].get("mlxQuantize").is_none());
+        assert_eq!(
+            store.portable_model_binding(&replay.id).unwrap(),
+            Some(migrated)
+        );
+    }
+}
+
+#[test]
 fn worker_source_claims_are_private_fresh_and_explicitly_cleared() {
     let temp = tempfile::tempdir().unwrap();
     let store = JobsStore::new(temp.path().join("jobs.db"));

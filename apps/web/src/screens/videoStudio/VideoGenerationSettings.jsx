@@ -4,7 +4,7 @@ import { StudioLoraImportPanel } from "../../components/StudioLoraImportPanel.js
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../components/StudioUpdateNotice.jsx";
 import { STYLE_GROUPS } from "../../data/styleCatalog.js";
 import { noPresetId } from "../../presetUtils.js";
-import { LoraPickerSection, SavePresetPanel, StyleAxisRow, TierPickerField } from "../../components/generationStudio.jsx";
+import { LoraPickerSection, SavePresetPanel, SourcePrecisionField, StyleAxisRow, TierPickerField } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { formatDurationOption } from "../../videoModelLimits.js";
 import { ModelAttribution } from "../../components/ModelAttribution.jsx";
@@ -134,6 +134,7 @@ export function VideoGenerationSettings({
               {/* Quant tier, not the abstract Fast/Balanced/Best segment (studio-cleanup
                   sc-15374): the settings bar names the concrete thing that will load. Quality
                   itself is still a live payload/preset field and moves to Advanced. */}
+              <SourcePrecisionField model={selectedModel} className="settings-field settings-field-tier" />
               {showTierPicker ? (
                 <TierPickerField
                   className="settings-field settings-field-tier"

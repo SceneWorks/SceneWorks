@@ -141,6 +141,11 @@ export function tierLabel(tier) {
   return TIER_LABELS[tier] ?? tier;
 }
 
+export function sourcePrecisionLabel(model) {
+  const label = model?.sourcePrecision?.label;
+  return typeof label === "string" && label ? label : null;
+}
+
 const PRECISION_FLOOR_COMPONENT_LABELS = {
   textEncoder: "text encoder layers",
   transformerHead: "transformer head",
@@ -227,6 +232,7 @@ export function installedTiers(model, options = {}) {
 // Installed and displayed tiers use the same source precedence and host gates. Only the
 // installed-only predicate differs; keep it here so the two public views cannot drift.
 function selectModelTiers(model, options, installedOnly) {
+  if (sourcePrecisionLabel(model)) return [];
   const hostEligible = (tier) => tierHostEligible(tier, options);
   // Imported same-shape providers can quantize the caller-owned checkpoint at load without a
   // separate downloaded tier. The API projects exactly the provider descriptor's supported set;
@@ -331,6 +337,18 @@ export function tierPickerOptions(model, options = {}) {
   const stateFor = tierStateLookup(model);
   return allPossibleTiers(model, options).map((tier) => {
     if (installed.has(tier)) {
+      const conversion = model?.sourceConversion;
+      if (conversion?.persistence === "resolved_artifact_cache") {
+        if (conversion.targetTiers?.includes(tier)) {
+          return {
+            tier, label: `${effectiveTierLabel(tier, model)} — quantize & save`, disabled: false,
+            conversionHint: `First use quantizes and saves a ${tier.toUpperCase()} copy. Later generations reuse the saved weights. Uses additional disk space.`,
+          };
+        }
+        if (tier === "bf16" && conversion.sourceLabel) {
+          return { tier, label: `${conversion.sourceLabel} (source)`, disabled: false };
+        }
+      }
       return { tier, label: effectiveTierLabel(tier, model), disabled: false };
     }
     // A tier present-but-torn reports cacheState "incomplete" (never "installed"); a cleanly-absent one

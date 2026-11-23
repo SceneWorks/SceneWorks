@@ -1268,8 +1268,8 @@ pub(super) fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 }
 
 /// In-place ComfyUI Wan2.2 A14B experts for the sc-10671 base lane (epic 10451 Phase 2c). When set on a
-/// [`VideoGenInput`], [`generate_video`] builds the two experts from these files (key remap +
-/// scaled-fp8 dequant, `runtime_cuda::providers::wan::load_from_comfyui_experts`) via the uncached bespoke load path
+/// [`VideoGenInput`], [`generate_video`] builds the two experts through the source codec readers
+/// (`runtime_cuda::providers::wan::load_from_comfyui_experts`) via the uncached load path
 /// instead of the registry snapshot. The UMT5 TE + VAE are read in place too when `te_file` / `vae_file`
 /// are set (sc-10909), else they come from `model_dir` (a resident Wan snapshot tier); the tiny
 /// tokenizer always comes from `model_dir`. Read in place, never copied.
@@ -1310,6 +1310,256 @@ impl ComfyuiWanExperts {
             vae_file,
             i2v,
         }
+    }
+
+    fn checkpoint_receipt_scope(&self, snapshot: &Path) -> gen_core::Result<ComfyuiWanReceipts> {
+        // The uncached constructor takes paths instead of a LoadSpec. Prepare the exact files
+        // selected by the source resolver and only the snapshot components the provider opens.
+        // In particular, neither of the snapshot's transformer directories is used here.
+        let mut sources = LoadSpec::new(WeightsSource::File(self.high_file.clone()));
+        sources.components.insert(
+            "transformer_2".into(),
+            WeightsSource::File(self.low_file.clone()),
+        );
+        sources.text_encoder = Some(self.te_file.clone().map_or_else(
+            || WeightsSource::Dir(snapshot.join("text_encoder")),
+            WeightsSource::File,
+        ));
+        sources.components.insert(
+            "vae".into(),
+            self.vae_file.clone().map_or_else(
+                || WeightsSource::Dir(snapshot.join("vae")),
+                WeightsSource::File,
+            ),
+        );
+        sources.components.insert(
+            "tokenizer".into(),
+            WeightsSource::File(snapshot.join("tokenizer/tokenizer.json")),
+        );
+        let inventory = gen_core::SourceInventory::capture(&sources)?;
+        sources.bind_source_inventory(inventory)?;
+        let expert_pin = |path: &Path| {
+            sources
+                .prepared_file_pin_for(path)?
+                .cloned()
+                .ok_or_else(|| {
+                    gen_core::Error::Msg(format!(
+                        "missing prepared Wan expert at {}",
+                        path.display()
+                    ))
+                })
+        };
+        Ok(ComfyuiWanReceipts {
+            high: expert_pin(&self.high_file)?,
+            low: expert_pin(&self.low_file)?,
+            scope: gen_core::CheckpointReceiptScope::for_load(&sources)?,
+        })
+    }
+}
+
+#[cfg(native_lane)]
+#[derive(Clone)]
+struct ComfyuiWanReceipts {
+    high: gen_core::PinnedWeightsFile,
+    low: gen_core::PinnedWeightsFile,
+    scope: gen_core::CheckpointReceiptScope,
+}
+
+#[cfg(native_lane)]
+impl ComfyuiWanReceipts {
+    fn expert_entry<'a>(
+        &self,
+        sources: &[gen_core::SourceBinding],
+        primary: &'a serde_json::Map<String, Value>,
+        low: &'a serde_json::Map<String, Value>,
+    ) -> Option<(bool, &'a serde_json::Map<String, Value>)> {
+        // Each ComfyUI expert is one prepared file. Auxiliary weights can also use a matching
+        // codec, so the engine's observed source binding must identify the correct expert.
+        let [source] = sources else { return None };
+        let matches = |pin: &gen_core::PinnedWeightsFile| {
+            source.canonical_path() == pin.canonical_target_path()
+                && source.target_fingerprint() == pin.target_fingerprint()
+        };
+        if matches(&self.high) {
+            Some((true, primary))
+        } else if matches(&self.low) {
+            Some((false, low))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(native_lane)]
+fn comfyui_wan_low_expert_entry(
+    primary: &serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let low = primary
+        .get("components")?
+        .as_array()?
+        .iter()
+        .find(|component| {
+            component.get("role").and_then(Value::as_str) == Some("transformer_low")
+        })?;
+    // This is the scanner's typed classification for the low expert. Give the shared receipt
+    // translator that component's label; it still corroborates it against the observed reader.
+    Some(serde_json::Map::from_iter([(
+        "importQuantFormat".into(),
+        low.get("quant")?.clone(),
+    )]))
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod comfyui_checkpoint_receipt_tests {
+    use super::*;
+
+    fn write_source(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"source").unwrap();
+        path
+    }
+
+    #[test]
+    fn every_in_place_wan_source_is_guarded_before_a_deferred_read() {
+        let dir = tempfile::tempdir().unwrap();
+        write_source(dir.path(), "tokenizer/tokenizer.json");
+        let [high, low, te, vae] = ["high", "low", "te", "vae"].map(|name| dir.path().join(name));
+        let experts = ComfyuiWanExperts::new(
+            high.clone(),
+            low.clone(),
+            Some(te.clone()),
+            Some(vae.clone()),
+            false,
+        );
+        let paths = [&high, &low, &te, &vae];
+        for changed in paths {
+            for path in paths {
+                std::fs::write(path, b"source").unwrap();
+            }
+            let scope = experts.checkpoint_receipt_scope(dir.path()).unwrap().scope;
+            scope
+                .with_prepared(|| {
+                    assert!(gen_core::CheckpointReceiptScope::current().is_some());
+                    Ok(())
+                })
+                .unwrap();
+            std::fs::write(changed, b"changed source").unwrap();
+            let result: gen_core::Result<()> =
+                scope.with_prepared(|| panic!("read {changed:?} through a stale pin"));
+            assert!(result.is_err(), "{changed:?} was outside the prepared set");
+        }
+    }
+
+    #[test]
+    fn fallback_snapshot_guards_only_selected_components_and_tokenizer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let high = write_source(root, "external/high.safetensors");
+        let low = write_source(root, "external/low.safetensors");
+        let unused_expert = write_source(root, "transformer/unused.safetensors");
+        for (external_te, external_vae) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let snapshot_te = write_source(root, "text_encoder/model.safetensors");
+            let snapshot_vae = write_source(root, "vae/model.safetensors");
+            let tokenizer = write_source(root, "tokenizer/tokenizer.json");
+            let te = external_te.then(|| write_source(root, "external/te.safetensors"));
+            let vae = external_vae.then(|| write_source(root, "external/vae.safetensors"));
+            let experts = ComfyuiWanExperts::new(high.clone(), low.clone(), te, vae, false);
+            let guarded = [
+                Some(tokenizer),
+                (!external_te).then(|| snapshot_te.clone()),
+                (!external_vae).then(|| snapshot_vae.clone()),
+            ];
+            for path in guarded.into_iter().flatten() {
+                let scoped = experts.checkpoint_receipt_scope(root).unwrap();
+                std::fs::write(&unused_expert, b"unused expert change").unwrap();
+                if external_te {
+                    std::fs::write(&snapshot_te, b"unused encoder change").unwrap();
+                }
+                if external_vae {
+                    std::fs::write(&snapshot_vae, b"unused VAE change").unwrap();
+                }
+                scoped.scope.with_prepared(|| Ok(())).unwrap();
+                std::fs::write(&path, b"changed after preparation").unwrap();
+                let result: gen_core::Result<()> = scoped
+                    .scope
+                    .with_prepared(|| panic!("read {path:?} through a stale pin"));
+                assert!(result.is_err(), "{path:?} was outside the prepared set");
+                std::fs::write(&path, b"source").unwrap();
+            }
+            for component in [
+                (!external_te).then_some("text_encoder"),
+                (!external_vae).then_some("vae"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let scoped = experts.checkpoint_receipt_scope(root).unwrap();
+                let new_shard = write_source(root, &format!("{component}/added.safetensors"));
+                let result: gen_core::Result<()> = scoped
+                    .scope
+                    .with_prepared(|| panic!("read a shard added after source preparation"));
+                assert!(
+                    result.is_err(),
+                    "{component} did not guard shard membership"
+                );
+                std::fs::remove_file(new_shard).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_expert_receipts_select_the_codec_of_the_bound_expert() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let high = write_source(root, "high.safetensors");
+        let low = write_source(root, "low.safetensors");
+        let te = write_source(root, "te.safetensors");
+        write_source(root, "tokenizer/tokenizer.json");
+        let vae = write_source(root, "vae.safetensors");
+        let binding = |path| {
+            [
+                gen_core::SourceBinding::verify(&gen_core::PinnedWeightsFile::pin(path).unwrap())
+                    .unwrap(),
+            ]
+        };
+        let experts = ComfyuiWanExperts::new(
+            high.clone(),
+            low.clone(),
+            Some(te.clone()),
+            Some(vae),
+            false,
+        );
+        let scoped = experts.checkpoint_receipt_scope(root).unwrap();
+        let entry = serde_json::json!({
+            "importQuantFormat": "fp8_e4m3_scalar",
+            "components": [
+                {"role": "transformer_high", "quant": "fp8_e4m3_scalar"},
+                {"role": "transformer_low", "quant": "fp8_e5m2_scalar"},
+                {"role": "text_encoder", "quant": "fp8_e4m3_scalar"}
+            ]
+        });
+        let primary = entry.as_object().unwrap();
+        let secondary = comfyui_wan_low_expert_entry(primary).unwrap();
+        let (is_high, entry) = scoped
+            .expert_entry(&binding(&high), primary, &secondary)
+            .unwrap();
+        assert!(is_high);
+        assert_eq!(entry["importQuantFormat"], "fp8_e4m3_scalar");
+        let (is_high, entry) = scoped
+            .expert_entry(&binding(&low), primary, &secondary)
+            .unwrap();
+        assert!(!is_high);
+        assert_eq!(entry["importQuantFormat"], "fp8_e5m2_scalar");
+        assert!(scoped
+            .expert_entry(&binding(&te), primary, &secondary)
+            .is_none());
+        std::fs::write(&low, b"new expert at the original path").unwrap();
+        assert!(scoped
+            .expert_entry(&binding(&low), primary, &secondary)
+            .is_none());
     }
 }
 
@@ -2237,7 +2487,26 @@ pub(super) fn run_prepared_video_generation(
     plan: Option<(&gen_core::VideoRenderPlan, &LoadSpec)>,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<DecodedVideo> {
-    let completed = match plan {
+    run_prepared_video_generation_with_receipts(
+        generator,
+        request,
+        context,
+        plan,
+        on_progress,
+        None,
+    )
+}
+
+#[cfg(native_lane)]
+fn run_prepared_video_generation_with_receipts(
+    generator: &dyn Generator,
+    request: &mut GenerationRequest,
+    context: Option<&gen_core::MemoryRunContext>,
+    plan: Option<(&gen_core::VideoRenderPlan, &LoadSpec)>,
+    on_progress: &mut dyn FnMut(Progress),
+    receipts: Option<&gen_core::CheckpointReceiptScope>,
+) -> WorkerResult<DecodedVideo> {
+    let mut generate = || match plan {
         Some((plan, spec)) => crate::memory_strategy::generate_video_with_scope_execution_report(
             generator,
             request,
@@ -2252,6 +2521,10 @@ pub(super) fn run_prepared_video_generation(
             context,
             on_progress,
         ),
+    };
+    let completed = match receipts {
+        Some(scope) => scope.with_prepared(generate),
+        None => generate(),
     }
     .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     let output = completed
@@ -2818,12 +3091,13 @@ pub(super) async fn generate_video_using(
     // The fitted-curve identity uses the catalog family, not the provider descriptor's internal
     // family. Resolve it exactly like the asset path's `resolve_family`, without re-parsing the
     // entire payload into another `VideoRequest` merely for this admission-only key.
-    let admission_manifest_entry = job
+    let manifest_entry = job
         .payload
         .get("modelManifestEntry")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let admission_manifest_entry = manifest_entry.clone();
     let admission_model_family =
         super::resolve_catalog_video_family(&admission_model_id, &admission_manifest_entry);
     // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
@@ -2864,19 +3138,13 @@ pub(super) async fn generate_video_using(
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let cold_load_admission = input.cold_load_admission.take();
         // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
-        // (`load_from_comfyui_experts` — two experts read in place + remapped + dequant'd), which frees
+        // (`load_from_comfyui_experts` — two experts read in place with remapped keys), which frees
         // any resident cached generator first; every other job takes the registry cached path. On the
         // non-candle/macOS build `comfyui` is always `None`, so only the cached path is compiled.
-        let comfyui_load = input.comfyui.as_ref().map(|e| {
-            (
-                e.high_file.clone(),
-                e.low_file.clone(),
-                e.te_file.clone(),
-                e.vae_file.clone(),
-                input.model_dir.clone(),
-                e.i2v,
-            )
-        });
+        let comfyui_load = input
+            .comfyui
+            .clone()
+            .map(|experts| (experts, input.model_dir.clone()));
         let fit_gpu = settings.gpu_id.clone();
         let host_probe_runtime = tokio::runtime::Handle::current();
         crate::load_progress::spawn(async move {
@@ -3095,6 +3363,33 @@ pub(super) async fn generate_video_using(
             let admission_spec = spec.clone();
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let comfyui_load = if let Some((experts, snapshot)) = comfyui_load {
+                Some(
+                    crate::load_progress::spawn_blocking(move || {
+                        let receipts =
+                            experts
+                                .checkpoint_receipt_scope(&snapshot)
+                                .map_err(|error| {
+                                    crate::classify_engine_error(
+                                        "ComfyUI Wan source preparation failed",
+                                        error,
+                                    )
+                                })?;
+                        Ok::<_, WorkerError>((experts, snapshot, receipts))
+                    })
+                    .await
+                    .map_err(|error| WorkerError::Engine(error.to_string()))??,
+                )
+            } else {
+                None
+            };
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let comfyui_receipts = comfyui_load
+                .as_ref()
+                .map(|(_, _, receipts)| receipts.clone());
+            #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+            let comfyui_receipts: Option<ComfyuiWanReceipts> = None;
             let run = move |generator: &dyn Generator,
                             cache_state: gen_core::MemoryCacheState,
                             loaded_policy: crate::generator_cache::ExecutionPolicy,
@@ -3392,20 +3687,114 @@ pub(super) async fn generate_video_using(
                 if engine_id == "minimax_h3" {
                     super::minimax_h3::record_cuda_proof_pool(&receipt_job_id, "before")?;
                 }
+                let receipt_scope = comfyui_receipts.as_ref().map(|receipts| &receipts.scope);
                 let mut generate = || {
-                    run_prepared_video_generation(
+                    run_prepared_video_generation_with_receipts(
                         generator,
                         &mut request,
                         context.as_ref(),
                         plan.as_ref()
                             .map(|reservation| (&reservation.plan, &admission_spec)),
                         &mut on_progress,
+                        receipt_scope,
                     )
                 };
                 let result = match &plural_fit {
                     Some(fit) => fit.with_execution(generate),
                     None => generate(),
                 };
+                let mut primary_checkpoint_facts = None;
+                let mut low_checkpoint_facts = None;
+                let mut same_codec_experts = false;
+                if result.is_ok() {
+                    // Read this generator's receipts after lazy component loads and the actual
+                    // forward. Keep each physical source binding; one primary getter cannot
+                    // describe a normalized multi-shard checkpoint or its inherited components.
+                    if let Some(primary_codec) =
+                        sceneworks_core::jobs_store::imported_entry_source_codec(
+                            &admission_manifest_entry,
+                        )
+                    {
+                        let source_facts = match &comfyui_receipts {
+                            Some(receipts) => receipts.scope.try_snapshots().map_err(|error| {
+                                crate::classify_engine_error(
+                                    "ComfyUI Wan checkpoint receipt validation failed",
+                                    error,
+                                )
+                            })?,
+                            None => generator.checkpoint_weight_facts_by_source(),
+                        };
+                        let low_entry = comfyui_receipts
+                            .as_ref()
+                            .and_then(|_| comfyui_wan_low_expert_entry(&admission_manifest_entry));
+                        same_codec_experts = low_entry
+                            .as_ref()
+                            .and_then(sceneworks_core::jobs_store::imported_entry_source_codec)
+                            == Some(primary_codec);
+                        let receipts: Vec<_> = source_facts
+                            .into_iter()
+                            .filter_map(|facts| {
+                                let (entry, primary, same_codec_low) = match &comfyui_receipts {
+                                    Some(receipts) => {
+                                        let (high, entry) = receipts.expert_entry(
+                                            facts.source_bindings(),
+                                            &admission_manifest_entry,
+                                            low_entry.as_ref().unwrap_or(&admission_manifest_entry),
+                                        )?;
+                                        (entry, high, !high && same_codec_experts)
+                                    }
+                                    None => (
+                                        &admission_manifest_entry,
+                                        h3_receipt.as_ref().is_some_and(|receipt| {
+                                            receipt
+                                                .binds_transformer_receipt(facts.source_bindings())
+                                        }),
+                                        false,
+                                    ),
+                                };
+                                let codec =
+                                    sceneworks_core::jobs_store::imported_entry_source_codec(
+                                        entry,
+                                    )?;
+                                if !facts.source().declares(codec) {
+                                    return None;
+                                }
+                                let sources: Vec<_> = facts
+                                    .source_bindings()
+                                    .iter()
+                                    .map(|binding| binding.canonical_path().to_path_buf())
+                                    .collect();
+                                if sources.is_empty() {
+                                    return None;
+                                }
+                                let single_source = match sources.as_slice() {
+                                    [source] => Some(source.as_path()),
+                                    _ => None,
+                                };
+                                let measured =
+                                    crate::checkpoint_weight_facts_host::runtime_checkpoint_facts(
+                                        entry,
+                                        single_source,
+                                        Some(facts),
+                                    )?;
+                                let log = serde_json::json!({
+                                    "sourcePaths": sources,
+                                    "checkpointWeightFacts": measured,
+                                });
+                                if primary {
+                                    primary_checkpoint_facts = Some(measured);
+                                } else if same_codec_low {
+                                    low_checkpoint_facts = Some(measured);
+                                }
+                                Some(log)
+                            })
+                            .collect();
+                        tracing::info!(event = "checkpoint_weight_materialization",
+                            jobId = %receipt_job_id, provider = engine_id,
+                            receipts = %serde_json::Value::Array(receipts),
+                            "Completed video request source-bound weight materialization");
+                    }
+                }
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                 if engine_id == "minimax_h3" {
                     // Scope cleanup has already run, including cancellation and failed forwards.
@@ -3421,28 +3810,39 @@ pub(super) async fn generate_video_using(
                         tracing::error!(%error, "H3 proof-pool observation failed after generation error");
                     }
                 }
-                result
+                // The phase record has one codec. Include both Wan experts when the verified
+                // primary codec describes both, and leave it unmeasured if either is missing.
+                result.map(|decoded| {
+                    let facts = match (primary_checkpoint_facts, low_checkpoint_facts) {
+                        (Some(primary), Some(low)) => vec![primary, low],
+                        (Some(primary), None) if !same_codec_experts => vec![primary],
+                        _ => Vec::new(),
+                    };
+                    (decoded, facts)
+                })
             };
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let result = match comfyui_load {
-                Some((high, low, te, vae, snapshot, i2v)) => {
+                Some((experts, snapshot, receipts)) => {
                     debug_assert!(cold_load_admission.is_none());
                     crate::generator_cache::with_uncached_generator(
                         move || {
-                            runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts_with_offload(
-                                high,
-                                low,
-                                te,
-                                vae,
-                                snapshot,
-                                i2v,
-                                OffloadPolicy::Sequential,
-                            )
+                            receipts.scope.with_prepared(|| {
+                                runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts_with_offload(
+                                    experts.high_file,
+                                    experts.low_file,
+                                    experts.te_file,
+                                    experts.vae_file,
+                                    snapshot,
+                                    experts.i2v,
+                                    OffloadPolicy::Sequential,
+                                )
+                            })
                             .map_err(|error| {
                                 crate::classify_engine_error("video load failed", error)
                             })
                         },
-                        // The uncached in-place route loads eagerly under the hardcoded policy and
+                        // The uncached in-place route uses sequential offload and
                         // has no request-scoped planner seam, so the loaded policy is synthesized
                         // here and the proposal is inert (the run closure declines it regardless).
                         move |generator, cache_state, load_policy, external, provider| {
@@ -3740,9 +4140,19 @@ pub(super) async fn generate_video_using(
         .and_then(|value| value.as_str())
         .map(str::to_owned);
     let mut metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
-    if let Ok(decoded) = &result {
+    let measured_facts = result
+        .as_ref()
+        .map(|(_, facts)| facts.as_slice())
+        .unwrap_or_default();
+    crate::checkpoint_weight_facts_host::record_checkpoint_metrics(
+        &mut metrics,
+        &manifest_entry,
+        measured_facts,
+    );
+    let result = result.map(|(decoded, _)| {
         record_video_veda_metrics(&mut metrics, decoded.veda_execution.as_ref());
-    }
+        decoded
+    });
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }

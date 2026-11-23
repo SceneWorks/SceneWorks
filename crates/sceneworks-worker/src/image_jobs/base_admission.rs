@@ -331,6 +331,7 @@ pub(super) struct CachedCandleBaseFloorAdmission {
     lane: &'static str,
     gpu_id: String,
     source_weight_bytes: u64,
+    auxiliary_source_bytes: u64,
     runtime: tokio::runtime::Handle,
 }
 
@@ -339,6 +340,18 @@ impl CachedCandleBaseFloorAdmission {
     /// The transient headroom added to the incoming floor is deliberately excluded: evicting a
     /// resident generator cannot promise to reclaim that allowance.
     pub(super) fn reclaimable_weight_bytes(&self) -> u64 {
+        self.source_weight_bytes
+            .saturating_sub(self.auxiliary_source_bytes)
+    }
+
+    /// Auxiliary file bytes are priced in the incoming floor, but do not prove GPU occupancy.
+    pub(super) fn without_auxiliary_reclaim_credit(mut self, auxiliary_source_bytes: u64) -> Self {
+        self.auxiliary_source_bytes = auxiliary_source_bytes;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn source_floor_bytes(&self) -> u64 {
         self.source_weight_bytes
     }
 
@@ -381,7 +394,7 @@ impl CachedCandleBaseFloorAdmission {
                 // `reclaimable_weight_bytes`).
                 crate::vram_gate::note_loaded_peak(
                     &self.gpu_id,
-                    self.source_weight_bytes as f64 / BYTES_PER_GIB,
+                    self.reclaimable_weight_bytes() as f64 / BYTES_PER_GIB,
                 );
                 tracing::info!(
                     model = self.model,
@@ -425,6 +438,7 @@ pub(super) fn prepare_cached_candle_base_floor(
         lane,
         gpu_id: settings.gpu_id.clone(),
         source_weight_bytes: bytes,
+        auxiliary_source_bytes: 0,
         runtime: tokio::runtime::Handle::current(),
     })
 }
@@ -601,6 +615,7 @@ mod tests {
             lane: "Krea imported",
             gpu_id: gpu_id.to_owned(),
             source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
+            auxiliary_source_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("floor admission admits");
@@ -617,6 +632,7 @@ mod tests {
             lane: "Krea imported",
             gpu_id: empty_gpu.to_owned(),
             source_weight_bytes: 0,
+            auxiliary_source_bytes: 0,
             runtime: runtime.handle().clone(),
         };
         admission.admit(0).expect("un-gateable admission admits");

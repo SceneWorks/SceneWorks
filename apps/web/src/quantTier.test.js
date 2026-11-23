@@ -32,6 +32,36 @@ import candidate from "./testUtils/catalogBaseline/candidate-catalog.json";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 
+it.each(["Scaled FP8 (E4M3)", "INT8-ConvRot", "NVFP4"])("does not offer conversion tiers for %s", (label) => {
+  const model = { runtimeQuantTiers: ["q4", "q8", "bf16"], sourcePrecision: { label } };
+  expect(installedTiers(model)).toEqual([]);
+  expect(tierPickerOptions(model)).toEqual([]);
+  expect(defaultTierSelection(model, "q4", { defaultQuality: "bf16", autoTier: "q8" })).toBeNull();
+  expect(shouldShowTierPicker(model)).toBe(false);
+  const builtin = { hasVariantMatrix: true, variants: [
+    { variant: "q4", installState: "installed" }, { variant: "q8", installState: "installed" },
+  ] };
+  expect(shouldShowTierPicker(builtin)).toBe(true);
+  expect(defaultTierSelection(builtin, "q4", { defaultQuality: "bf16" })).toBe("q4");
+});
+
+it.each(["BF16", "FP16", "FP32"])("explains creating and reusing saved quants from %s", (sourceLabel) => {
+  const model = {
+    runtimeQuantTiers: ["q4", "q8", "bf16"],
+    sourceConversion: { sourceLabel, targetTiers: ["q4", "q8"], persistence: "resolved_artifact_cache" },
+  };
+  const options = tierPickerOptions(model);
+  for (const tier of ["q4", "q8"]) {
+    const option = options.find((item) => item.tier === tier);
+    expect(option.disabled).toBe(false);
+    expect(option.label).toContain("quantize & save");
+    expect(option.conversionHint).toMatch(/First use quantizes and saves/);
+    expect(option.conversionHint).toMatch(/Later generations reuse/);
+  }
+  expect(options.find((item) => item.tier === "bf16")).toEqual({ tier: "bf16", label: `${sourceLabel} (source)`, disabled: false });
+  expect(shouldShowTierPicker(model)).toBe(true);
+});
+
 // The shipped catalog projects product facts from the manifest and memory facts from the evidence
 // store. Use that same projection for the catalog-shaped fixtures below.
 const MANIFEST_PATH = resolve(

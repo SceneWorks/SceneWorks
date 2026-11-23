@@ -332,6 +332,7 @@ pub(crate) async fn create_image_job(
         false
     };
     if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::source_precision::canonicalize_for_entry(&mut job_payload, entry, None)?;
         sceneworks_core::image_request::validate_image_request_payload(&job_payload, entry)
             .map_err(ApiError::bad_request)?;
         crate::models::ensure_run_license_acknowledged(&state, entry).await?;
@@ -2698,6 +2699,7 @@ pub(crate) async fn create_video_job(
     // cannot consume them. The catalog flag is absent today and will be set only with the paired
     // descriptor/pin evidence.
     if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::source_precision::canonicalize_for_entry(&mut job_payload, entry, None)?;
         sceneworks_core::request_validation::validate("video", &job_payload, entry)
             .map_err(ApiError::from)?;
     }

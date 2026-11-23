@@ -67,7 +67,7 @@ const INFERENCE_CRATES = [
 ];
 // Resolved through the root [patch], not direct dependencies. Every vendored package must move
 // with the inference pin and have its lock entry refreshed by Cargo.
-const PATCHED_CRATES = ["candle-core", "candle-kernels", "candle-metal-kernels"];
+const PATCHED_CRATES = ["candle-core", "candle-nn", "candle-kernels", "candle-metal-kernels"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
@@ -394,7 +394,7 @@ function distinctResolutions(crate) {
 // classification notes. Verify the derivation's integrity against the actual scanned inventories;
 // classification findings and older pin/population mentions in human prose remain advisory under
 // sc-19751. Never turn historical review currency into a pin gate or fabricate a new human review.
-function verifyLicenseAudit(io = {}) {
+export function verifyLicenseAudit(io = {}) {
   const {
     report = () =>
       execFileSync("node", ["scripts/check-license-coverage.mjs"], {
@@ -617,7 +617,7 @@ export function restampAuditRecord(audit, sha, derived) {
 }
 
 /** Re-scan the ported/embedded source inventory and restamp the audit for the new revision. */
-function deriveLicenseAudit(sha, repo, io = {}) {
+export function deriveLicenseAudit(sha, repo, io = {}) {
   const {
     scan = (...args) =>
       execFileSync("node", ["scripts/scan-inference-provenance.mjs", "--repo", repo, ...args], {
@@ -756,7 +756,7 @@ function reportStaleCurrencyAttestations(sha) {
 // check in this script with real branching over the FILESYSTEM rather than over text, and its
 // audio half (sc-17593) guards a hole that stayed invisible for four pins, so "it is wired" is not
 // the same as "it fires".
-function verifyEngineCapabilityFacts(sha, root = repoRoot) {
+export function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   const dir = join(root, "config/engine-capabilities");
   // The audio registry's dumps live one level down (sc-17593), so `readdirSync` — not recursive —
   // keeps the two sets apart on its own. They are validated for staleness together and for coverage
@@ -1034,6 +1034,7 @@ function selfTest() {
   const bothPatches = repin(
     `[patch."https://github.com/huggingface/candle"]\n` +
     `candle-core = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
+    `candle-nn = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
     `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
     `candle-metal-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
   check("root Candle patches repin together", (() => {
@@ -1047,6 +1048,10 @@ function selfTest() {
   })());
   check("a missing vendored core patch refuses a later pin", (() => {
     try { verifyCandlePatches(bothPatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
+    catch { return true; }
+  })());
+  check("a missing native Linear hook patch refuses a later pin", (() => {
+    try { verifyCandlePatches(bothPatches.replace(/^candle-nn.*\n/m, ""), SHA); return false; }
     catch { return true; }
   })());
   check("a core patch in another TOML section cannot satisfy the root patch", (() => {

@@ -21,7 +21,170 @@ pub(crate) use sceneworks_core::external_base_models::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Map;
+
+    #[tokio::test]
+    async fn flux2_retry_and_duplicate_keep_verified_precision_with_frozen_source() {
+        use crate::portable_admission::{capture_local_model_entry, portable_authored_options};
+        use crate::tests::support::{create_project, request, test_settings};
+        use axum::http::StatusCode;
+        use sceneworks_core::contracts::{JobType, WorkerCapability};
+        use sceneworks_core::jobs_store::{CreateJob, RegisterWorker};
+        use sceneworks_core::model_artifacts::portable_binding::{
+            canonical_authored_options_sha256, registered_digest_member_claim_id,
+            PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceClaim,
+            PortableSourceProvenance,
+        };
+        use sceneworks_core::source_precision::SourcePrecision;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = models_root(temp.path());
+        let path = root.join("diffusion_models/flux2_dev_fp8mixed.safetensors");
+        write_safetensors(&path, &flux2_dev_dit_inline_scale_keys());
+        let mut settings = test_settings(&temp);
+        settings.external_model_roots = vec![root];
+        settings.candle_required = true;
+        let (app, state) = crate::create_app_with_state(settings).unwrap();
+        let (_, project) = create_project(app.clone(), &"External FLUX.2 replay").await;
+        let id = "external_base_flux2-dev-fp8mixed";
+        let current = crate::models::resolve_model_manifest_entry(&state, id)
+            .await
+            .unwrap();
+        assert_eq!(current["importQuantFormat"], "fp8_e4m3_scalar");
+
+        let mut saved = current.as_object().unwrap().clone();
+        saved.remove("importQuantFormat");
+        saved.remove("sourcePrecision");
+        saved.insert("quant".into(), json!("fp8_inline_scale"));
+        saved.get_mut("components").unwrap()[0]["quant"] = json!("fp8_inline_scale");
+        saved.insert("name".into(), json!("Frozen pre-upgrade carrier"));
+        let project_id = project["id"].as_str().unwrap();
+        let payload = json!({
+            "projectId": project_id, "mode": "text_to_image", "model": id, "prompt": "a fox",
+            "variant": "q4", "advanced": {"quant": "q4", "steps": 12},
+            "modelManifestEntry": saved,
+        });
+        let authored = portable_authored_options(payload.as_object().unwrap());
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            id,
+            "candle",
+            "q4",
+            None,
+            canonical_authored_options_sha256(&authored).unwrap(),
+            capture_local_model_entry(&state, &current, "modelManifestEntry").unwrap(),
+        )
+        .unwrap();
+        let claims: Vec<_> = model
+            .members
+            .iter()
+            .map(|member| {
+                PortableSourceClaim::new(
+                    registered_digest_member_claim_id(&model, member, &payload).unwrap(),
+                    PortableSourceProvenance::OperatorOverride,
+                    member.files.clone(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let route = PortableRouteBinding::new("candle", "windows", vec![model]).unwrap();
+        let frozen = PortableJobBinding::new(authored, [(route.key(), route)].into()).unwrap();
+        state
+            .jobs_store
+            .register_worker_with_portable_sources(
+                RegisterWorker {
+                    worker_id: "flux2-fixture".into(),
+                    gpu_id: "cuda:0".into(),
+                    gpu_name: None,
+                    capabilities: vec![
+                        WorkerCapability::Gpu,
+                        WorkerCapability::ImageGenerate,
+                        WorkerCapability::Unknown("candle".into()),
+                    ],
+                    loaded_models: Vec::new(),
+                    utilization: None,
+                },
+                Some("windows"),
+                Some(&claims),
+            )
+            .unwrap();
+        let job = state
+            .jobs_store
+            .create_job_with_portable_binding(
+                CreateJob {
+                    job_type: JobType::ImageGenerate,
+                    project_id: Some(project_id.to_owned()),
+                    project_name: None,
+                    payload: payload.as_object().unwrap().clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 0,
+                    initial_status: None,
+                },
+                None,
+                None,
+                Some(&serde_json::to_value(&frozen).unwrap()),
+            )
+            .unwrap();
+        let expected_binding =
+            serde_json::to_value(frozen.with_fixed_source_precision(id).unwrap()).unwrap();
+        let mut expected_entry = saved;
+        expected_entry.insert(
+            "importQuantFormat".into(),
+            current["importQuantFormat"].clone(),
+        );
+        SourcePrecision::project(&mut expected_entry);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{}/{operation}", job.id),
+                json!({"payloadChanges": {}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+            let replay_id = replay["id"].as_str().unwrap();
+            let replay = state.jobs_store.get_job(replay_id).unwrap();
+            assert_eq!(replay.payload["modelManifestEntry"], json!(expected_entry));
+            assert!(replay.payload["variant"].is_null());
+            assert_eq!(replay.payload["advanced"], json!({"steps": 12}));
+            assert_eq!(
+                state.jobs_store.portable_model_binding(replay_id).unwrap(),
+                Some(expected_binding.clone())
+            );
+            let (status, override_error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{}/{operation}", job.id),
+                json!({"payloadChanges": {"advanced": {"quant": "q4"}}}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{override_error}");
+            assert_eq!(override_error["context"]["field"], "advanced.quant");
+        }
+
+        // The worker still advertises the admitted bytes. The local replacement has the same
+        // FLUX.2 format and catalog id, but its precision facts cannot be grafted onto that ledger.
+        let mut changed = std::fs::read(&path).unwrap();
+        *changed.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, changed).unwrap();
+        let (status, error) = request(
+            app,
+            "POST",
+            &format!("/api/v1/jobs/{}/retry", job.id),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap()
+                .contains("different bytes"),
+            "{error}"
+        );
+    }
 
     /// Write a safetensors file whose header declares `(name, dtype)` tensors. Only
     /// the header is read, but the declared data must be present or the header is
@@ -30,20 +193,11 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("parent dir");
         }
-        let mut header = Map::new();
-        for (index, (key, dtype)) in entries.iter().enumerate() {
-            let start = index * 4;
-            header.insert(
-                (*key).to_owned(),
-                json!({ "dtype": dtype, "shape": [1], "data_offsets": [start, start + 4] }),
-            );
-        }
-        let header_bytes = serde_json::to_vec(&Value::Object(header)).expect("header json");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&header_bytes);
-        bytes.extend(std::iter::repeat_n(0_u8, entries.len() * 4));
-        std::fs::write(path, bytes).expect("write safetensors");
+        std::fs::write(
+            path,
+            crate::tests::support::test_safetensors_bytes_with_typed_keys(entries),
+        )
+        .expect("write safetensors");
     }
 
     fn z_image_keys() -> Vec<(&'static str, &'static str)> {
@@ -205,7 +359,17 @@ mod tests {
         assert_eq!(row["catalogScope"], EXTERNAL_SCOPE);
         assert_eq!(row["importSourceShape"], "comfy_ui_tree");
         assert_eq!(row["type"], "image");
-        assert_eq!(row["quant"], "fp8_e4m3");
+        assert_eq!(row["quant"], "fp8_e4m3_scalar");
+        assert_eq!(row["importQuantFormat"], row["quant"]);
+        assert_eq!(row["sourcePrecision"]["codecId"], "fp8-e4m3-scalar-v1");
+        let refusal = sceneworks_core::request_validation::validate(
+            "image",
+            json!({"projectId":"p", "model": row["id"], "prompt":"snow", "advanced": {"quantTier":"q4"}})
+                .as_object()
+                .unwrap(),
+            row.as_object().unwrap(),
+        ).unwrap_err();
+        assert_eq!(refusal.field, "advanced.quantTier");
         assert_eq!(row["assembly"], "complete");
         // sc-10670: plain-fp8 qwen DiT has a loader → usable, no reason. No tree VAE here, so
         // components is the DiT alone (the TE is always snapshot-sourced, sc-10671).
@@ -219,6 +383,7 @@ mod tests {
     /// and BF16 attention/modulation → detector `(flux2, transformer, fp8_inline_scale)` (sc-10662).
     fn flux2_dev_dit_inline_scale_keys() -> Vec<(&'static str, &'static str)> {
         vec![
+            ("guidance_in.in_layer.weight", "BF16"),
             ("double_stream_modulation_img.lin.weight", "BF16"),
             ("single_stream_modulation.lin.weight", "BF16"),
             ("double_blocks.0.img_attn.qkv.weight", "BF16"),
@@ -229,6 +394,22 @@ mod tests {
             ("single_blocks.0.linear1.weight_scale", "F32"),
             ("single_blocks.0.linear1.input_scale", "F32"),
         ]
+    }
+
+    #[test]
+    fn a_flux2_backbone_without_dev_guidance_does_not_claim_the_dev_tree_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = models_root(temp.path());
+        let mut keys = flux2_dev_dit_inline_scale_keys();
+        keys.retain(|(name, _)| !name.starts_with("guidance_in."));
+        write_safetensors(&root.join("diffusion_models/klein.safetensors"), &keys);
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["usable"], false);
+        assert!(rows[0]["unusableReason"]
+            .as_str()
+            .unwrap()
+            .contains("Dev guidance"));
     }
 
     #[test]
@@ -250,7 +431,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row["family"], "flux2");
         assert_eq!(row["type"], "image");
-        assert_eq!(row["quant"], "fp8_inline_scale");
+        assert_eq!(row["quant"], "fp8_e4m3_scalar");
         assert_eq!(row["assembly"], "complete");
         // sc-10680: inline-scale-fp8 flux2 DiT has a loader → usable, no reason. No tree VAE here, so
         // components is the DiT alone (the TE / VAE are snapshot-sourced).
@@ -295,7 +476,7 @@ mod tests {
         let row = &rows[0];
         assert_eq!(row["family"], "wan-video");
         assert_eq!(row["type"], "video");
-        assert_eq!(row["quant"], "scaled_fp8_companion");
+        assert_eq!(row["quant"], "fp8_e4m3_scalar");
         assert_eq!(row["assembly"], "complete");
         assert_eq!(row["usable"], true);
         assert_eq!(row["unusableReason"], Value::Null);
@@ -308,6 +489,46 @@ mod tests {
             .collect();
         assert!(roles.contains(&"transformer_high"));
         assert!(roles.contains(&"transformer_low"));
+    }
+
+    #[test]
+    fn wan_experts_keep_independently_verified_precisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = models_root(temp.path());
+        let high = wan_expert_scaled_fp8_keys();
+        let low: Vec<_> = high
+            .iter()
+            .map(|&(key, dtype)| {
+                (
+                    key,
+                    if key.ends_with(".weight") && dtype == "F8_E4M3" {
+                        "F8_E5M2"
+                    } else {
+                        dtype
+                    },
+                )
+            })
+            .collect();
+        write_safetensors(&root.join("unet/wan_high_noise.safetensors"), &high);
+        write_safetensors(&root.join("unet/wan_low_noise.safetensors"), &low);
+        let rows = scan(&[root]);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["usable"], true);
+        assert_eq!(row["sourcePrecision"]["format"], "fp8_e4m3_scalar");
+        let components = row["components"].as_array().unwrap();
+        for (role, format) in [
+            ("transformer_high", "fp8_e4m3_scalar"),
+            ("transformer_low", "fp8_e5m2_scalar"),
+        ] {
+            assert_eq!(
+                components
+                    .iter()
+                    .find(|component| component["role"] == role)
+                    .unwrap()["quant"],
+                format
+            );
+        }
     }
 
     #[test]

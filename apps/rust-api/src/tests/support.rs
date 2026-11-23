@@ -426,23 +426,47 @@ pub(crate) fn test_safetensors_bytes_with_keys(tensor_keys: &[String]) -> Vec<u8
 /// `(krea_2, Transformer, Bf16)` (importable) while an F8_E4M3 qwen DiT lands as a refused quant. Same
 /// header + padded-data completeness posture as [`test_safetensors_bytes_with_keys`].
 pub(crate) fn test_safetensors_bytes_with_typed_keys(entries: &[(&str, &str)]) -> Vec<u8> {
-    const TENSOR_DATA_END: u64 = 32768;
-    let mut object = serde_json::Map::new();
-    object.insert("__metadata__".to_owned(), json!({"format": "pt"}));
-    let mut data_end = 0_u64;
-    for (key, dtype) in entries {
-        object.insert(
-            (*key).to_owned(),
-            json!({"dtype": dtype, "shape": [16, 1024], "data_offsets": [0, TENSOR_DATA_END]}),
+    let mut header = serde_json::Map::new();
+    header.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+    let mut payload = Vec::new();
+    for &(key, dtype) in entries {
+        let start = payload.len();
+        let shape = if let Some(base) = key.strip_suffix(".comfy_quant") {
+            let weight = format!("{base}.weight");
+            let descriptor = match entries
+                .iter()
+                .find(|(name, _)| *name == weight)
+                .map(|row| row.1)
+            {
+                Some("I8") => json!({"format": "int8_tensorwise", "per_row": true}),
+                Some("F8_E4M3") => json!({"format": "float8_e4m3fn"}),
+                Some("F8_E5M2") => json!({"format": "float8_e5m2"}),
+                _ => json!({"format": "mxfp4"}),
+            };
+            payload.extend(serde_json::to_vec(&descriptor).unwrap());
+            vec![payload.len() - start]
+        } else {
+            match dtype {
+                "F8_E4M3" | "F8_E5M2" | "U8" | "I8" => payload.push(1),
+                "F16" | "BF16" => payload.extend([0; 2]),
+                "F32" => payload.extend(1.0_f32.to_le_bytes()),
+                other => panic!("unknown fixture dtype {other}"),
+            }
+            if key.ends_with(".weight") {
+                vec![1, 1]
+            } else {
+                vec![1]
+            }
+        };
+        header.insert(
+            key.to_owned(),
+            json!({"dtype": dtype, "shape": shape, "data_offsets": [start, payload.len()]}),
         );
-        data_end = data_end.max(TENSOR_DATA_END);
     }
-    let header = serde_json::to_vec(&Value::Object(object)).expect("header serializes");
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&header);
-    let data_len = usize::try_from(data_end.max(12)).expect("data length fits usize");
-    bytes.resize(bytes.len() + data_len, 0);
+    let json = serde_json::to_vec(&header).unwrap();
+    let mut bytes = (json.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(json);
+    bytes.extend(payload);
     bytes
 }
 

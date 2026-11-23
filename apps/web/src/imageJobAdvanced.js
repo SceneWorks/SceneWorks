@@ -1,6 +1,6 @@
 import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEditJobAdvanced } from "./mossImage.js";
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier } from "./quantTier.js";
+import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier, sourcePrecisionLabel } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 import { isFlux3ImageModel } from "./modelEligibility.js";
 
@@ -118,6 +118,7 @@ export function buildImageJobAdvanced(state) {
     multiPhaseActive,
     phases,
   } = state;
+  const selectablePrecision = !sourcePrecisionLabel(selectedModel);
 
   const moss = isMossImage(state.model ?? selectedModel?.id);
   const mossEdit = isMossEdit(state.model ?? selectedModel?.id, mode);
@@ -235,7 +236,7 @@ export function buildImageJobAdvanced(state) {
     ...(transparentBackground && modelSupportsAlphaOutput(selectedModel)
       ? { transparentBackground: true }
       : {}),
-    ...(precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
+    ...(selectablePrecision && precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
     // Quant-tier A/B (sc-8515) + on-disk tier fidelity (sc-12090): send the resolved tier's
     // mlxQuantize (bf16→0, q8→8, q4→4) whenever the tier state maps to a known quant value —
     // NOT only when the picker is shown. A single installed tier hides the picker, but the tier
@@ -243,7 +244,7 @@ export function buildImageJobAdvanced(state) {
     // that tier instead of defaulting to q8 against a tier the user never downloaded (#1516). A
     // non-matrix model keeps `quantTier` empty (`tierQuantize("") === null`), so this stays
     // disjoint from the Boogu precisionToggle above — no `showTierPicker` guard needed.
-    ...(tierQuantize(quantTier) !== null
+    ...(selectablePrecision && tierQuantize(quantTier) !== null
       ? {
           mlxQuantize: tierQuantize(quantTier),
           // sc-10733: mark a DELIBERATE per-(screen, model) tier pick (`tierExplicit` — a persisted
@@ -259,7 +260,7 @@ export function buildImageJobAdvanced(state) {
     // Instead send a distinct `convRot: true` the worker maps to the ConvRot LoadSpec construction
     // (weights = Dir(bf16 snapshot) + text_encoder = File(convrot DiT)). Emitted only when the picker
     // is shown AND the picked tier is int8-convrot — disjoint from the mlxQuantize spread above.
-    ...(showTierPicker && isConvRotTier(quantTier) ? { convRot: true } : {}),
+    ...(selectablePrecision && showTierPicker && isConvRotTier(quantTier) ? { convRot: true } : {}),
     // NVFP4 tier (sc-11042, epic 11037): like int8-convrot, NVFP4 is NOT a bits-based quant — E2M1
     // elements + FP8-E4M3 block scales, ~4.5 effective bits/weight — so it can't ride `mlxQuantize`
     // (its `tierQuantize` is null, so the spread above omits it and mlxQuantize stays out of the
@@ -273,7 +274,7 @@ export function buildImageJobAdvanced(state) {
     // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
     // FP8R must identify even a single installed tier (including Simple's hidden picker).
     // Unlike the legacy NVFP4 opt-in, omitting it would request a different dense format.
-    ...(isFp8rTier(quantTier) || ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier))
+    ...(selectablePrecision && (isFp8rTier(quantTier) || ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier)))
       ? { quantTier } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native

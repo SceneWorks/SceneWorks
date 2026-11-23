@@ -29,7 +29,7 @@ import { savePresetDialogValidation } from "../generationValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { StylePicker } from "./StylePicker.jsx";
-import { defaultTierSelection, tierQuantize } from "../quantTier.js";
+import { defaultTierSelection, sourcePrecisionLabel, tierQuantize } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { errorMessage } from "../errorMessage.js";
@@ -51,7 +51,7 @@ export function useQuantTierPicker({
   resolvedTier = null,
 }) {
   const [pickedTier, setQuantTier] = useState("");
-  const quantTier = resolvedTier ?? pickedTier;
+  const quantTier = sourcePrecisionLabel(selectedModel) ? "" : (resolvedTier ?? pickedTier);
   const [tierSwitching, setTierSwitching] = useState("");
   // Bumped by `confirmTier` so the sticky it writes re-derives `tierExplicit` even though the
   // selected tier itself does not change.
@@ -132,6 +132,16 @@ export function useQuantTierPicker({
   };
 }
 
+export function SourcePrecisionField({ model, className, labelClassName }) {
+  const label = sourcePrecisionLabel(model);
+  return label ? (
+    <div className={className}>
+      <span className={labelClassName}>Source precision</span>
+      <strong>{label}</strong>
+    </div>
+  ) : null;
+}
+
 // `className` lets the studios render this as a settings-bar cell (`settings-field`) instead of an
 // Advanced-panel label (studio-cleanup sc-15374) without a wrapper element around the <label>.
 // `suggested` + `onConfirm` (sc-22246): a DERIVED tier (not the user's own pick) is labelled as a
@@ -149,12 +159,15 @@ export function TierPickerField({
   onConfirm = null,
 }) {
   const suggestedNoteId = useId();
+  const conversionNoteId = useId();
+  const conversionHint = items.find((item) => item.tier === value)?.conversionHint;
   const showSuggested = suggested && !tierSwitching;
   return (
     <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
       Quant tier
       <select
-        aria-describedby={showSuggested ? suggestedNoteId : undefined}
+        aria-label="Quant tier"
+        aria-describedby={[showSuggested && suggestedNoteId, conversionHint && conversionNoteId].filter(Boolean).join(" ") || undefined}
         onChange={(event) => onChange(event.target.value)}
         value={value}
       >
@@ -164,6 +177,7 @@ export function TierPickerField({
           </option>
         ))}
       </select>
+      {conversionHint ? <span className="field-hint" id={conversionNoteId}>{conversionHint}</span> : null}
       {tierSwitching ? (
         <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
       ) : null}

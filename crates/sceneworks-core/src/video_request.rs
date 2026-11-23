@@ -361,7 +361,11 @@ impl VideoRequest {
         request.options = Some(VideoOptions::bind(&BindingInput::new(authored, effective))?);
         request.advanced = object_or_empty(authored, "advanced");
         request.duration_was_explicit = parse_safe_float(authored.get("duration")).is_some();
-        request.bind_admitted_tier(authored, effective);
+        if crate::source_precision::SourcePrecision::for_entry(&request.model_manifest_entry)
+            .is_none()
+        {
+            request.bind_admitted_tier(authored, effective);
+        }
         Ok(request)
     }
 
@@ -427,6 +431,10 @@ impl VideoRequest {
 
     /// Execution tier selection from effective controls and the worker's verified source guard.
     pub fn resolved_quant_bits(&self) -> Option<i64> {
+        if crate::source_precision::SourcePrecision::for_entry(&self.model_manifest_entry).is_some()
+        {
+            return None;
+        }
         crate::payload_util::request_quant_bits_typed(
             self.options().mlx_quantize.as_ref(),
             self.portable_aux.bound_tier(),

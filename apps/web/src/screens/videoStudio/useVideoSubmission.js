@@ -1,3 +1,4 @@
+import { sourcePrecisionLabel } from "../../quantTier.js";
 import { composeNegativePrompt } from "../../data/appearanceCatalog.js";
 import { ltxVideoModelId, ltx25VideoModelId } from "./videoTierHelpers.js";
 import { parseResolution } from "../../resolutionMatch.js";
@@ -219,7 +220,7 @@ export function useVideoSubmission({
         // sc-26691: a replayed H3 recipe's reference sizing, only while an H3 model is active
         // (any other family refuses the key at enqueue).
         ...(replayReferenceResize && isMinimaxH3Entry(selectedModel) ? replayReferenceResize : {}),
-        ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
+        ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, ...(sourcePrecisionLabel(selectedModel) ? {} : { precision }) } : {}),
         ...(model === ltx25VideoModelId
           ? {
               transformerVariant,
@@ -238,8 +239,8 @@ export function useVideoSubmission({
         selectedTextEncoderModel !== defaultTextEncoderId
           ? { textEncoderModel: selectedTextEncoderModel }
           : {}),
-        ...(showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
-        ...(selectedTierQuantize !== null ? { mlxQuantize: selectedTierQuantize } : {}),
+        ...(!sourcePrecisionLabel(selectedModel) && showTorchQuantization && quantization !== "auto" ? { quantization } : {}),
+        ...(!sourcePrecisionLabel(selectedModel) && selectedTierQuantize !== null ? { mlxQuantize: selectedTierQuantize } : {}),
         // Configurable sampler / scheduler (epic 1753). Sealed adapters
         // (LTX native, MLX) silently fall back to default; only the Wan
         // diffusers (torch) path actually applies these.

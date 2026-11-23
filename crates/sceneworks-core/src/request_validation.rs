@@ -1,9 +1,47 @@
 //! Native job-kind adapter for the portable static option policy.
+use crate::contracts::JsonObject;
+use std::borrow::Cow;
+
 pub mod shape;
 pub use sceneworks_options::request_validation::{
-    model_id_for_request, resolve, resolve_request, validate, validate_shape, ResolvedRequest,
-    ValidationRefusal, VALIDATOR_SCHEMA_VERSION,
+    model_id_for_request, validate_shape, ResolvedRequest, ValidationRefusal,
+    VALIDATOR_SCHEMA_VERSION,
 };
+
+fn precision_facts(entry: &JsonObject) -> Cow<'_, JsonObject> {
+    if crate::source_precision::SourcePrecision::for_entry(entry).is_none()
+        && !entry.contains_key("sourcePrecision")
+    {
+        return Cow::Borrowed(entry);
+    }
+    let mut projected = entry.clone();
+    crate::source_precision::SourcePrecision::project(&mut projected);
+    Cow::Owned(projected)
+}
+
+pub fn validate(
+    kind: &str,
+    payload: &JsonObject,
+    entry: &JsonObject,
+) -> Result<(), ValidationRefusal> {
+    sceneworks_options::request_validation::validate(kind, payload, &precision_facts(entry))
+}
+
+pub fn resolve(
+    kind: &str,
+    payload: &JsonObject,
+    entry: &JsonObject,
+) -> Result<JsonObject, ValidationRefusal> {
+    sceneworks_options::request_validation::resolve(kind, payload, &precision_facts(entry))
+}
+
+pub fn resolve_request(
+    kind: &str,
+    payload: &JsonObject,
+    entry: &JsonObject,
+) -> Result<ResolvedRequest, ValidationRefusal> {
+    sceneworks_options::request_validation::resolve_request(kind, payload, &precision_facts(entry))
+}
 pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str> {
     use crate::contracts::JobType::*;
     match job_type {

@@ -147,6 +147,19 @@ test('owned API pipeline binds real-shaped jobs/assets/load events, compares med
   assert.equal((await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true})).comparisons,1);
   await assert.rejects(validateEvidence(f.p,f.c,f.dir,'H3_API_ASSERTIONS_EXECUTED=1'),/unit_fake/);
 });
+test('owned API completion carries the same explicit physical GPU0 selection into the late receipt',async t=>{
+  const f=await fixture(t,'capability','image','cuda'),fake=fakeRuntime(f,{backend:'cuda'});
+  const uuid='GPU-00000000-0000-0000-0000-000000000000';
+  const other='GPU-11111111-1111-1111-1111-111111111111';
+  Object.assign(f.c.runtime,{gpuId:'0',deviceId:uuid,physicalGpuIndex:0,physicalGpuUuid:uuid});
+  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:uuid,SCENEWORKS_GPU_ID:'0'};
+  const csv=`1, ${other}, 00000000:41:00.0, unit_fake_gpu1, unit_fake_driver\n0, ${uuid}, 00000000:01:00.0, unit_fake_gpu0, unit_fake_driver\n`;
+  fake.deps.hardware=(backend,deviceId,selection)=>hardware(backend,deviceId,{...selection,env,exec:async()=>({stdout:csv})});
+  const result=await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  assert.equal(result.evidence.completedJob.status,'completed');
+  assert.equal(result.evidence.hardware.cuda.selectedPhysicalDevice.nvmlIndex,0);
+  assert.equal(result.evidence.hardware.cuda.selectedPhysicalDevice.uuid,uuid);
+});
 test('every actual render passes the rendered-content gate before its case can pass (sc-26691)',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f),seen=[];
   fake.deps.content=async(file,keyframes)=>{seen.push({file,keyframes});await readFile(file);return {size:32,frames:124,spatialStd:{median:0.19},keyframes:[]};};

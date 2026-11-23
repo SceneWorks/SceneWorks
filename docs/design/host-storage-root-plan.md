@@ -1,9 +1,16 @@
-# Shared dev host root — implementation plan (DRAFT p3.1)
+# Shared dev host root — implementation plan (DRAFT p4)
 
 Status: draft for Michael's review. No CodeGraph items until approved.
 Requirements: [host-storage-root-requirements.md](host-storage-root-requirements.md)
-(r4, amended; E1–E14, acceptance tests 1–11). Items inherit those
+(r5; E1–E14, acceptance tests 1–11). Items inherit those
 requirements and don't restate them.
+
+- p4 (2026-11-22) follows requirements r5: both Macs share one root on the
+  Tower NAS (`/Volumes/Work/dev-host`), with a per-host folder
+  `hosts/<host>/`. Changes: new item DW-5 (per-host folders in `dev-host`);
+  HOST-1 moves this Mac's existing per-host state under `hosts/<host>/`;
+  HOST-3 joins `nax-macos-2` to the share instead of waiting for a drive;
+  SW-1 and INF-1 take the Mac lock path from `dev-host`.
 
 - p2 folded in plan review round 1 (13 findings).
 - p3 folds in plan review round 2 (13 findings, main ones checked against
@@ -26,8 +33,7 @@ requirements and don't restate them.
   - SWITCH turns on the build redirection for everyone, re-registers the
     runners, and deletes old copies once active branches have caught up.
 - **After that:** inference's old-lock retirement and one terminal item.
-- **`nax-macos-2`** gets its root when its new drive arrives (HOST-3),
-  before MERGE.
+- **`nax-macos-2`** joins the shared NAS root (HOST-3) before MERGE.
 
 **Branches** follow `FEATURE_DEVELOPMENT.md`:
 - SceneWorks and inference items target mirrored integration branches
@@ -56,8 +62,12 @@ No two items share both a mechanism and a repo.
 - **Acceptance:**
   - Each host has a verified root (marker present, device differs from the
     system volume) with `locks/`:
-    - this Mac: `/Volumes/Models/dev-host`
+    - this Mac: `/Volumes/Work/dev-host` (NAS), with its own state under
+      `hosts/<host>/`
     - Windows CUDA: `D:\dev-host`
+  - E15: this Mac mounts `/Volumes/Work` and `/Volumes/Models` with its
+    own authenticated account, and a guest mount of each share can't
+    create a file (Michael sets up the Tower accounts).
   - Runner wiring is in place:
     - the pinned `dev-host` binary is installed;
     - each runner `.env` sets `DEV_HOST_ROOT` and
@@ -105,6 +115,32 @@ No two items share both a mechanism and a repo.
 - **Blocked by:** none
 - **Validation:** unit tests with temp-dir fakes for the device and marker;
   one manual run on this Mac.
+
+### DW-5 — Per-host folders under a shared root (story, DevWorks)
+- **Goal:** Lets several machines share one root safely (r5): each host's
+  locks, build slots, scratch, campaign work, runner and Docker folders
+  live under `hosts/<host>/`, and nothing one host decides alone touches
+  another host's folder.
+- **Acceptance:**
+  - `dev-host env` hands out build slots and `TMPDIR` under
+    `hosts/<host>/`, with `<host>` read from the OS (not the
+    environment); two hosts with the same worktree path get different
+    slots. `dev-host lock-dir` prints this host's `hosts/<host>/locks`.
+  - `dev-host cleanup` deletes only inside this host's `hosts/<host>/`,
+    applies the E9 budgets to that folder, and only measures the shared
+    `weights/`, `cache/` and campaign evidence.
+  - `dev-host env --local-build` gives a job a fresh build folder and
+    `TMPDIR` on the runner's local disk, outside the share (for signing
+    jobs, E15).
+  - `dev-host check` also verifies that `hosts/<host>/` exists, and that
+    every `required_mount` listed in `dev-host.conf` (on the Macs,
+    `/Volumes/Models`) is a mounted share. It fails naming whichever is
+    missing (setup creates `hosts/<host>/`; nothing else does).
+- **Inherits:** E2, E3, E4, E5, E8, E9, E13
+- **Touches:** `crates/dev-host`
+- **Blocked by:** none
+- **Validation:** unit tests with two fake host names on one temp root;
+  one run on this Mac against the NAS. Ships as a dev-host release.
 
 ### DW-3 — `dev-host cleanup` and `dev-host guard` (story, DevWorks)
 - **Goal:** Keeps the root bounded, and gives every repo one shared checker
@@ -216,7 +252,7 @@ No two items share both a mechanism and a repo.
     10).
   - The StarVector readiness workflow passes reading the HOST-1 copy at
     `weights/sceneworks/starvector`. xcodebuild steps write DerivedData
-    under `cache/sceneworks/`.
+    under `hosts/<host>/cache/sceneworks/` (per host, r5).
 - **Inherits:** E1, E2, E6, E10
 - **Touches:** `.github/workflows/*`, `scripts/**`, `apps/desktop/scripts/**`
 - **Blocked by:** SW-2
@@ -244,8 +280,20 @@ No two items share both a mechanism and a repo.
     `dev-host guard --all` finds no target-path patterns.
   - `macos-mlx.yml`'s warm build runs in a `warm` sticky slot, and a
     second run of the job starts warm.
+  - `release.yml`'s signing and notarizing jobs build in a fresh local
+    folder and use no build slot, cache or `TMPDIR` on the share (E15), so
+    another host's account can't change what gets signed.
+  - No SceneWorks caller turns incremental compilation back on for a
+    build in a root slot on the NAS (r5). Today
+    `scripts/remote-macos-verification.mjs:418,457` sets
+    `CARGO_INCREMENTAL=1` for the `consumer-assertions` profile, overriding
+    `dev-host env`. That recipe and its recorded cache context
+    (`CACHE_FLAGS`, `cacheFlags()`, and their tests) change to `0`, and a
+    `consumer-assertions` dispatch passes on `nax-macos-2` with its build
+    folder on the share.
 - **Inherits:** E4, E7
-- **Touches:** `.github/workflows/*`, `scripts/ci/**`
+- **Touches:** `.github/workflows/*`, `scripts/ci/**`,
+  `scripts/remote-macos-verification.mjs`
 - **Blocked by:** SW-2
 
 ### INF-2a — inference setup step, agent hook, guard, docs (task, inference)
@@ -274,7 +322,8 @@ No two items share both a mechanism and a repo.
     target-path patterns. That covers about 287 path matches, 119
     `CARGO_TARGET_DIR` lines, 16 consumers, and the absolute-path cargo
     launches.
-  - The 25 xcodebuild sites write DerivedData under `cache/inference/`.
+  - The 25 xcodebuild sites write DerivedData under
+    `hosts/<host>/cache/inference/` (per host, r5).
   - One real-weights job and one kv-poc job pass, reading HOST-1's copies.
 - **Inherits:** E1, E2, E4, E6, E10
 - **Touches:** `.github/workflows/*`, `scripts/**`
@@ -336,7 +385,8 @@ No two items share both a mechanism and a repo.
     - the `cargo` shim is on `PATH` and the host-level Codex config runs
       `dev-host env`;
     - runners are re-registered with `workFolder` under
-      `runner/<name>/_work`;
+      `hosts/<host>/runner/<name>/_work`, except the signing runner
+      (`nax-macos`), whose work folder stays on its local disk (E15);
     - Docker's disk image is in `docker/`.
 
     Main CI stays green afterwards.
@@ -348,7 +398,8 @@ No two items share both a mechanism and a repo.
 - **Inherits:** E4, E6, E11
 - **Touches:** host filesystems, runner registrations, Codex config on each
   host, `PATH` on each host
-- **Blocked by:** MERGE, CW-1, LW-1
+- **Blocked by:** MERGE, CW-1, LW-1. (E15's authenticated mounts are
+  already in place: HOST-1 and HOST-3 verify them before MERGE.)
 
 ### RELNEXT — Dual lock onto `release/next` by hotfix (task, SceneWorks)
 - **Goal:** Lets the old locks retire without waiting for a release.
@@ -366,20 +417,20 @@ No two items share both a mechanism and a repo.
   inference hotfix branch from `2b09938e`
 - **Blocked by:** SW-1, INF-1
 
-### HOST-3 — `nax-macos-2` gets its root on its new 8 TB drive (task, ops)
-- **Goal:** Gives `nax-macos-2` the root and runner wiring HOST-1 gives the
-  other hosts. Its current drive has no room for one (2026-11-15).
+### HOST-3 — `nax-macos-2` joins the shared NAS root (task, ops)
+- **Goal:** Gives `nax-macos-2` the runner wiring HOST-1 gives the other
+  hosts, on the same NAS root as this Mac (r5; no new drive).
 - **Acceptance:**
-  - The new drive is mounted as `/Volumes/Models` with a verified root,
-    the full budget config and the cleanup schedule.
+  - `/Volumes/Work` and `/Volumes/Models` are mounted on `nax-macos-2`
+    with its own authenticated account (E15) and come back after a reboot; its `hosts/<host>/` folder exists, and
+    `dev-host check` passes there. Its cleanup schedule is installed.
   - The SceneWorks runner on it has HOST-1's wiring; the devworks-mac
     runners on the same machine are unchanged.
   - An existing real-weights job still passes on `nax-macos-2` with the
     wiring in place, before MERGE.
 - **Inherits:** E5, E9, E11
 - **Touches:** `nax-macos-2` filesystems and runner config
-- **Blocked by:** DW-2, DW-3, and the drive's arrival (about 2026-11-20;
-  a hardware dependency). It blocks MERGE.
+- **Blocked by:** DW-5. It blocks MERGE.
 
 ### INF-3 — inference retires the old locks (task, inference, targets main)
 - **Goal:** inference stops taking the old lock paths once no old-only
@@ -409,13 +460,14 @@ No two items share both a mechanism and a repo.
 
 ```
 DW-1 ─ DW-3 ─ DW-2 ─┐
+DW-5 ───────────────┤ (HOST-1 also needs DW-5)
                     HOST-1 ─┬─ SW-1 ────────────────────┐
   (roots + copy may │       ├─ INF-1 ───────────────────┤
    start earlier)   │       ├─ SW-2 ─┬─ SW-3 ───────────┤
                     │       │        ├─ SW-4a ──────────┤
                     │       │        └─ SW-4b ──────────┤
                     │       ├─ INF-2a ─ INF-2b ─────────┤
-DW-2 + new drive ─ HOST-3 ──────────────────────────────┴─ MERGE ─┐
+     DW-5 ─ HOST-3 ──────────────────────────────────────┴─ MERGE ─┐
                     │       ├─ CW-1 ──────────────────────────────┤
                     │       └─ LW-1 ──────────────────────────────┴─ SWITCH ─ INF-3 ─ FINAL
 SW-1 + INF-1 ─ RELNEXT ─ INF-3
@@ -429,19 +481,20 @@ one. The other edges into HOST-1 are for the binary and the schedule.
 | Req | Items |
 |---|---|
 | E1 | DW-1, DW-2, HOST-1, SW-2, SW-3, INF-2a, INF-2b, CW-1, LW-1, MERGE |
-| E2 | DW-1, HOST-1 (layout + weights manifest), SW-3, INF-2b |
-| E3 | SW-1, INF-1, RELNEXT, INF-3, FINAL |
+| E2 | DW-1, DW-5, HOST-1 (layout + weights manifest), SW-3, INF-2b |
+| E3 | DW-5 (lock dir), SW-1, INF-1, RELNEXT, INF-3, FINAL |
 | E4 | DW-1, SW-2, SW-4a, SW-4b, INF-2a, INF-2b, CW-1, SWITCH |
 | E5 | DW-1, HOST-1, SW-1, INF-1, SW-2 (Docker rule), HOST-3 |
 | E6 | SW-3, INF-2b, SWITCH |
 | E7 | DW-2, DW-3, SW-2, SW-4b, INF-2a, CW-1, LW-1 |
-| E8 | DW-3, HOST-1 |
-| E9 | DW-3, HOST-1, HOST-3 |
+| E8 | DW-3, DW-5, HOST-1 |
+| E9 | DW-3, DW-5, HOST-1, HOST-3 |
 | E10 | SW-3, INF-2b |
 | E11 | HOST-1, MERGE, SWITCH, HOST-3 |
 | E12 | DW-2, DW-3, SW-2, INF-2a, CW-1, LW-1 |
 | E13 | DW-1, SW-2, INF-2a |
 | E14 | DW-2, HOST-1, SW-2, INF-2a |
+| E15 | HOST-1, HOST-3 (authenticated mounts, before MERGE) |
 
 Acceptance tests:
 - 3 (SW-1, INF-1)

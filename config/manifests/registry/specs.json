@@ -16050,7 +16050,8 @@
         "supported_guidance_methods": [],
         "supported_quants": [
           "q4",
-          "q8"
+          "q8",
+          "fp8r"
         ],
         "supports_lokr": false,
         "supports_lora": true,
@@ -16510,7 +16511,8 @@
         "supported_guidance_methods": [],
         "supported_quants": [
           "q4",
-          "q8"
+          "q8",
+          "fp8r"
         ],
         "supports_lokr": false,
         "supports_lora": true,
