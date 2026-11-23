@@ -2,6 +2,11 @@ name: Mac runner storage maintenance
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        default: inspect
+        options: [inspect, repair]
 
 permissions:
   contents: read
@@ -41,10 +46,26 @@ jobs:
               tools[str(tool)]={'exists':tool.exists()}
               if tool.name=='dev-host' and tool.is_file():tools[str(tool)]['version']=command([str(tool),'--version'])
           print(json.dumps({'runner':os.environ['RUNNER_NAME'],'runner_root':str(runner),'process_config':{k:os.environ.get(k) for k in ('DEV_HOST_ROOT','DEV_HOST_BIN','ACTIONS_RUNNER_HOOK_JOB_STARTED')},'saved_config':config,'mounts':mount_points,'tools':tools},indent=2))
+          for task in ('d09e5df2',):
+              folder=pathlib.Path('/Volumes/Work/dev-host/hosts/Michael-MBP/t')/task # dev-host: allow-path this task's verified repair receipt
+              for leaf in ('storage-repair.json','restart.log'):
+                  path=folder/leaf
+                  if path.is_file():print(leaf,path.read_text()[-8000:])
+          print('RUNNER PROCESSES')
+          p=command(['/bin/ps','-axo','pid=,ppid=,lstart=,comm='])
+          for line in p.get('stdout','').splitlines():
+              if 'Runner.Listener' in line or 'Runner.Worker' in line or 'runsvc.sh' in line:print(line)
+          print('SERVICE STATUS')
+          p=command(['/bin/launchctl','print',f'gui/{os.getuid()}/actions.runner.SceneWorks.nax-macos-2'])
+          print('exit',p.get('code'))
+          for line in p.get('stdout','').splitlines():
+              if any(line.strip().startswith(k) for k in ('pid =','state =','program =','path =','working directory =')):print(line)
           PY
       - name: Install and persist verified managed storage
+        if: ${{ inputs.mode == 'repair' }}
         run: python3 scripts/ci/repair-mac-runner-storage.py
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: ${{ inputs.mode == 'repair' }}
         with:
           name: mac-storage-repair
           path: storage-repair.json
