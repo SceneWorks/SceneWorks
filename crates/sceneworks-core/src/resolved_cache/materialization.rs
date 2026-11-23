@@ -394,7 +394,7 @@ fn copy_and_verify(
     // The only content-durability point for this file: flush through the very write handle that
     // produced the verified bytes. Publication never reopens staged files by path to flush them
     // again — that reopen is what a parent-junction swap could redirect (see `sync_tree`).
-    output.sync_all().map_err(|error| {
+    crate::fsutil::sync_file(&output).map_err(|error| {
         ResolvedCacheError::new(format!(
             "sync staged file {}: {error}",
             destination.display()

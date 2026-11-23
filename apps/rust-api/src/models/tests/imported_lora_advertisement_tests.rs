@@ -50,6 +50,28 @@ fn withdrawn(object: &JsonObject) -> bool {
         && object["loraCompatibility"]["supported"] == json!(false)
 }
 
+#[test]
+fn dense_conversion_notice_follows_shared_route_quants_across_families() {
+    for family in ["krea_2", "sdxl", "mage-flow", "z_image"] {
+        for (format, label) in [("bf16", "BF16"), ("f16", "FP16"), ("f32", "FP32")] {
+            let mut model = entry("dense-import", family);
+            model.insert("importQuantFormat".to_owned(), json!(format));
+            let mut supported = route("generate", &[]);
+            supported.supported_quants = vec!["q8".into()];
+            project_imported_operation_surface(&mut model, &[&supported]);
+            assert_eq!(
+                model["sourceConversion"]["sourceLabel"], label,
+                "{family} {format}"
+            );
+            assert_eq!(model["sourceConversion"]["targetTiers"], json!(["q8"]));
+            assert_eq!(
+                model["sourceConversion"]["persistence"],
+                "resolved_artifact_cache"
+            );
+        }
+    }
+}
+
 /// A plan-backed imported MiniMax-H3 entry of ANY supported partition advertises the family's
 /// adapter surface on its lanes. A Ref2VA import serves references, not text-only shapes: a
 /// text_to_video-only probe cannot be claimed by it, so deriving the advertisement from that
@@ -358,12 +380,21 @@ fn an_nvfp4_import_offers_its_own_tier_and_never_q4() {
     dense.insert("importQuantFormat".to_owned(), json!("bf16"));
     apply_imported_provider_surface_for_lanes(&mut dense, false, true);
     assert_eq!(dense["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+    assert_eq!(
+        dense["sourceConversion"],
+        json!({
+            "sourceFormat": "bf16", "sourceLabel": "BF16", "targetTiers": ["q4", "q8"],
+            "persistence": "resolved_artifact_cache",
+        })
+    );
+    assert!(dense.get("sourcePrecision").is_none());
 
     // A classification with no proved engine codec is not an NVFP4 claim.
     let mut packed = entry("user_krea_packed", "krea_2");
     packed.insert("importQuantFormat".to_owned(), json!("comfy_quant_packed"));
     apply_imported_provider_surface_for_lanes(&mut packed, false, true);
     assert_eq!(packed["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+    assert!(packed.get("sourceConversion").is_none());
 }
 
 #[test]

@@ -1881,6 +1881,26 @@ describe("ImageStudio model picker capability gating", () => {
     [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
   const clickGenerate = () => clickReadyGenerate(generateButton);
 
+  it("explains saving a converted dense checkpoint and submits the chosen quant", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-saved-quant" }));
+    const imported = {
+      ...Z_IMAGE, id: "sick_ollie", name: "Sick Ollie", family: "krea_2", catalogScope: "user",
+      hasVariantMatrix: false, runtimeQuantTiers: ["q4", "q8", "bf16"],
+      sourceConversion: { sourceLabel: "BF16", targetTiers: ["q4", "q8"], persistence: "resolved_artifact_cache" },
+    };
+    await render(baseContext({ createImageJob, imageModels: [imported], macCapabilities: MAC_CAPS }));
+    setSelect(field(container, "Model"), imported.id);
+    const picker = tierPicker(container);
+    expect(picker).toBeTruthy();
+    setSelect(picker, "q4");
+    expect(container.textContent).toContain("First use quantizes and saves a Q4 copy");
+    expect(container.textContent).toContain("Later generations reuse the saved weights");
+    await clickGenerate();
+    expect(createImageJob.mock.calls.at(-1)[0].advanced.mlxQuantize).toBe(4);
+    setSelect(tierPicker(container), "bf16");
+    expect(container.textContent).not.toContain("First use quantizes and saves");
+  });
+
   it.each(["Scaled FP8 (E4M3)", "INT8-ConvRot", "NVFP4"])("shows %s as read-only and restores builtin selection", async (label) => {
     const createImageJob = vi.fn(async () => ({ id: "job-fixed-source" }));
     const builtin = matrixModel(["q4", "q8"]);

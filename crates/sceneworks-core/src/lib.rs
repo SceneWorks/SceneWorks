@@ -87,6 +87,7 @@ pub mod portable_sources;
 pub mod preview_support;
 pub mod process;
 pub mod project_store;
+pub mod quantization_cache;
 pub mod registry;
 pub mod resolved_options;
 pub use sceneworks_options as options;

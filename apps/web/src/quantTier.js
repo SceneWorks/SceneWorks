@@ -337,6 +337,18 @@ export function tierPickerOptions(model, options = {}) {
   const stateFor = tierStateLookup(model);
   return allPossibleTiers(model, options).map((tier) => {
     if (installed.has(tier)) {
+      const conversion = model?.sourceConversion;
+      if (conversion?.persistence === "resolved_artifact_cache") {
+        if (conversion.targetTiers?.includes(tier)) {
+          return {
+            tier, label: `${effectiveTierLabel(tier, model)} — quantize & save`, disabled: false,
+            conversionHint: `First use quantizes and saves a ${tier.toUpperCase()} copy. Later generations reuse the saved weights. Uses additional disk space.`,
+          };
+        }
+        if (tier === "bf16" && conversion.sourceLabel) {
+          return { tier, label: `${conversion.sourceLabel} (source)`, disabled: false };
+        }
+      }
       return { tier, label: effectiveTierLabel(tier, model), disabled: false };
     }
     // A tier present-but-torn reports cacheState "incomplete" (never "installed"); a cleanly-absent one

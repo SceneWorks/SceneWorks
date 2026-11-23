@@ -65,6 +65,11 @@ export async function prepareDevHost(env, { run = execute, nonce = randomUUID() 
   await writeFile(resolve(work, '.actions-owner.json'), JSON.stringify(owner), { flag: 'wx' });
   const exports = { DEV_HOST_JOB_ROOT: work, TMPDIR: work, TEMP: work, TMP: work, HF_HOME: 'E:\\huggingface', HF_HUB_CACHE: 'E:\\huggingface\\hub', HUGGINGFACE_HUB_CACHE: 'E:\\huggingface\\hub' };
   // Existing workflows still own their build output consumers; do not silently redirect Cargo.
+  if (env['INPUT_CARGO-SLOT'] === 'true') {
+    const target = await realpath(values.CARGO_TARGET_DIR);
+    if (!inside(target, resolve(root, 'build'))) throw Error('dev-host returned a Cargo target outside its managed build slots');
+    exports.CARGO_TARGET_DIR = target; // dev-host: allow-path validated result of dev-host env beneath DEV_HOST_ROOT/build
+  }
   await appendFile(env.GITHUB_ENV, Object.entries(exports).map(([k, v]) => `${k}=${v}\n`).join(''));
   await appendFile(env.GITHUB_STATE, `dev_host_root=${work}\ndev_host_nonce=${nonce}\n`);
   return exports;

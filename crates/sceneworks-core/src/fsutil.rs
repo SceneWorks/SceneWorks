@@ -55,7 +55,7 @@ pub fn write_atomic_with<E: From<io::Error>>(
     fs::create_dir_all(temporary_directory)?;
     let (temporary, mut file) = create_temporary(temporary_directory, options.secret)?;
     file.write_all(contents)?;
-    file.sync_all()?;
+    sync_file(&file)?;
     drop(file); // Windows cannot rename an open staging handle.
     sync_parent_directory(&temporary.0)?;
     before_publish()?;
@@ -136,7 +136,7 @@ fn write_new_unpublished_using(
     fs::create_dir_all(parent_directory(path))?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     let mut owned = TemporaryFile(path.to_path_buf());
-    let result = write(&mut file).and_then(|()| file.sync_all());
+    let result = write(&mut file).and_then(|()| sync_file(&file));
     drop(file);
     result?;
     sync_parent_directory(path)?;
@@ -271,11 +271,43 @@ fn create_temporary(directory: &Path, secret: bool) -> io::Result<(TemporaryFile
 /// best-effort policy; open failures and actual I/O errors still propagate. Windows
 /// has no POSIX directory fsync.
 pub fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    sync_directory(parent_directory(path))
+}
+
+/// Flush a directory using the same unsupported-directory policy as atomic writes.
+pub fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    directory_sync_result(fs::File::open(parent_directory(path))?.sync_all())?;
+    directory_sync_result(sync_file(&fs::File::open(path)?))?;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+/// Flush file content before publication. Darwin's full-device flush is unsupported on SMB;
+/// require POSIX fsync there instead. Actual I/O failures from either flush still propagate.
+pub fn sync_file(file: &fs::File) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        sync_file_with_fallback(file.sync_all(), || loop {
+            match rustix::fs::fsync(file).map_err(io::Error::from) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    file.sync_all()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn sync_file_with_fallback(
+    full_flush: io::Result<()>,
+    fallback: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match full_flush {
+        Err(error) if unsupported_operation(&error) => fallback(),
+        result => result,
+    }
 }
 
 #[cfg(unix)]
@@ -292,6 +324,28 @@ fn directory_sync_result(result: io::Result<()>) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn file_flush_falls_back_only_when_unsupported_and_preserves_failures() {
+        sync_file_with_fallback(Ok(()), || panic!("full flush succeeded")).unwrap();
+        sync_file_with_fallback(Err(io::ErrorKind::Unsupported.into()), || Ok(())).unwrap();
+        assert_eq!(
+            sync_file_with_fallback(Err(io::ErrorKind::Unsupported.into()), || {
+                Err(io::ErrorKind::PermissionDenied.into())
+            })
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            sync_file_with_fallback(Err(io::ErrorKind::WriteZero.into()), || {
+                panic!("a real flush failure must not be hidden")
+            })
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::WriteZero
+        );
+    }
 
     fn names(directory: &Path) -> Vec<PathBuf> {
         fs::read_dir(directory)

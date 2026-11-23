@@ -177,6 +177,47 @@ pub(super) async fn run_utility_job(
     .await;
 }
 
+/// Bind saved weights only after the shared guard has selected this worker's actual source.
+pub(crate) fn saved_quantizations(
+    job_type: &JobType,
+    guard: &external_library_runtime::RuntimeSourceGuard,
+    settings: &Settings,
+) -> Option<std::sync::Arc<sceneworks_core::quantization_cache::SavedQuantizations>> {
+    sceneworks_core::source_precision::applies_to_job(job_type)
+        .then_some(guard.dispatch_payload())
+        .and_then(|payload| {
+            payload
+                .get("modelManifestEntry")
+                .or_else(|| payload.get("manifestEntry"))
+        })
+        .and_then(serde_json::Value::as_object)
+        .filter(|entry| {
+            sceneworks_core::source_precision::SourcePrecision::dense_import(entry).is_some()
+        })
+        .map(|entry| {
+            let owner = entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("imported-checkpoint")
+                .to_owned();
+            let source = sceneworks_core::jobs_store::imported_entry_loadable_path(entry)
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .unwrap_or_else(|| settings.data_dir.clone());
+            let checkpoint = sceneworks_core::quantization_cache::source_identity(entry)
+                .map(str::to_owned)
+                .unwrap_or_else(|| owner.clone());
+            std::sync::Arc::new(
+                sceneworks_core::quantization_cache::SavedQuantizations::new(
+                    &settings.data_dir,
+                    source,
+                    owner,
+                    checkpoint,
+                ),
+            )
+        })
+}
+
 async fn run_utility_job_inner(
     api: &ApiClient,
     settings: &Settings,
@@ -355,13 +396,18 @@ async fn run_utility_job_inner(
         // The guard below outlives this dispatch, retaining its exclusive lease through load.
         dispatch_settings.verified_plan_layers = source_guard.plan_layers();
         dispatch_settings.verified_revision_sources = source_guard.verified_revision_sources();
-        let dispatch_result = dispatch_utility_job(
-            api,
-            &dispatch_settings,
-            http_client,
-            &dispatch_job,
-            &shutdown,
-            source_guard.portable_aux(),
+        let quantization_cache =
+            saved_quantizations(&dispatch_job.job_type, &source_guard, &dispatch_settings);
+        let dispatch_result = load_progress::with_quantization_cache(
+            quantization_cache,
+            dispatch_utility_job(
+                api,
+                &dispatch_settings,
+                http_client,
+                &dispatch_job,
+                &shutdown,
+                source_guard.portable_aux(),
+            ),
         )
         .await;
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
