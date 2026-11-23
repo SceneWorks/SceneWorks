@@ -68,7 +68,11 @@ service = service_file.removesuffix(".plist")
 plist = home / "Library/LaunchAgents" / f"{service}.plist"
 assert plist.is_file(), f"Missing service definition: {plist}"
 service_config = plistlib.loads(plist.read_bytes())
-assert service_config["Label"] == service
+service = service_config["Label"]
+assert re.fullmatch(r"[A-Za-z0-9_.-]+", service)
+assert service_config.get("WorkingDirectory") == str(runner) or any(
+    str(argument).startswith(str(runner) + "/") for argument in service_config.get("ProgramArguments", [])
+), "Service definition does not belong to this runner"
 domain = f"gui/{os.getuid()}/{service}"
 subprocess.run(["/bin/launchctl", "print", domain], stdout=subprocess.DEVNULL, check=True, timeout=8)
 receipt = {"runner": os.environ["RUNNER_NAME"], "root": str(root), "binary": str(binary),
@@ -82,10 +86,11 @@ print(json.dumps(receipt, indent=2))
 helper = task / "restart-after-job.py"
 helper.write_text('''import json,pathlib,subprocess,sys,time
 runner,domain,receipt=sys.argv[1:]
+time.sleep(30)
 quiet=0
 for attempt in range(600):
     lines=subprocess.check_output(['/bin/ps','-axo','comm='],text=True).splitlines()
-    busy=any(line.strip()==runner+'/bin/Runner.Worker' for line in lines)
+    busy=any(pathlib.Path(line.strip()).name=='Runner.Worker' for line in lines)
     quiet=0 if busy else quiet+1
     if quiet>=6:
         p=subprocess.run(['/bin/launchctl','kickstart','-k',domain],capture_output=True,text=True,timeout=30)
