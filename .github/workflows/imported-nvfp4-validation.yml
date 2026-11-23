@@ -11,6 +11,9 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, rw-krea]
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Inspect storage prerequisites without model execution
         shell: bash
         run: |
@@ -39,3 +42,10 @@ jobs:
               if tool.name=='dev-host' and tool.is_file():tools[str(tool)]['version']=command([str(tool),'--version'])
           print(json.dumps({'runner':os.environ['RUNNER_NAME'],'runner_root':str(runner),'process_config':{k:os.environ.get(k) for k in ('DEV_HOST_ROOT','DEV_HOST_BIN','ACTIONS_RUNNER_HOOK_JOB_STARTED')},'saved_config':config,'mounts':mount_points,'tools':tools},indent=2))
           PY
+      - name: Install and persist verified managed storage
+        run: python3 scripts/ci/repair-mac-runner-storage.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: mac-storage-repair
+          path: storage-repair.json
+          if-no-files-found: error
