@@ -6,11 +6,17 @@ import pathlib
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import urllib.request
 
 assert os.environ.get("GITHUB_ACTIONS") == "true"
 assert os.environ.get("RUNNER_NAME") == "nax-macos-2"
+# Retire this repair's earlier deferred helper, whose wait included unrelated listeners.
+old_helper = "/Volumes/Work/dev-host/hosts/Michael-MBP/t/d09e5df2/restart-after-job.py"  # dev-host: allow-path verified task-owned helper from repair run 45091976402
+previous = subprocess.run(["/bin/ps", "-p", "47205", "-o", "args="], capture_output=True, text=True)
+if old_helper in previous.stdout:
+    os.kill(47205, signal.SIGTERM)
 root = pathlib.Path("/Volumes/Work/dev-host")  # dev-host: allow-path established shared host root; never create its mount or marker
 home = pathlib.Path.home()  # dev-host: allow-path installed binary and runner configuration only
 runner = pathlib.Path(os.environ["RUNNER_WORKSPACE"]).parent.parent
@@ -90,7 +96,7 @@ time.sleep(30)
 quiet=0
 for attempt in range(600):
     lines=subprocess.check_output(['/bin/ps','-axo','comm='],text=True).splitlines()
-    busy=any(pathlib.Path(line.strip()).name=='Runner.Worker' for line in lines)
+    busy=any(line.strip().startswith(runner+'/') and pathlib.Path(line.strip()).name=='Runner.Worker' for line in lines)
     quiet=0 if busy else quiet+1
     if quiet>=6:
         p=subprocess.run(['/bin/launchctl','kickstart','-k',domain],capture_output=True,text=True,timeout=30)
@@ -109,3 +115,5 @@ with (task / "restart.log").open("ab") as log:
         "/usr/bin/python3", str(helper), str(runner), domain, str(task / "storage-repair.json")
     ], env=background_env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
 print(json.dumps({"restartHelperPid": process.pid, "waitsForNoRunnerWorker": True}))
+receipt["restartHelperPid"] = process.pid
+(task / "storage-repair.json").write_text(json.dumps(receipt, indent=2))
