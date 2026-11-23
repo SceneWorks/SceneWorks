@@ -1,309 +1,41 @@
-name: Imported checkpoint native validation
+name: Mac runner storage maintenance
 
-# Real model inference is opt-in, never ordinary PR/main CI.
 on:
   workflow_dispatch:
-    inputs:
-      format:
-        description: Imported checkpoint formats to execute
-        type: choice
-        default: nvfp4
-        options: [nvfp4, fp8, convrot, all, sdxl-fp8-reference, quantization-cache]
-      cache_backend:
-        description: Native saved-quantization proof backend
-        type: choice
-        default: both
-        options: [both, candle, mlx]
-      mac_runner:
-        description: Optional secondary Mac routing when the primary host is unavailable
-        type: choice
-        default: auto
-        options: [auto, secondary]
 
 permissions:
   contents: read
 
 jobs:
-  imported-checkpoint-worker-smoke:
-    if: ${{ inputs.format != 'quantization-cache' }}
-    # Preserve every dispatched request; the physical UUID guard owns exclusion.
-    concurrency:
-      group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
-      cancel-in-progress: false
-    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 300
-    defaults:
-      run:
-        working-directory: sceneworks
-    env:
-      CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
-      SCENEWORKS_GPU_ID: "0"
-      CUDA_COMPUTE_CAP: "120"
-      CARGO_PROFILE_RELEASE_DEBUG: "0"
-      HF_HUB_CACHE: 'E:\huggingface\hub'
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
-      SHARED_FORMAT_PROFILE: ${{ inputs.format }}
-      SHARED_FORMAT_FEATURES: ${{ inputs.format == 'sdxl-fp8-reference' && 'model-inference-proof' || 'backend-candle' }}
-      SHARED_FORMAT_INFERENCE_ROOT: ${{ github.workspace }}/inference
-      SCENEWORKS_SCALAR_FP8_CHECKPOINT: 'C:\Users\Michael\AppData\Roaming\SceneWorks\data\models\imports\muse_fp8\Muse__By__Stable__Yogi__Krea2__V4.0__Extended__CIV__fp8-scaled__C86.safetensors'
-      SCENEWORKS_CONVROT_CHECKPOINT: 'C:\Users\Michael\AppData\Roaming\SceneWorks\data\models\imports\muse_int8\Muse__By__Stable__Yogi__Krea2__V4.0__Extended__CIV__INT8-ConvRot__C86.safetensors'
-      SCENEWORKS_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
-      SCENEWORKS_IMPORTED_FP8_ADAPTER: 'C:\Users\Michael\AppData\Roaming\SceneWorks\data\projects\training-tests.sceneworks\loras\imports\krea_2_mova\nova_lora-step003500.safetensors'
-      SCENEWORKS_IMPORTED_SDXL_FP8_CHECKPOINT: 'E:\huggingface\hub\models--icefog72--IceBlubery-SDXL-FP8\snapshots\2c477db63dc95a8b93cfb6197b7596495f6593e1\IceBlubery-SDXL-FP8.safetensors'
+  inspect:
+    runs-on: [self-hosted, macOS, ARM64, rw-krea]
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: sceneworks
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - name: Check proof refusal and receipt parsing without model execution
-        run: node --test scripts/ci/imported-shared-format-proof.test.mjs scripts/ci/imported-shared-format-h3-proof.test.mjs
-      - uses: ./sceneworks/.github/actions/prepare-rust-runner
-        with:
-          workspace-directory: sceneworks
-      - name: Prepare the supported persistent Cargo cache
-        shell: powershell
-        run: |
-          node scripts/prepare-windows-flash-prebuilt.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
-          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
-          Add-Content -Path $env:GITHUB_ENV -Value "TEMP=$env:RUNNER_TEMP"
-          Add-Content -Path $env:GITHUB_ENV -Value "TMP=$env:RUNNER_TEMP"
-          Add-Content -Path $env:GITHUB_ENV -Value "MODEL_PROOF_OUTPUT_DIR=$env:RUNNER_TEMP\shared-format-proof-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_IMPORTED_FP8_CHECKPOINT=$env:SCENEWORKS_SCALAR_FP8_CHECKPOINT"
-          Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_IMPORTED_CONVROT_CHECKPOINT=$env:SCENEWORKS_CONVROT_CHECKPOINT"
-      - name: Fetch the exact pinned dependencies
-        run: cargo fetch --locked
-      - name: Read the paired inference revision
-        id: paired
-        shell: powershell
-        run: |
-          $pin = node --input-type=module -e "import {readFileSync} from 'node:fs'; import {lockedInferenceRevision} from './scripts/select-windows-cargo-cache.mjs'; console.log(lockedInferenceRevision(readFileSync('Cargo.lock','utf8')));"
-          if ($LASTEXITCODE -ne 0) { throw 'cannot read the locked inference revision' }
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "revision=$pin"
-      - name: Check out the paired inference source for the H3 product proof
-        if: ${{ inputs.format == 'convrot' || inputs.format == 'all' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: SceneWorks/inference
-          ref: ${{ steps.paired.outputs.revision }}
-          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
-          path: inference
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Classify actual headers and plans before native compilation
-        run: cargo test --locked -p sceneworks-core --lib base_weights::tests::real_fixed_source_precision_headers -- --exact --ignored --nocapture
-      - name: Compile the native worker validation binary without execution
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test --locked -p sceneworks-worker --lib --features %SHARED_FORMAT_FEATURES% --release --no-run --message-format=json > "%RUNNER_TEMP%\shared-format-build.jsonl"
-          if errorlevel 1 exit /b 1
-      - name: Select the actual compiled libtest binary
-        shell: powershell
-        run: |
-          $artifacts = Get-Content "$env:RUNNER_TEMP\shared-format-build.jsonl" | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'sceneworks_worker' -and $_.profile.test -and $_.executable }
-          if (@($artifacts).Count -ne 1) { throw 'expected one compiled native worker test binary' }
-          $listing = & $artifacts.executable --list
-          $required = @('imported_scalar_fp8_worker_gpu_smoke', 'imported_sdxl_fp8_worker_gpu_smoke', 'imported_convrot_worker_gpu_smoke', 'imported_native_nvfp4_worker_gpu_smoke', 'imported_shared_formats_product_import_preflight')
-          if ($env:SHARED_FORMAT_PROFILE -eq 'sdxl-fp8-reference') { $required += 'imported_sdxl_fp8_dense_reference' }
-          foreach ($test in $required) {
-            if (@($listing | Where-Object { $_ -eq "imported_comfy_quant_gpu_smoke::${test}: test" }).Count -ne 1) { throw "missing exact compiled case $test" }
-          }
-          Add-Content -Path $env:GITHUB_ENV -Value "SHARED_FORMAT_TEST_BINARY=$($artifacts.executable)"
-      - name: Preflight normal request routes and prepared source bindings without execution
-        shell: powershell
-        run: |
-          & $env:SHARED_FORMAT_TEST_BINARY imported_comfy_quant_gpu_smoke::imported_shared_formats_product_import_preflight --exact --ignored --nocapture --test-threads=1
-          if ($LASTEXITCODE -ne 0) { throw 'shared-format request route preflight failed' }
-      - name: Execute completed native requests under the existing physical GPU0 guard
-        shell: powershell
-        run: python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format --budget-minutes 120 --physical-indices 0 --require-physical-index 0 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-proof.mjs
-      - name: Execute the second ConvRot architecture through normal import and completed AV
-        if: ${{ inputs.format == 'convrot' || inputs.format == 'all' }}
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          python -I scripts/ci/windows_cuda_execution.py --actor imported-shared-format-h3 --budget-minutes 150 --physical-indices 0 --require-physical-index 0 --min-free-mib 49152 -- node scripts/ci/imported-shared-format-h3-proof.mjs
-      - name: Retain bounded generated outputs, receipts and physical resource evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: imported-shared-format-${{ inputs.format }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ env.MODEL_PROOF_OUTPUT_DIR }}
-            ${{ env.MODEL_PROOF_OUTPUT_DIR }}-h3/cuda.reduced.real-independent-fl2va
-            ${{ env.MODEL_PROOF_OUTPUT_DIR }}-h3/plan.json
-            ${{ env.MODEL_PROOF_OUTPUT_DIR }}-h3/native-materialization.json
-            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-imported-shared-format/resource-receipt.json
-            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-imported-shared-format-h3/resource-receipt.json
-          if-no-files-found: error
-
-  saved-quantization-candle:
-    if: ${{ inputs.format == 'quantization-cache' && inputs.cache_backend != 'mlx' }}
-    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 90
-    env:
-      CARGO_BUILD_JOBS: '4'
-      CUDA_COMPUTE_CAP: '120'
-      SCENEWORKS_BF16_CHECKPOINT: 'C:\Users\Michael\AppData\Roaming\SceneWorks\data\models\imports\sick_ollie\sickOllie_krea2_full_bf16.safetensors' # dev-host: allow-path existing installed checkpoint, read-only and explicitly supplied by the user
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - uses: ./.github/actions/prepare-rust-runner
-      - uses: ./.github/actions/cleanup-runner-storage
-        with:
-          dev-host: 'true'
-          cargo-slot: 'true'
-      - name: Validate the actual BF16 header and prepare the bounded harness
-        shell: powershell
-        run: |
-          if (-not $env:DEV_HOST_JOB_ROOT) { throw 'Managed job storage was not allocated' }
-          $root = Join-Path $env:DEV_HOST_JOB_ROOT 'saved-quantization'
-          Add-Content $env:GITHUB_ENV "SAVED_QUANTIZATION_ROOT=$root"
-          node scripts/ci/saved-quantization-proof.mjs --prepare --backend candle --root $root
-          if ($LASTEXITCODE -ne 0) { throw 'saved quantization metadata preflight failed' }
-      - name: Select the existing native Cargo cache
-        shell: powershell
-        run: |
-          node scripts/prepare-windows-flash-prebuilt.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
-      - name: Compile the focused harness without executing quantization
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo build --manifest-path "%SAVED_QUANTIZATION_ROOT%\harness\Cargo.toml" --release --features candle
-          if errorlevel 1 exit /b %ERRORLEVEL%
-      - name: Run cold and fresh-process warm proofs on an idle physical GPU
-        shell: powershell
-        run: |
-          if (-not $env:CARGO_TARGET_DIR) { throw 'managed target directory was not selected' }
-          $env:SAVED_QUANTIZATION_BINARY = Join-Path $env:CARGO_TARGET_DIR 'release\saved-quantization-proof.exe'
-          $cards = nvidia-smi --query-gpu=index,uuid,utilization.gpu,memory.free --format=csv,noheader,nounits | ConvertFrom-Csv -Header index,uuid,utilization,free
-          if ($LASTEXITCODE -ne 0) { throw 'GPU inventory failed' }
-          $card = $cards | Where-Object { [int]$_.free -ge 2048 } | Sort-Object @{Expression={[int]$_.utilization}},@{Expression={-[int]$_.free}} | Select-Object -First 1
-          if (-not $card) { throw 'No GPU has the required free memory' }
-          $env:CUDA_VISIBLE_DEVICES = $card.uuid.Trim()
-          $env:SCENEWORKS_GPU_ID = '0'
-          $physicalIndex = [int]$card.index
-          python -I scripts/ci/windows_cuda_execution.py --actor saved-quantization --budget-minutes 15 --physical-indices $physicalIndex --require-physical-index $physicalIndex --min-free-mib 2048 -- node scripts/ci/saved-quantization-proof.mjs --backend candle --root $env:SAVED_QUANTIZATION_ROOT
-          if ($LASTEXITCODE -ne 0) { throw 'saved quantization cold/warm proof failed' }
-      - name: Stage only JSON receipts inside the artifact workspace
-        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
-        shell: powershell
-        run: node scripts/ci/saved-quantization-proof.mjs --stage-receipts --backend candle --root $env:SAVED_QUANTIZATION_ROOT
-      - name: Retain metadata and physical execution receipts
-        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: saved-quantization-candle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/saved-quantization-receipts/${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
-      - name: Confirm publication before managed job storage cleanup
-        if: ${{ success() && env.SAVED_QUANTIZATION_ROOT != '' }}
-        shell: powershell
-        run: Add-Content $env:GITHUB_ENV 'DEV_HOST_WORK_UPLOADS_COMPLETE=true'
-
-  saved-quantization-mlx:
-    if: ${{ inputs.format == 'quantization-cache' && inputs.cache_backend != 'candle' }}
-    runs-on: ${{ inputs.mac_runner == 'secondary' && fromJSON('["self-hosted","macOS","ARM64","nax","rw-krea"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
-    timeout-minutes: 90
-    defaults:
-      run:
+      - name: Inspect storage prerequisites without model execution
         shell: bash
-    env:
-      CARGO_BUILD_JOBS: '4'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
-        with:
-          toolchain: "1.98.0"
-      - name: Allocate native work and the existing managed build slot
         run: |
-          test -n "$DEV_HOST_ROOT"
-          dev_host="${DEV_HOST_BIN:-$(command -v dev-host || true)}"
-          if [ -z "$dev_host" ]; then dev_host="$HOME/.local/bin/dev-host"; fi # dev-host: allow-path installed storage allocator on the system volume, not scratch
-          "$dev_host" env --format github --project SceneWorks --worktree "$GITHUB_WORKSPACE" --session "saved-quantization-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
-      - name: Prepare the bounded native harness
-        run: |
-          root="$TMPDIR/saved-quantization"
-          echo "SAVED_QUANTIZATION_ROOT=$root" >> "$GITHUB_ENV"
-          node scripts/ci/saved-quantization-proof.mjs --prepare --backend mlx --root "$root"
-      - name: Reuse the supported Release MLX libraries
-        run: |
-          set +e
-          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
-          rc=$?
-          set -e
-          if [ "$rc" = 1 ]; then
-            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
-            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
-          elif [ "$rc" != 0 ]; then
-            exit "$rc"
-          fi
-      - name: Compile the focused harness without numerical execution
-        run: cargo build --manifest-path "$SAVED_QUANTIZATION_ROOT/harness/Cargo.toml" --release --features mlx
-      - name: Run both processes under the shared Metal lease
-        run: |
-          test -n "$CARGO_TARGET_DIR"
-          export SAVED_QUANTIZATION_BINARY="$CARGO_TARGET_DIR/release/saved-quantization-proof"
-          source scripts/ci/metal_execution_entry.sh
-          metal_execution_entry 18000 node scripts/ci/saved-quantization-proof.mjs --backend mlx --root "$SAVED_QUANTIZATION_ROOT"
-      - name: Remove inactive attempt-owned outputs and preserve JSON receipts
-        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
-        run: |
-          python3 - "$SAVED_QUANTIZATION_ROOT" <<'PY'
-          import fcntl,json,os,pathlib,shutil,subprocess,sys
-          root=pathlib.Path(sys.argv[1]).resolve()
-          assert root.name=='saved-quantization' and root.parent==pathlib.Path(os.environ['TMPDIR']).resolve()
-          assert root.is_relative_to(pathlib.Path(os.environ['DEV_HOST_ROOT']).resolve())
-          assert (root/'.saved-quantization-proof').read_text().strip()==f"{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
-          processes=subprocess.check_output(['ps','-axo','pid=,args='],text=True)
-          for line in processes.splitlines():
-              pid,*arguments=line.strip().split(None,1)
-              args=arguments[0] if arguments else ''
-              assert int(pid)==os.getpid() or str(root) not in args,f'Active process retained: {line}'
-          removed=[]
-          for name in ('harness','data','source','target'):
-              path=root/name
-              if not path.exists():continue
-              size=0
-              for directory,dirs,files in os.walk(path,followlinks=False):
-                  assert not pathlib.Path(directory).is_symlink()
-                  assert all(not (pathlib.Path(directory)/entry).is_symlink() for entry in dirs+files)
-                  size+=sum((pathlib.Path(directory)/entry).stat().st_size for entry in files)
-                  for entry in files:
-                      if entry in ('.cargo-lock','.lock'):
-                          with (pathlib.Path(directory)/entry).open('r+b') as lock:
-                              fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-              shutil.rmtree(path)
-              assert not path.exists()
-              removed.append({'path':str(path),'bytes':size,'verifiedAbsent':True})
-          (root/'cleanup.json').write_text(json.dumps({'verifiedAbsent':removed}))
-          print(json.dumps({'removedBytes':sum(entry['bytes'] for entry in removed),'verifiedAbsent':removed}))
+          python3 - <<'PY'
+          import json,os,pathlib,re,subprocess
+          def command(args):
+              try:
+                  p=subprocess.run(args,capture_output=True,text=True,timeout=8)
+                  return {'code':p.returncode,'stdout':p.stdout.strip(),'stderr':p.stderr.strip()}
+              except Exception as e:return {'error':str(e)}
+          home=pathlib.Path.home() # dev-host: allow-path inspect installed tools/config only; no scratch on the system volume
+          runner=pathlib.Path(os.environ['RUNNER_WORKSPACE']).parent.parent
+          config={}
+          if (runner/'.env').is_file():
+              for line in (runner/'.env').read_text().splitlines():
+                  k,sep,v=line.partition('=')
+                  if k in ('DEV_HOST_ROOT','DEV_HOST_BIN','ACTIONS_RUNNER_HOOK_JOB_STARTED'):config[k]=v
+          mounts=command(['/sbin/mount'])
+          mount_points=[]
+          for line in mounts.get('stdout','').splitlines():
+              match=re.search(r' on (.+) \(([^,)]+)',line)
+              if match:mount_points.append({'path':match[1],'type':match[2]})
+          tools={}
+          for tool in (home/'.local/bin/dev-host',home/'.local/share/dev-host/job-started.sh'):
+              tools[str(tool)]={'exists':tool.exists()}
+              if tool.name=='dev-host' and tool.is_file():tools[str(tool)]['version']=command([str(tool),'--version'])
+          print(json.dumps({'runner':os.environ['RUNNER_NAME'],'runner_root':str(runner),'process_config':{k:os.environ.get(k) for k in ('DEV_HOST_ROOT','DEV_HOST_BIN','ACTIONS_RUNNER_HOOK_JOB_STARTED')},'saved_config':config,'mounts':mount_points,'tools':tools},indent=2))
           PY
-      - name: Stage only JSON receipts inside the artifact workspace
-        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
-        run: node scripts/ci/saved-quantization-proof.mjs --stage-receipts --backend mlx --root "$SAVED_QUANTIZATION_ROOT"
-      - name: Retain cold and warm receipts
-        if: ${{ always() && env.SAVED_QUANTIZATION_ROOT != '' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: saved-quantization-mlx-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/saved-quantization-receipts/${{ github.run_id }}-${{ github.run_attempt }}
-          if-no-files-found: error
