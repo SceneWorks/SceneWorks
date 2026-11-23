@@ -29991,6 +29991,9 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
 #[test]
 fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
     use crate::external_library_runtime::{ResidentBaseShape, PLAN_BACKED_RESIDENT_BASE_MODELS};
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        model_download, selected_resident_base_closure_for_row,
+    };
     use std::collections::BTreeSet;
 
     let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
@@ -30067,6 +30070,38 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
                 row.tier,
                 row.family
             );
+            if row.shape == ResidentBaseShape::KreaImportedCompanions {
+                let companions =
+                    selected_resident_base_closure_for_row(&entry, row.tier, row.shape, platform)
+                        .expect("guard projects the Krea companion closure");
+                let download = model_download(&companions).expect("Krea companion download");
+                let files = download["files"]
+                    .as_array()
+                    .expect("Krea companion selectors");
+                for selector in [
+                    "transformer/config.json",
+                    "text_encoder/*",
+                    "vae/*",
+                    "tokenizer/*",
+                ] {
+                    let selector = format!("{}/{selector}", row.tier);
+                    assert!(
+                        files.iter().any(|file| file.as_str() == Some(&selector)),
+                        "Krea companion closure on {platform} omitted {selector}"
+                    );
+                }
+                let transformer = format!("{}/transformer/", row.tier);
+                let transformer_files: Vec<&str> = files
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|file| file.starts_with(&transformer))
+                    .collect();
+                assert_eq!(
+                    transformer_files,
+                    [format!("{transformer}config.json")],
+                    "the imported checkpoint owns the transformer weights on {platform}"
+                );
+            }
         }
     }
 
@@ -30103,12 +30138,10 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
 
     // And the SHAPE is not free-form: it says which of the base entry's repositories the family's
     // route opens, which is exactly what the family's presence in one plan table or the other
-    // already declares. A `base-snapshot` family resolves a whole tier DIRECTORY
-    // (`resolve_krea_imported_base_tier` → `WeightsSource::Dir`); a component-resolver family
-    // resolves named components out of a co-requisite repo and never opens the base's own primary
-    // (`resolve_mage_finetuned_components` → `resolve_co_requisites_for_tier`). Getting this
-    // backwards is silent: pass 3 is all-or-nothing across a model's pairs, so an over-wide
-    // closure stops the components being served instead of erroring.
+    // already declares. Krea's base directory contains the transformer config and shared
+    // components, while the separately bound import supplies the transformer weights.
+    // Mage resolves named components from a co-requisite repo. An over-wide closure stops
+    // the guard from serving those components because it verifies all pairs together.
     for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
         let in_base_tiers = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
             .iter()
@@ -30116,16 +30149,14 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
         let in_component_resolvers = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
             .iter()
             .any(|(family, _)| *family == row.family);
-        let expected = if in_base_tiers {
-            ResidentBaseShape::FullTier
-        } else {
-            assert!(
-                in_component_resolvers,
-                "family {:?} is in neither plan table, which the set equality above should have \
-                 caught",
+        let expected = match (in_base_tiers, in_component_resolvers) {
+            (true, false) if row.family == "krea_2" => ResidentBaseShape::KreaImportedCompanions,
+            (true, false) => ResidentBaseShape::FullTier,
+            (false, true) => ResidentBaseShape::ComponentsOnly,
+            _ => panic!(
+                "family {:?} must have exactly one plan resolver",
                 row.family
-            );
-            ResidentBaseShape::ComponentsOnly
+            ),
         };
         assert_eq!(
             row.shape,
