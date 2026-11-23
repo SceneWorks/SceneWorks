@@ -379,24 +379,35 @@ fn image_import_encoding_supported(
     component: ComponentRole,
     quant: QuantFormat,
 ) -> bool {
-    // Family membership constrains source topology. Encoded projections share one format
-    // contract; adding an engine codec must not require a separate model-by-format allowlist.
-    let topology_supported = matches!(
-        (family, component),
-        (
-            crate::model_family::KREA_2
-                | crate::model_family::FLUX2
-                | crate::model_family::MAGE_FLOW,
-            ComponentRole::Transformer
-        ) | (crate::model_family::SDXL, ComponentRole::Checkpoint)
-    );
+    // A source shape is loadable only when the shipped provider facts declare its route.
+    // Numeric encoding remains independent of architecture and is verified by the shared reader.
+    let shapes: &[&str] = match component {
+        ComponentRole::Transformer => &["transformer_file", "transformer_directory"],
+        ComponentRole::Checkpoint => &["fused_checkpoint"],
+        _ => &[],
+    };
+    let topology_supported = ["mlx", "candle"].into_iter().any(|backend| {
+        crate::jobs_store::imported_provider_routes(backend, family)
+            .any(|route| route.operation == "generate" && shapes.contains(&route.source.as_str()))
+    });
+    let source_codec_supported = crate::checkpoint_loader::adapter(family)
+        .and_then(|adapter| adapter.loader_reuse)
+        .is_none_or(|reuse| {
+            quant
+                .source_codec_id()
+                .is_some_and(|codec| reuse.supported_source_codecs.contains(&codec))
+        });
     topology_supported
+        && source_codec_supported
         && match quant {
             QuantFormat::Bf16 | QuantFormat::F16 | QuantFormat::F32 => true,
             format if format.shared_projection_format() => true,
             // NVFP4's existing imported source routes require the Candle implementation. Mage is
             // MLX-only; this does not advertise an NVFP4 Metal operator that the backend lacks.
-            QuantFormat::Nvfp4 => family != crate::model_family::MAGE_FLOW,
+            QuantFormat::Nvfp4 => crate::jobs_store::imported_provider_routes("candle", family)
+                .any(|route| {
+                    route.operation == "generate" && shapes.contains(&route.source.as_str())
+                }),
             _ => false,
         }
 }
@@ -930,6 +941,11 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import for the 'minimax-h3' family supports dense f16, bf16, f32 or \
              validated FP8 or ConvRot/W4A8 INT8 transformer components, not {quant}."
         )),
+        (Some(family), component, quant) if crate::checkpoint_loader::adapter(family)
+            .and_then(|adapter| adapter.loader_reuse).is_some() => {
+            let reuse = crate::checkpoint_loader::adapter(family).and_then(|adapter| adapter.loader_reuse).expect("guarded loader reuse");
+            Err(format!("The registered {family:?} loader does not accept {component} source encoding {quant}. Its supported source codecs are {}.", reuse.supported_source_codecs.join(", ")))
+        }
         (Some(family), _, _) => Err(format!(
             "Model import has no compatible loader arm for the '{family}' family."
         )),
@@ -1713,6 +1729,27 @@ fn detect_base_family(keys: &[&str]) -> Option<String> {
 /// we ship, so one hit is decisive (mirroring the LoRA detector's
 /// `detect_unique_key_family` posture).
 fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
+    // Reusable-loader adapters own discriminating architecture signatures. Legacy migration
+    // signatures describe known-family dialects and may intentionally overlap another family;
+    // those retain the specificity checks below until migrated to the reusable loader contract.
+    for adapter in gen_core::CHECKPOINT_ADAPTERS
+        .iter()
+        .filter(|adapter| adapter.loader_reuse.is_some())
+    {
+        if adapter.signatures.iter().any(|signature| {
+            !signature.required_tensor_names.is_empty()
+                && signature
+                    .required_tensor_names
+                    .iter()
+                    .all(|required| keys.iter().any(|key| key == required))
+        }) {
+            if let Some(family) =
+                crate::model_family::exact_identity(adapter.compatibility_projection.family)
+            {
+                return Some(family);
+            }
+        }
+    }
     // Classic SDXL LDM/A1111 fused checkpoint: a UNet under `model.diffusion_model.input_blocks`,
     // dual CLIP conditioners, and a `first_stage_model` VAE. The UNet input/output/middle block
     // grammar is distinct from modern DiTs; requiring the SDXL second conditioner prevents an SD1.5
@@ -1895,6 +1932,79 @@ fn detect_encoder_or_vae_family(keys: &[&str]) -> Option<&'static str> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reusable_loader_architecture_comes_from_its_exact_registered_signature() {
+        let signature = &gen_core::MOSS_IMAGE_CHECKPOINT_ADAPTER.signatures[0];
+        let mut header = serde_json::Map::new();
+        for key in signature.required_tensor_names {
+            header.insert((*key).to_owned(), json!({"dtype":"BF16","shape":[1]}));
+        }
+        assert!(
+            matches!(classify_base_header(&Value::Object(header.clone())),
+            BaseWeightDetection::Recognized(BaseWeightVerdict { family: Some(family), component: ComponentRole::Transformer, .. })
+                if family == crate::model_family::MOSS_IMAGE)
+        );
+        header.remove("shared_block_modulation.weight");
+        assert!(matches!(
+            classify_base_header(&Value::Object(header)),
+            BaseWeightDetection::Unrecognized { .. }
+        ));
+        let prefixed = signature
+            .required_tensor_names
+            .iter()
+            .map(|name| {
+                (
+                    format!("model.diffusion_model.{name}"),
+                    json!({"dtype":"BF16","shape":[1]}),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            classify_base_header(&Value::Object(prefixed)),
+            BaseWeightDetection::Unrecognized { .. }
+        ));
+    }
+
+    #[test]
+    fn reusable_loader_admits_only_its_declared_verified_source_codecs() {
+        for codec in gen_core::MOSS_IMAGE_CHECKPOINT_ADAPTER
+            .loader_reuse
+            .unwrap()
+            .supported_source_codecs
+        {
+            assert!([
+                QuantFormat::Bf16,
+                QuantFormat::F16,
+                QuantFormat::F32,
+                QuantFormat::ConvRotInt8
+            ]
+            .iter()
+            .any(|quant| quant.source_codec_id() == Some(*codec)
+                && image_import_encoding_supported(
+                    crate::model_family::MOSS_IMAGE,
+                    ComponentRole::Transformer,
+                    *quant
+                )));
+        }
+        assert!(!image_import_encoding_supported(
+            crate::model_family::MOSS_IMAGE,
+            ComponentRole::Transformer,
+            QuantFormat::Nvfp4
+        ));
+        assert!(!image_import_encoding_supported(
+            crate::model_family::MOSS_IMAGE,
+            ComponentRole::Transformer,
+            QuantFormat::Int8TensorwisePerRow
+        ));
+    }
+
+    #[test]
+    fn legacy_dialect_markers_do_not_grant_a_different_architecture() {
+        let sd1 = json!({"model.diffusion_model.input_blocks.0.0.weight":{"dtype":"F16"}});
+        assert!(!matches!(classify_base_header(&sd1),
+            BaseWeightDetection::Recognized(BaseWeightVerdict { family: Some(family), .. }) if family == "sdxl"));
+    }
 
     /// Build a safetensors-shaped header from `(name, dtype)` pairs. Ordinary dtype-based
     /// classification does not need shapes; the native-NVFP4 tests build their exact header below.
@@ -3770,6 +3880,7 @@ mod tests {
             ("mage-flow", ComponentRole::Transformer),
             ("flux2", ComponentRole::Transformer),
             ("minimax-h3", ComponentRole::Transformer),
+            ("moss-image", ComponentRole::Transformer),
         ];
         let mut rows: Vec<_> = expected.iter().map(|(family, _)| *family).collect();
         rows.sort_unstable();

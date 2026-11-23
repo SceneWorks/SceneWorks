@@ -1663,7 +1663,7 @@ export function ImageStudio() {
       skipAdvancedDefaultsReset.current = false;
       return;
     }
-    if (mossEdit && isMossImage(previousModel)) return;
+    if (mossEdit && isMossImage(imageModels.find((entry) => entry.id === previousModel) ?? previousModel)) return;
     setMossImage(mossDefaults());
     setMossDmdSteps(8);
     setSampler(samplerDefault);
@@ -1679,7 +1679,7 @@ export function ImageStudio() {
     );
     setStepsOverride("");
     setGuidanceOverride("");
-  }, [model, resolutionOptions, samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, guidanceMethodOptions, selectedModel, mossEdit, setMossImage, setMossDmdSteps, setSampler, setScheduler, setSchedulerShift, setStepsOverride, setGuidanceOverride]);
+  }, [model, imageModels, resolutionOptions, samplerOptions, schedulerOptions, samplerDefault, schedulerDefault, guidanceMethodOptions, selectedModel, mossEdit, setMossImage, setMossDmdSteps, setSampler, setScheduler, setSchedulerShift, setStepsOverride, setGuidanceOverride]);
   useMossImageTransition({
     model,
     mossEditTransition,

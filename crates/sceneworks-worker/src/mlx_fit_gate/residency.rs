@@ -1010,12 +1010,26 @@ pub(super) fn spec_component_bytes_with_provider_footprint_and_sizes(
     // not a split of `spec.weights` alone. Treat it as authoritative so a `base_snapshot` supplying
     // tokenizer/config does not recursively re-price the snapshot transformer the primary File
     // replaces.
-    let provider_owned_file_footprint = matches!(&spec.weights, WeightsSource::File(_))
+    let replaces_component = gen_core::CHECKPOINT_ADAPTERS.iter().any(|adapter| {
+        adapter.loader_reuse.is_some_and(|reuse| {
+            reuse.provider_id == engine_id
+                && spec.checkpoint_component(reuse.component_role).is_some()
+        })
+    });
+    let provider_owned_assembly_footprint = (matches!(&spec.weights, WeightsSource::File(_))
+        || replaces_component)
         .then_some(footprint)
         .flatten();
     let mut headroom = HeadroomAllowance::GENERIC;
-    let (mut total_bytes, mut te_bytes) = match &spec.weights {
-        WeightsSource::Dir(dir) => {
+    let (mut total_bytes, mut te_bytes) = match (&spec.weights, provider_owned_assembly_footprint) {
+        (_, Some(components)) => (
+            components
+                .text_encoder
+                .saturating_add(components.dit)
+                .saturating_add(components.vae),
+            components.text_encoder,
+        ),
+        (WeightsSource::Dir(dir), None) => {
             let mut total = sum_safetensors_bytes(dir);
             let te = resolve_text_encoder_bytes(footprint_te, dir);
             if matches!(engine_id, "lens" | "lens_turbo") {
@@ -1028,21 +1042,7 @@ pub(super) fn spec_component_bytes_with_provider_footprint_and_sizes(
             }
             (total, te)
         }
-        // A single-file source has no component tree of its own. A File-aware provider footprint
-        // prices the complete consumed assembly; otherwise keep the primary file here and add only
-        // the well-known companion subtrees below.
-        WeightsSource::File(_) => provider_owned_file_footprint.map_or_else(
-            || (source_bytes(&spec.weights), footprint_te.unwrap_or(0)),
-            |components| {
-                (
-                    components
-                        .text_encoder
-                        .saturating_add(components.dit)
-                        .saturating_add(components.vae),
-                    components.text_encoder,
-                )
-            },
-        ),
+        (WeightsSource::File(_), None) => (source_bytes(&spec.weights), footprint_te.unwrap_or(0)),
     };
     // Every directory source in this set was priced recursively. A selected encoder at the same
     // path or below one is already covered; a selected encoder above one is not, because its exact
@@ -1076,7 +1076,7 @@ pub(super) fn spec_component_bytes_with_provider_footprint_and_sizes(
     // the legacy override admit tiers that do not fit. A component resolved to a path INSIDE the
     // weights dir is skipped, because the scan already counted it.
     for (component_id, source) in &spec.components {
-        if provider_owned_file_footprint.is_some() {
+        if provider_owned_assembly_footprint.is_some() {
             // The File-aware footprint already reflects every named source the provider consumes.
             continue;
         }
@@ -1161,7 +1161,7 @@ pub(super) fn spec_component_bytes_with_provider_footprint_and_sizes(
     // A selection-aware provider owns the staged/materialized TE footprint; exact direct-shard bytes
     // are the fallback only when that provider fact is absent or zero. Provider-owned File
     // footprints are complete assemblies and remain authoritative.
-    if provider_owned_file_footprint.is_none() {
+    if provider_owned_assembly_footprint.is_none() {
         if let Some(selected) = selected_text_encoder {
             let already_priced = recursively_priced_paths
                 .iter()

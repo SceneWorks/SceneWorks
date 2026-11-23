@@ -460,15 +460,21 @@ fn imported_image_defaults_join_live_family_routes() {
         .iter()
         .copied()
         .collect();
-    assert_eq!(supported, ["flux2", "krea_2", "mage-flow", "sdxl"].into());
+    assert_eq!(
+        supported,
+        ["flux2", "krea_2", "mage-flow", "moss-image", "sdxl"].into()
+    );
     for (family, expected_modes) in [
         ("krea_2", json!(["text_to_image", "edit_image"])),
         ("sdxl", json!(["text_to_image"])),
         ("mage-flow", json!(["text_to_image"])),
         ("flux2", json!(["text_to_image"])),
+        ("moss-image", json!(["text_to_image"])),
     ] {
         let mut entry = serde_json::Map::new();
+        entry.insert("family".into(), json!(family));
         crate::lora_family::apply_model_manifest_defaults(&mut entry, "image", Some(family));
+        crate::checkpoint_loader::apply_bound_base_defaults(&mut entry).unwrap();
         assert_eq!(
             entry.get("capabilities"),
             Some(&expected_modes),
