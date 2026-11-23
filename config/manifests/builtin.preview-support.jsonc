@@ -7,7 +7,8 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "38dab65f5d9640396cf2946cd4ee866ce46630c6"
+      "inferenceRevision": "d4e9ee0b8756e94c18030f712656cde7435c82a0",
+      "audioInferenceRevision": "38dab65f5d9640396cf2946cd4ee866ce46630c6"
     },
     "mlx": {
       "inferenceRevision": "38dab65f5d9640396cf2946cd4ee866ce46630c6"

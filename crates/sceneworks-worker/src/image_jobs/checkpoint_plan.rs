@@ -1554,7 +1554,7 @@ mod reusable_loader_tests {
         );
         let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
-        let mut entry = json!({"id":"serenity","family":"moss-image"})
+        let mut entry = json!({"id":"serenity","family":sceneworks_core::model_family::MOSS_IMAGE})
             .as_object()
             .unwrap()
             .clone();
@@ -1598,8 +1598,12 @@ mod reusable_loader_tests {
             container: CheckpointContainerV1::Safetensors,
             source: SourceLocatorV1::linked("fixture", "serenity.safetensors", digest).unwrap(),
         };
-        let mut plan =
-            ImportPlanV1::new("fixture-plan", "moss-image", vec![layer.clone()]).unwrap();
+        let mut plan = ImportPlanV1::new(
+            "fixture-plan",
+            sceneworks_core::model_family::MOSS_IMAGE,
+            vec![layer.clone()],
+        )
+        .unwrap();
         plan.context =
             sceneworks_core::model_artifacts::provenance::import_declaration_context(&entry)
                 .unwrap();
@@ -2549,7 +2553,7 @@ fn checkpoint_plan_provider_memory_context(
     }
 }
 
-/// Plan-driven text-to-image: `count` renders, each its own seed, through the provider the
+/// Plan-driven text-to-image: `prompts × count` renders, each its own seed, through the provider the
 /// registry bound for the plan's family and source shape.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_checkpoint_plan_stream(

@@ -883,16 +883,14 @@ impl ImageRoute {
             // conditioning; strict-pose requests use the separate control route above.
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
-            // Plan-driven checkpoints (sc-20634) are plain per-image txt2img: `count` renders.
-            | ImageRoute::CheckpointPlan
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
             // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
             | ImageRoute::MageFinetuned
             | ImageRoute::FluxIpAdapterPoseReject
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject => request.count,
-            // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
-            ImageRoute::Mlx => request.image_count(),
+            // Generic providers and checkpoint plans serve `prompts × count` native batches.
+            ImageRoute::Mlx | ImageRoute::CheckpointPlan => request.image_count(),
         }
     }
 
@@ -1164,10 +1162,10 @@ impl CandleImageRoute {
             {
                 sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
             }
-            // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
-            CandleImageRoute::CandleTxt2Img | CandleImageRoute::MossImageEdit => {
-                request.image_count()
-            }
+            // Generic providers and checkpoint plans serve `prompts × count` native batches.
+            CandleImageRoute::CandleTxt2Img
+            | CandleImageRoute::MossImageEdit
+            | CandleImageRoute::CheckpointPlan => request.image_count(),
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
