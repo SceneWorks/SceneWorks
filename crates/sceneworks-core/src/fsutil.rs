@@ -288,15 +288,10 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 pub fn sync_file(file: &fs::File) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        use std::os::fd::AsRawFd;
         sync_file_with_fallback(file.sync_all(), || loop {
-            // SAFETY: the borrowed file keeps this descriptor valid for the entire flush.
-            if unsafe { libc::fsync(file.as_raw_fd()) } == 0 {
-                return Ok(());
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
+            match rustix::fs::fsync(file).map_err(io::Error::from) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result,
             }
         })
     }
