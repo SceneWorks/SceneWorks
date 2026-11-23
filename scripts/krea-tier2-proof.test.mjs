@@ -5,6 +5,7 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeF
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { sha256 } from "./lib/file-sha256.mjs";
 import { dispatchOptions, exitCodeFor, planRoutes, readCatalog, readPatternEvidence, resolveConfig } from "./tier2-ab.mjs";
 import {
   KREA_APPLE_RAW_PROJECTOR, KREA_LINKED_SOURCE_REPAIR_REVISION, appleRawBaselineCargoEnv, appleRawProjectorReceipt, bindKreaAppleRawProjector,
@@ -19,6 +20,12 @@ import {
 const HEAD = "1".repeat(40);
 const PIN = "2".repeat(40);
 const [RAW, HIRES] = kreaRoutes("mlx");
+const LINKED_SOURCE_FILES = [
+  "apps/rust-api/src/portable_admission.rs",
+  "apps/rust-api/src/portable_routes.rs",
+  "crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
+  "crates/sceneworks-worker/src/external_library_runtime.rs",
+];
 
 test("Krea source bind refuses an otherwise ordinary checkout with different source bytes", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "krea-source-bind-"));
@@ -51,6 +58,12 @@ test("Krea candidate fingerprints must belong to one exact reviewed source set",
   assert.throws(() => reviewedKreaLinkedSourceCandidate(integrated.slice(0, 3)), /one reviewed source set/);
 });
 
+test("the current Krea linked-source checkout matches the reviewed candidate", async () => {
+  const source = await Promise.all(LINKED_SOURCE_FILES.map((file) => readFile(new URL(`../${file}`, import.meta.url), "utf8")));
+  const fingerprints = source.map((bytes) => sha256(bytes.replaceAll("\r\n", "\n")));
+  assert.equal(reviewedKreaLinkedSourceCandidate(fingerprints), "468000983b90f3ffe0004777d3adfeda3679ce01");
+});
+
 test("paired Krea Actions fetch only the four frozen repair paths on both hosts", async () => {
   const workflow = await readFile(new URL("../.github/workflows/tier2-ab.yml", import.meta.url), "utf8");
   const repairs = workflow.split("- name: Check out the four reviewed Krea baseline repair files\n").slice(1);
@@ -61,12 +74,7 @@ test("paired Krea Actions fetch only the four frozen repair paths on both hosts"
     assert.match(step, /uses: actions\/checkout@[a-f0-9]{40}/);
     assert.ok(step.includes(`ref: ${KREA_LINKED_SOURCE_REPAIR_REVISION}\n`));
     assert.match(step, /path: tier2-ab-krea-repair\n\s+fetch-depth: 1\n\s+persist-credentials: false\n\s+sparse-checkout-cone-mode: false/);
-    assert.deepEqual(step.split("sparse-checkout: |\n")[1]?.split("\n").map((entry) => entry.trim()), [
-      "/apps/rust-api/src/portable_admission.rs",
-      "/apps/rust-api/src/portable_routes.rs",
-      "/crates/sceneworks-core/src/model_artifacts/artifact_selection.rs",
-      "/crates/sceneworks-worker/src/external_library_runtime.rs",
-    ]);
+    assert.deepEqual(step.split("sparse-checkout: |\n")[1]?.split("\n").map((entry) => entry.trim()), LINKED_SOURCE_FILES.map((file) => `/${file}`));
   }
 });
 

@@ -271,6 +271,7 @@ def _capture(args):
                        "not_before_filetime": str(terminal)})
                 continue  # the terminal read uses the next normal sample, not a second cadence
             except queue.Empty:
+                # A mailbox timeout starts the next scheduled sample.
                 pass
             read_started_ms = int((time.monotonic() - start) * 1000)
             verify_live()

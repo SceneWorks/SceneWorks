@@ -48,6 +48,11 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "be3b26400a7babc34ce1bd0f6fabf433cf11d3af62d41766b6439e3a72852d5d",
   ]],
+  ["468000983b90f3ffe0004777d3adfeda3679ce01", [
+    "9d9191f521d43c3f0850e4d80f305c187b97a3119f3e0681044670a7e61a1676",
+    REPAIR_SHA256[1], REPAIR_SHA256[2],
+    "bd92ec4aae54f89581a06dad9ef3072f7ef278821038164097731fa0c766d2c9",
+  ]],
 ];
 
 async function readSource(root, file) {
