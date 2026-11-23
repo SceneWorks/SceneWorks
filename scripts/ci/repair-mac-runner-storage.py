@@ -63,14 +63,44 @@ temporary = path.with_name(".env.storage-repair")
 temporary.write_text("\n".join(lines) + "\n")
 temporary.chmod(0o600)
 temporary.replace(path)
-service = (runner / ".service").read_text().strip()
+service_file = (runner / ".service").read_text().strip()
+service = service_file.removesuffix(".plist")
 plist = home / "Library/LaunchAgents" / f"{service}.plist"
 assert plist.is_file(), f"Missing service definition: {plist}"
 service_config = plistlib.loads(plist.read_bytes())
 assert service_config["Label"] == service
+domain = f"gui/{os.getuid()}/{service}"
+subprocess.run(["/bin/launchctl", "print", domain], stdout=subprocess.DEVNULL, check=True, timeout=8)
 receipt = {"runner": os.environ["RUNNER_NAME"], "root": str(root), "binary": str(binary),
            "version": version, "sha256": checksum[0].lower(), "check": check,
            "savedConfig": values, "service": service, "task": str(task), "restartRequired": True}
 (task / "storage-repair.json").write_text(json.dumps(receipt, indent=2))
 shutil.copyfile(task / "storage-repair.json", pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "storage-repair.json")
 print(json.dumps(receipt, indent=2))
+
+# Reload .env after this job completes. Never restart while this runner has a Worker.
+helper = task / "restart-after-job.py"
+helper.write_text('''import json,pathlib,subprocess,sys,time
+runner,domain,receipt=sys.argv[1:]
+quiet=0
+for attempt in range(600):
+    lines=subprocess.check_output(['/bin/ps','-axo','comm='],text=True).splitlines()
+    busy=any(line.strip()==runner+'/bin/Runner.Worker' for line in lines)
+    quiet=0 if busy else quiet+1
+    if quiet>=6:
+        p=subprocess.run(['/bin/launchctl','kickstart','-k',domain],capture_output=True,text=True,timeout=30)
+        path=pathlib.Path(receipt)
+        data=json.loads(path.read_text())
+        data.update(restartExitCode=p.returncode,restartError=p.stderr.strip(),restartRequestedAt=time.time())
+        path.write_text(json.dumps(data,indent=2))
+        sys.exit(p.returncode)
+    time.sleep(1)
+raise SystemExit('Runner remained busy; service was not restarted')
+''')
+background_env = dict(os.environ)
+background_env.pop("RUNNER_TRACKING_ID", None)
+with (task / "restart.log").open("ab") as log:
+    process = subprocess.Popen([
+        "/usr/bin/python3", str(helper), str(runner), domain, str(task / "storage-repair.json")
+    ], env=background_env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+print(json.dumps({"restartHelperPid": process.pid, "waitsForNoRunnerWorker": True}))
