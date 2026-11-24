@@ -72,14 +72,27 @@ mod plural {
     #[cfg(test)]
     tokio::task_local! { pub(crate) static SCAIL2_TEST_MACHINE: (String, String, Option<u64>); }
 
-    /// Parses `nvidia-smi --query-gpu=name,driver_version,memory.total` (csv, noheader, nounits).
+    /// Parses `nvidia-smi --query-gpu=name,driver_version,memory.total,uuid` (csv, noheader,
+    /// nounits) into the hardware class and the queried card's UUID.
     #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-    fn cuda_class(output: &str) -> Option<HostClass> {
+    fn cuda_class(output: &str) -> Option<(HostClass, String)> {
         let fields: Vec<_> = output.trim().split(',').collect();
-        let [device, runtime, total] = fields.as_slice() else {
+        let [device, runtime, total, uuid] = fields.as_slice() else {
             return None;
         };
-        HostClass::new(device, runtime, Some(total.trim().parse().ok()?))
+        let uuid = uuid.trim();
+        let id = uuid::Uuid::try_parse(uuid.strip_prefix("GPU-")?).ok()?;
+        if cuda_uuid_text(*id.as_bytes()) != uuid {
+            return None;
+        }
+        let class = HostClass::new(device, runtime, Some(total.trim().parse().ok()?))?;
+        Some((class, uuid.to_owned()))
+    }
+
+    /// `nvidia-smi`'s spelling of a CUDA device UUID.
+    #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+    fn cuda_uuid_text(bytes: [u8; 16]) -> String {
+        format!("GPU-{}", uuid::Uuid::from_bytes(bytes).hyphenated())
     }
 
     async fn hardware(gpu_id: &str) -> Option<HostClass> {
@@ -99,7 +112,7 @@ mod plural {
         let command = {
             let mut command = Command::new("nvidia-smi");
             command.arg(format!("--id={gpu_id}")).args([
-                "--query-gpu=name,driver_version,memory.total",
+                "--query-gpu=name,driver_version,memory.total,uuid",
                 "--format=csv,noheader,nounits",
             ]);
             command
@@ -113,28 +126,43 @@ mod plural {
             let (device, runtime) = output.split_once('\n')?;
             HostClass::new(device, runtime, None)?
         };
-        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        let class = cuda_class(output)?;
         // The generator cache binds CUDA ordinal zero in the worker's visible-device
-        // context. A supervisor-supplied nvidia-smi ordinal may refer to another class.
+        // context. A supervisor-supplied nvidia-smi ordinal may refer to another card, so
+        // its model, memory and driver count only when it is that same physical device.
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        {
+        let class = {
             use runtime_cuda::media::candle_core::cuda::cudarc::driver::result;
+            let (class, queried) = cuda_class(output)?;
             result::init().ok()?;
-            let native = result::device::get_name(result::device::get(0).ok()?).ok()?;
-            if native != class.device {
+            let device = result::device::get(0).ok()?;
+            let native = result::device::get_name(device).ok()?;
+            let uuid = result::device::get_uuid(device)
+                .ok()?
+                .bytes
+                .map(|byte| byte as u8);
+            if native != class.device || cuda_uuid_text(uuid) != queried {
                 return None;
             }
-        }
+            class
+        };
         Some(class)
     }
 
     #[cfg(test)]
     #[test]
     fn scail_plural_cuda_class_reads_model_driver_and_total_memory() {
-        let class =
-            cuda_class("NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 97887\n")
-                .unwrap();
+        let uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
+        let (class, queried) = cuda_class(&format!(
+            "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 97887, {uuid}\n"
+        ))
+        .unwrap();
+        assert_eq!(queried, uuid);
+        let native: [u8; 16] = [
+            0xe4, 0xb7, 0x99, 0x31, 0x7b, 0xe6, 0xf2, 0x16, 0x46, 0x0a, 0xf5, 0x40, 0x5c, 0xfa,
+            0xff, 0xfe,
+        ];
+        assert_eq!(cuda_uuid_text(native), uuid);
+        assert_ne!(cuda_uuid_text([0; 16]), uuid);
         assert_eq!(
             class,
             HostClass::new(
@@ -145,14 +173,19 @@ mod plural {
             .unwrap()
         );
         for invalid in [
-            "",
-            "board, 596.36",
-            "board, 596.36, [N/A]",
-            "board, 596.36, 0",
-            "board, 596.36, 97887, extra",
-            ", 596.36, 97887",
+            String::new(),
+            "board, 596.36".into(),
+            "board, 596.36, 97887".into(),
+            format!("board, 596.36, [N/A], {uuid}"),
+            format!("board, 596.36, 0, {uuid}"),
+            format!("board, 596.36, 97887, {uuid}, extra"),
+            format!(", 596.36, 97887, {uuid}"),
+            "board, 596.36, 97887, e4b79931-7be6-f216-460a-f5405cfafffe".into(),
+            "board, 596.36, 97887, GPU-E4B79931-7BE6-F216-460A-F5405CFAFFFE".into(),
+            "board, 596.36, 97887, GPU-e4b799317be6f216460af5405cfafffe".into(),
+            "board, 596.36, 97887, [N/A]".into(),
         ] {
-            assert_eq!(cuda_class(invalid), None, "{invalid}");
+            assert_eq!(cuda_class(&invalid), None, "{invalid}");
         }
     }
 

@@ -1413,12 +1413,30 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         const blank = structuredClone(projected);
         blank[0].bounds.device_total_mib = total;
         assert.throws(() => read(blank), /card capacity/);
+        assert.throws(() => scoped(blank), /card capacity/);
       }
-      // A complete second campaign on the other card ran under its own guard (the executed
-      // policy names its card). One native class keeps a single guard, so this still refuses.
+      // A complete second campaign on the other card runs under its own guard (the executed
+      // policy names its card). The worker prices either, so both campaigns stay available,
+      // each priced from its own rows; one card still keeps a single guard.
       const second = structuredClone(moved);
-      for (const r of second) Object.assign(r, { artifact_id: 900, guard_policy_sha256: sha256("gpu1 guard") });
-      assert.throws(() => scoped([...projected, ...second]), /different capture guards/);
+      for (const r of second) {
+        Object.assign(r, { artifact_id: 900, guard_policy_sha256: sha256("gpu1 guard") });
+        r.bounds.device.unsampled_overshoot_upper_bytes -= 1;
+      }
+      const both = scoped([...projected, ...second]);
+      assert.deepEqual(both.map((r) => [r.artifactId, r.references]),
+        [...projected.map((r) => [r.artifact_id, r.axes.references]), ...second.map((r) => [900, r.axes.references])]);
+      const own = scoped(projected);
+      for (const [i, r] of both.entries()) {
+        if (r.artifactId === 900) {
+          assert.equal(r.captureAdapter.cuda_uuid, gpu1.cuda_uuid);
+          assert.equal(r.price.grossDeviceBytes, own[i % counts.length].price.grossDeviceBytes - 1);
+        } else assert.deepEqual(r, own[i]);
+      }
+      assert.notEqual(both[0].campaign, both[counts.length].campaign);
+      const sameCard = structuredClone(projected);
+      for (const r of sameCard) Object.assign(r, { artifact_id: 901, guard_policy_sha256: sha256("second gpu0 guard") });
+      assert.throws(() => scoped([...projected, ...sameCard]), /different capture guards/);
       // Partial campaigns on two cards never combine into one complete campaign, even under one guard.
       const halves = [...projected.filter((r) => r.axes.references <= 4), ...moved.filter((r) => r.axes.references > 4)];
       assert.throws(() => scoped(halves), /no packaged native/);

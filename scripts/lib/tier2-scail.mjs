@@ -161,12 +161,12 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     // A CUDA class is the device model, total device memory and driver. The capture card's
     // UUID, LUID and node are provenance: an identical second card prices the same.
     const deviceTotalMib = mlx ? null : row.bounds?.device_total_mib;
+    if (!mlx) assert.ok(Number.isSafeInteger(deviceTotalMib) && deviceTotalMib > 0, "CUDA capture lacks its card capacity");
     if (host && (row.device !== host.device || row.runtime !== host.runtime
       || (!mlx && deviceTotalMib !== host.deviceTotalMib)
       || !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
     const b = row.bounds;
     assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
-    if (!mlx) assert.ok(Number.isSafeInteger(deviceTotalMib) && deviceTotalMib > 0, "CUDA capture lacks its card capacity");
     if (row.recovery_certificate_sha256 !== undefined || b.device_interval !== undefined) {
       assert.ok(!mlx && b.device_interval === "load_through_completed_rgb" && b.device.basis === "measured_aggregate",
         "missing empirical CUDA output interval");
@@ -193,11 +193,15 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
   }
   const complete = rows.filter((row) => counts.every((n) => rows.some((r) => r.campaign === row.campaign && r.references === n)));
   assert.ok(complete.length, `no packaged native SCAIL q4 evidence covering the required counts on the same ${platform} policy`);
-  // Windows acceptance claims five exact counts under a single guard and device policy.
+  // Windows acceptance claims five exact counts under a single guard per capture card. Identical
+  // cards of one class may each contribute a complete campaign, as the worker prices either one;
+  // no worker-eligible row may sit outside a complete campaign.
   if (!mlx) {
     for (const row of complete) {
-      assert.ok(rows.every((other) => other.nativePolicy !== row.nativePolicy || other.campaign === row.campaign),
-        "worker-eligible CUDA counts have different capture guards");
+      assert.ok(rows.every((other) => other.nativePolicy !== row.nativePolicy
+        || (complete.some((r) => r.campaign === other.campaign)
+          && (other.captureAdapter.cuda_uuid !== row.captureAdapter.cuda_uuid || other.campaign === row.campaign))),
+      "worker-eligible CUDA counts have different capture guards");
     }
     return complete;
   }
