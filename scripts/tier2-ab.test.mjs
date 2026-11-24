@@ -1314,14 +1314,16 @@ test("standalone SCAIL refusal authenticates both compiled candidate digests and
         return { stdout: JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid, luid, node_mask: 1 }] }) };
       }
       assert.equal(cmd, "C:\\Windows\\System32\\nvidia-smi.exe");
-      assert.deepEqual(args, ["--id=0", "--query-gpu=name,driver_version,uuid", "--format=csv,noheader,nounits"]);
-      return { stdout: `board, runtime, ${uuid}` };
+      assert.deepEqual(args, ["--id=0", "--query-gpu=name,driver_version,memory.total,uuid", "--format=csv,noheader,nounits"]);
+      return { stdout: `board, runtime, 97887, ${uuid}` };
     });
-    assert.deepEqual(identity, { device: "board", runtime: "runtime", ...(!mlx ? { captureAdapter: { cuda_uuid: uuid, luid, node_mask: 1 } } : {}) });
+    assert.deepEqual(identity, { device: "board", runtime: "runtime",
+      ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: { cuda_uuid: uuid, luid, node_mask: 1 } } : {}) });
     if (!mlx) await assert.rejects(scailHostIdentity(backend, {}, async (cmd) => ({ stdout: cmd === "python"
       ? JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", luid, node_mask: 1 }] })
-      : `board, runtime, ${uuid}` })), /logical CUDA 0 and selected physical adapter differ/);
-    for (const stdout of ["", "board", "board,runtime\nother,driver"]) {
+      : `board, runtime, 97887, ${uuid}` })), /logical CUDA 0 and selected physical adapter differ/);
+    for (const stdout of ["", "board", "board,runtime\nother,driver", ...(!mlx ? [`board, runtime, ${uuid}`,
+      `board, runtime, 0, ${uuid}`, `board, runtime, [N/A], ${uuid}`] : [])]) {
       await assert.rejects(scailHostIdentity(backend, {}, async () => ({ stdout })), /identity unavailable/);
     }
   }
@@ -1340,7 +1342,7 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const contract = { compiledPin: revision, coverage: [], closures: {} };
     const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
       hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
-    if (!mlx) receipt.hardware.uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
+    if (!mlx) Object.assign(receipt.hardware, { uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", "memory.total": "97887" });
     if (!mlx) receipt.adapter = { cuda_uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", counter: String.raw`\GPU Process Memory(*)\Dedicated Usage`,
       luid: "luid_0x00000000_0x0001e266", physical_node: 0, node_mask: 1 };
     for (const n of counts) {
@@ -1390,14 +1392,38 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
     const rows = read(projected);
     assert.deepEqual(rows.map((r) => r.references), counts);
-    const host = { device: "board", runtime: "runtime", env: {}, captureAdapter: projected[0].bounds.capture_adapter };
+    const host = { device: "board", runtime: "runtime", env: {},
+      ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: projected[0].bounds.capture_adapter } : {}) };
     const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
-    if (!mlx) for (const mismatch of [{cuda_uuid:"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"}, {luid:"luid_0x00000000_0x000000fe"}, {node_mask:2}]) {
-      assert.throws(() => scoped(projected, {...host, captureAdapter:{...host.captureAdapter, ...mismatch}}), /no packaged native/);
-      const other = structuredClone(projected.at(-1));
-      Object.assign(other.bounds.capture_adapter, mismatch);
-      other.bounds.device.unsampled_overshoot_upper_bytes -= 1;
-      assert.throws(() => scoped([...projected, other]), /single worker-eligible CUDA adapter/);
+    if (!mlx) {
+      assert.ok(projected.every((r) => r.bounds.device_total_mib === 97887));
+      const quoted = (evidence) => evidence.map((r) => [r.references, r.nativePolicy, r.artifactId, r.sha256, r.price]);
+      // A worker on a second identical card (another UUID, LUID and node) gets the same proof and prices,
+      // and so does a capture that ran on that card: the adapter is provenance, not the hardware class.
+      const gpu1 = { cuda_uuid: "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid: "luid_0x00000000_0x000000fe", node_mask: 2 };
+      assert.deepEqual(scoped(projected, { ...host, captureAdapter: gpu1 }), scoped(projected));
+      const moved = structuredClone(projected);
+      for (const r of moved) r.bounds.capture_adapter = gpu1;
+      assert.deepEqual(quoted(scoped(moved)), quoted(scoped(projected)));
+      // The device model, the card's total memory and the driver still refuse.
+      for (const change of [{ device: "other" }, { runtime: "other" }, { deviceTotalMib: 48943 }, { deviceTotalMib: undefined }]) {
+        assert.throws(() => scoped(projected, { ...host, ...change }), /no packaged native/);
+      }
+      for (const total of [undefined, 0, "97887"]) {
+        const blank = structuredClone(projected);
+        blank[0].bounds.device_total_mib = total;
+        assert.throws(() => read(blank), /card capacity/);
+      }
+      // A complete second campaign on the other card ran under its own guard (the executed
+      // policy names its card). One native class keeps a single guard, so this still refuses.
+      const second = structuredClone(moved);
+      for (const r of second) Object.assign(r, { artifact_id: 900, guard_policy_sha256: sha256("gpu1 guard") });
+      assert.throws(() => scoped([...projected, ...second]), /different capture guards/);
+      // Partial campaigns on two cards never combine into one complete campaign, even under one guard.
+      const halves = [...projected.filter((r) => r.axes.references <= 4), ...moved.filter((r) => r.axes.references > 4)];
+      assert.throws(() => scoped(halves), /no packaged native/);
+      assert.throws(() => read(halves), /no packaged native/);
+      assert.throws(() => scoped([...projected, ...moved.filter((r) => r.axes.references > 4)]), /different capture guards/);
     }
     const competing = structuredClone(projected.at(-1));
     competing.artifact_id = 782;
@@ -1407,6 +1433,7 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const price = rows.at(-1).acceleratorBytes;
     assert.equal(scailPackagedRefusalCapBytes(scoped([...projected, competing])), price - 2);
     for (const change of [r => { r.device = "other"; }, r => { r.runtime = "other"; },
+      r => { if (mlx) r.runtime = "another"; else r.bounds.device_total_mib = 48943; },
       r => { r.axes.execution_policy[0].value = "1"; }]) {
       const other = structuredClone(competing); change(other);
       assert.deepEqual(scoped([...projected, other]), rows);

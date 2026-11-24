@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 const INDEX: &[u8] = include_bytes!("../../../../../config/scail2-plural-memory.json");
 const APPROVED_INDEX_SHA256: &str =
-    "d02696be84a26f8e71f53c5f3ac69e4ae66b676f3471a1bde55437b3cdff557e";
+    "31f82fe81675f38120b057b714982df8238b87fedbcd74c8cb3d01a131c875fa";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,9 +36,12 @@ enum PhysicalBounds {
         mlx_decode_budget_bytes: u64,
     },
     WindowsJobAndWddm {
-        // Identifies the measuring adapter in the signed-off package for product proof.
-        // Deployed workers match its hardware class, driver and native execution axes.
+        // Provenance only: the physical card that ran the capture. Hosts match the hardware
+        // class (device model, total device memory, driver) and native execution axes, so an
+        // identical second card, or the same card after a reboot renumbers its LUID, qualifies.
         capture_adapter: CaptureAdapter,
+        /// `nvidia-smi memory.total` (MiB) of the capture card.
+        device_total_mib: u64,
         device_interval: Option<DeviceInterval>,
         host: Envelope,
         device: Envelope,
@@ -131,11 +134,35 @@ impl Envelope {
     }
 }
 
+/// The hardware class a capture was measured on. Two physical cards of one class run the
+/// same native allocations, so a measurement on either prices both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HostClass {
+    pub(super) device: String,
+    pub(super) runtime: String,
+    /// Total accelerator memory in MiB for a discrete CUDA device; `None` for unified memory.
+    pub(super) device_total_mib: Option<u64>,
+}
+
+impl HostClass {
+    pub(super) fn new(device: &str, runtime: &str, device_total_mib: Option<u64>) -> Option<Self> {
+        let (device, runtime) = (device.trim(), runtime.trim());
+        (!device.is_empty()
+            && !runtime.is_empty()
+            && !runtime.contains(['\n', ','])
+            && device_total_mib != Some(0))
+        .then(|| Self {
+            device: device.to_owned(),
+            runtime: runtime.to_owned(),
+            device_total_mib,
+        })
+    }
+}
+
 pub(super) struct QualifiedWitness {
     platform: String,
     inference_revision: String,
-    pub(super) device: String,
-    pub(super) runtime: String,
+    pub(super) class: HostClass,
     pub(super) artifact_id: u64,
     pub(super) evidence_sha256: String,
     pub(super) witness: Scail2FitWitness,
@@ -150,6 +177,11 @@ impl QualifiedWitness {
                 self.witness.axes.backend,
             )
             && (2..=self.witness.axes.references as usize).contains(&count)
+    }
+
+    /// The capture's physical card identity is provenance and never selects a host.
+    pub(super) fn matches_host(&self, host: &HostClass) -> bool {
+        self.class == *host
     }
 }
 
@@ -350,7 +382,7 @@ impl Capture {
         {
             return Err("incomplete SCAIL-2 physical capture or unverified native source".into());
         }
-        let (host, device, unified, decode_cap) =
+        let (host, device, unified, decode_cap, device_total_mib) =
             match (self.platform.as_str(), self.axes.backend, self.bounds) {
                 (
                     "macos",
@@ -364,6 +396,7 @@ impl Capture {
                     0,
                     unified.price(self.axes.floor_unified_bytes)?,
                     Some(mlx_decode_budget_bytes),
+                    None,
                 ),
                 (
                     "windows",
@@ -372,9 +405,11 @@ impl Capture {
                         host,
                         device,
                         capture_adapter,
+                        device_total_mib,
                         device_interval,
                     },
                 ) if capture_adapter.valid()
+                    && device_total_mib > 0
                     && (self.accepted
                         || self.count_accepted == Some(true)
                         || device_interval.is_some())
@@ -386,6 +421,7 @@ impl Capture {
                         device.price(self.axes.floor_device_bytes)?,
                         0,
                         None,
+                        Some(device_total_mib),
                     )
                 }
                 _ => {
@@ -395,11 +431,13 @@ impl Capture {
                     )
                 }
             };
+        let class = HostClass::new(&self.device, &self.runtime, device_total_mib)
+            .filter(|class| class.device == self.device && class.runtime == self.runtime)
+            .ok_or("capture has no exact hardware class")?;
         Ok(QualifiedWitness {
             platform: self.platform,
             inference_revision: self.inference_revision,
-            device: self.device,
-            runtime: self.runtime,
+            class,
             artifact_id: self.artifact_id,
             evidence_sha256: self.receipt_sha256,
             witness: Scail2FitWitness {
@@ -449,6 +487,75 @@ fn packaged_evidence_covers_every_plural_count_at_the_pinned_inference_revision(
 }
 
 #[test]
+fn packaged_cuda_evidence_matches_the_hardware_class_not_the_capture_card() {
+    use serde_json::{json, Value};
+    let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
+    let class = |device: &str, runtime: &str, mib| HostClass::new(device, runtime, mib).unwrap();
+    let rtx = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition";
+    let host = class(rtx, "596.36", Some(97_887));
+    let priced = |rows: &[QualifiedWitness], host: &HostClass| {
+        (2..=6)
+            .flat_map(|count| {
+                rows.iter()
+                    .filter(move |r| r.covers("windows", pin, count) && r.matches_host(host))
+                    .map(move |r| {
+                        let w = &r.witness;
+                        (
+                            count,
+                            r.artifact_id,
+                            r.evidence_sha256.clone(),
+                            w.axes.references,
+                            w.gross_host_bytes,
+                            w.gross_device_bytes,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    let packaged = packaged().unwrap();
+    let gpu0 = priced(packaged, &host);
+    assert!((2..=6).all(|count| gpu0.iter().any(|q| q.0 == count)));
+    // The same captures attributed to the second identical card (or a renumbered LUID after a
+    // reboot) qualify and price every count identically on the same class of host.
+    let mut moved = serde_json::from_slice::<Vec<Value>>(INDEX).unwrap();
+    for row in moved.iter_mut().filter(|r| r["platform"] == "windows") {
+        row["bounds"]["capture_adapter"] = json!({"cuda_uuid":"GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+            "luid":"luid_0x00000000_0x0002a1c4", "node_mask":2});
+    }
+    let moved = serde_json::to_vec(&moved).unwrap();
+    let moved = qualify_index(&moved, &sceneworks_core::hashing::sha256_bytes(&moved)).unwrap();
+    assert_eq!(priced(&moved, &host), gpu0);
+    // Every other class axis still refuses.
+    for other in [
+        class(
+            "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+            "596.36",
+            Some(97_887),
+        ),
+        class(rtx, "596.36", Some(48_943)),
+        class(rtx, "591.44", Some(97_887)),
+        class(rtx, "596.36", None),
+    ] {
+        assert!(priced(packaged, &other).is_empty(), "{other:?}");
+    }
+    // A CUDA capture without its card capacity has no hardware class.
+    let mut rows = serde_json::from_slice::<Vec<Value>>(INDEX).unwrap();
+    let windows = rows
+        .iter()
+        .position(|r| r["platform"] == "windows")
+        .unwrap();
+    for total in [None, Some(json!(0))] {
+        let bounds = rows[windows]["bounds"].as_object_mut().unwrap();
+        match &total {
+            Some(value) => bounds.insert("device_total_mib".into(), value.clone()),
+            None => bounds.remove("device_total_mib"),
+        };
+        let bytes = serde_json::to_vec(&rows).unwrap();
+        assert!(qualify_index(&bytes, &sceneworks_core::hashing::sha256_bytes(&bytes)).is_err());
+    }
+}
+
+#[test]
 fn continuation_keeps_each_original_count_and_its_own_certificate() {
     use serde_json::{json, Value};
     let certificates = [
@@ -470,7 +577,7 @@ fn continuation_keeps_each_original_count_and_its_own_certificate() {
                           "co_live_extra_bytes":0,"uncertainty_allowance_bytes":0,"review_sha256":"1".repeat(64)});
     row["bounds"] = json!({"measurement":"windows_job_and_wddm", "device":measured, "host":measured,
         "capture_adapter":{"cuda_uuid":"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
-                           "luid":"luid_0x00000000_0x0001f603", "node_mask":1}});
+                           "luid":"luid_0x00000000_0x0001f603", "node_mask":1}, "device_total_mib":97887});
     let accepted = |value: &Value| {
         serde_json::from_value::<Capture>(value.clone())
             .unwrap()

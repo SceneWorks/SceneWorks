@@ -269,6 +269,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
             "os_build": "version",
             "driver_version": "version",
             "uuid": None if mlx else adapter["cuda_uuid"],
+            **({} if mlx else {"memory.total": "97887"}),
         },
         "logs": {guard_name: {"sha256": tool["sha256"](guard_file.read_bytes())}},
     }
@@ -346,6 +347,21 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
             117 if native_pool else 110 if scope else 100
         )
         assert measured["bounds"]["host"]["classified_peak_bytes"] == 145
+        assert measured["bounds"]["device_total_mib"] == 97887
+        for total in (None, "", "0", "[N/A]"):
+            if total is None:
+                del receipt["hardware"]["memory.total"]
+            else:
+                receipt["hardware"]["memory.total"] = total
+            receipt_file.write_text(json.dumps(receipt))
+            review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
+            review_file.write_text(json.dumps(review))
+            with pytest.raises(ValueError, match="total memory"):
+                project()
+        receipt["hardware"]["memory.total"] = "97887"
+        receipt_file.write_text(json.dumps(receipt))
+        review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
+        review_file.write_text(json.dumps(review))
     if case == "cuda_gpu0":
         for key, wrong in (
             ("ordinal", 1),
@@ -1354,8 +1370,9 @@ def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_
         None if shared_release else "load_through_completed_rgb"
     )
     assert result["bounds"]["device"]["classified_peak_bytes"] == 110
-    # The packaged row binds the card the receipt recorded.
+    # The packaged row records the card the receipt names as provenance and its hardware class.
     assert result["bounds"]["capture_adapter"]["cuda_uuid"] == claim["device_uuid"]
+    assert result["bounds"]["device_total_mib"] == 97887
     gpu1_cases = []
     if gpu1:
         selection = capture["cuda_card_selection"]

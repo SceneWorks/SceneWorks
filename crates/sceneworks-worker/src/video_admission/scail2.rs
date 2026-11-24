@@ -48,7 +48,7 @@ pub(crate) fn scail2_verified_test_quotes(
 
 #[cfg(native_lane)]
 mod plural {
-    use super::evidence::packaged;
+    use super::evidence::{packaged, HostClass};
     use super::*;
     use gen_core::generator::scail2_fit::{Scail2FitPrice, Scail2FitProfile, Scail2FitWitness};
     use gen_core::{LoadSpec, MemoryBudgetDomain, MemoryCacheState};
@@ -70,36 +70,51 @@ mod plural {
     }
 
     #[cfg(test)]
-    tokio::task_local! { pub(crate) static SCAIL2_TEST_MACHINE: (String, String); }
+    tokio::task_local! { pub(crate) static SCAIL2_TEST_MACHINE: (String, String, Option<u64>); }
 
-    async fn hardware(gpu_id: &str) -> Option<(String, String)> {
+    /// Parses `nvidia-smi --query-gpu=name,driver_version,memory.total` (csv, noheader, nounits).
+    #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+    fn cuda_class(output: &str) -> Option<HostClass> {
+        let fields: Vec<_> = output.trim().split(',').collect();
+        let [device, runtime, total] = fields.as_slice() else {
+            return None;
+        };
+        HostClass::new(device, runtime, Some(total.trim().parse().ok()?))
+    }
+
+    async fn hardware(gpu_id: &str) -> Option<HostClass> {
         use tokio::process::Command;
         #[cfg(test)]
-        if let Ok(machine) = SCAIL2_TEST_MACHINE.try_with(Clone::clone) {
-            return Some(machine);
+        if let Ok((device, runtime, total)) = SCAIL2_TEST_MACHINE.try_with(Clone::clone) {
+            return HostClass::new(&device, &runtime, total);
         }
         #[cfg(target_os = "macos")]
-        let (command, separator) = {
+        let command = {
             let _ = gpu_id;
             let mut command = Command::new("/usr/sbin/sysctl");
             command.args(["-n", "machdep.cpu.brand_string", "kern.osversion"]);
-            (command, '\n')
+            command
         };
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        let (command, separator) = {
+        let command = {
             let mut command = Command::new("nvidia-smi");
             command.arg(format!("--id={gpu_id}")).args([
-                "--query-gpu=name,driver_version",
+                "--query-gpu=name,driver_version,memory.total",
                 "--format=csv,noheader,nounits",
             ]);
-            (command, ',')
+            command
         };
         let output = crate::gpu::run_bounded_command(command, Duration::from_secs(3))
             .await
             .ok()?;
         let output = std::str::from_utf8(&output.stdout).ok()?.trim();
-        let (device, runtime) = output.split_once(separator)?;
-        let (device, runtime) = (device.trim(), runtime.trim());
+        #[cfg(target_os = "macos")]
+        let class = {
+            let (device, runtime) = output.split_once('\n')?;
+            HostClass::new(device, runtime, None)?
+        };
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let class = cuda_class(output)?;
         // The generator cache binds CUDA ordinal zero in the worker's visible-device
         // context. A supervisor-supplied nvidia-smi ordinal may refer to another class.
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -107,12 +122,38 @@ mod plural {
             use runtime_cuda::media::candle_core::cuda::cudarc::driver::result;
             result::init().ok()?;
             let native = result::device::get_name(result::device::get(0).ok()?).ok()?;
-            if native != device {
+            if native != class.device {
                 return None;
             }
         }
-        (!device.is_empty() && !runtime.is_empty() && !runtime.contains(['\n', ',']))
-            .then(|| (device.to_owned(), runtime.to_owned()))
+        Some(class)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn scail_plural_cuda_class_reads_model_driver_and_total_memory() {
+        let class =
+            cuda_class("NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 97887\n")
+                .unwrap();
+        assert_eq!(
+            class,
+            HostClass::new(
+                "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                "596.36",
+                Some(97_887)
+            )
+            .unwrap()
+        );
+        for invalid in [
+            "",
+            "board, 596.36",
+            "board, 596.36, [N/A]",
+            "board, 596.36, 0",
+            "board, 596.36, 97887, extra",
+            ", 596.36, 97887",
+        ] {
+            assert_eq!(cuda_class(invalid), None, "{invalid}");
+        }
     }
 
     async fn hardware_witnesses(
@@ -130,14 +171,14 @@ mod plural {
         if !rows.iter().any(eligible) {
             return Ok(Vec::new());
         }
-        let (device, version) = hardware(gpu).await.ok_or_else(|| {
+        let host = hardware(gpu).await.ok_or_else(|| {
             crate::WorkerError::InvalidPayload(
                 "SCAIL-2 device and runtime identity unavailable".into(),
             )
         })?;
         Ok(rows
             .iter()
-            .filter(|r| eligible(r) && r.device == device && r.runtime == version)
+            .filter(|r| eligible(r) && r.matches_host(&host))
             .map(|r| WitnessSource {
                 artifact_id: r.artifact_id,
                 digest: r.evidence_sha256.clone(),

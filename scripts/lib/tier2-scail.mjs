@@ -158,18 +158,21 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
       && a.driving_stack_bytes === 45 * 832 * 480 * 24 && a.source_resize_bytes === 0 && a.schedule_bytes === 5 * 64
       && a.load_policy === (mlx ? "None" : "Some(Q4)") + "/Bf16/Resident/EagerMaterialization"
       && Array.isArray(a.execution_policy), "capture does not cover the fixed product inputs");
-    if (host && (row.device !== host.device || row.runtime !== host.runtime ||
-      !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
+    // A CUDA class is the device model, total device memory and driver. The capture card's
+    // UUID, LUID and node are provenance: an identical second card prices the same.
+    const deviceTotalMib = mlx ? null : row.bounds?.device_total_mib;
+    if (host && (row.device !== host.device || row.runtime !== host.runtime
+      || (!mlx && deviceTotalMib !== host.deviceTotalMib)
+      || !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
     const b = row.bounds;
     assert.equal(b.measurement, mlx ? "darwin_lifetime_footprint" : "windows_job_and_wddm");
+    if (!mlx) assert.ok(Number.isSafeInteger(deviceTotalMib) && deviceTotalMib > 0, "CUDA capture lacks its card capacity");
     if (row.recovery_certificate_sha256 !== undefined || b.device_interval !== undefined) {
       assert.ok(!mlx && b.device_interval === "load_through_completed_rgb" && b.device.basis === "measured_aggregate",
         "missing empirical CUDA output interval");
     }
     const adapter = b.capture_adapter;
-    if (!mlx && host) assert.ok(adapter && host.captureAdapter && adapter.cuda_uuid === host.captureAdapter.cuda_uuid
-      && adapter.luid === host.captureAdapter.luid && adapter.node_mask === host.captureAdapter.node_mask,
-      "no packaged native proof on a single worker-eligible CUDA adapter");
+    if (!mlx) assert.ok(adapter && typeof adapter.cuda_uuid === "string" && adapter.cuda_uuid, "CUDA capture lacks its card provenance");
     if (mlx) assert.ok(byteCount(b.mlx_decode_budget_bytes) > 0, "missing decoder budget");
     const price = {
       grossHostBytes: mlx ? 0 : physicalPrice(b.host, a.floor_host_bytes),
@@ -178,11 +181,13 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     };
     if (mlx) assert.ok(b.mlx_decode_budget_bytes <= price.grossUnifiedBytes, "decoder budget exceeds unified price");
     // The worker authenticates the index, hardware and compatible compiled pin before quoting.
-    const nativePolicy = JSON.stringify([row.device, row.runtime, ...(!mlx ? [adapter.cuda_uuid, adapter.luid, adapter.node_mask] : []), a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
+    const nativePolicy = JSON.stringify([row.device, row.runtime, ...(!mlx ? [deviceTotalMib] : []), a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
     // Each Windows count has its own complete measurement. Every cross-revision donor above
     // must identify the compiled pin's provider and shared contract before counts can be joined.
-    const campaign = JSON.stringify([nativePolicy, mlx ? row.inference_revision : null, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null]);
-    rows.push({ device: row.device, runtime: row.runtime, ...(!mlx ? { captureAdapter: adapter } : {}), nativePolicy, campaign, references: a.references,
+    // One campaign ran on one physical card, so counts from two identical cards never combine.
+    const campaign = JSON.stringify([nativePolicy, mlx ? row.inference_revision : null, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null,
+      mlx ? null : adapter.cuda_uuid]);
+    rows.push({ device: row.device, runtime: row.runtime, ...(!mlx ? { deviceTotalMib, captureAdapter: adapter } : {}), nativePolicy, campaign, references: a.references,
       ...(row.recovery_certificate_sha256 ? {recoveryCertificateSha256: row.recovery_certificate_sha256} : {}),
       inferenceRevision: row.inference_revision, sha256: row.receipt_sha256, artifactId: row.artifact_id, price, acceleratorBytes: mlx ? price.grossUnifiedBytes : price.grossDeviceBytes });
   }

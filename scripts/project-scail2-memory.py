@@ -60,6 +60,12 @@ DISPLAY_IDLE_ALLOWANCE_MIB = {"GPU-e4b79931-7be6-f216-460a-f5405cfafffe": 1536}
 IDLE_SPREAD_MIB = 64
 
 
+def card_total_mib(hw):
+    total = str(hw.get("memory.total", "")).strip()
+    require(re.fullmatch(r"[1-9][0-9]*", total), "CUDA capture lacks the card's total memory")
+    return int(total)
+
+
 def registered_card_index(uuid):
     require(uuid in REGISTERED_CUDA_CARDS, "CUDA capture ran on an unregistered card")
     return REGISTERED_CUDA_CARDS[uuid]
@@ -1427,9 +1433,12 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                 if completion or tied_read or (fresh_gpu0 and scope is not None)
                 else {}
             ),
+            # Provenance: the physical card that ran this capture.
             "capture_adapter": {
                 k: receipt["adapter"][k] for k in ("cuda_uuid", "luid", "node_mask")
             },
+            # Hardware class with device and runtime: workers on any identical card match it.
+            "device_total_mib": card_total_mib(hw),
         }
     require(set(review["domains"]) == set(pools), "review is missing a physical domain")
     # A measured aggregate allows for growth between samples: the whole allocation burst in

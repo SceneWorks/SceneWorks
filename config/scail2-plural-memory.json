@@ -272,6 +272,7 @@
         "review_sha256": "70f092b8cc53b9f29369131f96aff890e2e9260270d20b8343562fcac04c2ca0",
         "uncertainty_allowance_bytes": 15168815104
       },
+      "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
         "classified_peak_bytes": 57396076544,
@@ -360,6 +361,7 @@
         "review_sha256": "4dc2f9740ed813fb90a36a3ba538bf688280909bcfaa9b0cf85f7c5d046e5cf1",
         "uncertainty_allowance_bytes": 15537917952
       },
+      "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
         "classified_peak_bytes": 57767669760,
@@ -449,6 +451,7 @@
         "uncertainty_allowance_bytes": 15873462272
       },
       "device_interval": "load_through_completed_rgb",
+      "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
         "classified_peak_bytes": 58102448128,
@@ -537,6 +540,7 @@
         "review_sha256": "174d3d7cbac053f0ebb59f80534ab972368da890680984fa982e6bd6d9deacda",
         "uncertainty_allowance_bytes": 16209010688
       },
+      "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
         "classified_peak_bytes": 58442567680,
@@ -625,6 +629,7 @@
         "review_sha256": "d938e3636fcb2acef1a3a8a1e8e68c31f2bcc9d59b322d8452a76b626e6e6642",
         "uncertainty_allowance_bytes": 15904923648
       },
+      "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
         "classified_peak_bytes": 58833371136,

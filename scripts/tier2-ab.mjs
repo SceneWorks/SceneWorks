@@ -1108,17 +1108,20 @@ async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: tru
 export async function scailHostIdentity(backend, env, run = execFile) {
   const mlx = backend === "mlx";
   const [command, args] = mlx ? ["/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string", "kern.osversion"]]
-    : [nvidiaSmiPath(env, "win32"), [`--id=${env.TIER2_AB_PHYSICAL_GPU ?? CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version,uuid", "--format=csv,noheader,nounits"]];
+    : [nvidiaSmiPath(env, "win32"), [`--id=${env.TIER2_AB_PHYSICAL_GPU ?? CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version,memory.total,uuid", "--format=csv,noheader,nounits"]];
   const { stdout } = await run(command, args, { timeout: 3_000, windowsHide: true });
   const fields = stdout.trim().split(mlx ? /\r?\n/ : ",").map((s) => s.trim());
-  fact(fields.length === (mlx ? 2 : 3) && fields.every((s) => s && !/[,\r\n]/.test(s)), "SCAIL device and runtime identity unavailable");
+  fact(fields.length === (mlx ? 2 : 4) && fields.every((s) => s && !/[,\r\n]/.test(s))
+    && (mlx || (/^[1-9]\d*$/.test(fields[2]) && Number.isSafeInteger(Number(fields[2])))), "SCAIL device and runtime identity unavailable");
   const identity = { device: fields[0], runtime: fields[1] };
   if (mlx) return identity;
+  // The worker matches the CUDA class (model, total memory, driver); the adapter is provenance.
+  identity.deviceTotalMib = Number(fields[2]);
   const script = fileURLToPath(new URL("./ci/windows_cuda_metadata.py", import.meta.url));
   const probe = await run("python", ["-I", script, "--wddm-adapter"], { timeout: 10_000, windowsHide: true, env });
   const packet = JSON.parse(probe.stdout), [adapter] = packet.devices;
   fact(packet.context_created === false && packet.devices.length === 1 && adapter.ordinal === 0
-    && adapter.uuid === fields[2] && /^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(adapter.uuid)
+    && adapter.uuid === fields[3] && /^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(adapter.uuid)
     && /^luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}$/.test(adapter.luid) && adapter.luid !== "luid_0x00000000_0x00000000"
     && Number.isInteger(adapter.node_mask) && adapter.node_mask > 0 && adapter.node_mask <= 2 ** 31
     && (adapter.node_mask & (adapter.node_mask - 1)) === 0, "SCAIL logical CUDA 0 and selected physical adapter differ");

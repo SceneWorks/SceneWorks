@@ -571,7 +571,7 @@ fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices
     } else {
         (
             "windows",
-            json!({"measurement":"windows_job_and_wddm","capture_adapter":{"cuda_uuid":"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0","luid":"luid_0x00000000_0x00000001","node_mask":1},"host":env,"device":env}),
+            json!({"measurement":"windows_job_and_wddm","capture_adapter":{"cuda_uuid":"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0","luid":"luid_0x00000000_0x00000001","node_mask":1},"device_total_mib":97887,"host":env,"device":env}),
         )
     };
     let tokens = vec![
@@ -675,7 +675,11 @@ async fn scail_plural_product_arm_refuses_missing_capture_before_media_or_tier_a
     let api = ApiClient::new(&settings);
     let result = crate::video_admission::SCAIL2_TEST_MACHINE
         .scope(
-            ("unqualified fixture".into(), "unqualified runtime".into()),
+            (
+                "unqualified fixture".into(),
+                "unqualified runtime".into(),
+                None,
+            ),
             super::run_video_generate_job(&api, &settings, &job, &Default::default()),
         )
         .await;
