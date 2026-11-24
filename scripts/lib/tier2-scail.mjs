@@ -86,7 +86,7 @@ function verifyProductWindow(axes, mlx) {
 export const MACOS_MINIMUM_PRODUCT_VERSION = "26.2";
 const macosProductVersion = (text) => {
   const parts = String(text ?? "").trim().split(".");
-  if (parts.length > 3 || !parts.every((part) => /^\d+$/.test(part))) return null;
+  if (parts.length > 3 || !parts.every((part) => /^\d{1,9}$/.test(part))) return null;
   return [0, 1, 2].map((i) => Number(parts[i] ?? 0));
 };
 export function meetsMacosMinimum(productVersion) {
@@ -249,8 +249,8 @@ export function scailRefusalCapBytes(events, evidence) {
   const alternatives = evidence.filter((row) => row.nativePolicy === bound.nativePolicy && row.references === 6);
   return Math.min(cold.requiredAcceleratorBytes, ...alternatives.map((row) => row.acceleratorBytes)) - 1;
 }
-// The caller restricted these authenticated rows to the actual device, runtime and worker
-// policy. Count six can only use a six-reference donor on either backend.
+// The caller restricted these authenticated rows to the actual device and worker policy, plus
+// the driver and card memory on CUDA (a Mac only had to meet the macOS minimum). Count six can only use a six-reference donor on either backend.
 export function scailPackagedRefusalCapBytes(evidence) {
   const prices = evidence.filter((r) => r.references === 6).map((r) => byteCount(r.acceleratorBytes));
   assert.ok(prices.length && Math.min(...prices) > 1, "no usable six-reference accelerator price on this host");

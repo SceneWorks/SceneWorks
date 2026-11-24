@@ -1733,6 +1733,8 @@ export function boundedSelectorAnchorReport(bundlesByTier) {
       logicalCaseId: record.logicalCaseId,
       recordId: record.id,
       fixture: record.fixture,
+      // Provenance only: the macOS version this tier was captured on (outside the match basis).
+      osVersion: record.hardware.osVersion,
       source: {
         sceneWorksRevision: record.repositories.sceneWorks.revision,
         inferenceRevision: record.repositories.inference.revision,

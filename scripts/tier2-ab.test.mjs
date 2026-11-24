@@ -1298,7 +1298,7 @@ test("SCAIL proof tooling and the worker share the 26.2 macOS minimum and compar
   assert.equal(/const MACOS_MINIMUM_PRODUCT_VERSION: &str = "([^"]+)";/.exec(evidence)?.[1], MACOS_MINIMUM_PRODUCT_VERSION);
   assert.equal(JSON.parse(tauri).bundle.macOS.minimumSystemVersion, MACOS_MINIMUM_PRODUCT_VERSION);
   for (const supported of ["26.2", "26.2.1", "26.10", "27", "27.0.1", "30.0"]) assert.ok(meetsMacosMinimum(supported), supported);
-  for (const refused of ["26.1", "26.1.9", "25.10", "26", "", undefined, "26B131", "26.2.x", "26..2", "26.2.1.1"]) {
+  for (const refused of ["26.1", "26.1.9", "25.10", "26", "", undefined, "26B131", "26.2.x", "26..2", "26.2.1.1", "27.9999999999"]) {
     assert.ok(!meetsMacosMinimum(refused), String(refused));
   }
 });
@@ -1418,6 +1418,8 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       // SW-7271: any macOS at or above 26.2 matches the chip's evidence whatever build it ran on;
       // below the minimum the refusal names it.
       for (const runtime of ["26.2", "26.10", "26.2.1", "28.0"]) assert.deepEqual(scoped(projected, { ...host, runtime }), scoped(projected));
+      // The chip still selects the evidence on a supported release.
+      assert.throws(() => scoped(projected, { ...host, device: "other" }), /no packaged native/);
       for (const runtime of ["26.1", "26.1.9", "runtime"]) {
         assert.throws(() => scoped(projected, { ...host, runtime }), /requires macOS 26\.2 or later/);
       }
