@@ -1685,7 +1685,9 @@ export function boundedSelectorAnchorReport(bundlesByTier) {
     const diagnostics = diagnosticMeasurements(record);
     const recordMatchBasis = {
       hardware: Object.fromEntries([
-        "memoryBytes", "model", "chip", "osVersion", "metalDevice",
+        // macOS version is provenance on each record, not part of the basis (SW-7271): an
+        // OS update between tier captures on the same machine does not change the comparison.
+        "memoryBytes", "model", "chip", "metalDevice",
         "mlxMemoryLimitBytes", "wiredLimitBytes",
       ].map((name) => [name, record.hardware[name]])),
       inference: {

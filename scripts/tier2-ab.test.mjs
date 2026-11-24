@@ -1290,6 +1290,19 @@ test("SCAIL imports ordered files through project multipart and verifies the ser
   await assert.rejects(uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng), /served input differs/);
 });
 
+test("SCAIL proof tooling and the worker share the 26.2 macOS minimum and compare it numerically", async () => {
+  const { MACOS_MINIMUM_PRODUCT_VERSION, meetsMacosMinimum } = await import("./lib/tier2-scail.mjs");
+  const [evidence, tauri] = await Promise.all([
+    readFile(path.join(root, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8"),
+    readFile(path.join(root, "apps/desktop/tauri.conf.json"), "utf8")]);
+  assert.equal(/const MACOS_MINIMUM_PRODUCT_VERSION: &str = "([^"]+)";/.exec(evidence)?.[1], MACOS_MINIMUM_PRODUCT_VERSION);
+  assert.equal(JSON.parse(tauri).bundle.macOS.minimumSystemVersion, MACOS_MINIMUM_PRODUCT_VERSION);
+  for (const supported of ["26.2", "26.2.1", "26.10", "27", "27.0.1", "30.0"]) assert.ok(meetsMacosMinimum(supported), supported);
+  for (const refused of ["26.1", "26.1.9", "25.10", "26", "", undefined, "26B131", "26.2.x", "26..2", "26.2.1.1"]) {
+    assert.ok(!meetsMacosMinimum(refused), String(refused));
+  }
+});
+
 test("standalone SCAIL refusal authenticates both compiled candidate digests and identifies the leased device", async () => {
   const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
   const { scailHostIdentity } = await import("./tier2-ab.mjs");
@@ -1306,8 +1319,8 @@ test("standalone SCAIL refusal authenticates both compiled candidate digests and
     const identity = await scailHostIdentity(backend, { TIER2_AB_PHYSICAL_GPU: "0" }, async (cmd, args) => {
       if (mlx) {
         assert.equal(cmd, "/usr/sbin/sysctl");
-        assert.deepEqual(args, ["-n", "machdep.cpu.brand_string", "kern.osversion"]);
-        return { stdout: "board\nruntime\n" };
+        assert.deepEqual(args, ["-n", "machdep.cpu.brand_string", "kern.osproductversion"]);
+        return { stdout: "board\n27.0.1\n" };
       }
       if (cmd === "python") {
         assert.equal(args.at(-1), "--wddm-adapter");
@@ -1317,8 +1330,13 @@ test("standalone SCAIL refusal authenticates both compiled candidate digests and
       assert.deepEqual(args, ["--id=0", "--query-gpu=name,driver_version,memory.total,uuid", "--format=csv,noheader,nounits"]);
       return { stdout: `board, runtime, 97887, ${uuid}` };
     });
-    assert.deepEqual(identity, { device: "board", runtime: "runtime",
+    assert.deepEqual(identity, { device: "board", runtime: mlx ? "27.0.1" : "runtime",
       ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: { cuda_uuid: uuid, luid, node_mask: 1 } } : {}) });
+    // SW-7271: a Mac below the supported minimum is refused by name; any build at or above it is read.
+    if (mlx) for (const version of ["26.1", "25.6.1", "26B131"]) {
+      await assert.rejects(scailHostIdentity(backend, {}, async () => ({ stdout: `board\n${version}\n` })),
+        new RegExp(`requires macOS 26\\.2 or later; this Mac reports macOS ${version}`));
+    }
     if (!mlx) await assert.rejects(scailHostIdentity(backend, {}, async (cmd) => ({ stdout: cmd === "python"
       ? JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", luid, node_mask: 1 }] })
       : `board, runtime, 97887, ${uuid}` })), /logical CUDA 0 and selected physical adapter differ/);
@@ -1392,9 +1410,18 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
     const rows = read(projected);
     assert.deepEqual(rows.map((r) => r.references), counts);
-    const host = { device: "board", runtime: "runtime", env: {},
+    // A Mac host reports its product version; the capture recorded a different OS build ("runtime").
+    const host = { device: "board", runtime: mlx ? "27.0.1" : "runtime", env: {},
       ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: projected[0].bounds.capture_adapter } : {}) };
     const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
+    if (mlx) {
+      // SW-7271: any macOS at or above 26.2 matches the chip's evidence whatever build it ran on;
+      // below the minimum the refusal names it.
+      for (const runtime of ["26.2", "26.10", "26.2.1", "28.0"]) assert.deepEqual(scoped(projected, { ...host, runtime }), scoped(projected));
+      for (const runtime of ["26.1", "26.1.9", "runtime"]) {
+        assert.throws(() => scoped(projected, { ...host, runtime }), /requires macOS 26\.2 or later/);
+      }
+    }
     if (!mlx) {
       assert.ok(projected.every((r) => r.bounds.device_total_mib === 97887));
       const quoted = (evidence) => evidence.map((r) => [r.references, r.nativePolicy, r.artifactId, r.sha256, r.price]);
@@ -1457,7 +1484,7 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       assert.deepEqual(scoped([...projected, other]), rows);
       assert.equal(scailPackagedRefusalCapBytes(scoped([...projected, other])), price - 1);
     }
-    assert.throws(() => scoped(projected, { ...host, runtime: "wrong" }), /no packaged native/);
+    assert.throws(() => scoped(projected, { ...host, runtime: "wrong" }), mlx ? /requires macOS 26\.2/ : /no packaged native/);
     assert.throws(() => scoped(projected, { ...host, env: { [projected[0].axes.execution_policy[0].name]: "" } }), /no packaged native/);
     assert.throws(() => scailPackagedRefusalCapBytes(rows.filter((r) => r.references !== 6)));
     assert.throws(() => scailPackagedRefusalCapBytes([{ references: 6, acceleratorBytes: 1 }]));
