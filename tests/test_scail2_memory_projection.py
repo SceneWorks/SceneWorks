@@ -1479,3 +1479,30 @@ def test_quiet_release_idle_level_is_capped_at_driver_contexts_plus_the_gpu1_dis
     # A card already holding more than the bound at admission does not make that level quiet.
     with pytest.raises(ValueError, match="quiet"):
         release(cap + 1)
+
+
+@pytest.mark.parametrize("phase", ["admission", "release"])
+def test_gpu1_desktop_idle_is_quiet_at_its_recorded_zero_percent_utilization(phase):
+    # config/sdxl-cuda-memory-endpoint-evidence/sdxl-cuda-endpoints.json records GPU1 idle while
+    # driving the desktop: 1,459,617,792 B (1,392 MiB) used at 0% GPU and memory utilization in
+    # all six samples. GPU1 therefore gets a display memory allowance but no utilization one.
+    guard, claim, _, _ = completed_job_fixture(tied=True, uuid=GPU1)
+    desktop_mib = 1459617792 >> 20
+    claim["admission_background_activity"] = {
+        "samples": [
+            {"selected_card": {"index": 1, "used_mib": desktop_mib, "utilization_percent": 0}}
+            for _ in range(5)
+        ]
+    }
+    released = claim["release_background_activity"]["samples"]
+    for sample in released:
+        sample["selected_card"].update(used_mib=desktop_mib, free_mib=97887 - desktop_mib)
+
+    def release():
+        tool["validate_job_release"](guard, claim, "owned-job-completion", require_quiet=True)
+
+    release()
+    samples = claim["admission_background_activity"]["samples"] if phase == "admission" else released
+    samples[0]["selected_card"]["utilization_percent"] = 1
+    with pytest.raises(ValueError):
+        release()
