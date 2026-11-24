@@ -1,9 +1,11 @@
 import React from "react";
 import { Icon } from "../../components/Icons.jsx";
-import { AssetPickerField } from "../../components/AssetPicker.jsx";
+import { MediaSourcePickerField } from "../../components/AssetPicker.jsx";
 
 export function AudioVoiceReferencePanel({
   audioAssets,
+  importAsset,
+  projectId,
   setReferenceAudioAssetId,
   referenceAudioAssetId,
   savedVoices,
@@ -25,14 +27,17 @@ export function AudioVoiceReferencePanel({
 }) {
   return (
 <div className="studio-source-band">
-                <AssetPickerField
+                <MediaSourcePickerField
                   assets={audioAssets}
+                  importAsset={importAsset}
+                  mediaKind="audio"
+                  projectId={projectId}
                   buttonLabel="Select reference voice"
                   changeLabel="Change"
                   emptyLabel="No reference voice selected"
                   label="Reference voice"
                   onChange={setReferenceAudioAssetId}
-                  showCategories={false}
+                  showCharacters={false}
                   value={referenceAudioAssetId}
                 />
                 {savedVoices.length > 0 ? (

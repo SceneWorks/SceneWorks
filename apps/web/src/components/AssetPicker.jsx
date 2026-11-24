@@ -147,19 +147,10 @@ function projectMatches(asset, projectId) {
   return Boolean(projectId) && asset?.projectId === projectId;
 }
 
-function activeProjectImageAsset(asset, projectId) {
+function activeProjectMediaAsset(asset, projectId, mediaKind) {
   return (
     projectMatches(asset, projectId) &&
-    (assetCanRenderAsImage(asset) || asset?.type === "frame") &&
-    !asset?.status?.trashed &&
-    !asset?.status?.rejected
-  );
-}
-
-function activeProjectVideoAsset(asset, projectId) {
-  return (
-    projectMatches(asset, projectId) &&
-    assetCanRenderAsVideo(asset) &&
+    assetMatchesMediaKind(asset, mediaKind) &&
     !asset?.status?.trashed &&
     !asset?.status?.rejected
   );
@@ -314,30 +305,29 @@ export function VideoSourcePickerField({
   );
 }
 
-function MediaSourcePickerField({
+export function MediaSourcePickerField({
   assets,
-  buttonLabel,
-  characters,
-  changeLabel,
-  clearable,
-  emptyLabel,
-  eyebrow = "Image Edit",
+  buttonLabel = "Select",
+  characters = [],
+  changeLabel = "Change",
+  clearable = false,
+  emptyLabel = "No asset selected",
+  mediaKind = "image",
+  eyebrow = mediaKind === "audio" ? "Audio" : "Image Edit",
   importAsset,
-  label,
-  mediaKind,
-  multiple,
+  label = "Source",
+  multiple = false,
   onChange,
   projectId,
-  value,
-  values,
+  showCharacters = true,
+  value = "",
+  values = [],
 }) {
   const [open, setOpen] = useState(false);
   const selectableAssets = useMemo(
     () =>
       assets.filter((asset) =>
-        mediaKind === "video"
-          ? activeProjectVideoAsset(asset, projectId)
-          : activeProjectImageAsset(asset, projectId),
+        activeProjectMediaAsset(asset, projectId, mediaKind),
       ),
     [assets, mediaKind, projectId],
   );
@@ -382,6 +372,7 @@ function MediaSourcePickerField({
           multiple={multiple}
           onCancel={() => setOpen(false)}
           onConfirm={confirm}
+          showCharacters={showCharacters}
           title={label}
         />
       ) : null}
@@ -399,16 +390,18 @@ function assetMatchesMediaKind(asset, mediaKind) {
   return assetCanRenderAsImage(asset) || asset?.type === "frame";
 }
 
-function MediaSourcePickerModal({
+// Callers that open this modal directly supply active project assets of the requested kind.
+export function MediaSourcePickerModal({
   assets,
-  characters,
-  eyebrow,
+  characters = [],
+  eyebrow = "Library",
   importAsset,
   initialSelectedIds,
-  mediaKind,
-  multiple,
+  mediaKind = "image",
+  multiple = false,
   onCancel,
   onConfirm,
+  showCharacters = true,
   title,
 }) {
   const [tab, setTab] = useState("assets");
@@ -421,7 +414,7 @@ function MediaSourcePickerModal({
   const [dragActive, setDragActive] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
-  const mediaLabel = mediaKind === "video" ? "video" : "image";
+  const mediaLabel = mediaKind;
 
   useEffect(() => {
     setSelectedIds((ids) => {
@@ -455,18 +448,17 @@ function MediaSourcePickerModal({
     [assets, characterId, selectedCharacter, characterReferenceIds],
   );
   // The Assets tab shows the project library minus media that already belongs
-  // to a character — those live on the Character tab. Splitting the library this
-  // way is the whole point of the two tabs; without this exclusion every
-  // character asset appeared on both tabs, so "Assets" looked unfiltered.
+  // to a character when the Character tab is enabled. Without that tab, all
+  // supplied project media stays available under Assets.
   const nonCharacterAssets = useMemo(
     () =>
       assets.filter(
         (asset) =>
-          !characters.some((character) =>
+          !showCharacters || !characters.some((character) =>
             assetMatchesCharacter(asset, character.id, character, characterReferenceIds.get(character.id)),
           ),
       ),
-    [assets, characters, characterReferenceIds],
+    [assets, characters, characterReferenceIds, showCharacters],
   );
   const allCharacterAssetCount = assets.length - nonCharacterAssets.length;
   const tabAssets = tab === "character" ? characterAssets : nonCharacterAssets;
@@ -570,7 +562,7 @@ function MediaSourcePickerModal({
 
       <div className="asset-picker-toolbar">
         <div className="segmented-control compact-segment" role="tablist" aria-label={`Source ${mediaLabel} source`}>
-          {sourceMediaTabs.map(([key, label]) => (
+          {sourceMediaTabs.filter(([key]) => showCharacters || key !== "character").map(([key, label]) => (
             <button
               aria-selected={tab === key}
               className={tab === key ? "active" : ""}
@@ -921,14 +913,14 @@ export function CharacterImportDialog({
   const imageCandidates = useMemo(
     () =>
       assets.filter(
-        (asset) => activeProjectImageAsset(asset, projectId) && !assetMatchesCharacter(asset, characterId, character),
+        (asset) => activeProjectMediaAsset(asset, projectId, "image") && !assetMatchesCharacter(asset, characterId, character),
       ),
     [assets, projectId, characterId, character],
   );
   const videoCandidates = useMemo(
     () =>
       assets.filter(
-        (asset) => activeProjectVideoAsset(asset, projectId) && !assetMatchesCharacter(asset, characterId, character),
+        (asset) => activeProjectMediaAsset(asset, projectId, "video") && !assetMatchesCharacter(asset, characterId, character),
       ),
     [assets, projectId, characterId, character],
   );

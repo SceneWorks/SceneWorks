@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { MediaSourcePickerField } from "../components/AssetPicker.jsx";
 import {
   YUE_SECTION_LABELS,
   YUE_TAG_CATEGORIES,
@@ -208,6 +208,8 @@ export function YueReferenceBand({
   enabled,
   showRegion,
   audioAssets,
+  importAsset,
+  projectId,
   iclMode,
   onIclModeChange,
   referenceAssetId,
@@ -245,33 +247,42 @@ export function YueReferenceBand({
       </div>
       {iclMode === "dual" ? (
         <>
-          <AssetPickerField
+          <MediaSourcePickerField
             assets={audioAssets}
+            importAsset={importAsset}
+            mediaKind="audio"
+            projectId={projectId}
             buttonLabel="Select vocal track"
             emptyLabel="No vocal track selected"
             label="Vocal track"
             onChange={onVocalChange}
-            showCategories={false}
+            showCharacters={false}
             value={vocalAssetId}
           />
-          <AssetPickerField
+          <MediaSourcePickerField
             assets={audioAssets}
+            importAsset={importAsset}
+            mediaKind="audio"
+            projectId={projectId}
             buttonLabel="Select instrumental track"
             emptyLabel="No instrumental track selected"
             label="Instrumental track"
             onChange={onInstrumentalChange}
-            showCategories={false}
+            showCharacters={false}
             value={instrumentalAssetId}
           />
         </>
       ) : (
-        <AssetPickerField
+        <MediaSourcePickerField
           assets={audioAssets}
+          importAsset={importAsset}
+          mediaKind="audio"
+          projectId={projectId}
           buttonLabel="Select reference song"
           emptyLabel="No reference song selected"
           label="Reference song"
           onChange={onReferenceChange}
-          showCategories={false}
+          showCharacters={false}
           value={referenceAssetId}
         />
       )}

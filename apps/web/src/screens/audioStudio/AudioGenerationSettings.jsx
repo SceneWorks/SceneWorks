@@ -1,5 +1,5 @@
 import React from "react";
-import { AssetPickerField } from "../../components/AssetPicker.jsx";
+import { MediaSourcePickerField } from "../../components/AssetPicker.jsx";
 import { TierPickerField } from "../../components/generationStudio.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { YueGenreTags } from "../audioYueControls.jsx";
@@ -38,6 +38,8 @@ export function AudioGenerationSettings({
   lyrics,
   showEditModes,
   audioAssets,
+  importAsset,
+  projectId,
   setSourceAudioAssetId,
   sourceAudioAssetId,
   editModes,
@@ -208,14 +210,17 @@ export function AudioGenerationSettings({
                   the new total length. Empty source ⇒ plain text-to-music (the band is optional). */}
               {showEditModes ? (
                 <div className="studio-source-band">
-                  <AssetPickerField
+                  <MediaSourcePickerField
                     assets={audioAssets}
+                    importAsset={importAsset}
+                    mediaKind="audio"
+                    projectId={projectId}
                     buttonLabel="Select audio"
                     changeLabel="Change"
                     emptyLabel="No source track selected"
                     label="Source track (extend / edit)"
                     onChange={setSourceAudioAssetId}
-                    showCategories={false}
+                    showCharacters={false}
                     value={sourceAudioAssetId}
                   />
                   <div className="settings-bar-styles">
