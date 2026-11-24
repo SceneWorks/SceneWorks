@@ -789,6 +789,19 @@ pub(super) fn validate_sdxl_imported_hires_conditioning(
     Ok(())
 }
 
+pub(super) fn validate_sdxl_imported_hires_scheduler(
+    engine_id: &str,
+    scheduler: Option<&str>,
+    hires_fix: Option<HiresFixPlan>,
+) -> WorkerResult<()> {
+    if hires_fix.is_some() && scheduler == Some("discrete") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id}: Imported SDXL Hires.fix is not supported with the \"discrete\" scheduler; select a curated scheduler instead"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn resolve_sdxl_imported_hires(
     request: &ImageRequest,
     first_pass_steps: u32,
@@ -940,6 +953,8 @@ impl PreparedSdxlHires {
         first.enhance_temperature = None;
         first.enhance_max_tokens = None;
         first.prompt_enhancement = gen_core::PromptEnhancementSink::default();
+
+        validate_sdxl_imported_hires_scheduler(engine_id, first.scheduler.as_deref(), Some(hires))?;
 
         let mut refine = GenerationRequest {
             width: hires.width,
@@ -1345,24 +1360,91 @@ where
     )
 }
 
+fn pin_weights_source_file(
+    source: WeightsSource,
+    pins: &mut Vec<gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<WeightsSource> {
+    match source {
+        WeightsSource::File(path) => {
+            let pin = gen_core::PinnedWeightsFile::pin(&path)
+                .map_err(|error| crate::classify_engine_error(label, error))?;
+            let loader_path = pin.loader_path().to_path_buf();
+            pins.push(pin);
+            Ok(WeightsSource::File(loader_path))
+        }
+        dir @ WeightsSource::Dir(_) => Ok(dir),
+    }
+}
+
+pub(super) fn prepare_sdxl_imported_load_spec(
+    checkpoint_pin: gen_core::PinnedWeightsFile,
+    prepared_adapters: PreparedAdapters,
+    quant: Option<gen_core::Quant>,
+    pid_weights: Option<gen_core::PidWeights>,
+) -> WorkerResult<LoadSpec> {
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        checkpoint_pin.loader_path().to_path_buf(),
+    ));
+    if !prepared_adapters.specs.is_empty() {
+        spec = spec.with_adapters(prepared_adapters.specs);
+    }
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    let mut extra_pins = Vec::new();
+    if let Some(pid) = pid_weights {
+        let checkpoint = pin_weights_source_file(
+            pid.checkpoint,
+            &mut extra_pins,
+            "SDXL imported PiD source preparation failed",
+        )?;
+        let gemma = pin_weights_source_file(
+            pid.gemma,
+            &mut extra_pins,
+            "SDXL imported PiD source preparation failed",
+        )?;
+        spec = spec.with_pid(checkpoint, gemma);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(checkpoint_pin)
+            .chain(prepared_adapters.pins)
+            .chain(extra_pins),
+        "SDXL imported source preparation failed",
+    )?;
+    Ok(spec)
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(super) fn sdxl_imported_candle_floor_companion_dirs(spec: &LoadSpec) -> Vec<&Path> {
+    let mut companions: Vec<&Path> = spec
+        .components
+        .values()
+        .filter_map(|source| match source {
+            WeightsSource::Dir(dir) => Some(dir.as_path()),
+            WeightsSource::File(_) => None,
+        })
+        .collect();
+    if let Some(pid) = &spec.pid {
+        if let WeightsSource::Dir(dir) = &pid.checkpoint {
+            companions.push(dir.as_path());
+        }
+        if let WeightsSource::Dir(dir) = &pid.gemma {
+            companions.push(dir.as_path());
+        }
+    }
+    companions
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn prepare_sdxl_imported_candle_floor(
+pub(super) fn prepare_sdxl_imported_candle_floor(
     model: &str,
     settings: &Settings,
     spec: &LoadSpec,
     hires_workspace_bytes: u64,
 ) -> WorkerResult<super::base_admission::CachedCandleBaseFloorAdmission> {
-    let mut companions: Vec<&Path> = spec
-        .components
-        .values()
-        .map(crate::weights_source::WeightsSourceExt::path)
-        .collect();
-    if let Some(pid) = &spec.pid {
-        companions.push(crate::weights_source::WeightsSourceExt::path(
-            &pid.checkpoint,
-        ));
-        companions.push(crate::weights_source::WeightsSourceExt::path(&pid.gemma));
-    }
+    let companions = sdxl_imported_candle_floor_companion_dirs(spec);
     Ok(super::base_admission::prepare_cached_candle_base_floor(
         model,
         "SDXL imported",
@@ -1390,7 +1472,6 @@ pub(super) async fn generate_sdxl_imported_stream(
     } = sources;
     let checkpoint =
         super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &file_pin);
-    let file = file_pin.loader_path().to_path_buf();
     let adapter_count = prepared_adapters.specs.len();
     let steps =
         resolved_option_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
@@ -1450,6 +1531,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         resolve_imported_sdxl_conditioning(request, settings, project_path)?;
     let hires_fix = resolve_sdxl_imported_hires(request, steps, guidance);
     validate_sdxl_imported_hires_conditioning(&conditioning, hires_fix)?;
+    validate_sdxl_imported_hires_scheduler(descriptor.id, scheduler.as_deref(), hires_fix)?;
     let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported SDXL")?;
     let enhance = PromptEnhance::default();
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -1480,21 +1562,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         );
     }
 
-    let mut spec = LoadSpec::new(WeightsSource::File(file.clone()));
-    if !prepared_adapters.specs.is_empty() {
-        spec = spec.with_adapters(prepared_adapters.specs);
-    }
-    if let Some(quant) = quant {
-        spec = spec.with_quant(quant);
-    }
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        std::iter::once(file_pin).chain(prepared_adapters.pins),
-        "SDXL imported source preparation failed",
-    )?;
-    if let Some(pid) = pid_weights {
-        spec = spec.with_pid(pid.checkpoint, pid.gemma);
-    }
+    let spec = prepare_sdxl_imported_load_spec(file_pin, prepared_adapters, quant, pid_weights)?;
     #[cfg(target_os = "macos")]
     let spec = spec.with_component(
         "ldm_tokenizer",

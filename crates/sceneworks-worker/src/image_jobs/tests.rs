@@ -724,6 +724,10 @@ use super::sdxl_imported::drive_sdxl_imported_mlx_items;
 use super::sdxl_imported::mirror_cached_sdxl_component_file;
 #[cfg(native_lane)]
 use super::sdxl_imported::mirror_cached_sdxl_component_file_with_copy;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::sdxl_imported::prepare_sdxl_imported_candle_floor;
+#[cfg(native_lane)]
+use super::sdxl_imported::prepare_sdxl_imported_load_spec;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::prepare_sdxl_imported_sources;
 #[cfg(all(native_lane, all(windows, feature = "backend-candle")))]
@@ -736,12 +740,16 @@ use super::sdxl_imported::resolve_imported_sdxl_pin;
 use super::sdxl_imported::resolve_sdxl_imported_hires;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::sdxl_imported_available;
+#[cfg(native_lane)]
+use super::sdxl_imported::sdxl_imported_candle_floor_companion_dirs;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::sdxl_imported_memory_inputs;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::sdxl_imported_request_shape_available;
 #[cfg(native_lane)]
 use super::sdxl_imported::validate_sdxl_imported_hires_conditioning;
+#[cfg(native_lane)]
+use super::sdxl_imported::validate_sdxl_imported_hires_scheduler;
 #[cfg(native_lane)]
 use super::sdxl_imported::PreparedSdxlHires;
 #[cfg(target_os = "macos")]
@@ -3170,6 +3178,197 @@ fn imported_sdxl_hires_closes_each_scope_on_refinement_failure() {
             gen_core::MemoryRunOutcome::Error { .. },
         ]
     ));
+}
+
+#[cfg(native_lane)]
+#[test]
+fn sdxl_imported_load_spec_pins_pid_checkpoint_without_double_counting_candle_floor() {
+    let fixture = tempfile::tempdir().unwrap();
+    let checkpoint = fixture.path().join("imported-sdxl.safetensors");
+    let pid_dir = fixture.path().join("pid-ckpt");
+    let pid_ckpt = pid_dir.join("pid_sdxl_2kto4k.safetensors");
+    let gemma_dir = fixture.path().join("pid-gemma");
+    let tokenizer_dir = fixture.path().join("tokenizer");
+    std::fs::create_dir_all(&pid_dir).unwrap();
+    std::fs::create_dir_all(&gemma_dir).unwrap();
+    std::fs::create_dir_all(&tokenizer_dir).unwrap();
+    std::fs::write(&checkpoint, [1_u8; 11]).unwrap();
+    std::fs::write(&pid_ckpt, [2_u8; 19]).unwrap();
+    std::fs::write(gemma_dir.join("model.safetensors"), [3_u8; 23]).unwrap();
+    std::fs::write(tokenizer_dir.join("tokenizer.json"), "{}").unwrap();
+
+    let checkpoint_pin = gen_core::PinnedWeightsFile::pin(&checkpoint).expect("checkpoint pins");
+    let spec = prepare_sdxl_imported_load_spec(
+        checkpoint_pin,
+        PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
+        None,
+        Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(pid_ckpt.clone()),
+            gemma: WeightsSource::Dir(gemma_dir.clone()),
+        }),
+    )
+    .expect("imported SDXL LoadSpec with PiD pins both file sources")
+    .with_component(
+        "tokenizer_clip_l",
+        WeightsSource::Dir(tokenizer_dir.clone()),
+    );
+
+    assert!(spec.prepared_file_pins().is_prepared());
+    spec.validate_prepared_file_pins()
+        .expect("prepared file pins must include pid.checkpoint");
+
+    let canonical_checkpoint = std::path::absolute(&checkpoint).unwrap();
+    let canonical_pid_ckpt = std::path::absolute(&pid_ckpt).unwrap();
+    assert_eq!(
+        spec.prepared_file_pin_for(&canonical_checkpoint)
+            .unwrap()
+            .expect("primary checkpoint pin")
+            .target_fingerprint()
+            .size,
+        11
+    );
+    assert_eq!(
+        spec.prepared_file_pin_for(&canonical_pid_ckpt)
+            .unwrap()
+            .expect("PiD checkpoint pin")
+            .target_fingerprint()
+            .size,
+        19
+    );
+
+    let companions = sdxl_imported_candle_floor_companion_dirs(&spec);
+    assert!(
+        companions.contains(&gemma_dir.as_path()),
+        "PiD Gemma directory must remain in Candle floor companions"
+    );
+    assert!(
+        companions.contains(&tokenizer_dir.as_path()),
+        "staged directory components must remain in Candle floor companions"
+    );
+    assert!(
+        !companions.contains(&canonical_pid_ckpt.as_path())
+            && !companions.contains(&pid_ckpt.as_path()),
+        "pinned pid.checkpoint File must not be added to companion dirs"
+    );
+
+    let pinned_bytes = spec
+        .prepared_file_pins()
+        .iter()
+        .fold(0_u64, |total, (_, pin)| {
+            total.saturating_add(pin.target_fingerprint().size)
+        });
+    let companion_bytes = companions.iter().fold(0_u64, |total, path| {
+        let bytes = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata.len(),
+            Ok(metadata) if metadata.is_dir() => std::fs::read_dir(path)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|child| {
+                    child
+                        .extension()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
+                })
+                .filter_map(|child| std::fs::metadata(child).ok())
+                .fold(0_u64, |sum, meta| sum.saturating_add(meta.len())),
+            _ => 0,
+        };
+        total.saturating_add(bytes)
+    });
+    assert_eq!(pinned_bytes, 11 + 19);
+    assert_eq!(companion_bytes, 23);
+    assert_eq!(
+        pinned_bytes + companion_bytes,
+        11 + 19 + 23,
+        "Candle floor sizing must count pid.checkpoint exactly once"
+    );
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let _guard = runtime.enter();
+        let settings = Settings::for_test(fixture.path().to_path_buf());
+        let floor = prepare_sdxl_imported_candle_floor("community_sdxl", &settings, &spec, 7)
+            .expect("Candle floor admission must succeed with pinned PiD checkpoint");
+        assert_eq!(
+            floor.source_floor_bytes(),
+            11 + 19 + 23,
+            "Candle source floor must not double-count pid.checkpoint"
+        );
+        assert_eq!(
+            floor.reclaimable_weight_bytes(),
+            11 + 19 + 23,
+            "Candle reclaimable weight bytes must not double-count pid.checkpoint"
+        );
+    }
+
+    // Mutating pid.checkpoint after pinning must fail validation rather than passing silently.
+    std::fs::write(&pid_ckpt, [9_u8; 29]).unwrap();
+    assert!(
+        spec.validate_prepared_file_pins().is_err(),
+        "stale pid.checkpoint must fail prepared pin validation"
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn sdxl_imported_hires_refuses_discrete_scheduler_with_invalid_payload() {
+    let hires = HiresFixPlan {
+        width: 1024,
+        height: 1024,
+        steps: 4,
+        guidance: Some(6.5),
+        true_cfg: None,
+        provider_reference_strength: 0.45,
+    };
+    validate_sdxl_imported_hires_scheduler("sdxl", Some("discrete"), None)
+        .expect("non-Hires requests keep the discrete scheduler");
+    let direct_refusal =
+        validate_sdxl_imported_hires_scheduler("sdxl", Some("discrete"), Some(hires))
+            .expect_err("Hires.fix must refuse discrete scheduler");
+    assert!(
+        matches!(
+            direct_refusal,
+            WorkerError::InvalidPayload(ref message) if message.contains("discrete")
+        ),
+        "expected InvalidPayload refusal for discrete scheduler, got {direct_refusal:?}"
+    );
+
+    let fixture = tempfile::tempdir().unwrap();
+    let spec = std::sync::Arc::new(prepared_sdxl_imported_test_spec(&fixture));
+    let first = GenerationRequest {
+        prompt: "a stormy lighthouse".into(),
+        width: 512,
+        height: 512,
+        count: 1,
+        seed: Some(77),
+        steps: Some(6),
+        guidance: Some(7.0),
+        sampler: Some("euler".into()),
+        scheduler: Some("discrete".into()),
+        ..Default::default()
+    };
+    let prepare_refusal = PreparedSdxlHires::prepare(
+        crate::inference_runtime::media(),
+        "sdxl",
+        spec,
+        first,
+        hires,
+        PromptEnhance::default(),
+    )
+    .err()
+    .expect("PreparedSdxlHires::prepare must refuse discrete scheduler before load");
+    assert!(
+        matches!(
+            prepare_refusal,
+            WorkerError::InvalidPayload(ref message) if message.contains("discrete")
+        ),
+        "expected InvalidPayload refusal from PreparedSdxlHires::prepare, got {prepare_refusal:?}"
+    );
 }
 
 #[cfg(target_os = "macos")]
