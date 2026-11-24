@@ -57,7 +57,7 @@ pub(crate) struct HiresExecutionStage {
 /// A final PNG is produced by two independent provider calls with a worker resize between them.
 /// The stage identities remain inspectable, while no single provider identity may claim that the
 /// composite can be replayed exactly. The stage count and order are checked before publication.
-fn completed_hires_report(
+pub(super) fn completed_hires_report(
     stages: Vec<(&'static str, WorkerExecutionReport)>,
 ) -> WorkerResult<WorkerExecutionReport> {
     let [base, refine]: [(&'static str, WorkerExecutionReport); 2] =
@@ -2977,12 +2977,18 @@ mod hires_report_tests {
             );
         }
 
-        // 5. ENG-5 non-curated Kolors/SDXL paths yield PreparedRender { pass: None, hires: None }
-        // so legacy B5 Hires.fix execution remains intact for ENG-5 paths.
-        for (eng5_route, eng5_sampler, eng5_scheduler) in [
-            ("kolors", Some("euler_discrete"), None),
-            ("kolors", Some("euler"), Some("discrete")),
-            ("sdxl", Some("euler"), Some("discrete")),
+        // 5. After SW-6966 (`FamilyDriver` migration for native SDXL and Kolors), native
+        // ancestral/discrete Kolors and MLX SDXL routes now compile two-pass MultiPassRenderPlan
+        // directly; Candle SDXL still returns None for non-Candle `discrete` scheduler.
+        for (eng5_route, eng5_sampler, eng5_scheduler, expects_plan) in [
+            ("kolors", Some("euler_discrete"), None, true),
+            ("kolors", Some("euler"), Some("discrete"), true),
+            (
+                "sdxl",
+                Some("euler"),
+                Some("discrete"),
+                cfg!(target_os = "macos"),
+            ),
         ] {
             let first = gen_core::GenerationRequest {
                 prompt: "a street scene".to_owned(),
@@ -3013,11 +3019,18 @@ mod hires_report_tests {
                 &first,
                 Some((&refine, &hires)),
             )
-            .expect("ENG-5 non-curated Kolors/SDXL must not fail pre-load planning");
-            assert!(
-                prepared.pass.is_none() && prepared.hires.is_none(),
-                "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must defer to ENG-5 legacy path"
-            );
+            .expect("ENG-5 native Kolors/SDXL must not fail pre-load planning");
+            if expects_plan {
+                assert!(
+                    prepared.pass.is_some() && prepared.hires.is_some(),
+                    "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must compile two-pass RenderPlan on SW-6966 FamilyDriver"
+                );
+            } else {
+                assert!(
+                    prepared.pass.is_none() && prepared.hires.is_none(),
+                    "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must defer when backend has no native planner"
+                );
+            }
         }
     }
 
@@ -3580,8 +3593,12 @@ mod hires_report_tests {
         assert!(krea_imported.contains("compile_hires_multi_pass_plan("));
         assert!(krea_imported.contains("drive_hires_passes("));
         assert!(krea_imported.contains("generate_with_scope_report_planned("));
-        assert!(sdxl_imported.contains("resolve_hires_fix_plan("));
-        assert!(sdxl_imported.contains("generate_one_with_hires_on_surface("));
+        assert!(!sdxl_imported.contains("resolve_hires_fix_plan("));
+        assert!(!sdxl_imported.contains("generate_one_with_hires_on_surface("));
+        assert!(!sdxl_imported.contains("hires_fix_reference_count()"));
+        assert!(sdxl_imported.contains("compile_hires_multi_pass_plan("));
+        assert!(sdxl_imported.contains("drive_hires_passes("));
+        assert!(sdxl_imported.contains("generate_with_scope_execution_report_planned("));
         assert!(memory_src.contains("hires_fix_reference_count()"));
     }
 }
