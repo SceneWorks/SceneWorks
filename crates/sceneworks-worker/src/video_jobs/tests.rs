@@ -398,6 +398,47 @@ async fn scail_plural_fit_refuses_short_unknown_or_stale_evidence_before_factory
     assert!(!probe.loaded());
 }
 
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_fit_prices_at_the_nearest_covering_count_not_a_cheaper_higher_one() {
+    let gross = 64 << 20;
+    let root = scail_fit_root();
+    let own = scail_fit_witness(root.path(), 2);
+    // A higher-count measurement that came out cheaper also covers two references (its
+    // windows dominate this plan's).
+    let mut cheaper = own.clone();
+    cheaper.axes.references = 4;
+    for bytes in [
+        &mut cheaper.gross_unified_bytes,
+        &mut cheaper.gross_device_bytes,
+        &mut cheaper.gross_host_bytes,
+    ] {
+        *bytes = bytes.saturating_sub(1 << 20);
+    }
+    cheaper.mlx_decode_budget_bytes = cheaper.mlx_decode_budget_bytes.map(|b| b - (1 << 20));
+    let host = gross - own.axes.source_bytes;
+    for rows in [
+        vec![cheaper.clone(), own.clone()],
+        vec![own.clone(), cheaper.clone()],
+    ] {
+        let mut input = scail_fit_input(root.path(), 2);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(rows.clone(), gross - 1, Some(host)));
+        let probe = ArmProbe::default();
+        let Err(WorkerError::InvalidPayload(reason)) = drive_scail_fit(input, &probe).await else {
+            panic!("the cheaper four-reference row must not price a two-reference job")
+        };
+        assert!(reason.contains("accelerator bytes"), "{reason}");
+        assert!(!probe.loaded());
+        let mut input = scail_fit_input(root.path(), 2);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(rows, gross, Some(host)));
+        drive_scail_fit(input, &ArmProbe::default()).await.unwrap();
+    }
+    // Without a two-reference row the four-reference measurement still covers the job.
+    let mut input = scail_fit_input(root.path(), 2);
+    input.scail2_fit_fixture = Some(scail_fit_budgets(vec![cheaper], gross - 1, Some(host)));
+    drive_scail_fit(input, &ArmProbe::default()).await.unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn scail_plural_cold_fit_keeps_measured_residency_under_generic_sequential_pressure() {

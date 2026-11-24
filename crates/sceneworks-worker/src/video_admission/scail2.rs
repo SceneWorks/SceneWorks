@@ -328,6 +328,12 @@ mod plural {
                     });
                 }
             }
+            // A higher reference count can measure cheaper than a lower one (a sampled
+            // allocation burst, run-to-run variation), so price only at the covering
+            // measurement whose reference count is closest to and at least this request's.
+            if let Some(nearest) = prices.iter().map(|q| q.evidence_references).min() {
+                prices.retain(|q| q.evidence_references == nearest);
+            }
             if prices.is_empty() {
                 return Err(missing("no completed measurement covers the native plan"));
             }

@@ -4,6 +4,8 @@ Run after the inference producer's --verify-artifacts has passed. The review JSO
 names the immutable artifact_id, run_id, run_attempt, receipt_sha256, references, rationale, and
 one entry per domain in "domains". Each entry supplies a "basis" and only its
 reviewed extra/uncertainty or overshoot bytes. Capture facts come from the files.
+A CUDA measured-aggregate allowance must cover the whole allocation burst (see
+burst_growth); an MLX price must reach the native decode budget.
 
     python scripts/project-scail2-memory.py path/to/receipt.json physical-review.json
 
@@ -47,7 +49,15 @@ REGISTERED_CUDA_CARDS = {GPU0: 0, "GPU-e4b79931-7be6-f216-460a-f5405cfafffe": 1}
 # Inference's card-free campaign records its most-free-card choice under this rule.
 CARD_SELECTION_RULE = "most-free-card-covering-estimate-plus-reserve-v1"
 CARD_SELECTION_ESTIMATE_SOURCE = "scail2-plural-reviewed-device-peak-v1"
-CARD_SELECTION_REQUIRED_FREE_BYTES = (6 + 60) << 30
+CARD_SELECTION_ESTIMATE_BYTES = 60 << 30
+# The most an idle card may hold before admission and still count as quiet at release. Recorded
+# idle GPU0 admission samples hold 19 MiB (and 498 MiB in run 45265278792), so driver contexts
+# get 512 MiB. GPU1 also drives the desktop: its recorded baseline is 908 MiB
+# (docs/testing/sc-26235) under a 2,048 MiB prelaunch guard, so it gets a further 1,536 MiB.
+# Admission samples must agree within 64 MiB at 0% utilization.
+DRIVER_CONTEXT_IDLE_MIB = 512
+DISPLAY_IDLE_ALLOWANCE_MIB = {"GPU-e4b79931-7be6-f216-460a-f5405cfafffe": 1536}
+IDLE_SPREAD_MIB = 64
 
 
 def registered_card_index(uuid):
@@ -55,27 +65,24 @@ def registered_card_index(uuid):
     return REGISTERED_CUDA_CARDS[uuid]
 
 
-def validate_card_selection(receipt):
-    """A card-free campaign must have run on the recorded most-free fitting registered card."""
-    rule = receipt["contract"].get("cuda_card_selection")
-    selection = receipt.get("cuda_card_selection")
-    if rule is None:
-        require(selection is None, "a named-card campaign records no card selection")
-        return
-    hw = receipt["hardware"]
-    cards = selection.get("cards") if isinstance(selection, dict) else None
+def cards_read(record, policy, expected):
+    """The card one selection record chose, after checking it read exactly `expected` and chose
+    the most-free card that fit. Mirrors inference's `_cards_read` (SceneWorks/inference#1509)."""
+    cards = record.get("cards") if isinstance(record, dict) else None
+    uuids = [card.get("uuid") for card in cards] if isinstance(cards, list) else None
+    chosen = record.get("chosen_uuid") if isinstance(record, dict) else None
+    reserve = policy.get("gpuFreeReserveBytes")
     require(
-        rule == CARD_SELECTION_RULE
-        and isinstance(cards, list)
-        and selection.get("rule") == CARD_SELECTION_RULE
-        and selection.get("chosen_uuid") in REGISTERED_CUDA_CARDS
-        and selection.get("chosen_index") == REGISTERED_CUDA_CARDS[selection["chosen_uuid"]]
-        and [card.get("uuid") for card in cards]
-        == sorted(REGISTERED_CUDA_CARDS, key=REGISTERED_CUDA_CARDS.get)
+        isinstance(record, dict)
+        and record.get("rule") == CARD_SELECTION_RULE
+        and uuids == sorted(expected, key=REGISTERED_CUDA_CARDS.get)
+        and chosen in uuids
+        and record.get("chosen_index") == REGISTERED_CUDA_CARDS[chosen]
         and all(
             card.get("index") == REGISTERED_CUDA_CARDS[card["uuid"]]
-            and card.get("required_free_bytes") == CARD_SELECTION_REQUIRED_FREE_BYTES
-            and card.get("estimate_source") == CARD_SELECTION_ESTIMATE_SOURCE
+            and type(card.get("estimate_bytes")) is int
+            and 0 < card["estimate_bytes"] <= policy.get("childGpuCapBytes", 0)
+            and card.get("required_free_bytes") == reserve + card["estimate_bytes"]
             for card in cards
         ),
         "card-free campaign lacks its recorded registered card selection",
@@ -85,14 +92,69 @@ def validate_card_selection(receipt):
         fitting
         and all(
             type(card.get("free_mib")) is int
-            and card["free_mib"] << 20 >= CARD_SELECTION_REQUIRED_FREE_BYTES
+            and card["free_mib"] << 20 >= card["required_free_bytes"]
             for card in fitting
         )
-        and selection["chosen_uuid"]
-        == max(fitting, key=lambda card: (card["free_mib"], -card["index"]))["uuid"]
-        and hw["uuid"] == selection["chosen_uuid"]
-        and str(hw["index"]) == str(selection["chosen_index"]),
+        and chosen == max(fitting, key=lambda card: (card["free_mib"], -card["index"]))["uuid"],
         "card-free campaign did not run on its recorded most-free card",
+    )
+    return chosen
+
+
+def validate_card_selection(receipt, record):
+    """A card-free campaign must have run on the card its final recorded selection chose.
+
+    Mirrors inference's `executed_card_policy`: the first selection read every registered card;
+    each switch (`superseded`) records why it left the card the previous selection chose, and the
+    next selection read only the other card(s). Every selection used the SCAIL device estimate."""
+    rule = receipt["contract"].get("cuda_card_selection")
+    selection = receipt.get("cuda_card_selection")
+    if rule is None:
+        require(selection is None, "a named-card campaign records no card selection")
+        return
+    policy = receipt["contract"]["request"]["policy"]
+    require(
+        rule == CARD_SELECTION_RULE and "cudaDeviceUuid" not in policy,
+        "card-free campaign lacks its recorded registered card selection",
+    )
+    superseded = selection.get("superseded", []) if isinstance(selection, dict) else None
+    require(isinstance(superseded, list), "card-free campaign records an invalid card re-selection")
+    previous, expected = None, list(REGISTERED_CUDA_CARDS)
+    for earlier in superseded:
+        require(
+            isinstance(earlier, dict)
+            and isinstance(earlier.get("reason"), str)
+            and earlier["reason"]
+            and cards_read(earlier.get("selection"), policy, expected) == earlier.get("left_uuid")
+            and earlier["left_uuid"] != earlier.get("switched_to"),
+            "card-free campaign records an invalid card re-selection",
+        )
+        previous = earlier
+        expected = [uuid for uuid in REGISTERED_CUDA_CARDS if uuid != earlier["left_uuid"]]
+    chosen = cards_read(selection, policy, expected)
+    hw = receipt["hardware"]
+    every = [selection, *(earlier["selection"] for earlier in superseded)]
+    require(
+        (previous is None or previous["switched_to"] == chosen)
+        and all(
+            (card.get("estimate_source"), card["estimate_bytes"])
+            == (CARD_SELECTION_ESTIMATE_SOURCE, CARD_SELECTION_ESTIMATE_BYTES)
+            for record in every
+            for card in record["cards"]
+        )
+        and hw["uuid"] == chosen
+        and str(hw["index"]) == str(REGISTERED_CUDA_CARDS[chosen]),
+        "card-free campaign did not run on its recorded most-free card",
+    )
+    # The projected count's claim holds that card and states the SCAIL device estimate.
+    claim = record["claim"]
+    stated = claim.get("claim_gpu_estimate")
+    require(
+        claim.get("device_uuid") == chosen
+        and isinstance(stated, dict)
+        and (stated.get("source"), stated.get("estimate_bytes"))
+        == (CARD_SELECTION_ESTIMATE_SOURCE, CARD_SELECTION_ESTIMATE_BYTES),
+        "card-free claim lacks its card or stated device estimate",
     )
 
 
@@ -110,7 +172,26 @@ def byte_count(value):
     return value
 
 
-def envelope(review, observed, classified, guard_ceiling, review_digest):
+def burst_growth(values):
+    """Growth across the continuous rising run that holds the largest single-poll step.
+
+    One allocation can land across two or more polls (37.69 -> 46.07 -> 52.47 GiB), so a
+    single step understates it. The weight-load ramp is a separate rising run before a
+    plateau and does not join the allocation burst.
+    """
+    require(len(values) >= 2, "incomplete timeline for allocation burst")
+    peak = max(range(1, len(values)), key=lambda i: values[i] - values[i - 1])
+    if values[peak] <= values[peak - 1]:
+        return 0
+    start, end = peak - 1, peak
+    while start > 0 and values[start - 1] < values[start]:
+        start -= 1
+    while end + 1 < len(values) and values[end + 1] > values[end]:
+        end += 1
+    return values[end] - values[start]
+
+
+def envelope(review, observed, classified, guard_ceiling, review_digest, minimum_allowance=0):
     observed = byte_count(observed)
     classified = byte_count(classified)
     require(
@@ -126,6 +207,10 @@ def envelope(review, observed, classified, guard_ceiling, review_digest):
             classified
             + byte_count(review["co_live_extra_bytes"])
             + byte_count(review["uncertainty_allowance_bytes"])
+        )
+        require(
+            review["uncertainty_allowance_bytes"] >= minimum_allowance,
+            "uncertainty allowance is below the measured allocation burst or decode budget",
         )
         return dict(
             review,
@@ -555,14 +640,25 @@ def validate_job_release(guard, claim, basis, *, require_quiet=True):
             and verification.get("diagnostic") == activity,
             "missing original shared GPU0 timing diagnostics",
         )
-    # A quiet card holds no more than its own pre-admission idle memory (driver contexts; on
-    # GPU1 also the display) and has zero utilization. Without admission samples it holds none.
+    # A quiet card holds no more than its own pre-admission idle memory and has zero
+    # utilization. That level comes only from stable, idle admission samples of this card and
+    # is capped at the driver-context bound (plus the display on GPU1). Without admission
+    # samples a quiet card holds none.
     admitted = claim.get("admission_background_activity", {}).get("samples", [])
+    idle = [byte_count(s["selected_card"]["used_mib"]) for s in admitted]
     require(
-        all(byte_count(s["selected_card"]["index"]) == physical for s in admitted),
-        "admission samples belong to another card",
+        all(
+            byte_count(s["selected_card"]["index"]) == physical
+            and byte_count(s["selected_card"]["utilization_percent"]) == 0
+            for s in admitted
+        )
+        and (not idle or max(idle) - min(idle) <= IDLE_SPREAD_MIB),
+        "admission samples are not a stable idle reading of this card",
     )
-    idle_mib = min((byte_count(s["selected_card"]["used_mib"]) for s in admitted), default=0)
+    idle_mib = min(
+        min(idle, default=0),
+        DRIVER_CONTEXT_IDLE_MIB + DISPLAY_IDLE_ALLOWANCE_MIB.get(claim["device_uuid"], 0),
+    )
     for index, sample in enumerate(release, 1):
         card = sample["selected_card"]
         require(
@@ -1162,7 +1258,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             and receipt["adapter"]["node_mask"] == 1 << receipt["adapter"]["physical_node"],
             "crossed CUDA identity",
         )
-        validate_card_selection(receipt)
+        validate_card_selection(receipt, record)
         # GPU0 captures, and any owned-Job or card-selected capture on another registered card,
         # bind the native ordinal-zero adapter to the recorded card. Only GPU0's PCI address is
         # pinned; another card's is bound by NVML, WDDM and the native ordinal agreeing.
@@ -1336,6 +1432,27 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             },
         }
     require(set(review["domains"]) == set(pools), "review is missing a physical domain")
+    # A measured aggregate allows for growth between samples: the whole allocation burst in
+    # the owned WDDM dedicated or card series (device) and the WDDM shared series (host).
+    # An MLX price never falls below the native decode budget.
+    if row["platform"] == "macos":
+        minimums = {"unified": max(0, bounds["mlx_decode_budget_bytes"] - pools["unified"][1])}
+    else:
+        observation = guard["fit_observation"]
+        minimums = {
+            "device": max(
+                burst_growth(
+                    sample_values(guard["cuda_attribution"]["wddm_dedicated"]["samples"], 2, "WDDM dedicated")
+                ),
+                burst_growth(
+                    [
+                        byte_count(sample[2])
+                        for sample in observation["card_samples_monotonic_ns_free_owned_or_fallback_bytes"]
+                    ]
+                ),
+            ),
+            "host": burst_growth(sample_values(observation["wddm_shared"]["samples"], 2, "WDDM shared")),
+        }
     for domain, (observed, classified, ceiling) in pools.items():
         bounds[domain] = envelope(
             review["domains"][domain],
@@ -1343,6 +1460,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             classified,
             ceiling,
             sha256(review_bytes),
+            minimums[domain],
         )
     require(
         re.fullmatch(r"[0-9a-f]{64}", admission["policySha256"]),

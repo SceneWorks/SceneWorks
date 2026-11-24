@@ -1,18 +1,1 @@
-[
-  {
-    "capture_revision": "54f288263184fa60f0b0a998caedb0309757468d",
-    "target_revision": "f5c9ff80acd00334fd668e4ecc8d56be3347affd",
-    "backend": "mlx",
-    "provider_digest": "9e11f0cb3b5265a542cd555135274bf897c4b1b6068ad5e0ad4e19d5486b34a8",
-    "shared_contract_digest": "3c8c94b1df3518a3f85a1524f13d00e37365da408150c7421f3783f860bce1b7",
-    "tree_diff_sha256": "fe32649ae8e3face2d50a3fdd88d2e95cc229f1e1460946fb83328b970a7078a"
-  },
-  {
-    "capture_revision": "7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
-    "target_revision": "f5c9ff80acd00334fd668e4ecc8d56be3347affd",
-    "backend": "cuda",
-    "provider_digest": "42ecf12ce81b8eefed5d18d3ce9778395959f35fd90fbdb571352b5899993f05",
-    "shared_contract_digest": "3c8c94b1df3518a3f85a1524f13d00e37365da408150c7421f3783f860bce1b7",
-    "tree_diff_sha256": "9cb3a02942a6785d0351f0e324e66ff7e2ca65449e14fcf888f96697139db52a"
-  }
-]
+[]

@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 const INDEX: &[u8] = include_bytes!("../../../../../config/scail2-plural-memory.json");
 const APPROVED_INDEX_SHA256: &str =
-    "f27db6b55ddbbbd02421ef5dc4eeda6ccf8debf3de77ee2f256c4d9f38a64556";
+    "d02696be84a26f8e71f53c5f3ac69e4ae66b676f3471a1bde55437b3cdff557e";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -207,7 +207,7 @@ fn permits_revision(capture: &str, target: &str, backend: Scail2FitBackend) -> b
             // Approve this digest only after reviewing the entire Git delta and matching both
             // closure digests offline. Runtime uses the certified immutable pair.
             const APPROVED: &str =
-                "73baf43a3b4003b561468c572d0e8afa0ea45e2fdaad722965c9e7d671faff17";
+                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570";
             approved_pin_coverage(BYTES, APPROVED).unwrap_or_default()
         })
         .iter()
@@ -435,14 +435,13 @@ pub(super) fn packaged() -> crate::WorkerResult<&'static [QualifiedWitness]> {
 }
 
 #[test]
-fn packaged_evidence_covers_the_pinned_inference_revision_without_pin_coverage() {
+fn packaged_evidence_covers_every_plural_count_at_the_pinned_inference_revision() {
     let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
     let rows = packaged().unwrap();
     for platform in ["macos", "windows"] {
         for count in 2..=6 {
             assert!(
-                rows.iter()
-                    .any(|r| r.inference_revision == pin && r.covers(platform, pin, count)),
+                rows.iter().any(|r| r.covers(platform, pin, count)),
                 "{platform} {count}"
             );
         }

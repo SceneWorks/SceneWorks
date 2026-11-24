@@ -293,7 +293,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
     empirical = {
         "basis": "measured_aggregate",
         "co_live_extra_bytes": 5,
-        "uncertainty_allowance_bytes": 8,
+        "uncertainty_allowance_bytes": 1000,
     }
     review = {
         "artifact_id": 314,
@@ -318,6 +318,17 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
     def project():
         return tool["project"](receipt_file, review_file)
 
+    # The allowance must cover the measured allocation burst (CUDA) or the decode budget (MLX).
+    minimum = 0 if mlx else 2  # the WDDM shared burst 0 -> 2
+    for allowance in (minimum - 1, minimum):
+        empirical["uncertainty_allowance_bytes"] = allowance
+        review_file.write_text(json.dumps(review))
+        if allowance < 0 or allowance == minimum:
+            continue
+        with pytest.raises(ValueError, match="allocation burst"):
+            project()
+    empirical["uncertainty_allowance_bytes"] = 1000
+    review_file.write_text(json.dumps(review))
     result = project()
     pool = result["bounds"]["unified" if mlx else "host"]
     assert (pool["observed_peak_bytes"], pool["classified_peak_bytes"]) == (
@@ -621,6 +632,17 @@ def test_gapless_pdh_still_requires_the_native_pool_and_output_markers_for_faile
         quote(*args, 117, None, pool)
 
 
+def test_burst_growth_spans_an_allocation_split_across_polls_but_not_the_load_ramp():
+    gib = 1 << 30
+    # Load ramp, plateau, then one allocation landing across two polls (count 4 at db90739be).
+    ramp = [0, 4, 9, 14, 21, 21, 25, 29, 33, 37.69, 37.69, 46.07, 52.47, 52.47, 40]
+    values = [round(v * gib) for v in ramp]
+    assert tool["burst_growth"](values) == values[12] - values[10]
+    # Landing in one poll gives the single step.
+    assert tool["burst_growth"]([0, 5, 5, 20, 20]) == 15
+    assert tool["burst_growth"]([7, 7, 3]) == 0
+
+
 GPU1 = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
 GPU1_PCI = "00000000:e1:00.0"
 
@@ -883,7 +905,7 @@ def completed_capture_fixture(tmp_path, *, tied=False, uuid="GPU-b1a31911-c7b4-2
     empirical = {
         "basis": "measured_aggregate",
         "co_live_extra_bytes": 0,
-        "uncertainty_allowance_bytes": 8,
+        "uncertainty_allowance_bytes": 1000,
     }
     review = {
         "artifact_id": 333,
@@ -1153,14 +1175,14 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
         record["accepted"] = not record["accepted"]
 
 
-@pytest.mark.parametrize("card", ["gpu0", "gpu1-selected"])
+@pytest.mark.parametrize("card", ["gpu0", "gpu1-selected", "gpu1-switched"])
 @pytest.mark.parametrize(
     "mode", ["tied", "owned-completion", "shared-release", "partial-shared-release"]
 )
 def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_path, mode, card):
     """GPU0 and a card-free capture that ran on GPU1 (the display card) qualify on the same terms."""
     tied = mode != "owned-completion"
-    gpu1 = card == "gpu1-selected"
+    gpu1 = card != "gpu0"
     write, guard, claim, _, _, _, record, capture, _, review = completed_capture_fixture(
         tmp_path, tied=tied, uuid=GPU1 if gpu1 else tool["GPU0"]
     )
@@ -1223,9 +1245,33 @@ def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_
                 },
             ],
         }
+        if card == "gpu1-switched":
+            # GPU0 was chosen first, then taken before the first claim: the producer re-selected
+            # over the remaining card and recorded the switch (inference#1509 card_switcher).
+            selection = capture["cuda_card_selection"]
+            first = dict(selection, chosen_uuid=tool["GPU0"], chosen_index=0)
+            first["cards"] = [dict(c) for c in selection["cards"]]
+            first["cards"][0].pop("refusal")
+            first["cards"][0].update(used_mib=0, free_mib=97887)
+            selection["cards"] = selection["cards"][1:]
+            selection["superseded"] = [
+                {
+                    "reason": "lock held by another job",
+                    "left_uuid": tool["GPU0"],
+                    "switched_to": GPU1,
+                    "selection": first,
+                }
+            ]
+        claim["claim_gpu_estimate"] = {
+            "source": "scail2-plural-reviewed-device-peak-v1",
+            "estimate_bytes": 60 << 30,
+        }
         # GPU1 drives the display: its idle card holds memory before admission and after release.
         claim["admission_background_activity"] = {
-            "samples": [{"selected_card": {"index": 1, "used_mib": 900}} for _ in range(5)]
+            "samples": [
+                {"selected_card": {"index": 1, "used_mib": 900, "utilization_percent": 0}}
+                for _ in range(5)
+            ]
         }
         for sample in claim["release_background_activity"]["samples"]:
             sample["selected_card"].update(used_mib=900, free_mib=96987)
@@ -1317,17 +1363,37 @@ def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_
             (selection, "chosen_uuid", tool["GPU0"]),
             (selection, "chosen_index", 0),
             (selection["cards"][0], "required_free_bytes", 1),
-            (selection["cards"][1], "free_mib", 1),
+            (selection["cards"][-1], "free_mib", 1),
             (capture["hardware"], "index", "0"),
             (capture["hardware"], "pci.bus_id", "00000000:21:00.0"),
             (claim, "physical_index", 0),
             (claim["release_background_activity"]["samples"][0]["selected_card"], "index", 0),
             (contract, "cuda_card_selection", "another-rule"),
+            (claim["claim_gpu_estimate"], "estimate_bytes", 59 << 30),
+            (selection["cards"][-1], "estimate_bytes", 59 << 30),
         ]
+        if card == "gpu1-switched":
+            switch = selection["superseded"][0]
+            gpu1_cases += [
+                (switch, "left_uuid", GPU1),
+                (switch, "reason", ""),
+                (switch, "switched_to", tool["GPU0"]),
+                (switch["selection"], "chosen_uuid", GPU1),
+                (selection, "superseded", "x"),
+                # A switch reads only the other card, and every selection used the same estimate.
+                (selection, "cards", switch["selection"]["cards"]),
+                (switch["selection"]["cards"][0], "estimate_source", "another-estimate"),
+            ]
+        admitted = claim["admission_background_activity"]["samples"]
+        gpu1_cases.append((admitted[1]["selected_card"], "index", 0))
         if tied:
-            gpu1_cases.append(
-                (claim["release_background_activity"]["samples"][0]["selected_card"], "used_mib", 901)
-            )
+            released = claim["release_background_activity"]["samples"]
+            gpu1_cases += [
+                (released[0]["selected_card"], "used_mib", 901),
+                # The idle level must come from stable, idle admission samples.
+                (admitted[0]["selected_card"], "utilization_percent", 3),
+                (admitted[0]["selected_card"], "used_mib", 900 + 65),
+            ]
     for target, field, invalid in gpu1_cases + [
         (review, "hosted_plan_sha256", "0" * 64),
         (capture["counts"]["4"], "accepted", False),
@@ -1390,3 +1456,26 @@ def test_fresh_strict_post_output_gaps_bound_both_clocks(with_rejections):
             with pytest.raises(ValueError):
                 quote()
             event[field] = old
+
+
+@pytest.mark.parametrize("uuid", ["GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", GPU1])
+def test_quiet_release_idle_level_is_capped_at_driver_contexts_plus_the_gpu1_display(uuid):
+    guard, claim, _, _ = completed_job_fixture(tied=True, uuid=uuid)
+    cap = 512 + (1536 if uuid == GPU1 else 0)
+    index = tool["REGISTERED_CUDA_CARDS"][uuid]
+
+    def release(level):
+        claim["admission_background_activity"] = {
+            "samples": [
+                {"selected_card": {"index": index, "used_mib": level, "utilization_percent": 0}}
+                for _ in range(5)
+            ]
+        }
+        for sample in claim["release_background_activity"]["samples"]:
+            sample["selected_card"].update(used_mib=level, free_mib=97887 - level)
+        tool["validate_job_release"](guard, claim, "owned-job-completion", require_quiet=True)
+
+    release(cap)
+    # A card already holding more than the bound at admission does not make that level quiet.
+    with pytest.raises(ValueError, match="quiet"):
+        release(cap + 1)
