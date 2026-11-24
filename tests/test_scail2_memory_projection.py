@@ -349,7 +349,7 @@ def test_review_projects_only_the_measured_process_and_accepted_domains(tmp_path
             receipt_file.write_text(json.dumps(receipt))
             review["receipt_sha256"] = tool["sha256"](receipt_file.read_bytes())
             review_file.write_text(json.dumps(review))
-            with pytest.raises(ValueError, match="GPU0 capture lacks"):
+            with pytest.raises(ValueError, match="CUDA capture lacks"):
                 project()
             native["cuda_device"][key] = actual
         receipt_file.write_text(json.dumps(receipt))
@@ -621,9 +621,13 @@ def test_gapless_pdh_still_requires_the_native_pool_and_output_markers_for_faile
         quote(*args, 117, None, pool)
 
 
-def completed_job_fixture(*, tied=False):
+GPU1 = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
+GPU1_PCI = "00000000:e1:00.0"
+
+
+def completed_job_fixture(*, tied=False, uuid="GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"):
     adapter, guard = windows_guard()
-    uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+    index = tool["REGISTERED_CUDA_CARDS"][uuid]
     adapter["cuda_uuid"] = guard["admission"]["cudaDeviceUuid"] = guard["samples"][0][
         "cudaDeviceUuid"
     ] = uuid
@@ -642,7 +646,7 @@ def completed_job_fixture(*, tied=False):
     }
     guard["owned_completion"] = completion.copy()
     claim = {
-        "physical_index": 0,
+        "physical_index": index,
         "device_uuid": uuid,
         "lease_released": True,
         "post_execution_verified": True,
@@ -653,7 +657,7 @@ def completed_job_fixture(*, tied=False):
                 {
                     "selected_index_matches_admission": True,
                     "post_owned_exit_primary_metadata_valid": True,
-                    "selected_card": {"index": 0, "used_mib": 0, "utilization_percent": 0},
+                    "selected_card": {"index": index, "used_mib": 0, "utilization_percent": 0},
                 }
                 for _ in range(5)
             ]
@@ -782,8 +786,9 @@ def test_completed_job_fails_on_unproven_terminal_evidence(change):
         completed_peak(guard, claim, scope, pool)
 
 
-def completed_capture_fixture(tmp_path, *, tied=False):
-    guard, claim, summary, pool = completed_job_fixture(tied=tied)
+def completed_capture_fixture(tmp_path, *, tied=False, uuid="GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"):
+    guard, claim, summary, pool = completed_job_fixture(tied=tied, uuid=uuid)
+    pci = "00000000:21:00.0" if uuid == tool["GPU0"] else GPU1_PCI
     base = tool["RECOVERED_SIX"].copy()
 
     def write(name, data):
@@ -824,7 +829,7 @@ def completed_capture_fixture(tmp_path, *, tied=False):
             "ordinal": 0,
             "visible_count": 1,
             "uuid": adapter["cuda_uuid"],
-            "pci_bus_id": "00000000:21:00.0",
+            "pci_bus_id": pci,
             "luid": adapter["luid"],
             "node_mask": 1,
         },
@@ -863,8 +868,8 @@ def completed_capture_fixture(tmp_path, *, tied=False):
         "request": {"policy": policy},
         "adapter": adapter,
         "hardware": {
-            "index": "0",
-            "pci.bus_id": "00000000:21:00.0",
+            "index": str(tool["REGISTERED_CUDA_CARDS"][uuid]),
+            "pci.bus_id": pci.upper(),
             "uuid": adapter["cuda_uuid"],
             "name": "board",
             "driver_version": "runtime",
@@ -1148,13 +1153,16 @@ def test_partial_archive_keeps_original_verdict_and_binds_each_certificate(tmp_p
         record["accepted"] = not record["accepted"]
 
 
+@pytest.mark.parametrize("card", ["gpu0", "gpu1-selected"])
 @pytest.mark.parametrize(
     "mode", ["tied", "owned-completion", "shared-release", "partial-shared-release"]
 )
-def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path, mode):
+def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_path, mode, card):
+    """GPU0 and a card-free capture that ran on GPU1 (the display card) qualify on the same terms."""
     tied = mode != "owned-completion"
+    gpu1 = card == "gpu1-selected"
     write, guard, claim, _, _, _, record, capture, _, review = completed_capture_fixture(
-        tmp_path, tied=tied
+        tmp_path, tied=tied, uuid=GPU1 if gpu1 else tool["GPU0"]
     )
     digest = tool["sha256"]
 
@@ -1179,7 +1187,48 @@ def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path,
             "gpuFreeReserveBytes": 6 << 30,
         },
     }
+    executed = dict(policy["policy"])
     contract = capture["contract"]
+    if gpu1:
+        # The card-free request names no card; the producer records its most-free choice.
+        del policy["policy"]["cudaDeviceUuid"]
+        contract["cuda_card_selection"] = tool["CARD_SELECTION_RULE"]
+        capture["cuda_card_selection"] = {
+            "rule": tool["CARD_SELECTION_RULE"],
+            "chosen_uuid": GPU1,
+            "chosen_index": 1,
+            "polls": 1,
+            "wait_seconds": 0.1,
+            "cards": [
+                {
+                    "uuid": tool["GPU0"],
+                    "index": 0,
+                    "estimate_source": "scail2-plural-reviewed-device-peak-v1",
+                    "estimate_bytes": 60 << 30,
+                    "required_free_bytes": 66 << 30,
+                    "total_mib": 97887,
+                    "used_mib": 40000,
+                    "free_mib": 57887,
+                    "refusal": "57887 MiB free < 67584 MiB required",
+                },
+                {
+                    "uuid": GPU1,
+                    "index": 1,
+                    "estimate_source": "scail2-plural-reviewed-device-peak-v1",
+                    "estimate_bytes": 60 << 30,
+                    "required_free_bytes": 66 << 30,
+                    "total_mib": 97887,
+                    "used_mib": 900,
+                    "free_mib": 96987,
+                },
+            ],
+        }
+        # GPU1 drives the display: its idle card holds memory before admission and after release.
+        claim["admission_background_activity"] = {
+            "samples": [{"selected_card": {"index": 1, "used_mib": 900}} for _ in range(5)]
+        }
+        for sample in claim["release_background_activity"]["samples"]:
+            sample["selected_card"].update(used_mib=900, free_mib=96987)
     capture["request"] = contract["request"] = policy
     contract.update(
         backend="candle-cuda",
@@ -1191,10 +1240,10 @@ def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path,
         capture["counts"][str(n)] = {"accepted": True, "candidate_row_pending_physical_review": {}}
     admission = guard["admission"]
     admission.update(
-        policy["policy"],
+        executed,
         originalClaimDeadlineMonotonic=500,
         policySha256=digest(
-            (json.dumps(policy["policy"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+            (json.dumps(executed, sort_keys=True, separators=(",", ":")) + "\n").encode()
         ),
     )
     free_reserve = 6 << 30
@@ -1259,7 +1308,27 @@ def test_ordinary_full_gpu0_captures_bind_the_hosted_plan_and_real_job(tmp_path,
         None if shared_release else "load_through_completed_rgb"
     )
     assert result["bounds"]["device"]["classified_peak_bytes"] == 110
-    for target, field, invalid in [
+    # The packaged row binds the card the receipt recorded.
+    assert result["bounds"]["capture_adapter"]["cuda_uuid"] == claim["device_uuid"]
+    gpu1_cases = []
+    if gpu1:
+        selection = capture["cuda_card_selection"]
+        gpu1_cases = [
+            (selection, "chosen_uuid", tool["GPU0"]),
+            (selection, "chosen_index", 0),
+            (selection["cards"][0], "required_free_bytes", 1),
+            (selection["cards"][1], "free_mib", 1),
+            (capture["hardware"], "index", "0"),
+            (capture["hardware"], "pci.bus_id", "00000000:21:00.0"),
+            (claim, "physical_index", 0),
+            (claim["release_background_activity"]["samples"][0]["selected_card"], "index", 0),
+            (contract, "cuda_card_selection", "another-rule"),
+        ]
+        if tied:
+            gpu1_cases.append(
+                (claim["release_background_activity"]["samples"][0]["selected_card"], "used_mib", 901)
+            )
+    for target, field, invalid in gpu1_cases + [
         (review, "hosted_plan_sha256", "0" * 64),
         (capture["counts"]["4"], "accepted", False),
         (claim, "claim_deadline_monotonic", 501),

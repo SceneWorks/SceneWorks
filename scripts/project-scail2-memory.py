@@ -15,8 +15,11 @@ For the four-count GPU0 continuation, supply the original --recovery-archive for
 each count. Counts 3 and 5 also require the native owned-zero certificate map.
 The review names the SHA-256 of the count's sorted compact JSON certificate plus
 one newline. Each projection retains the original campaign and count verdicts.
-For a fresh full GPU0 plan with supervised Job completion, the review supplies
-hosted_plan_sha256 from the original hosted plan. No certificate is needed.
+For a fresh full plan with supervised Job completion, the review supplies
+hosted_plan_sha256 from the original hosted plan. No certificate is needed. Such a plan
+may name GPU0 or GPU1 or name no card; a card-free receipt records its most-free card
+under cuda_card_selection. Either card qualifies on the same terms, bound to the card
+UUID and physical index the receipt recorded.
 """
 
 import argparse
@@ -33,6 +36,73 @@ def sha256(data):
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+# The Windows CUDA host's two identical RTX PRO 6000 Blackwell Max-Q cards (97,887 MiB each):
+# UUID -> nvidia-smi physical index. GPU1 also drives the display. A SCAIL owned-Job capture may
+# run on either card; projection binds the card UUID and index the receipt recorded.
+GPU0 = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+GPU0_PCI = "00000000:21:00.0"
+REGISTERED_CUDA_CARDS = {GPU0: 0, "GPU-e4b79931-7be6-f216-460a-f5405cfafffe": 1}
+# Inference's card-free campaign records its most-free-card choice under this rule.
+CARD_SELECTION_RULE = "most-free-card-covering-estimate-plus-reserve-v1"
+CARD_SELECTION_ESTIMATE_SOURCE = "scail2-plural-reviewed-device-peak-v1"
+CARD_SELECTION_REQUIRED_FREE_BYTES = (6 + 60) << 30
+
+
+def registered_card_index(uuid):
+    require(uuid in REGISTERED_CUDA_CARDS, "CUDA capture ran on an unregistered card")
+    return REGISTERED_CUDA_CARDS[uuid]
+
+
+def validate_card_selection(receipt):
+    """A card-free campaign must have run on the recorded most-free fitting registered card."""
+    rule = receipt["contract"].get("cuda_card_selection")
+    selection = receipt.get("cuda_card_selection")
+    if rule is None:
+        require(selection is None, "a named-card campaign records no card selection")
+        return
+    hw = receipt["hardware"]
+    cards = selection.get("cards") if isinstance(selection, dict) else None
+    require(
+        rule == CARD_SELECTION_RULE
+        and isinstance(cards, list)
+        and selection.get("rule") == CARD_SELECTION_RULE
+        and selection.get("chosen_uuid") in REGISTERED_CUDA_CARDS
+        and selection.get("chosen_index") == REGISTERED_CUDA_CARDS[selection["chosen_uuid"]]
+        and [card.get("uuid") for card in cards]
+        == sorted(REGISTERED_CUDA_CARDS, key=REGISTERED_CUDA_CARDS.get)
+        and all(
+            card.get("index") == REGISTERED_CUDA_CARDS[card["uuid"]]
+            and card.get("required_free_bytes") == CARD_SELECTION_REQUIRED_FREE_BYTES
+            and card.get("estimate_source") == CARD_SELECTION_ESTIMATE_SOURCE
+            for card in cards
+        ),
+        "card-free campaign lacks its recorded registered card selection",
+    )
+    fitting = [card for card in cards if "refusal" not in card]
+    require(
+        fitting
+        and all(
+            type(card.get("free_mib")) is int
+            and card["free_mib"] << 20 >= CARD_SELECTION_REQUIRED_FREE_BYTES
+            for card in fitting
+        )
+        and selection["chosen_uuid"]
+        == max(fitting, key=lambda card: (card["free_mib"], -card["index"]))["uuid"]
+        and hw["uuid"] == selection["chosen_uuid"]
+        and str(hw["index"]) == str(selection["chosen_index"]),
+        "card-free campaign did not run on its recorded most-free card",
+    )
+
+
+def executed_policy(receipt):
+    """The signed request policy, or for a card-free request the policy of the recorded card."""
+    policy = receipt["contract"]["request"]["policy"]
+    if "cuda_card_selection" in receipt["contract"]:
+        require("cudaDeviceUuid" not in policy, "card-free request names a card")
+        return dict(policy, cudaDeviceUuid=receipt["hardware"]["uuid"])
+    return policy
 
 
 def byte_count(value):
@@ -458,15 +528,16 @@ def validate_job_release(guard, claim, basis, *, require_quiet=True):
     verification = claim["release_metadata_verification"]
     baseline = claim["admission_baseline"]
     total = byte_count(baseline["admitted_total_mib"])
+    physical = registered_card_index(claim["device_uuid"])
     require(
         baseline["uuid"] == claim["device_uuid"] == guard["admission"]["cudaDeviceUuid"]
-        and byte_count(claim["physical_index"]) == 0
+        and byte_count(claim["physical_index"]) == physical
         and total > 0
         and activity["status"] == "retained-existing-samples"
         and activity["activity_profile"] == claim["activity_profile"]
         and activity["admission_headroom_is_diagnostic_only"] is True
         and 1 <= len(release) == byte_count(activity["sample_count"]) <= 5,
-        "shared GPU0 release differs from the selected device or sample window",
+        "shared CUDA release differs from the selected device or sample window",
     )
     if verification == {"status": "verified"}:
         require(
@@ -484,6 +555,14 @@ def validate_job_release(guard, claim, basis, *, require_quiet=True):
             and verification.get("diagnostic") == activity,
             "missing original shared GPU0 timing diagnostics",
         )
+    # A quiet card holds no more than its own pre-admission idle memory (driver contexts; on
+    # GPU1 also the display) and has zero utilization. Without admission samples it holds none.
+    admitted = claim.get("admission_background_activity", {}).get("samples", [])
+    require(
+        all(byte_count(s["selected_card"]["index"]) == physical for s in admitted),
+        "admission samples belong to another card",
+    )
+    idle_mib = min((byte_count(s["selected_card"]["used_mib"]) for s in admitted), default=0)
     for index, sample in enumerate(release, 1):
         card = sample["selected_card"]
         require(
@@ -491,16 +570,16 @@ def validate_job_release(guard, claim, basis, *, require_quiet=True):
             and sample["predicates"]["unique_uuid"] is True
             and sample["selected_index_matches_admission"] is True
             and sample["post_owned_exit_primary_metadata_valid"] is True
-            and byte_count(card["index"]) == 0
+            and byte_count(card["index"]) == physical
             and byte_count(card["total_mib"]) == total
             and byte_count(card["used_mib"]) <= total
             and byte_count(card["free_mib"]) <= total
             and card["used_mib"] + card["free_mib"] <= total + 2,
-            "shared GPU0 release sample differs from the claimed adapter capacity",
+            "shared CUDA release sample differs from the claimed adapter capacity",
         )
         if require_quiet:
             require(
-                card["used_mib"] == byte_count(card["utilization_percent"]) == 0,
+                card["used_mib"] <= idle_mib and byte_count(card["utilization_percent"]) == 0,
                 "completed render scope lacks five quiet release samples",
             )
 
@@ -530,14 +609,14 @@ def validate_completed_job(guard, claim, summary, basis, pool, card, native_pool
     pid, uuid = guard["pid"], guard["admission"]["cudaDeviceUuid"]
     require(
         end["zero"] is None
-        and uuid == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+        and uuid in REGISTERED_CUDA_CARDS
         and mark["basis"] == "verified-output-pool"
         and mark["pid"] == pid
         and mark["cuda_uuid"] == uuid
         and byte_count(mark["card_index"]) < len(card)
         and (mark["at_ns"], mark["pool_reserved_high_bytes"]) == (card[mark["card_index"]][0], pool)
         and card[mark["card_index"]][2] == pool
-        and claim["physical_index"] == 0
+        and claim["physical_index"] == registered_card_index(uuid)
         and claim["device_uuid"] == uuid
         and claim["lease_released"] is True
         and claim["post_execution_verified"] is True
@@ -868,15 +947,22 @@ def recovered_row(receipt, review, certificate_path, archive_path):
 
 
 def validate_fresh_gpu0_plan(receipt, review, guard, record, *, five_count=False):
-    """Match the hosted five-count GPU0 plan and the original verdict for every count."""
+    """Match the hosted five-count owned-Job plan and the original verdict for every count.
+
+    The plan may name GPU0, name another registered card, or name none (card-free selection)."""
     contract = receipt["contract"]
     request = receipt["request"]
     encode = lambda value: json.dumps(
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
-    # The native GPU0 scail2-plural-fit request fixes the 84 GiB device cap,
-    # 6 GiB free reserve, 64 GiB Job cap, 250 ms poll and original deadline.
-    request_digest = "70d4d02ac74e5c0a9994b5728c4950df050c652bc47263fe3164ea6cbb601722"
+    # The native scail2-plural-fit request, apart from its card, fixes the 84 GiB device cap,
+    # 6 GiB free reserve, 64 GiB Job cap, 250 ms poll and original deadline. Naming GPU0 gives
+    # 70d4d02ac74e5c0a9994b5728c4950df050c652bc47263fe3164ea6cbb601722.
+    request_digest = "d28931338bf5350e2e408106562af9bc01a072f09f22ee0e857a1849ace0c90c"
+    named = request["policy"].get("cudaDeviceUuid")
+    card_free = dict(
+        request, policy={k: v for k, v in request["policy"].items() if k != "cudaDeviceUuid"}
+    )
 
     def original_verdict(count, item):
         if five_count and count == "3":
@@ -897,12 +983,14 @@ def validate_fresh_gpu0_plan(receipt, review, guard, record, *, five_count=False
         and contract["counts"] == [6, 2, 3, 4, 5]
         and "recovered_six" not in contract
         and request == contract["request"]
-        and sha256(encode(request) + b"\n") == request_digest
+        and sha256(encode(card_free) + b"\n") == request_digest
+        and (named is None) == ("cuda_card_selection" in contract)
+        and (named is None or named in REGISTERED_CUDA_CARDS)
         and review.get("hosted_plan_sha256") == sha256(encode(contract))
         and receipt["accepted"] is (not five_count)
         and set(receipt["counts"]) == {str(count) for count in contract["counts"]}
         and all(original_verdict(count, item) for count, item in receipt["counts"].items()),
-        "fresh capture differs from the complete accepted hosted GPU0 plan",
+        "fresh capture differs from the complete accepted hosted owned-Job plan",
     )
     output = record["native"]["output"]
     body = record["body"]
@@ -918,11 +1006,12 @@ def validate_fresh_gpu0_plan(receipt, review, guard, record, *, five_count=False
     )
     admission = guard["admission"]
     deadline = record["claim"]["claim_deadline_monotonic"]
+    policy = executed_policy(receipt)
     require(
         type(deadline) in (int, float)
         and 0 < deadline == admission["originalClaimDeadlineMonotonic"]
         and all(
-            admission[k] == request["policy"][k]
+            admission[k] == policy[k]
             for k in (
                 "backend",
                 "cudaDeviceUuid",
@@ -1033,8 +1122,8 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             not recovery
             and (not partial or five_count)
             and row["platform"] == "windows"
-            and str(hw["index"]) == "0",
-            "expected an ordinary Windows GPU0 capture",
+            and str(hw["index"]) == str(registered_card_index(hw["uuid"])),
+            "expected an ordinary Windows capture on a registered card",
         )
         validate_fresh_gpu0_plan(receipt, review, guard, record, five_count=five_count)
     if row["platform"] == "macos":
@@ -1073,37 +1162,47 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             and receipt["adapter"]["node_mask"] == 1 << receipt["adapter"]["physical_node"],
             "crossed CUDA identity",
         )
-        if str(hw.get("index")) == "0" or hw["uuid"] == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0":
+        validate_card_selection(receipt)
+        # GPU0 captures, and any owned-Job or card-selected capture on another registered card,
+        # bind the native ordinal-zero adapter to the recorded card. Only GPU0's PCI address is
+        # pinned; another card's is bound by NVML, WDDM and the native ordinal agreeing.
+        if (
+            str(hw.get("index")) == "0"
+            or hw["uuid"] == GPU0
+            or fresh_gpu0
+            or "cuda_card_selection" in receipt["contract"]
+        ):
             adapter = receipt["adapter"]
+            pci = str(hw.get("pci.bus_id", "")).lower()
             require(
-                str(hw["index"]) == "0"
-                and hw["uuid"] == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0"
+                str(hw["index"]) == str(registered_card_index(hw["uuid"]))
                 and isinstance(native.get("cuda_device"), dict)
                 and all(
                     type(native["cuda_device"].get(k)) is int
                     for k in ("ordinal", "visible_count", "node_mask")
                 )
-                and hw["pci.bus_id"].upper() == "00000000:21:00.0"
+                and re.fullmatch(r"[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", pci)
+                and (hw["uuid"] != GPU0 or pci == GPU0_PCI)
                 and native.get("cuda_device")
                 == {
                     "ordinal": 0,
                     "visible_count": 1,
                     "uuid": hw["uuid"],
-                    "pci_bus_id": "00000000:21:00.0",
+                    "pci_bus_id": pci,
                     "luid": adapter["luid"],
                     "node_mask": adapter["node_mask"],
                 },
-                "GPU0 capture lacks the matching native execution adapter",
+                "CUDA capture lacks the matching native execution adapter",
             )
         native_pool = None
         end = guard["fit_observation"].get("cuda_render_end", {})
         if fresh_gpu0 or "rejected_growth" in end:
-            policy = receipt["contract"]["request"]["policy"]
+            policy = executed_policy(receipt)
             policy_bytes = (
                 json.dumps(policy, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
             ).encode()
             require(
-                receipt["request"]["policy"] == policy
+                receipt["request"]["policy"] == receipt["contract"]["request"]["policy"]
                 and admission["policySha256"] == sha256(policy_bytes)
                 and all(
                     admission[k] == policy[k] and type(admission[k]) is type(policy[k])
@@ -1131,7 +1230,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             basis = "archived-supervisor-return" if recovery else "owned-job-completion"
             require(
                 summary["basis"] == basis
-                and hw["uuid"] == "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+                and str(hw["index"]) == str(registered_card_index(hw["uuid"])),
                 "unverified CUDA completion source",
             )
             require(
@@ -1150,7 +1249,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
             require(
                 byte_count(record["claim"]["admission_baseline"]["admitted_total_mib"])
                 == int(hw["memory.total"]),
-                "release baseline differs from physical GPU0 capacity",
+                "release baseline differs from the physical card capacity",
             )
         if (partial or fresh_gpu0) and not completion:
             require(
@@ -1158,7 +1257,7 @@ def project(receipt_path, review_path, *, certificate_path=None, archive_path=No
                 == receipt["request"]["policy"]["pollMillis"]
                 == 250
                 and record["claim"]["device_uuid"] == hw["uuid"]
-                and record["claim"]["physical_index"] == 0
+                and record["claim"]["physical_index"] == registered_card_index(hw["uuid"])
                 and record["claim"]["lease_released"] is True
                 and review["domains"]["device"]["basis"] == "measured_aggregate",
                 "CUDA count lacks its original signed guard or release",

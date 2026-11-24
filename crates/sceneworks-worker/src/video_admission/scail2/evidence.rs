@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 const INDEX: &[u8] = include_bytes!("../../../../../config/scail2-plural-memory.json");
 const APPROVED_INDEX_SHA256: &str =
-    "84c0cf6ce4d100f9c467f2e729ba890a554e21e64ac18451db1ed91b84ca7da2";
+    "f27db6b55ddbbbd02421ef5dc4eeda6ccf8debf3de77ee2f256c4d9f38a64556";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -432,6 +432,21 @@ pub(super) fn packaged() -> crate::WorkerResult<&'static [QualifiedWitness]> {
                 "invalid SCAIL-2 plural memory evidence: {e}"
             ))
         })
+}
+
+#[test]
+fn packaged_evidence_covers_the_pinned_inference_revision_without_pin_coverage() {
+    let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
+    let rows = packaged().unwrap();
+    for platform in ["macos", "windows"] {
+        for count in 2..=6 {
+            assert!(
+                rows.iter()
+                    .any(|r| r.inference_revision == pin && r.covers(platform, pin, count)),
+                "{platform} {count}"
+            );
+        }
+    }
 }
 
 #[test]
