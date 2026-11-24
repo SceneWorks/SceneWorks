@@ -2,7 +2,7 @@ import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedb
 import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { MediaSourcePickerField } from "../components/AssetPicker.jsx";
 import { assetCanRenderAsAudio } from "../components/assetMedia.jsx";
 import { formatRelativeTime } from "../audioTakes.js";
 import { formatBytes, percent } from "../formatting.js";
@@ -794,7 +794,7 @@ export function Yue2RecordingCover({
       )}
 
       <div className="yue2-transcribe" data-testid="yue2-transcribe">
-        <AssetPickerField
+        <MediaSourcePickerField
           assets={audioAssets}
           buttonLabel="Choose or upload a recording"
           changeLabel="Change"
@@ -803,7 +803,8 @@ export function Yue2RecordingCover({
           label="Recording"
           mediaKind="audio"
           onChange={(id) => update({ transcribeAssetId: id })}
-          showCategories={false}
+          projectId={projectId}
+          showCharacters={false}
           value={settings.transcribeAssetId}
         />
         <MicrophoneTake importAsset={importAsset} onImported={(id) => update({ transcribeAssetId: id })} />

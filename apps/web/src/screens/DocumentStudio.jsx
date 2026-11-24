@@ -1,8 +1,8 @@
 import { formatResolutionLabel } from "../studioDefaults.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
-import { AssetPickerModal } from "../components/AssetPicker.jsx";
-import { AssetThumbnail } from "../components/assetMedia.jsx";
+import { MediaSourcePickerModal } from "../components/AssetPicker.jsx";
+import { AssetThumbnail, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { DocumentView } from "../components/DocumentView.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -211,8 +211,9 @@ export function DocumentStudio() {
   }, [interleaveModels, model]);
 
   const sourceImageAssets = useMemo(
-    () => (assets ?? []).filter((asset) => asset.type === "image" || asset.type === "frame" || asset.type === "upload"),
-    [assets],
+    () => (assets ?? []).filter((asset) => asset.projectId === activeProject?.id &&
+      (assetCanRenderAsImage(asset) || asset.type === "frame") && !asset.status?.trashed && !asset.status?.rejected),
+    [assets, activeProject?.id],
   );
   const assetById = useMemo(() => new Map((assets ?? []).map((asset) => [asset.id, asset])), [assets]);
 
@@ -683,8 +684,9 @@ export function DocumentStudio() {
       </section>
 
       {pickerFrame ? (
-        <AssetPickerModal
+        <MediaSourcePickerModal
           assets={sourceImageAssets}
+          importAsset={importAsset}
           initialSelectedIds={pickerFrame.assetId ? [pickerFrame.assetId] : []}
           multiple={false}
           onCancel={() => setPickerFrameId(null)}
@@ -693,6 +695,7 @@ export function DocumentStudio() {
             setPickerFrameId(null);
           }}
           title="Reference frame"
+          showCharacters={false}
         />
       ) : null}
     </section>

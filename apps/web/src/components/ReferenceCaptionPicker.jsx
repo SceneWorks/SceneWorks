@@ -15,7 +15,7 @@ import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
 // the result to its own state). C1: the image is captioning-only — never sent to generation.
 
 import React, { useState } from "react";
-import { AssetPickerField, ImageEditSourcePickerField } from "./AssetPicker.jsx";
+import { ImageEditSourcePickerField } from "./AssetPicker.jsx";
 import { ModelAvailabilityGate } from "./ModelAvailabilityGate.jsx";
 import { useReferenceAspectSnap } from "../hooks/useReferenceAspectSnap.js";
 
@@ -162,17 +162,20 @@ export default function ReferenceCaptionPicker({
         />
         {/* Mood board (epic 8588, sc-8595): add MORE reference images beyond the primary; the model
             synthesizes ONE prompt/caption from the aesthetic they share. Only once a primary is chosen
-            (it is the first image). The extras come from the project library (the primary picker keeps
-            import/characters). Capped at moodBoardMax − 1 extras; the server enforces the same ceiling. */}
+            (it is the first image). Both pickers share project assets, uploads, and characters.
+            Capped at moodBoardMax − 1 extras; the server enforces the same ceiling. */}
         {selectedReady && (showMoodBoard || useLoop) && referenceAssetId ? (
-          <AssetPickerField
+          <ImageEditSourcePickerField
             assets={referenceAssets.filter((asset) => asset.id !== referenceAssetId)}
             buttonLabel="Add mood-board images"
             changeLabel="Edit mood board"
+            characters={referenceCharacters}
             emptyLabel="Add more images to blend their style (optional)"
+            importAsset={importAsset}
             label="Mood board (optional)"
             multiple
             onChange={setMoodBoardIds}
+            projectId={projectId}
             values={moodBoardExtras}
           />
         ) : null}

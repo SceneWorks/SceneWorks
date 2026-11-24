@@ -2,7 +2,7 @@ import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { MediaSourcePickerField } from "../components/AssetPicker.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { ModeTabs } from "../components/generationStudio.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -228,6 +228,7 @@ export function VectorStudio() {
     macCapabilities,
     macCapabilitiesAuthoritative,
     createVectorJob,
+    importAsset,
     createVectorPromptWorkflow,
     createModelDownloadJob,
     jobAction,
@@ -649,10 +650,14 @@ export function VectorStudio() {
                   </select>
                 </label>
               ) : null}
-              <AssetPickerField
+              <MediaSourcePickerField
                 assets={sources}
+                eyebrow="Vector Studio"
+                importAsset={importAsset}
                 label="Project raster image"
                 onChange={setSourceAssetId}
+                projectId={activeProject?.id}
+                showCharacters={false}
                 value={sourceAssetId}
               />
               {conversionModel?.vector?.acceptsTextGuidance === true ? (
