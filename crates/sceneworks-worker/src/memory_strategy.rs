@@ -347,6 +347,7 @@ pub(crate) fn generate_video_with_scope_execution_report(
         generator,
         request,
         context,
+        None,
         on_progress,
         |generator, request, scope, progress| {
             let bound = plan.bind_admission(spec, context, request)?;
