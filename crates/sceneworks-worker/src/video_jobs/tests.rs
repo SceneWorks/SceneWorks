@@ -4040,6 +4040,13 @@ fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
             _ => (false, 0),
         };
         let manifest = if quantized {
+            // A shipped packed tier carries `quantize_config.json`; the pinned candle loader reads
+            // the tier's bits from it and refuses a `spec.quantize` it cannot confirm.
+            std::fs::write(
+                root.join(tier).join("quantize_config.json"),
+                json!({ "quantization": { "bits": bits, "group_size": 64 } }).to_string(),
+            )
+            .unwrap();
             json!({ "quantized": true, "quantization_bits": bits, "quantization_group_size": 64 })
         } else {
             json!({ "quantized": false })
