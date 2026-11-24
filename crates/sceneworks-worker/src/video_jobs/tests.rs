@@ -4061,6 +4061,9 @@ fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
         for component in ["text_encoder", "tokenizer", "vae"] {
             std::fs::create_dir_all(root.join(component)).unwrap();
         }
+        // The pinned video plan reads the shared codec geometry before any weights; `{}` takes
+        // the real checkpoint's defaults (as `mochi_root_real_sized` does).
+        std::fs::write(root.join("vae/config.json"), b"{}").unwrap();
     }
     root_guard
 }
