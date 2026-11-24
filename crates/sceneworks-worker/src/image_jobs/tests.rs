@@ -718,10 +718,16 @@ use super::sdxl_control::SDXL_CONTROL_ENGINE_ID;
 #[cfg(native_lane)]
 #[cfg(native_lane)]
 use super::sdxl_control::SDXL_CONTROL_REPO;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::drive_sdxl_imported_mlx_items;
 #[cfg(native_lane)]
 use super::sdxl_imported::mirror_cached_sdxl_component_file;
 #[cfg(native_lane)]
 use super::sdxl_imported::mirror_cached_sdxl_component_file_with_copy;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::sdxl_imported::prepare_sdxl_imported_candle_floor;
+#[cfg(native_lane)]
+use super::sdxl_imported::prepare_sdxl_imported_load_spec;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::prepare_sdxl_imported_sources;
 #[cfg(all(native_lane, all(windows, feature = "backend-candle")))]
@@ -730,10 +736,24 @@ use super::sdxl_imported::promote_cached_sdxl_component;
 use super::sdxl_imported::resolve_imported_sdxl_file;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::resolve_imported_sdxl_pin;
+#[cfg(native_lane)]
+use super::sdxl_imported::resolve_sdxl_imported_hires;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::sdxl_imported_available;
+#[cfg(native_lane)]
+use super::sdxl_imported::sdxl_imported_candle_floor_companion_dirs;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::sdxl_imported_memory_inputs;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::sdxl_imported_request_shape_available;
+#[cfg(native_lane)]
+use super::sdxl_imported::validate_sdxl_imported_hires_conditioning;
+#[cfg(native_lane)]
+use super::sdxl_imported::validate_sdxl_imported_hires_scheduler;
+#[cfg(native_lane)]
+use super::sdxl_imported::PreparedSdxlHires;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::SdxlImportedItem;
 #[cfg(native_lane)]
 use super::sdxl_imported::SDXL_CLIP_BIGG_REVISION;
 #[cfg(native_lane)]
@@ -1746,15 +1766,20 @@ impl HiresProbeGenerator {
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn krea(provider_id: &str) -> Self {
+    #[cfg(native_lane)]
+    fn provider(provider_id: &str) -> Self {
         let mut generator = Self::new();
         generator.descriptor = crate::inference_runtime::media()
             .generators()
             .map(|entry| (entry.descriptor)())
             .find(|descriptor| descriptor.id == provider_id)
-            .expect("the linked runtime includes the selected Krea variant");
+            .expect("the linked runtime includes the selected provider");
         generator
+    }
+
+    #[cfg(target_os = "macos")]
+    fn krea(provider_id: &str) -> Self {
+        Self::provider(provider_id)
     }
 }
 
@@ -2809,6 +2834,855 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             }
             assert_eq!(steps, [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
             assert_eq!((decodes, images), (1, 1));
+        }
+    }
+}
+
+#[cfg(native_lane)]
+fn prepared_sdxl_imported_test_spec(fixture: &tempfile::TempDir) -> LoadSpec {
+    let checkpoint = fixture.path().join("imported-sdxl-test.safetensors");
+    std::fs::write(&checkpoint, [0_u8; 8]).unwrap();
+    let mut spec = LoadSpec::new(WeightsSource::File(checkpoint));
+    spec.prepare_file_sources().unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let tokenizer_root = fixture.path().join("ldm-tokenizer");
+        std::fs::create_dir_all(tokenizer_root.join("tokenizer")).unwrap();
+        spec = spec.with_component("ldm_tokenizer", WeightsSource::Dir(tokenizer_root));
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let clip_l = fixture.path().join("clip-l");
+        let clip_g = fixture.path().join("clip-bigg");
+        std::fs::create_dir_all(&clip_l).unwrap();
+        std::fs::create_dir_all(&clip_g).unwrap();
+        std::fs::write(clip_l.join("tokenizer.json"), "{}").unwrap();
+        std::fs::write(clip_g.join("tokenizer.json"), "{}").unwrap();
+        spec = spec
+            .with_component("tokenizer_clip_l", WeightsSource::Dir(clip_l))
+            .with_component("tokenizer_clip_bigg", WeightsSource::Dir(clip_g));
+    }
+    spec
+}
+
+#[cfg(native_lane)]
+#[test]
+fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only_enhancement() {
+    let req = request(json!({
+        "projectId": "p",
+        "model": "community_sdxl",
+        "prompt": "a stormy lighthouse",
+        "width": 512,
+        "height": 512,
+        "hiresFix": {
+            "enabled": true,
+            "upscaleBy": 2.0,
+            "steps": 4,
+            "denoisingStrength": 0.45,
+            "cfgScale": 6.5
+        },
+        "modelManifestEntry": { "family": "sdxl" }
+    }));
+    let hires = resolve_sdxl_imported_hires(&req, 6, 7.0).expect("SDXL hires plan");
+    assert_eq!((hires.width, hires.height), (1024, 1024));
+    assert_eq!(hires.steps, 4);
+    assert_eq!(hires.guidance, Some(6.5));
+    assert_eq!(hires.true_cfg, None);
+    assert!((hires.provider_reference_strength - 0.45).abs() < 1e-6);
+
+    let disabled_req = request(json!({
+        "projectId": "p",
+        "model": "community_sdxl",
+        "prompt": "a stormy lighthouse",
+        "width": 512,
+        "height": 512,
+        "modelManifestEntry": { "family": "sdxl" }
+    }));
+    assert!(resolve_sdxl_imported_hires(&disabled_req, 6, 7.0).is_none());
+
+    validate_sdxl_imported_hires_conditioning(&[], Some(hires))
+        .expect("prompt-only hires is admitted");
+    let conditioned_refusal = validate_sdxl_imported_hires_conditioning(
+        &[Conditioning::Reference {
+            image: Image {
+                width: 4,
+                height: 4,
+                pixels: vec![9; 4 * 4 * 3],
+            },
+            strength: Some(0.6),
+        }],
+        Some(hires),
+    )
+    .expect_err("conditioning + hires must refuse");
+    assert!(
+        matches!(
+            conditioned_refusal,
+            WorkerError::InvalidPayload(ref message)
+                if message == "Imported SDXL img2img/edit conditioning cannot be combined with Hires.fix"
+        ),
+        "unexpected refusal: {conditioned_refusal:?}"
+    );
+
+    let fixture = tempfile::tempdir().unwrap();
+    let spec = std::sync::Arc::new(prepared_sdxl_imported_test_spec(&fixture));
+    let mut loaded_policy = crate::generator_cache::ExecutionPolicy::from_load_spec(&spec);
+    loaded_policy.offload_policy = gen_core::OffloadPolicy::Sequential;
+    let first_use_pid = cfg!(target_os = "macos");
+    let first = GenerationRequest {
+        prompt: "a stormy lighthouse".into(),
+        negative_prompt: Some("blurry".into()),
+        width: 512,
+        height: 512,
+        count: 1,
+        seed: Some(77),
+        steps: Some(6),
+        guidance: Some(7.0),
+        sampler: Some("euler".into()),
+        scheduler: Some("karras".into()),
+        use_pid: first_use_pid,
+        enhance_prompt: true,
+        ..Default::default()
+    };
+    // Enabling prompt enhancement on SDXL fails pre-load compilation because SDXL does not
+    // advertise prompt enhancement; pass 0 is always stripped to unenhanced regardless.
+    let enhance_refusal = PreparedSdxlHires::prepare(
+        crate::inference_runtime::media(),
+        "sdxl",
+        spec.clone(),
+        first.clone(),
+        hires,
+        PromptEnhance {
+            enabled: true,
+            temperature: Some(0.5),
+            max_tokens: Some(64),
+        },
+    )
+    .err()
+    .expect("SDXL refuses unsupported prompt enhancement before load");
+    assert!(
+        matches!(
+            enhance_refusal,
+            WorkerError::InvalidPayload(ref message)
+                if message.contains("prompt enhancement is not supported")
+        ),
+        "unexpected enhancement refusal: {enhance_refusal:?}"
+    );
+
+    let prepared = PreparedSdxlHires::prepare(
+        crate::inference_runtime::media(),
+        "sdxl",
+        spec,
+        first,
+        hires,
+        PromptEnhance::default(),
+    )
+    .expect("imported SDXL compiles both planned hires passes before load");
+    let (base_plan, refine_plan) = prepared.passes();
+    assert_eq!(base_plan.output_size(), (512, 512));
+    assert_eq!(base_plan.reference_count(), 0);
+    assert_eq!(refine_plan.output_size(), (1024, 1024));
+    assert_eq!(refine_plan.reference_count(), 1);
+    assert_eq!(
+        refine_plan
+            .produced_reference()
+            .and_then(|produced| produced.strength),
+        Some(0.45)
+    );
+    let _memory = prepared.memory().expect("SDXL hires pricing succeeds");
+
+    let selection = gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+    };
+    let mut refine_ctx = hires_memory_context(selection);
+    refine_ctx.mode = gen_core::MemoryMode::ImageToImage;
+    refine_ctx.has_reference = true;
+    refine_ctx.geometry.width = 1024;
+    refine_ctx.geometry.height = 1024;
+    refine_ctx.geometry.reference_count = 1;
+    refine_ctx.use_pid = false;
+    let mut base_ctx = hires_first_pass_context(&refine_ctx, 512, 512, 0);
+    base_ctx.use_pid = first_use_pid;
+
+    let generator = HiresProbeGenerator::provider("sdxl");
+    let enhancement_reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reports_sink = enhancement_reports.clone();
+    let prompt_enhancement = gen_core::PromptEnhancementSink::new(move |report| {
+        reports_sink.lock().unwrap().push(report);
+    });
+    let mut progress_events = Vec::new();
+    let (out_width, out_height, pixels, report) = prepared
+        .generate(
+            &generator,
+            loaded_policy,
+            None,
+            [Some(&base_ctx), Some(&refine_ctx)],
+            Default::default(),
+            prompt_enhancement,
+            &CancelFlag::new(),
+            &mut |event| progress_events.push(event),
+        )
+        .expect("planned imported SDXL hires render succeeds");
+
+    assert_eq!((out_width, out_height), (1024, 1024));
+    assert_eq!(pixels.len(), 1024 * 1024 * 3);
+    assert!(pixels.iter().all(|&pixel| pixel == 2));
+    assert_eq!(*generator.planned_seeds.lock().unwrap(), [77, 77]);
+
+    let requests = generator.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[0].enhance_prompt,
+        "base pass must stay unenhanced even if the input request had enhance_prompt set"
+    );
+    assert_eq!(requests[0].use_pid, first_use_pid);
+    assert!(requests[0].conditioning.is_empty());
+    assert!(
+        !requests[1].enhance_prompt,
+        "SDXL refinement preserves PromptEnhance::default() (unenhanced)"
+    );
+    assert!(
+        !requests[1].use_pid,
+        "refinement pass always uses native VAE"
+    );
+    assert_eq!(requests[1].guidance, Some(6.5));
+    match requests[1].conditioning.as_slice() {
+        [Conditioning::Reference { image, strength }] => {
+            assert_eq!((image.width, image.height), (1024, 1024));
+            assert_eq!(*strength, Some(0.45));
+            assert!(image.pixels.iter().all(|&pixel| pixel == 1));
+        }
+        other => panic!("expected fitted single Hires.fix reference, got {other:?}"),
+    }
+
+    let reports = enhancement_reports.lock().unwrap();
+    assert!(
+        reports.is_empty(),
+        "unenhanced SDXL hires must emit no prompt enhancement report"
+    );
+
+    let step_events: Vec<(u32, u32)> = progress_events
+        .iter()
+        .filter_map(|event| match event {
+            Progress::Step { current, total } => Some((*current, *total)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        step_events,
+        (1..=10).map(|step| (step, 10)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        progress_events
+            .iter()
+            .filter(|event| matches!(event, Progress::Decoding))
+            .count(),
+        1,
+        "intermediate base-pass decode must stay hidden"
+    );
+
+    let mut facts = crate::JsonObject::new();
+    report
+        .insert_image_facts(&mut facts)
+        .expect("hires execution report serializes");
+    assert!(facts.contains_key("workerExecutionReport"));
+    let stages = facts
+        .get("workerExecutionStages")
+        .and_then(Value::as_array)
+        .expect("hires execution stages recorded");
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0].get("stage").and_then(Value::as_str), Some("base"));
+    assert_eq!(
+        stages[1].get("stage").and_then(Value::as_str),
+        Some("refine")
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn imported_sdxl_hires_closes_each_scope_on_refinement_failure() {
+    let fixture = tempfile::tempdir().unwrap();
+    let spec = std::sync::Arc::new(prepared_sdxl_imported_test_spec(&fixture));
+    let loaded_policy = crate::generator_cache::ExecutionPolicy::from_load_spec(&spec);
+    let mut generator = HiresProbeGenerator::provider("sdxl");
+    generator.fail_planned_pass = Some(1);
+    let prepared = PreparedSdxlHires::prepare(
+        crate::inference_runtime::media(),
+        "sdxl",
+        spec,
+        GenerationRequest {
+            prompt: "unchanged prompt".into(),
+            seed: Some(42),
+            width: 512,
+            height: 512,
+            count: 1,
+            steps: Some(4),
+            guidance: Some(7.0),
+            sampler: Some("euler".into()),
+            scheduler: Some("karras".into()),
+            ..Default::default()
+        },
+        HiresFixPlan {
+            width: 1024,
+            height: 1024,
+            steps: 2,
+            guidance: Some(7.0),
+            true_cfg: None,
+            provider_reference_strength: 0.4,
+        },
+        PromptEnhance::default(),
+    )
+    .expect("both SDXL plans compile");
+
+    let selection = gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+    };
+    let mut refine = hires_memory_context(selection);
+    refine.mode = gen_core::MemoryMode::ImageToImage;
+    refine.has_reference = true;
+    refine.geometry.width = 1024;
+    refine.geometry.height = 1024;
+    refine.geometry.reference_count = 1;
+    let base = hires_first_pass_context(&refine, 512, 512, 0);
+
+    let result = prepared.generate(
+        &generator,
+        loaded_policy,
+        None,
+        [Some(&base), Some(&refine)],
+        Default::default(),
+        gen_core::PromptEnhancementSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(result, Err(WorkerError::Engine(message)) if message.contains("planned refinement failed"))
+    );
+    assert_eq!(*generator.contexts.lock().unwrap(), [base, refine]);
+    let outcomes = generator.scope_outcomes.lock().unwrap();
+    assert!(matches!(
+        outcomes.as_slice(),
+        [
+            gen_core::MemoryRunOutcome::Complete,
+            gen_core::MemoryRunOutcome::Error { .. },
+        ]
+    ));
+}
+
+#[cfg(native_lane)]
+#[test]
+fn sdxl_imported_load_spec_pins_pid_checkpoint_without_double_counting_candle_floor() {
+    let fixture = tempfile::tempdir().unwrap();
+    let checkpoint = fixture.path().join("imported-sdxl.safetensors");
+    let pid_dir = fixture.path().join("pid-ckpt");
+    let pid_ckpt = pid_dir.join("pid_sdxl_2kto4k.safetensors");
+    let gemma_dir = fixture.path().join("pid-gemma");
+    let tokenizer_dir = fixture.path().join("tokenizer");
+    std::fs::create_dir_all(&pid_dir).unwrap();
+    std::fs::create_dir_all(&gemma_dir).unwrap();
+    std::fs::create_dir_all(&tokenizer_dir).unwrap();
+    std::fs::write(&checkpoint, [1_u8; 11]).unwrap();
+    std::fs::write(&pid_ckpt, [2_u8; 19]).unwrap();
+    std::fs::write(gemma_dir.join("model.safetensors"), [3_u8; 23]).unwrap();
+    std::fs::write(tokenizer_dir.join("tokenizer.json"), "{}").unwrap();
+
+    let checkpoint_pin = gen_core::PinnedWeightsFile::pin(&checkpoint).expect("checkpoint pins");
+    let spec = prepare_sdxl_imported_load_spec(
+        checkpoint_pin,
+        PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
+        None,
+        Some(gen_core::PidWeights {
+            checkpoint: WeightsSource::File(pid_ckpt.clone()),
+            gemma: WeightsSource::Dir(gemma_dir.clone()),
+        }),
+    )
+    .expect("imported SDXL LoadSpec with PiD pins both file sources")
+    .with_component(
+        "tokenizer_clip_l",
+        WeightsSource::Dir(tokenizer_dir.clone()),
+    );
+
+    assert!(spec.prepared_file_pins().is_prepared());
+    spec.validate_prepared_file_pins()
+        .expect("prepared file pins must include pid.checkpoint");
+
+    let canonical_checkpoint = std::path::absolute(&checkpoint).unwrap();
+    let canonical_pid_ckpt = std::path::absolute(&pid_ckpt).unwrap();
+    assert_eq!(
+        spec.prepared_file_pin_for(&canonical_checkpoint)
+            .unwrap()
+            .expect("primary checkpoint pin")
+            .target_fingerprint()
+            .size,
+        11
+    );
+    assert_eq!(
+        spec.prepared_file_pin_for(&canonical_pid_ckpt)
+            .unwrap()
+            .expect("PiD checkpoint pin")
+            .target_fingerprint()
+            .size,
+        19
+    );
+
+    let companions = sdxl_imported_candle_floor_companion_dirs(&spec);
+    assert!(
+        companions.contains(&gemma_dir.as_path()),
+        "PiD Gemma directory must remain in Candle floor companions"
+    );
+    assert!(
+        companions.contains(&tokenizer_dir.as_path()),
+        "staged directory components must remain in Candle floor companions"
+    );
+    assert!(
+        !companions.contains(&canonical_pid_ckpt.as_path())
+            && !companions.contains(&pid_ckpt.as_path()),
+        "pinned pid.checkpoint File must not be added to companion dirs"
+    );
+
+    let pinned_bytes = spec
+        .prepared_file_pins()
+        .iter()
+        .fold(0_u64, |total, (_, pin)| {
+            total.saturating_add(pin.target_fingerprint().size)
+        });
+    let companion_bytes = companions.iter().fold(0_u64, |total, path| {
+        let bytes = match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata.len(),
+            Ok(metadata) if metadata.is_dir() => std::fs::read_dir(path)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|child| {
+                    child
+                        .extension()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
+                })
+                .filter_map(|child| std::fs::metadata(child).ok())
+                .fold(0_u64, |sum, meta| sum.saturating_add(meta.len())),
+            _ => 0,
+        };
+        total.saturating_add(bytes)
+    });
+    assert_eq!(pinned_bytes, 11 + 19);
+    assert_eq!(companion_bytes, 23);
+    assert_eq!(
+        pinned_bytes + companion_bytes,
+        11 + 19 + 23,
+        "Candle floor sizing must count pid.checkpoint exactly once"
+    );
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let _guard = runtime.enter();
+        let settings = Settings::for_test(fixture.path().to_path_buf());
+        let floor = prepare_sdxl_imported_candle_floor("community_sdxl", &settings, &spec, 7)
+            .expect("Candle floor admission must succeed with pinned PiD checkpoint");
+        assert_eq!(
+            floor.source_floor_bytes(),
+            11 + 19 + 23,
+            "Candle source floor must not double-count pid.checkpoint"
+        );
+        assert_eq!(
+            floor.reclaimable_weight_bytes(),
+            11 + 19 + 23,
+            "Candle reclaimable weight bytes must not double-count pid.checkpoint"
+        );
+    }
+
+    // Mutating pid.checkpoint after pinning must fail validation rather than passing silently.
+    std::fs::write(&pid_ckpt, [9_u8; 29]).unwrap();
+    assert!(
+        spec.validate_prepared_file_pins().is_err(),
+        "stale pid.checkpoint must fail prepared pin validation"
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn sdxl_imported_hires_refuses_discrete_scheduler_with_invalid_payload() {
+    let hires = HiresFixPlan {
+        width: 1024,
+        height: 1024,
+        steps: 4,
+        guidance: Some(6.5),
+        true_cfg: None,
+        provider_reference_strength: 0.45,
+    };
+    validate_sdxl_imported_hires_scheduler("sdxl", Some("discrete"), None)
+        .expect("non-Hires requests keep the discrete scheduler");
+    let direct_refusal =
+        validate_sdxl_imported_hires_scheduler("sdxl", Some("discrete"), Some(hires))
+            .expect_err("Hires.fix must refuse discrete scheduler");
+    assert!(
+        matches!(
+            direct_refusal,
+            WorkerError::InvalidPayload(ref message) if message.contains("discrete")
+        ),
+        "expected InvalidPayload refusal for discrete scheduler, got {direct_refusal:?}"
+    );
+
+    let fixture = tempfile::tempdir().unwrap();
+    let spec = std::sync::Arc::new(prepared_sdxl_imported_test_spec(&fixture));
+    let first = GenerationRequest {
+        prompt: "a stormy lighthouse".into(),
+        width: 512,
+        height: 512,
+        count: 1,
+        seed: Some(77),
+        steps: Some(6),
+        guidance: Some(7.0),
+        sampler: Some("euler".into()),
+        scheduler: Some("discrete".into()),
+        ..Default::default()
+    };
+    let prepare_refusal = PreparedSdxlHires::prepare(
+        crate::inference_runtime::media(),
+        "sdxl",
+        spec,
+        first,
+        hires,
+        PromptEnhance::default(),
+    )
+    .err()
+    .expect("PreparedSdxlHires::prepare must refuse discrete scheduler before load");
+    assert!(
+        matches!(
+            prepare_refusal,
+            WorkerError::InvalidPayload(ref message) if message.contains("discrete")
+        ),
+        "expected InvalidPayload refusal from PreparedSdxlHires::prepare, got {prepare_refusal:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_sdxl_mlx_driver_evaluates_every_shape_and_scopes_every_pass() {
+    let image = |pixel| Image {
+        width: 4,
+        height: 4,
+        pixels: vec![pixel; 4 * 4 * 3],
+    };
+    let hires = HiresFixPlan {
+        width: 1024,
+        height: 1024,
+        steps: 3,
+        guidance: Some(6.0),
+        true_cfg: None,
+        provider_reference_strength: 0.45,
+    };
+    let selection = gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: None,
+            component_precision_floors: &[],
+        },
+    };
+
+    struct Case {
+        name: &'static str,
+        mode: &'static str,
+        conditioning: Vec<Conditioning>,
+        hires_fix: Option<HiresFixPlan>,
+        use_pid: bool,
+        item_count: usize,
+        expected_pass_references: &'static [u32],
+    }
+    let cases = [
+        Case {
+            name: "t2i",
+            mode: "image_generation",
+            conditioning: vec![],
+            hires_fix: None,
+            use_pid: false,
+            item_count: 2,
+            expected_pass_references: &[0, 0],
+        },
+        Case {
+            name: "img2img",
+            mode: "image_generation",
+            conditioning: vec![Conditioning::Reference {
+                image: image(1),
+                strength: Some(0.6),
+            }],
+            hires_fix: None,
+            use_pid: false,
+            item_count: 1,
+            expected_pass_references: &[1],
+        },
+        Case {
+            name: "edit_inpaint",
+            mode: "edit_image",
+            conditioning: vec![
+                Conditioning::Reference {
+                    image: image(1),
+                    strength: Some(0.85),
+                },
+                Conditioning::Mask { image: image(255) },
+            ],
+            hires_fix: None,
+            use_pid: false,
+            item_count: 1,
+            expected_pass_references: &[2],
+        },
+        Case {
+            name: "hires",
+            mode: "image_generation",
+            conditioning: vec![],
+            hires_fix: Some(hires),
+            use_pid: true,
+            item_count: 1,
+            expected_pass_references: &[0, 1],
+        },
+    ];
+
+    for case in cases {
+        let generator = HiresProbeGenerator::provider("sdxl");
+        let mut req = request(json!({
+            "projectId": "p",
+            "model": "community_sdxl",
+            "mode": case.mode,
+            "width": 512,
+            "height": 512,
+            "count": case.item_count,
+            "modelManifestEntry": { "family": "sdxl" }
+        }));
+        req.mode = case.mode.to_owned();
+        let fixture = tempfile::tempdir().unwrap();
+        let spec = prepared_sdxl_imported_test_spec(&fixture);
+        let prototype = GenerationRequest {
+            width: req.width,
+            height: req.height,
+            count: 1,
+            steps: Some(2),
+            guidance: Some(7.0),
+            sampler: Some("euler".into()),
+            scheduler: Some("karras".into()),
+            use_pid: case.use_pid,
+            ..Default::default()
+        };
+        let mut hires_memory = None;
+        let work = (0..case.item_count)
+            .map(|index| (42 + index as i64, format!("{} prompt {index}", case.name)))
+            .collect::<Vec<_>>();
+        let work = if let Some(hires) = case.hires_fix {
+            work.into_iter()
+                .map(|(seed, prompt)| {
+                    let first = GenerationRequest {
+                        prompt,
+                        seed: Some(seed as u64),
+                        ..prototype.clone()
+                    };
+                    let prepared = PreparedSdxlHires::prepare(
+                        crate::inference_runtime::media(),
+                        "sdxl",
+                        std::sync::Arc::new(spec.clone()),
+                        first,
+                        hires,
+                        PromptEnhance::default(),
+                    )
+                    .expect("imported SDXL hires compiles both passes before load");
+                    hires_memory = Some(prepared.memory().expect("SDXL hires memory pricing"));
+                    (seed, SdxlImportedItem::Hires(Box::new(prepared)))
+                })
+                .collect()
+        } else {
+            work.into_iter()
+                .map(|(seed, prompt)| (seed, SdxlImportedItem::Ordinary(prompt)))
+                .collect()
+        };
+        let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+            "sdxl",
+            &req.model,
+            &spec,
+            Some(&req.model_manifest_entry),
+            None,
+        );
+        let memory_inputs = sdxl_imported_memory_inputs(
+            &req,
+            &spec,
+            &case.conditioning,
+            hires_memory.as_ref(),
+            1,
+            case.use_pid,
+            7.0,
+            None,
+        );
+        if case.hires_fix.is_some() {
+            assert_eq!((memory_inputs.width, memory_inputs.height), (1024, 1024));
+            assert_eq!(memory_inputs.reference_count, 1);
+            assert!(memory_inputs.has_reference);
+            assert!(!memory_inputs.use_pid);
+            assert_eq!(memory_inputs.overlay.as_deref(), Some("adapters:1+pid"));
+        } else if case.name == "edit_inpaint" {
+            assert_eq!(memory_inputs.reference_count, 2);
+            assert_eq!(
+                memory_inputs.overlay.as_deref(),
+                Some("references:2+mask+adapters:1")
+            );
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut evaluated_states = Vec::new();
+        without_mlx_cache_release_for_headless_test(|| {
+            drive_sdxl_imported_mlx_items(
+                &generator,
+                &memory_plan,
+                &memory_inputs,
+                gen_core::MemoryCacheState::Cold,
+                crate::generator_cache::ExecutionPolicy::from_load_spec(&spec),
+                crate::execution_planner::WarmPolicyProposal::inert("sdxl"),
+                17,
+                work,
+                prototype,
+                case.conditioning,
+                tx,
+                CancelFlag::new(),
+                None,
+                |_generator,
+                 _plan,
+                 inputs,
+                 cache_state,
+                 offload_policy,
+                 warm_policy,
+                 external_bytes| {
+                    evaluated_states.push(cache_state);
+                    assert_eq!(offload_policy, gen_core::OffloadPolicy::Resident);
+                    warm_policy.settle_with_selection(
+                        crate::execution_planner::GrantOutcome::AlreadyStaged,
+                    );
+                    assert_eq!(external_bytes, 17);
+                    let mut context = hires_memory_context(selection);
+                    context.mode = if inputs.mode == "edit_image" {
+                        gen_core::MemoryMode::Edit
+                    } else if inputs.has_reference {
+                        gen_core::MemoryMode::ImageToImage
+                    } else {
+                        gen_core::MemoryMode::TextToImage
+                    };
+                    context.has_reference = inputs.has_reference;
+                    context.geometry.width = inputs.width;
+                    context.geometry.height = inputs.height;
+                    context.geometry.reference_count = inputs.reference_count;
+                    context.use_pid = inputs.use_pid;
+                    context.cache_state = cache_state;
+                    Ok(crate::mlx_fit_gate::MlxRequestEvaluation {
+                        memory: gen_core::GenerationMemory::default(),
+                        context,
+                        decode_quality_decisions: Vec::new(),
+                        process_limit_bytes: None,
+                        prefix_kv_cache: None,
+                    })
+                },
+            )
+        })
+        .unwrap_or_else(|error| panic!("{} imported SDXL driver: {error}", case.name));
+
+        let expected_states = std::iter::once(gen_core::MemoryCacheState::Cold)
+            .chain(std::iter::repeat_n(
+                gen_core::MemoryCacheState::Warm,
+                case.item_count.saturating_sub(1),
+            ))
+            .collect::<Vec<_>>();
+        assert_eq!(evaluated_states, expected_states);
+
+        let requests = generator.requests.lock().unwrap();
+        let contexts = generator.contexts.lock().unwrap();
+        assert_eq!(requests.len(), case.expected_pass_references.len());
+        assert_eq!(contexts.len(), requests.len());
+        for (pass, ((request, context), expected_references)) in requests
+            .iter()
+            .zip(contexts.iter())
+            .zip(case.expected_pass_references.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                request.image_reference_count(),
+                *expected_references,
+                "{} pass {} conditioning",
+                case.name,
+                pass + 1
+            );
+            assert_eq!(
+                context.geometry.reference_count,
+                *expected_references,
+                "{} pass {} scope references",
+                case.name,
+                pass + 1
+            );
+            assert_eq!(
+                (context.geometry.width, context.geometry.height),
+                (request.width, request.height),
+                "{} pass {} scope geometry",
+                case.name,
+                pass + 1
+            );
+            assert_eq!(
+                context.use_pid,
+                request.use_pid,
+                "{} pass {} PiD identity",
+                case.name,
+                pass + 1
+            );
+        }
+
+        if case.hires_fix.is_some() {
+            let mut steps = Vec::new();
+            let mut decodes = 0;
+            let mut images = 0;
+            let mut saw_hires_stages = false;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    GenEvent::Step {
+                        index: 0,
+                        current,
+                        total,
+                    } => steps.push((current, total)),
+                    GenEvent::Decoding { index: 0 } => decodes += 1,
+                    GenEvent::ImageFacts { index: 0, facts } => {
+                        assert!(facts.contains_key("workerExecutionReport"));
+                        saw_hires_stages = facts
+                            .get("workerExecutionStages")
+                            .and_then(Value::as_array)
+                            .is_some_and(|stages| stages.len() == 2);
+                    }
+                    GenEvent::Image {
+                        index: 0,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                        ..
+                    } => {
+                        images += 1;
+                        assert_eq!((seed, width, height), (Some(42), 1024, 1024));
+                        assert!(pixels.iter().all(|&pixel| pixel == 2));
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(steps, [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
+            assert_eq!(decodes, 1);
+            assert_eq!(images, 1);
+            assert!(saw_hires_stages);
         }
     }
 }
@@ -23679,7 +24553,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "SdxlImported",
             "sdxl_imported.rs",
             include_str!("sdxl_imported.rs"),
-            "admit_candle_load_spec_floor(",
+            "prepare_cached_candle_base_floor(",
         ),
         (
             "KreaImported",

@@ -355,6 +355,11 @@ impl CachedCandleBaseFloorAdmission {
         self
     }
 
+    pub(super) fn with_hires_workspace_bytes(mut self, workspace: u64) -> Self {
+        self.hires_workspace_bytes = workspace;
+        self
+    }
+
     fn request_peak_floor_bytes(&self) -> u64 {
         self.materialized_hires_weight_bytes
             .unwrap_or(self.source_weight_bytes)
