@@ -1349,10 +1349,72 @@ impl JobsStore {
         download_binding: Option<&Value>,
         portable_binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_portable_binding_once(
+            request,
+            provenance,
+            download_binding,
+            portable_binding,
+            None,
+        )
+    }
+
+    /// An API-owned deterministic id makes durable side-effect recovery safe across a crash
+    /// after child enqueue. Existing rows must retain the exact admitted operation.
+    pub fn create_job_with_portable_binding_once(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable_binding: Option<&Value>,
+        id: Option<&str>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
+        if let Some(id) = id {
+            match self.get_job_on_connection(&transaction, id) {
+                Ok(job)
+                    if job.job_type == request.job_type
+                        && job.payload == request.payload
+                        && job.requested_gpu == request.requested_gpu
+                        && job.project_id == request.project_id
+                        && job.project_name == request.project_name
+                        && job.source_job_id == request.source_job_id
+                        && job.duplicate_of_job_id == request.duplicate_of_job_id =>
+                {
+                    let contexts: (Option<String>, Option<String>, Option<String>) = transaction.query_row(
+                        "select model_provenance_json, download_binding_json, portable_model_binding_json from jobs where id = ?1",
+                        [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                    for (stored, expected) in [
+                        (&contexts.0, provenance),
+                        (&contexts.1, download_binding),
+                        (&contexts.2, portable_binding),
+                    ] {
+                        let stored: Option<Value> =
+                            stored.as_deref().map(serde_json::from_str).transpose()?;
+                        if stored.as_ref() != expected {
+                            return Err(JobsStoreError::InvalidStatus(
+                                "Idempotent job authorization changed".into(),
+                            ));
+                        }
+                    }
+                    return Ok(job);
+                }
+                Ok(_) => {
+                    return Err(JobsStoreError::InvalidStatus(
+                        "Idempotent job id already names a different operation".into(),
+                    ))
+                }
+                Err(JobsStoreError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let job = self.create_job_on_connection(
+            &transaction,
+            request,
+            id.map(str::to_owned),
+            provenance,
+        )?;
         Self::write_download_binding(&transaction, &job.id, download_binding)?;
         Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;

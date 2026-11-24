@@ -442,6 +442,8 @@ use super::krea_control_candle_available;
 #[cfg(target_os = "macos")]
 use super::krea_edit::krea_edit_generate_one;
 #[cfg(target_os = "macos")]
+use super::krea_imported::candle_hires_context;
+#[cfg(target_os = "macos")]
 use super::krea_imported::drive_krea_imported_mlx_items;
 #[cfg(native_lane)]
 use super::krea_imported::imported_model_quant;
@@ -480,6 +482,10 @@ use super::krea_imported::resolve_krea_imported_control_overlay;
 #[cfg(native_lane)]
 use super::krea_imported::resolve_krea_imported_edit_conditioning;
 #[cfg(target_os = "macos")]
+use super::krea_imported::KreaImportedItem;
+#[cfg(target_os = "macos")]
+use super::krea_imported::PreparedKreaHires;
+#[cfg(target_os = "macos")]
 use super::krea_imported::PreparedKreaImportedControlSources;
 #[cfg(native_lane)]
 use super::krea_imported::PreparedKreaImportedSources;
@@ -495,12 +501,12 @@ use super::krea_imported::KREA_IMPORTED_ENGINE;
 use super::krea_multiphase::build_generation_phases;
 #[cfg(native_lane)]
 use super::krea_multiphase::ensure_multiphase_job_shape;
-#[cfg(target_os = "macos")]
-use super::krea_multiphase::krea_multiphase_generate_one;
 #[cfg(native_lane)]
 use super::krea_multiphase::multiphase_load_quant;
 #[cfg(target_os = "macos")]
 use super::krea_multiphase::parse_multiphase_specs;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::prepare_multiphase_work;
 #[cfg(target_os = "macos")]
 use super::krea_multiphase::request_has_multiphase;
 #[cfg(target_os = "macos")]
@@ -1666,13 +1672,18 @@ struct HiresProbeGenerator {
     /// DECLARED geometry of every pass against the request that pass actually sent — the exact
     /// agreement the backend request scopes enforce.
     contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
+    planned_seeds: std::sync::Mutex<Vec<u64>>,
+    scope_outcomes: std::sync::Mutex<Vec<gen_core::MemoryRunOutcome>>,
+    fail_planned_pass: Option<usize>,
 }
 
 #[cfg(native_lane)]
-struct ProbeMemoryRequestScope;
+struct ProbeMemoryRequestScope<'a> {
+    outcomes: &'a std::sync::Mutex<Vec<gen_core::MemoryRunOutcome>>,
+}
 
 #[cfg(native_lane)]
-impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
+impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope<'_> {
     fn configure_request(&mut self, _request: &mut GenerationRequest) -> gen_core::Result<()> {
         Ok(())
     }
@@ -1706,7 +1717,8 @@ impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
         Ok(())
     }
 
-    fn finish(&mut self, _outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+    fn finish(&mut self, outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+        self.outcomes.lock().unwrap().push(outcome);
         Ok(())
     }
 }
@@ -1728,7 +1740,21 @@ impl HiresProbeGenerator {
             },
             requests: Default::default(),
             contexts: Default::default(),
+            planned_seeds: Default::default(),
+            scope_outcomes: Default::default(),
+            fail_planned_pass: None,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn krea(provider_id: &str) -> Self {
+        let mut generator = Self::new();
+        generator.descriptor = crate::inference_runtime::media()
+            .generators()
+            .map(|entry| (entry.descriptor)())
+            .find(|descriptor| descriptor.id == provider_id)
+            .expect("the linked runtime includes the selected Krea variant");
+        generator
     }
 }
 
@@ -1754,7 +1780,9 @@ impl Generator for HiresProbeGenerator {
         context: &gen_core::MemoryRunContext,
     ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
         self.contexts.lock().unwrap().push(context.clone());
-        Ok(Some(Box::new(ProbeMemoryRequestScope)))
+        Ok(Some(Box::new(ProbeMemoryRequestScope {
+            outcomes: &self.scope_outcomes,
+        })))
     }
 
     fn generate(
@@ -1783,6 +1811,26 @@ impl Generator for HiresProbeGenerator {
             height: req.height,
             pixels: vec![pass; (req.width * req.height * 3) as usize],
         }]))
+    }
+
+    fn generate_planned(
+        &self,
+        request: &GenerationRequest,
+        plan: &gen_core::RenderPlan,
+        scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::GenerationReport> {
+        assert!(
+            scope.is_some(),
+            "the same admitted scope must reach the runner"
+        );
+        plan.check_request(self.descriptor(), request)?;
+        self.planned_seeds.lock().unwrap().push(plan.base_seed());
+        if self.fail_planned_pass == Some(plan.pass_index()) {
+            return Err(gen_core::Error::Msg("planned refinement failed".into()));
+        }
+        self.generate(request, progress)
+            .map(gen_core::GenerationReport::from_output)
     }
 }
 
@@ -2292,7 +2340,92 @@ fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() 
 /// Production-seam regression for the normal imported-Krea lane. This invokes the exact driver
 /// installed in `start_cached_gen_stream_with_request_state`, with only the heavyweight live-budget
 /// evaluator substituted. It proves that every sequential t2i/img2img/edit image is evaluated and
-/// that every resulting provider pass opens the admitted request scope, including both hires passes.
+/// that every provider pass opens the admitted request scope, including both hires passes.
+/// Phased requests must deliver both their compiled seed and the admitted scope to the runner.
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_krea_hires_closes_each_candle_scope_on_refinement_failure() {
+    let mut generator = HiresProbeGenerator::krea("krea_2_turbo");
+    generator.fail_planned_pass = Some(1);
+    let spec = std::sync::Arc::new(LoadSpec::new(WeightsSource::Dir("/krea-base".into())));
+    let loaded_policy = crate::generator_cache::ExecutionPolicy::from_load_spec(&spec);
+    let prepared = PreparedKreaHires::prepare(
+        crate::inference_runtime::media(),
+        spec,
+        GenerationRequest {
+            prompt: "unchanged prompt".into(),
+            seed: Some(42),
+            width: 256,
+            height: 256,
+            steps: Some(2),
+            ..Default::default()
+        },
+        HiresFixPlan {
+            width: 512,
+            height: 512,
+            steps: 1,
+            guidance: None,
+            true_cfg: None,
+            provider_reference_strength: 0.3,
+        },
+    )
+    .expect("both Krea plans compile");
+    let contract = gen_core::MemoryProviderContract::compatibility_default(
+        "krea_2_turbo",
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: true,
+            host_to_device_block_materialization: false,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    let budget = gen_core::MemoryBudget {
+        total_bytes: 100,
+        committed_bytes: 25,
+        reclaimable_bytes: 0,
+        reserved_headroom_bytes: 0,
+    };
+    let (base_plan, refine_plan) = prepared.passes();
+    let context = |plan| {
+        candle_hires_context(
+            &contract,
+            None,
+            plan,
+            gen_core::MemoryCacheState::Warm,
+            budget,
+            75,
+        )
+    };
+    let base = context(base_plan);
+    let refine = context(refine_plan);
+    assert_eq!(base.mode, gen_core::MemoryMode::TextToImage);
+    assert_eq!(refine.mode, gen_core::MemoryMode::ImageToImage);
+    assert_eq!(refine.geometry.reference_count, 1);
+    assert_eq!((refine.geometry.width, refine.geometry.height), (512, 512));
+    assert!(refine.budget.fits(refine.predicted_peak_bytes));
+    let result = prepared.generate(
+        &generator,
+        loaded_policy,
+        None,
+        [&base, &refine],
+        Default::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    );
+    assert!(
+        matches!(result, Err(WorkerError::Engine(message)) if message.contains("planned refinement failed"))
+    );
+    assert_eq!(*generator.contexts.lock().unwrap(), [base, refine]);
+    let outcomes = generator.scope_outcomes.lock().unwrap();
+    assert!(matches!(
+        outcomes.as_slice(),
+        [
+            gen_core::MemoryRunOutcome::Complete,
+            gen_core::MemoryRunOutcome::Error { .. },
+        ]
+    ));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
@@ -2304,7 +2437,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
     let hires = HiresFixPlan {
         width: 512,
         height: 512,
-        steps: 1,
+        steps: 3,
         guidance: None,
         true_cfg: None,
         provider_reference_strength: 0.35,
@@ -2324,6 +2457,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
         mode: &'static str,
         conditioning: Vec<Conditioning>,
         hires_fix: Option<HiresFixPlan>,
+        phase_steps: Option<u32>,
         item_count: usize,
         expected_pass_references: &'static [u32],
     }
@@ -2333,6 +2467,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             mode: "image_generation",
             conditioning: vec![],
             hires_fix: None,
+            phase_steps: None,
             // Two sequential outputs prove that the production driver evaluates each request and
             // advances only its cache identity from Cold to Warm.
             item_count: 2,
@@ -2346,6 +2481,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 strength: Some(0.55),
             }],
             hires_fix: None,
+            phase_steps: None,
             item_count: 1,
             expected_pass_references: &[1],
         },
@@ -2356,24 +2492,38 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 images: vec![image(1), image(2)],
             }],
             hires_fix: None,
+            phase_steps: None,
             item_count: 1,
             expected_pass_references: &[2],
         },
         Case {
-            name: "edit+hires",
-            mode: "edit_image",
-            conditioning: vec![Conditioning::MultiReference {
-                images: vec![image(1), image(2)],
-            }],
+            name: "hires",
+            mode: "image_generation",
+            conditioning: vec![],
             hires_fix: Some(hires),
+            phase_steps: None,
             item_count: 1,
-            // First pass retains the edit sources; the refinement consumes its generated image.
-            expected_pass_references: &[2, 1],
+            expected_pass_references: &[0, 1],
+        },
+        Case {
+            name: "multi-phase",
+            mode: "image_generation",
+            conditioning: vec![],
+            hires_fix: None,
+            phase_steps: Some(4),
+            item_count: 2,
+            expected_pass_references: &[0, 0],
         },
     ];
 
     for case in cases {
-        let generator = HiresProbeGenerator::new();
+        let generator = if case.phase_steps.is_some() {
+            HiresProbeGenerator::krea("krea_2_raw")
+        } else if case.hires_fix.is_some() {
+            HiresProbeGenerator::krea("krea_2_turbo")
+        } else {
+            HiresProbeGenerator::new()
+        };
         let mut req = request(json!({
             "projectId": "p",
             "model": "community_krea",
@@ -2384,25 +2534,104 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             "modelManifestEntry": { "family": "krea_2" }
         }));
         req.mode = case.mode.to_owned();
-        let memory_inputs =
-            krea_imported_memory_inputs(&req, &case.conditioning, case.hires_fix, 1);
+        if case.phase_steps.is_some() {
+            req.width = 512;
+            req.height = 512;
+        } else if case.hires_fix.is_some() {
+            req.width = 256;
+            req.height = 256;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let dit = fixture.path().join("imported-krea-test.safetensors");
+        std::fs::write(&dit, [0_u8; 8]).unwrap();
+        let mut spec = LoadSpec::new(WeightsSource::File(dit)).with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(fixture.path().to_owned()),
+        );
+        spec.prepare_file_sources().unwrap();
+        let mut hires_memory = None;
+        let engine_id = if case.phase_steps.is_some() {
+            "krea_2_raw"
+        } else if case.mode == "edit_image" {
+            "krea_2_turbo_edit"
+        } else {
+            "krea_2_turbo"
+        };
         let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
-            if case.mode == "edit_image" {
-                "krea_2_turbo_edit"
-            } else {
-                "krea_2_turbo"
-            },
+            engine_id,
             &req.model,
-            &LoadSpec::new(WeightsSource::File(PathBuf::from(
-                "/nonexistent/imported-krea-test.safetensors",
-            ))),
+            &spec,
             Some(&req.model_manifest_entry),
             None,
         );
         let work = (0..case.item_count)
             .map(|index| (42 + index as i64, format!("{} prompt {index}", case.name)))
             .collect();
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let work = if let Some(steps) = case.phase_steps {
+            prepare_multiphase_work(
+                engine_id,
+                &spec,
+                GenerationRequest {
+                    width: req.width,
+                    height: req.height,
+                    phases: Some(vec![
+                        gen_core::GenerationPhase {
+                            steps: 1,
+                            guidance: Some(0.0),
+                            adapters: vec![],
+                        },
+                        gen_core::GenerationPhase {
+                            steps: steps - 1,
+                            guidance: Some(3.0),
+                            adapters: vec![],
+                        },
+                    ]),
+                    ..Default::default()
+                },
+                work,
+            )
+            .expect("compile imported Krea phases without loading its file")
+            .into_iter()
+            .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
+            .collect()
+        } else if let Some(hires) = case.hires_fix {
+            let work: Vec<(i64, String)> = work;
+            work.into_iter()
+                .map(|(seed, prompt)| {
+                    let first = GenerationRequest {
+                        prompt,
+                        width: req.width,
+                        height: req.height,
+                        count: 1,
+                        seed: Some(seed as u64),
+                        steps: Some(2),
+                        sampler: Some("euler".to_owned()),
+                        ..Default::default()
+                    };
+                    let prepared = PreparedKreaHires::prepare(
+                        crate::inference_runtime::media(),
+                        std::sync::Arc::new(spec.clone()),
+                        first,
+                        hires,
+                    )
+                    .expect("the selected Krea Turbo route compiles both passes before loading");
+                    hires_memory = Some(prepared.memory(None).expect("Krea Hires.fix admission"));
+                    (seed, KreaImportedItem::Hires(Box::new(prepared)))
+                })
+                .collect()
+        } else {
+            work.into_iter()
+                .map(|(seed, prompt)| (seed, KreaImportedItem::Ordinary(prompt)))
+                .collect()
+        };
+        let memory_inputs = krea_imported_memory_inputs(
+            &req,
+            &case.conditioning,
+            hires_memory.as_ref(),
+            1,
+            case.phase_steps.map(|_| 0),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut evaluated_states = Vec::new();
 
         without_mlx_cache_release_for_headless_test(|| {
@@ -2411,7 +2640,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 &memory_plan,
                 &memory_inputs,
                 gen_core::MemoryCacheState::Cold,
-                gen_core::OffloadPolicy::Resident,
+                crate::generator_cache::ExecutionPolicy::from_load_spec(&spec),
                 crate::execution_planner::WarmPolicyProposal::inert("krea_2_turbo"),
                 17,
                 work,
@@ -2420,10 +2649,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 1,
                 gen_core::GenerationRequest::default(),
                 case.conditioning,
-                None,
-                None,
                 Some(1.2),
-                case.hires_fix,
                 tx,
                 CancelFlag::new(),
                 None,
@@ -2449,6 +2675,8 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                     let mut context = hires_memory_context(selection);
                     context.mode = if inputs.mode == "edit_image" {
                         gen_core::MemoryMode::Edit
+                    } else if inputs.has_reference {
+                        gen_core::MemoryMode::ImageToImage
                     } else {
                         gen_core::MemoryMode::TextToImage
                     };
@@ -2456,6 +2684,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                     context.geometry.width = inputs.width;
                     context.geometry.height = inputs.height;
                     context.geometry.reference_count = inputs.reference_count;
+                    context.has_phases = inputs.has_phases;
                     context.cache_state = cache_state;
                     Ok(crate::mlx_fit_gate::MlxRequestEvaluation {
                         memory: gen_core::GenerationMemory::default(),
@@ -2479,6 +2708,17 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             evaluated_states, expected_states,
             "{} must evaluate every sequential image",
             case.name
+        );
+        let expected_planned_seeds: &[u64] = if case.phase_steps.is_some() {
+            &[42, 43]
+        } else if case.hires_fix.is_some() {
+            &[42, 42]
+        } else {
+            &[]
+        };
+        assert_eq!(
+            *generator.planned_seeds.lock().unwrap(),
+            expected_planned_seeds
         );
         let requests = generator.requests.lock().unwrap();
         let contexts = generator.contexts.lock().unwrap();
@@ -2521,12 +2761,54 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 case.name,
                 pass + 1
             );
+            assert_eq!(context.has_phases, request.phases.is_some());
             assert!(
                 request.memory.is_some(),
                 "{} pass {} must carry admitted memory",
                 case.name,
                 pass + 1
             );
+        }
+        if case.hires_fix.is_some() {
+            assert_eq!(requests[0].prompt, "hires prompt 0");
+            assert_eq!(requests[1].prompt, requests[0].prompt);
+            assert!(!requests[0].enhance_prompt && !requests[1].enhance_prompt);
+            match requests[1].conditioning.as_slice() {
+                [Conditioning::Reference { image, strength }] => {
+                    assert_eq!((image.width, image.height), (512, 512));
+                    assert_eq!(*strength, Some(0.35));
+                    assert!(image.pixels.iter().all(|&pixel| pixel == 1));
+                }
+                other => panic!("expected the sole fitted Hires.fix reference, got {other:?}"),
+            }
+            let mut steps = Vec::new();
+            let mut decodes = 0;
+            let mut images = 0;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    GenEvent::Step {
+                        index: 0,
+                        current,
+                        total,
+                    } => steps.push((current, total)),
+                    GenEvent::Decoding { index: 0 } => decodes += 1,
+                    GenEvent::Image {
+                        index: 0,
+                        seed,
+                        width,
+                        height,
+                        pixels,
+                        ..
+                    } => {
+                        images += 1;
+                        assert_eq!((seed, width, height), (Some(42), 512, 512));
+                        assert!(pixels.iter().all(|&pixel| pixel == 2));
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(steps, [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
+            assert_eq!((decodes, images), (1, 1));
         }
     }
 }
@@ -2624,30 +2906,39 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         .is_some_and(|memory| memory.stream_transformer_blocks));
     drop(edit_request);
 
-    let phase_generator = HiresProbeGenerator::new();
-    let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
-    krea_multiphase_generate_one(
-        &phase_generator,
-        &sampling_controls,
-        "phases",
-        None,
-        4,
-        4,
-        9,
-        None,
-        None,
-        vec![gen_core::GenerationPhase {
-            steps: 2,
-            guidance: None,
-            adapters: vec![],
-        }],
-        Some(phase.memory),
-        Some(&phase.context),
-        gen_core::PreviewSink::default(),
-        &CancelFlag::new(),
-        &mut |_| {},
+    let phase_generator = HiresProbeGenerator::krea("krea_2_raw");
+    let mut phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
+    phase.context.geometry.width = 512;
+    phase.context.geometry.height = 512;
+    let (_, render) = prepare_multiphase_work(
+        "krea_2_raw",
+        &LoadSpec::new(WeightsSource::Dir("krea-test".into())),
+        GenerationRequest {
+            width: 512,
+            height: 512,
+            phases: Some(vec![gen_core::GenerationPhase {
+                steps: 2,
+                guidance: None,
+                adapters: vec![],
+            }]),
+            ..sampling_controls
+        },
+        vec![(9, "phases".into())],
     )
+    .unwrap()
+    .pop()
     .unwrap();
+    render
+        .generate(
+            &phase_generator,
+            Some(phase.memory),
+            Some(&phase.context),
+            gen_core::PreviewSink::default(),
+            &CancelFlag::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+    assert_eq!(*phase_generator.planned_seeds.lock().unwrap(), [9]);
     assert_eq!(
         phase_generator.contexts.lock().unwrap().as_slice(),
         &[phase.context]
@@ -2674,12 +2965,16 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
         "count": 3,
         "modelManifestEntry": { "family": "krea_2" }
     }));
-    let plain = krea_imported_memory_inputs(&req, &[], None, 0);
+    let plain = krea_imported_memory_inputs(&req, &[], None, 0, None);
     assert_eq!(
         (plain.width, plain.height, plain.reference_count),
         (512, 768, 0)
     );
     assert_eq!(plain.overlay, None);
+    assert!(!plain.has_phases);
+    let phased = krea_imported_memory_inputs(&req, &[], None, 0, Some(6));
+    assert!(phased.has_phases);
+    assert_eq!(phased.pag_workspace_bytes, 6);
 
     let reference = Conditioning::Reference {
         image: Image {
@@ -2689,7 +2984,8 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
         },
         strength: Some(0.5),
     };
-    let img2img = krea_imported_memory_inputs(&req, std::slice::from_ref(&reference), None, 1);
+    let img2img =
+        krea_imported_memory_inputs(&req, std::slice::from_ref(&reference), None, 1, None);
     assert_eq!(img2img.reference_count, 1);
     assert_eq!(img2img.overlay.as_deref(), Some("references:1+adapters:1"));
 
@@ -2712,57 +3008,37 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
         }],
         None,
         2,
+        None,
     );
     assert_eq!(edit.mode, "edit_image");
     assert_eq!(edit.reference_count, 2);
     assert_eq!(edit.overlay.as_deref(), Some("references:2+adapters:2"));
 
-    let hires = krea_imported_memory_inputs(
-        &req,
-        &[Conditioning::MultiReference {
-            images: vec![
-                Image {
-                    width: 1,
-                    height: 1,
-                    pixels: vec![0; 3],
-                },
-                Image {
-                    width: 1,
-                    height: 1,
-                    pixels: vec![1; 3],
-                },
-            ],
-        }],
-        Some(HiresFixPlan {
-            width: 1024,
-            height: 1536,
-            steps: 4,
-            guidance: None,
-            true_cfg: None,
-            provider_reference_strength: 0.4,
-        }),
-        2,
-    );
-    assert_eq!(
-        (hires.width, hires.height, hires.reference_count),
-        (1024, 1536, 1)
-    );
-    assert_eq!(hires.overlay.as_deref(), Some("references:2+adapters:2"));
-
     req.mode = "image_generation".to_owned();
-    let t2i_hires = krea_imported_memory_inputs(
-        &req,
-        &[],
-        Some(HiresFixPlan {
+    let prepared = PreparedKreaHires::prepare(
+        crate::inference_runtime::media(),
+        std::sync::Arc::new(LoadSpec::new(WeightsSource::Dir("/krea-base".into()))),
+        GenerationRequest {
+            prompt: "an unenhanced prompt".into(),
+            width: req.width,
+            height: req.height,
+            steps: Some(2),
+            seed: Some(9),
+            ..Default::default()
+        },
+        HiresFixPlan {
             width: 1024,
             height: 1536,
             steps: 4,
             guidance: None,
             true_cfg: None,
             provider_reference_strength: 0.4,
-        }),
-        0,
-    );
+        },
+    )
+    .expect("prepare both Krea Hires.fix passes before load");
+    let memory = prepared.memory(None).expect("price exact plans");
+    let t2i_hires = krea_imported_memory_inputs(&req, &[], Some(&memory), 0, None);
+    assert_eq!((t2i_hires.width, t2i_hires.height), (1024, 1536));
     assert_eq!(t2i_hires.reference_count, 1);
     assert!(t2i_hires.has_reference);
     assert_eq!(t2i_hires.overlay, None);
@@ -21497,12 +21773,8 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         );
     }
 
-    // Only a POSE set is hires-incompatible. Edit and img2img hires used to be refused here too,
-    // before `krea_imported_generate_one` became a two-pass renderer that threads the request
-    // conditioning into the first pass and refines it — so those two shapes now render the source
-    // instead of dropping it, and refusing them would reject work the lane actually serves. The
-    // strict-pose handler still renders one image per pose and never reads `hires_fix`, so it stays
-    // fail-closed.
+    // The strict-pose loop has no Hires.fix pass. Public Hires.fix validation also refuses
+    // caller-supplied conditioning before the imported renderer can open its internal refinement.
     let mut pose_hires = json!({
         "projectId": "p", "model": "kreamania_variant5",
         "modelManifestEntry": base.clone()
@@ -23496,6 +23768,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
+            "start_cached_gen_stream_after_cold_admission_with_placement(",
+            "start_cached_gen_stream_after_cold_admission_with_placement_using(",
             "start_cached_gen_stream_with_request_state_using(",
             "start_cached_gen_stream_with_request_state_using_owned(",
             "start_cached_gen_stream_with_request_state_using_prepared(",
@@ -25960,7 +26234,7 @@ fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
 
     // The legacy lane's inputs for a plain txt2img job: no conditioning, no hires, no adapters —
     // which is the only shape `prepare_checkpoint_plan_sources` lets onto this route.
-    let legacy = krea_imported_memory_inputs(&request, &[], None, 0);
+    let legacy = krea_imported_memory_inputs(&request, &[], None, 0, None);
     let plan = checkpoint_plan_memory_inputs(
         &request,
         "krea_2_raw",
@@ -25988,14 +26262,14 @@ fn the_plan_route_admits_through_the_same_mlx_seam_as_the_legacy_krea_lane() {
     };
     for marker in [
         "MlxRequestPlan::try_for_spec_and_manifest(",
-        "start_cached_gen_stream_with_request_state(",
+        "start_cached_gen_stream_with_request_state_using(",
         "crate::mlx_fit_gate::evaluate_request(",
         "WarmPolicyOnce::new(warm_policy)",
     ] {
         assert!(
             live(marker),
-            "the plan route's MLX arm must reach `{marker}` — the seam the legacy Krea imported \
-             lane uses for the same weights"
+            "the plan route's MLX arm must reach `{marker}` — the injected-loader wrapper of \
+             the same request-state cache transaction used by the legacy Krea imported lane"
         );
     }
     // `start_cached_gen_stream(` is the bare seam, which declines the warm policy outright. The
@@ -28863,7 +29137,7 @@ async fn checkpoint_plan_route_mlx_gpu_parity() {
         "legacy_krea_imported",
         legacy_spec,
         legacy_request.clone(),
-        krea_imported_memory_inputs(&legacy_request, &[], None, 0),
+        krea_imported_memory_inputs(&legacy_request, &[], None, 0, None),
     )
     .await;
     let (plan_image, plan_sha) = render(
@@ -29718,6 +29992,9 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
 #[test]
 fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
     use crate::external_library_runtime::{ResidentBaseShape, PLAN_BACKED_RESIDENT_BASE_MODELS};
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        model_download, selected_resident_base_closure_for_row,
+    };
     use std::collections::BTreeSet;
 
     let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
@@ -29773,7 +30050,9 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
                     );
                 match row.shape {
                     // The route opens the base's own tier: its PRIMARY row must survive.
-                    ResidentBaseShape::FullTier => !co_requisite,
+                    ResidentBaseShape::FullTier | ResidentBaseShape::KreaImportedCompanions => {
+                        !co_requisite
+                    }
                     // The route opens only declared components: a co-requisite row at this tier
                     // must survive, and it is the only thing the guard's closure will name.
                     ResidentBaseShape::ComponentsOnly => {
@@ -29792,6 +30071,38 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
                 row.tier,
                 row.family
             );
+            if row.shape == ResidentBaseShape::KreaImportedCompanions {
+                let companions =
+                    selected_resident_base_closure_for_row(&entry, row.tier, row.shape, platform)
+                        .expect("guard projects the Krea companion closure");
+                let download = model_download(&companions).expect("Krea companion download");
+                let files = download["files"]
+                    .as_array()
+                    .expect("Krea companion selectors");
+                for selector in [
+                    "transformer/config.json",
+                    "text_encoder/*",
+                    "vae/*",
+                    "tokenizer/*",
+                ] {
+                    let selector = format!("{}/{selector}", row.tier);
+                    assert!(
+                        files.iter().any(|file| file.as_str() == Some(&selector)),
+                        "Krea companion closure on {platform} omitted {selector}"
+                    );
+                }
+                let transformer = format!("{}/transformer/", row.tier);
+                let transformer_files: Vec<&str> = files
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|file| file.starts_with(&transformer))
+                    .collect();
+                assert_eq!(
+                    transformer_files,
+                    [format!("{transformer}config.json")],
+                    "the imported checkpoint owns the transformer weights on {platform}"
+                );
+            }
         }
     }
 
@@ -29828,12 +30139,10 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
 
     // And the SHAPE is not free-form: it says which of the base entry's repositories the family's
     // route opens, which is exactly what the family's presence in one plan table or the other
-    // already declares. A `base-snapshot` family resolves a whole tier DIRECTORY
-    // (`resolve_krea_imported_base_tier` → `WeightsSource::Dir`); a component-resolver family
-    // resolves named components out of a co-requisite repo and never opens the base's own primary
-    // (`resolve_mage_finetuned_components` → `resolve_co_requisites_for_tier`). Getting this
-    // backwards is silent: pass 3 is all-or-nothing across a model's pairs, so an over-wide
-    // closure stops the components being served instead of erroring.
+    // already declares. Krea's base directory contains the transformer config and shared
+    // components, while the separately bound import supplies the transformer weights.
+    // Mage resolves named components from a co-requisite repo. An over-wide closure stops
+    // the guard from serving those components because it verifies all pairs together.
     for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
         let in_base_tiers = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
             .iter()
@@ -29841,16 +30150,14 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
         let in_component_resolvers = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
             .iter()
             .any(|(family, _)| *family == row.family);
-        let expected = if in_base_tiers {
-            ResidentBaseShape::FullTier
-        } else {
-            assert!(
-                in_component_resolvers,
-                "family {:?} is in neither plan table, which the set equality above should have \
-                 caught",
+        let expected = match (in_base_tiers, in_component_resolvers) {
+            (true, false) if row.family == "krea_2" => ResidentBaseShape::KreaImportedCompanions,
+            (true, false) => ResidentBaseShape::FullTier,
+            (false, true) => ResidentBaseShape::ComponentsOnly,
+            _ => panic!(
+                "family {:?} must have exactly one plan resolver",
                 row.family
-            );
-            ResidentBaseShape::ComponentsOnly
+            ),
         };
         assert_eq!(
             row.shape,

@@ -120,8 +120,8 @@ export function buildImageJobAdvanced(state) {
   } = state;
   const selectablePrecision = !sourcePrecisionLabel(selectedModel);
 
-  const moss = isMossImage(state.model ?? selectedModel?.id);
-  const mossEdit = isMossEdit(state.model ?? selectedModel?.id, mode);
+  const moss = isMossImage(selectedModel ?? state.model);
+  const mossEdit = isMossEdit(selectedModel ?? state.model, mode);
   const editAdvanced = mossEdit ? buildMossEditJobAdvanced(state) : null;
   const dmd = moss && mossAccelerated(state.mossImage);
   const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;

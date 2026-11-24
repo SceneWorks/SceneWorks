@@ -18,9 +18,9 @@ use super::sdxl_imported::resolve_sdxl_imported_component_cache_only;
 use super::sdxl_imported::resolve_sdxl_ldm_tokenizer_root_cache_only;
 use super::stream::drive_gen_items;
 #[cfg(not(target_os = "macos"))]
-use super::stream::start_cached_gen_stream_after_cold_admission;
+use super::stream::start_cached_gen_stream_after_cold_admission_with_placement_using;
 #[cfg(target_os = "macos")]
-use super::stream::start_cached_gen_stream_with_request_state;
+use super::stream::start_cached_gen_stream_with_request_state_using;
 #[cfg(not(target_os = "macos"))]
 use super::stream::ColdLoadAdmission;
 use super::stream::GenEvent;
@@ -809,6 +809,9 @@ pub(super) struct PreparedCheckpointPlanSources {
     components: Vec<CheckpointPlanComponent>,
     /// The primary's file(s), with the checkpoint backbone first.
     primary_pins: Vec<gen_core::PinnedWeightsFile>,
+    /// Existing loader's immutable base root, when the adapter declares component substitution.
+    loader_base: Option<PathBuf>,
+    companion_pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
 /// The backbone role a given source shape's primary layer must carry.
@@ -1341,7 +1344,24 @@ pub(super) fn prepare_checkpoint_plan_candle_floor(
     sources: &PreparedCheckpointPlanSources,
     spec: &LoadSpec,
 ) -> WorkerResult<super::base_admission::CachedCandleBaseFloorAdmission> {
-    let (companions, auxiliary_bytes) = checkpoint_plan_candle_components(sources, spec)?;
+    let (companions, auxiliary_bytes) = if sources.loader_base.is_some() {
+        // The complete selected companion members are already in the prepared pin set. The base
+        // root supplies architecture JSON only: its original transformer is replaced and unpriced.
+        let auxiliary_bytes = sources
+            .companion_pins
+            .iter()
+            .filter(|pin| {
+                !pin.loader_path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
+            })
+            .fold(0_u64, |total, pin| {
+                total.saturating_add(pin.target_fingerprint().size)
+            });
+        (Vec::new(), auxiliary_bytes)
+    } else {
+        checkpoint_plan_candle_components(sources, spec)?
+    };
     let companion_refs = companions.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     Ok(
         prepare_cached_candle_base_floor(
@@ -1380,6 +1400,344 @@ pub(super) fn prepare_checkpoint_plan_sources_resolved(
         settings,
         checkpoint_plan_serves_request_shape_resolved(execution),
     )
+}
+
+/// Resolve a registered component replacement against the immutable builtin product declaration.
+/// Both ordinary model loading and this route use the same descriptor/co-requisite resolver.
+#[allow(clippy::type_complexity)]
+fn prepare_reused_checkpoint_loader(
+    adapter: &gen_core::CheckpointAdapterRegistration,
+    descriptor: &gen_core::ModelDescriptor,
+    resolved: &ResolvedCheckpointV1,
+    entry: &JsonObject,
+    settings: &Settings,
+) -> WorkerResult<
+    Option<(
+        PathBuf,
+        std::collections::BTreeMap<String, WeightsSource>,
+        Vec<gen_core::PinnedWeightsFile>,
+    )>,
+> {
+    let Some(reuse) = adapter.loader_reuse else {
+        return Ok(None);
+    };
+    let base = sceneworks_core::checkpoint_loader::bound_base(entry)
+        .map_err(WorkerError::InvalidPayload)?
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Checkpoint loader has no compatible base binding".into())
+        })?;
+    let base_id = base["id"].as_str().expect("builtin base id");
+    let declared_base = resolved
+        .plan
+        .context
+        .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+        .and_then(|declaration| declaration.pointer("/baseLineage/baseModel"))
+        .and_then(Value::as_str);
+    if declared_base != Some(base_id) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:base-mismatch] checkpoint {:?} binds base {:?}, but the selected model declares {base_id:?}",
+            resolved.checkpoint_id, declared_base
+        )));
+    }
+    let primary = sceneworks_core::model_artifacts::artifact_selection::model_download(&base)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Base {base_id:?} has no primary source declaration"
+            ))
+        })?;
+    let snapshot = |row: &Value| -> WorkerResult<PathBuf> {
+        let repo = row.get("repo").and_then(Value::as_str).ok_or_else(|| {
+            WorkerError::InvalidPayload("Base component has no repository".into())
+        })?;
+        let revision = row.get("revision").and_then(Value::as_str).ok_or_else(|| {
+            WorkerError::InvalidPayload("Base component has no immutable revision".into())
+        })?;
+        crate::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+            .ok_or_else(|| WorkerError::InvalidPayload(format!("Base {base_id:?} component {repo}@{revision} is missing; install or repair the compatible base in Models")))
+    };
+    let root = snapshot(&primary)?;
+    let components = crate::model_jobs::resolve_co_requisites(descriptor, &base, settings)?;
+    let mut pins = Vec::new();
+    let mut pin = |path: PathBuf| -> WorkerResult<()> {
+        pins.push(crate::paths::pin_app_managed_model_file(
+            settings,
+            &path,
+            "Checkpoint companion",
+        )?);
+        Ok(())
+    };
+    // A replacement keeps configuration from the base, but never pins/reads its old denoiser.
+    for relative in primary
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if sceneworks_core::checkpoint_loader::is_base_descriptor(relative)
+            && !relative.contains(['*', '?', '['])
+        {
+            pin(crate::safe_join(&root, relative)?)?;
+        }
+    }
+    for row in base
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = row.get("componentId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(source) = components.get(id) else {
+            continue;
+        };
+        if let WeightsSource::File(path) = source {
+            pin(path.clone())?;
+            continue;
+        }
+        let directory = snapshot(row)?;
+        for relative in row
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let path = crate::safe_join(&directory, relative)?;
+            if relative.contains(['*', '?', '[']) {
+                let matches = glob::glob(&path.to_string_lossy())
+                    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+                for member in matches {
+                    let member = member.map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+                    if member.is_file() {
+                        pin(member)?;
+                    }
+                }
+            } else {
+                pin(path)?;
+            }
+        }
+    }
+    if reuse.base_component_role != "base-snapshot" {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Unknown reusable loader base role {:?}",
+            reuse.base_component_role
+        )));
+    }
+    Ok(Some((root, components, pins)))
+}
+
+#[cfg(test)]
+mod reusable_loader_tests {
+    use super::*;
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+    };
+
+    struct Fixture {
+        _data: tempfile::TempDir,
+        _cache: sceneworks_core::hf_home::test_support::CacheRootGuard,
+        settings: Settings,
+        entry: JsonObject,
+        resolved: ResolvedCheckpointV1,
+        descriptor: gen_core::ModelDescriptor,
+        shared_vae: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let data = tempfile::tempdir().unwrap();
+        let hub = data.path().join("hub");
+        let cache = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data.path().to_path_buf(),
+            hub.clone(),
+        );
+        let mut settings = crate::test_env::offline_settings();
+        settings.data_dir = data.path().to_path_buf();
+        let mut entry = json!({"id":"serenity","family":sceneworks_core::model_family::MOSS_IMAGE})
+            .as_object()
+            .unwrap()
+            .clone();
+        sceneworks_core::checkpoint_loader::apply_bound_base_defaults(&mut entry).unwrap();
+        let base = sceneworks_core::checkpoint_loader::bound_base(&entry)
+            .unwrap()
+            .unwrap();
+        let mut shared_vae = PathBuf::new();
+        for row in sceneworks_core::checkpoint_loader::component_downloads(&base) {
+            let repo = row["repo"].as_str().unwrap();
+            let root = hub
+                .join(format!("models--{}", repo.replace('/', "--")))
+                .join("snapshots")
+                .join(row["revision"].as_str().unwrap());
+            for relative in row["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+            {
+                let path = root.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                // Only source selection, hashes and shapes run here; no model loads or arrays.
+                std::fs::write(&path, b"fixture metadata and weight source").unwrap();
+                if relative == "vae/diffusion_pytorch_model.safetensors" {
+                    shared_vae = path;
+                }
+            }
+        }
+        let imported = data.path().join("serenity.safetensors");
+        std::fs::write(&imported, b"selected imported checkpoint bytes").unwrap();
+        let digest = sceneworks_core::checkpoint_plan_store::source_file_sha256_with_check(
+            &imported,
+            &|| Ok(()),
+        )
+        .unwrap();
+        let layer = ImportLayerV1 {
+            layer_id: "transformer".into(),
+            role: "transformer".into(),
+            target_path: "serenity.safetensors".into(),
+            container: CheckpointContainerV1::Safetensors,
+            source: SourceLocatorV1::linked("fixture", "serenity.safetensors", digest).unwrap(),
+        };
+        let mut plan = ImportPlanV1::new(
+            "fixture-plan",
+            sceneworks_core::model_family::MOSS_IMAGE,
+            vec![layer.clone()],
+        )
+        .unwrap();
+        plan.context =
+            sceneworks_core::model_artifacts::provenance::import_declaration_context(&entry)
+                .unwrap();
+        let resolved = ResolvedCheckpointV1 {
+            checkpoint_id: "linked/fixture/serenity.safetensors".into(),
+            record: CheckpointCatalogRecordV1::from_plan(
+                "linked/fixture/serenity.safetensors",
+                &plan,
+            )
+            .unwrap(),
+            plan,
+            layers: vec![ResolvedLayerV1 {
+                layer,
+                path: imported,
+                rehashed: false,
+            }],
+        };
+        let descriptor = gen_core::ModelDescriptor {
+            id: "moss_image_base",
+            family: "moss_image",
+            backend: "candle",
+            modality: gen_core::Modality::Image,
+            capabilities: Default::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
+            required_components: &["moss-shared-snapshot"],
+            control_kinds: None,
+        };
+        Fixture {
+            _data: data,
+            _cache: cache,
+            settings,
+            entry,
+            resolved,
+            descriptor,
+            shared_vae,
+        }
+    }
+
+    #[test]
+    fn reused_loader_pins_the_imported_primary_and_selected_companions() {
+        let fx = fixture();
+        let adapter = &gen_core::MOSS_IMAGE_CHECKPOINT_ADAPTER;
+        let (root, mut components, companion_pins) = prepare_reused_checkpoint_loader(
+            adapter,
+            &fx.descriptor,
+            &fx.resolved,
+            &fx.entry,
+            &fx.settings,
+        )
+        .unwrap()
+        .unwrap();
+        let primary =
+            checkpoint_plan_primary(&fx.resolved, gen_core::ImportedModelSource::TransformerFile)
+                .unwrap();
+        let imported = primary.weights.clone();
+        let source = PreparedCheckpointPlanSources {
+            checkpoint_id: fx.resolved.checkpoint_id.clone(),
+            resolved: fx.resolved,
+            adapter,
+            descriptor: fx.descriptor,
+            source: gen_core::ImportedModelSource::TransformerFile,
+            operation: gen_core::ImportedModelOperation::Generate,
+            primary: primary.weights,
+            components: vec![CheckpointPlanComponent {
+                id: "moss-shared-snapshot",
+                source: components.remove("moss-shared-snapshot").unwrap(),
+                consumed: None,
+                pin: None,
+            }],
+            primary_pins: primary.pins,
+            loader_base: Some(root.clone()),
+            companion_pins,
+        };
+        let spec = checkpoint_plan_load_spec(&source, None).unwrap();
+        assert_eq!(spec.weights, WeightsSource::Dir(root.clone()));
+        assert_eq!(spec.checkpoint_component("transformer"), Some(&imported));
+        assert!(spec.prepared_file_pins().get(&fx.shared_vae).is_some());
+        let old_base = root.join("transformer/diffusion_pytorch_model-00001-of-00003.safetensors");
+        std::fs::write(&old_base, b"base bytes are not selected").unwrap();
+        assert!(spec.prepared_file_pins().get(&old_base).is_none());
+        assert!(spec.validate_prepared_file_pins().is_ok());
+        let WeightsSource::File(imported) = imported else {
+            panic!("single file source");
+        };
+        std::fs::write(imported, b"changed imported checkpoint").unwrap();
+        assert!(spec.validate_prepared_file_pins().is_err());
+    }
+
+    #[test]
+    fn missing_companion_and_changed_base_binding_refuse_before_loading() {
+        let mut fx = fixture();
+        let adapter = &gen_core::MOSS_IMAGE_CHECKPOINT_ADAPTER;
+        fx.resolved
+            .plan
+            .context
+            .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            .unwrap()["baseLineage"]["baseModel"] = json!("moss_image_sft");
+        assert!(prepare_reused_checkpoint_loader(
+            adapter,
+            &fx.descriptor,
+            &fx.resolved,
+            &fx.entry,
+            &fx.settings
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("base-mismatch"));
+        fx.resolved.plan.context =
+            sceneworks_core::model_artifacts::provenance::import_declaration_context(&fx.entry)
+                .unwrap();
+        std::fs::remove_file(&fx.shared_vae).unwrap();
+        assert!(prepare_reused_checkpoint_loader(
+            adapter,
+            &fx.descriptor,
+            &fx.resolved,
+            &fx.entry,
+            &fx.settings
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("missing"));
+        fx.entry.insert("baseModel".into(), json!("krea_2_raw"));
+        assert!(prepare_reused_checkpoint_loader(
+            adapter,
+            &fx.descriptor,
+            &fx.resolved,
+            &fx.entry,
+            &fx.settings
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("incompatible"));
+    }
 }
 
 fn prepare_checkpoint_plan_sources_with_shape(
@@ -1447,8 +1805,31 @@ fn prepare_checkpoint_plan_sources_with_shape(
         mut consumed,
         pins: primary_pins,
     } = primary;
+    if adapter.loader_reuse.is_some() && request.portable_aux.has_paths() {
+        return Err(WorkerError::InvalidPayload("Portable component bindings for this reusable checkpoint loader must be staged as a complete base closure; local cache fallback is refused".into()));
+    }
+    let reused = prepare_reused_checkpoint_loader(
+        adapter,
+        &descriptor,
+        &resolved,
+        &request.model_manifest_entry,
+        settings,
+    )?;
+    let (loader_base, mut declared_components, companion_pins) = match reused {
+        Some((root, components, pins)) => (Some(root), components, pins),
+        None => (None, std::collections::BTreeMap::new(), Vec::new()),
+    };
     let mut components = Vec::with_capacity(descriptor.required_components.len());
     for component in descriptor.required_components {
+        if let Some(source) = declared_components.remove(*component) {
+            components.push(CheckpointPlanComponent {
+                id: component,
+                source,
+                consumed: None,
+                pin: None,
+            });
+            continue;
+        }
         let mut resolved_component =
             match resolve_checkpoint_plan_component(component, &resolved, settings) {
                 Ok(component) => component,
@@ -1475,6 +1856,8 @@ fn prepare_checkpoint_plan_sources_with_shape(
             primary: primary_weights,
             components,
             primary_pins,
+            loader_base,
+            companion_pins,
         },
     ))
 }
@@ -1958,6 +2341,14 @@ pub(super) fn checkpoint_plan_load_spec(
         .fold(LoadSpec::new(sources.primary.clone()), |spec, component| {
             spec.with_component(component.id, component.source.clone())
         });
+    if let Some(root) = &sources.loader_base {
+        let reuse = sources
+            .adapter
+            .loader_reuse
+            .expect("prepared reused loader");
+        spec.weights = WeightsSource::Dir(root.clone());
+        spec = spec.with_checkpoint_component(reuse.component_role, sources.primary.clone());
+    }
     if let Some(quant) = quant {
         spec = spec.with_quant(quant);
     }
@@ -1969,6 +2360,7 @@ pub(super) fn checkpoint_plan_load_spec(
         sources
             .primary_pins
             .iter()
+            .chain(sources.companion_pins.iter())
             .chain(
                 sources
                     .components
@@ -2048,7 +2440,7 @@ fn checkpoint_plan_raw_settings(
 
 /// The plan route's MLX request inputs. This skeleton serves plain text-to-image only — no
 /// references, adapters, PiD, or phases reach it (`prepare_checkpoint_plan_sources` refuses those
-/// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0)` produces
+/// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0, None)` produces
 /// for the same request, and the two lanes price the same geometry.
 #[cfg(target_os = "macos")]
 pub(super) fn checkpoint_plan_memory_inputs(
@@ -2111,7 +2503,57 @@ pub(super) fn checkpoint_plan_generation_request(request: &ImageRequest) -> Gene
     }
 }
 
-/// Plan-driven text-to-image: `count` renders, each its own seed, through the provider the
+/// A live request budget for a component-reusing provider's existing allocation guard. The
+/// provider computes its structural peak from the authenticated selected sources and the actual
+/// request before allocations; no source-size estimate is promoted to a measured request bound.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn checkpoint_plan_provider_memory_context(
+    contract: &gen_core::MemoryProviderContract,
+    precision: gen_core::Precision,
+    quant: Option<gen_core::Quant>,
+    width: u32,
+    height: u32,
+    budget: gen_core::MemoryBudget,
+    cache_state: gen_core::MemoryCacheState,
+) -> gen_core::MemoryRunContext {
+    let calibration = contract.calibration.as_ref();
+    gen_core::MemoryRunContext {
+        selection: gen_core::MemorySelection {
+            strategy: gen_core::MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier: gen_core::MemoryNumericTier {
+                precision,
+                quant,
+                component_precision_floors: &[],
+            },
+        },
+        optimization_authority: gen_core::MemoryOptimizationAuthority::Resident,
+        calibration_abi: calibration.map_or(0, |identity| identity.abi),
+        calibration_fingerprint: calibration
+            .map_or_else(String::new, |identity| identity.fingerprint.clone()),
+        load_shape: contract.load_shape,
+        mode: gen_core::MemoryMode::TextToImage,
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
+        reference_resources: None,
+        overlay: None,
+        budget,
+        predicted_peak_bytes: 0,
+        cache_state,
+        evidence_revision: "provider-owned-structural-request-bound".into(),
+        low_res_start: None,
+    }
+}
+
+/// Plan-driven text-to-image: `prompts × count` renders, each its own seed, through the provider the
 /// registry bound for the plan's family and source shape.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_checkpoint_plan_stream(
@@ -2132,14 +2574,22 @@ pub(super) async fn generate_checkpoint_plan_stream(
     let (quant, quant_bits) =
         imported_model_quant(request, &sources.descriptor, "Checkpoint plan")?;
     let (width, height) = (request.width, request.height);
-    let mut prototype = checkpoint_plan_generation_request(request);
+    let mut prototype = request
+        .native_generation_request()
+        .map_err(WorkerError::InvalidPayload)?
+        .unwrap_or_else(|| checkpoint_plan_generation_request(request));
     prototype.pag = resolved_pag;
     let steps = prototype.steps;
     let guidance = prototype.guidance;
     let raw_settings = checkpoint_plan_raw_settings(request, &sources, steps, guidance, quant_bits);
     let negative_prompt = checkpoint_plan_negative_prompt(request, &sources.descriptor);
-    let work: Vec<(i64, String)> = (0..request.count as usize)
-        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
+    let work: Vec<(i64, String)> = (0..request.image_count() as usize)
+        .map(|index| {
+            (
+                resolve_seed(request, index),
+                request.image_prompt(index).to_owned(),
+            )
+        })
         .collect();
     let total = work.len();
 
@@ -2151,6 +2601,12 @@ pub(super) async fn generate_checkpoint_plan_stream(
         super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, primary_pin);
     let spec = checkpoint_plan_load_spec(&sources, quant)?;
     let engine_id = sources.descriptor.id;
+    let load_family = sources.resolved.family().to_owned();
+    let load_source = sources.source;
+    let load_operation = sources.operation;
+    let load_generator = move |_id: &str, spec: &LoadSpec| {
+        crate::inference_runtime::load_imported(&load_family, load_source, load_operation, spec)
+    };
 
     // Admission is the legacy Krea imported lane's, not a weaker twin (sc-20634 review).
     //
@@ -2179,24 +2635,35 @@ pub(super) async fn generate_checkpoint_plan_stream(
         prepare_checkpoint_plan_candle_floor(&request.model, settings, &sources, &spec)?;
 
     let checkpoint_id = sources.checkpoint_id.clone();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let reused_loader_context = sources
+        .loader_base
+        .is_some()
+        .then(|| (settings.gpu_id.clone(), spec.precision, spec.quantize));
     let generate_one = move |model: &dyn gen_core::Generator,
                              seed: i64,
                              prompt: String,
                              memory: Option<gen_core::GenerationMemory>,
                              context: Option<&gen_core::MemoryRunContext>,
+                             _cache_state: gen_core::MemoryCacheState,
                              preview: gen_core::PreviewSink,
                              cancel: &CancelFlag,
                              on_progress: &mut dyn FnMut(Progress),
                              negative_prompt: Option<String>,
                              checkpoint_id: &str|
           -> WorkerResult<
-        Option<(GeneratedImage, Option<gen_core::PagExecutionReport>)>,
+        Option<(
+            GeneratedImage,
+            Option<gen_core::PagExecutionReport>,
+            gen_core::generator::ExecutionIdentity,
+        )>,
     > {
         if cancel.is_cancelled() {
             return Ok(None);
         }
         let mut generation = GenerationRequest {
             prompt,
+            prompt_batch: Vec::new(),
             negative_prompt,
             width,
             height,
@@ -2209,9 +2676,32 @@ pub(super) async fn generate_checkpoint_plan_stream(
             memory,
             ..prototype.clone()
         };
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let provider_context = if context.is_none() {
+            reused_loader_context.as_ref().map(|(gpu_id, precision, quant)| {
+                let contract = model.memory_strategy_contract().ok_or_else(|| WorkerError::InvalidPayload(
+                    "A reusable checkpoint loader must publish its existing request memory contract".into()))?;
+                let raw = crate::vram_gate::live_capped_budget_fresh_blocking(gpu_id)
+                    .ok_or_else(|| WorkerError::InvalidPayload("Checkpoint loader device memory budget unavailable".into()))?;
+                let bytes = |gib: f64| (gib.max(0.0) * crate::fit_gate::BYTES_PER_GIB) as u64;
+                Ok::<_, WorkerError>(checkpoint_plan_provider_memory_context(
+                    contract, *precision, *quant, width, height, gen_core::MemoryBudget {
+                        total_bytes: bytes(raw.total_gb),
+                        committed_bytes: bytes((raw.total_gb - raw.free_gb).max(0.0)),
+                        reclaimable_bytes: 0,
+                        reserved_headroom_bytes: bytes(crate::vram_gate::HEADROOM_GB),
+                    },
+                    _cache_state,
+                ))
+            }).transpose()?
+        } else {
+            None
+        };
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let context = context.or(provider_context.as_ref());
         // The same seam every request-scoped MLX lane generates through: the selected memory
         // strategy plus its run context. On candle both are `None` and this is the plain call.
-        let report = match crate::memory_strategy::generate_with_scope_report(
+        let report = match crate::memory_strategy::generate_with_scope_execution_report(
             model,
             &mut generation,
             context,
@@ -2233,15 +2723,20 @@ pub(super) async fn generate_checkpoint_plan_stream(
                 ));
             }
         };
-        let pag = report.pag;
-        match report.output {
+        let execution = report.execution;
+        let pag = report.generation.pag;
+        match report.generation.output {
             Some(GenerationOutput::Images(mut images)) => {
                 let image = images.pop().ok_or_else(|| {
                     WorkerError::Engine(format!(
                         "Checkpoint plan {checkpoint_id:?} produced no image"
                     ))
                 })?;
-                Ok(Some(((seed, image.width, image.height, image.pixels), pag)))
+                Ok(Some((
+                    (seed, image.width, image.height, image.pixels),
+                    pag,
+                    execution,
+                )))
             }
             _ => Err(WorkerError::Engine(format!(
                 "Checkpoint plan {checkpoint_id:?} returned non-image output"
@@ -2250,12 +2745,13 @@ pub(super) async fn generate_checkpoint_plan_stream(
     };
 
     #[cfg(target_os = "macos")]
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         0,
         spec,
         format!("Checkpoint plan {checkpoint_id:?} load failed"),
+        load_generator,
         move |model,
               initial_cache_state,
               loaded_policy,
@@ -2286,12 +2782,13 @@ pub(super) async fn generate_checkpoint_plan_stream(
                     let _request_memory_limit = evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                    let Some((generated, pag)) = generate_one(
+                    let Some((generated, pag, execution)) = generate_one(
                         model,
                         seed,
                         prompt,
                         Some(evaluation.memory),
                         Some(&evaluation.context),
+                        evaluation.context.cache_state,
                         preview,
                         &cancel,
                         on_progress,
@@ -2302,6 +2799,10 @@ pub(super) async fn generate_checkpoint_plan_stream(
                         return Ok(None);
                     };
                     let mut pag_facts = crate::JsonObject::new();
+                    pag_facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
                     super::lane_controls::record_pag_execution_report(&mut pag_facts, pag.as_ref());
                     if !pag_facts.is_empty() {
                         let _ = facts_tx.blocking_send(GenEvent::ImageFacts {
@@ -2319,7 +2820,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission(
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission_with_placement_using(
         job.id.clone(),
         engine_id,
         0,
@@ -2331,18 +2832,21 @@ pub(super) async fn generate_checkpoint_plan_stream(
                 cold_admission.admit(resident_reclaimable_weight_bytes)
             },
         ),
-        move |model, tx, cancel| {
+        load_generator,
+        move |model, cache_state, _loaded_policy, tx, cancel| {
+            let mut item_cache_state = cache_state;
             let facts_tx = tx.clone();
             drive_gen_items(
                 tx,
                 work,
                 move |index, (seed, prompt), preview, on_progress| {
-                    let Some((generated, pag)) = generate_one(
+                    let Some((generated, pag, execution)) = generate_one(
                         model,
                         seed,
                         prompt,
                         None,
                         None,
+                        item_cache_state,
                         preview,
                         &cancel,
                         on_progress,
@@ -2352,7 +2856,12 @@ pub(super) async fn generate_checkpoint_plan_stream(
                     else {
                         return Ok(None);
                     };
+                    item_cache_state = gen_core::MemoryCacheState::Warm;
                     let mut pag_facts = crate::JsonObject::new();
+                    pag_facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(execution).map_err(WorkerError::Json)?,
+                    );
                     super::lane_controls::record_pag_execution_report(&mut pag_facts, pag.as_ref());
                     if !pag_facts.is_empty() {
                         let _ = facts_tx.blocking_send(GenEvent::ImageFacts {

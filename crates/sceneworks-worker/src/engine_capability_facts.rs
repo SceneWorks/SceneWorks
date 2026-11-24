@@ -2356,6 +2356,7 @@ mod tests {
                     max_size: 2048,
                     max_count: 8,
                     supports_guidance: true,
+                    supports_low_res_start: true,
                     conditioning: vec![gen_core::ConditioningKind::Reference],
                     samplers: vec!["euler"],
                     schedulers: vec!["linear"],

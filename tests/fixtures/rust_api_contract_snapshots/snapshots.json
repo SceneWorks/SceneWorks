@@ -2408,6 +2408,7 @@
                   ],
                   "id": "low_res_start",
                   "inapplicability_reasons": [
+                    "missing_clean_estimate_renoise_transition",
                     "conflicts_with_pass0_control_conditioning"
                   ],
                   "memory_effect": {
@@ -2439,6 +2440,10 @@
                   },
                   "parameters": null,
                   "reasons": [
+                    {
+                      "code": "missing_clean_estimate_renoise_transition",
+                      "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                    },
                     {
                       "code": "conflicts_with_pass0_control_conditioning",
                       "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
@@ -3248,6 +3253,7 @@
               ],
               "id": "low_res_start",
               "inapplicability_reasons": [
+                "missing_clean_estimate_renoise_transition",
                 "conflicts_with_pass0_control_conditioning"
               ],
               "memory_effect": {
@@ -3279,6 +3285,10 @@
               },
               "parameters": null,
               "reasons": [
+                {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
                 {
                   "code": "conflicts_with_pass0_control_conditioning",
                   "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"

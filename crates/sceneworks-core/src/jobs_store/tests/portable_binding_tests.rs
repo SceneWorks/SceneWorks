@@ -24,6 +24,65 @@ fn request() -> CreateJob {
     }
 }
 
+#[test]
+fn durable_child_enqueue_reuses_identity_but_rejects_changed_operation_or_authority() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.sqlite"));
+    store.initialize().unwrap();
+    let frozen = binding();
+    let download = json!({"trusted":"catalog-selection"});
+    let first = store
+        .create_job_with_portable_binding_once(
+            request(),
+            None,
+            Some(&download),
+            Some(&frozen),
+            Some("durable-child"),
+        )
+        .unwrap();
+    store.cancel_job(&first.id).unwrap();
+    let repeated = store
+        .create_job_with_portable_binding_once(
+            request(),
+            None,
+            Some(&download),
+            Some(&frozen),
+            Some("durable-child"),
+        )
+        .unwrap();
+    assert_eq!(first.id, repeated.id);
+    assert_eq!(
+        repeated.status,
+        JobStatus::Canceled,
+        "recovery cannot revive canceled children"
+    );
+    let mut changed = request();
+    changed.payload.insert("repo".into(), json!("other/source"));
+    assert!(store
+        .create_job_with_portable_binding_once(
+            changed,
+            None,
+            Some(&download),
+            Some(&frozen),
+            Some("durable-child")
+        )
+        .is_err());
+    assert!(store
+        .create_job_with_portable_binding_once(
+            request(),
+            None,
+            None,
+            Some(&frozen),
+            Some("durable-child")
+        )
+        .is_err());
+    assert_eq!(store.download_binding(&first.id).unwrap(), Some(download));
+    assert_eq!(
+        store.portable_model_binding(&first.id).unwrap(),
+        Some(frozen)
+    );
+}
+
 pub(super) fn binding() -> Value {
     let platform = std::env::consts::OS;
     let authored = json!({"model":"example"});

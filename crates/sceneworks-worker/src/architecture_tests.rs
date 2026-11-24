@@ -499,6 +499,7 @@ const CHECKPOINT_PLAN_FAMILY_TOKENS: &[&str] = &[
     "ltx-video",
     "ideogram",
     "anima",
+    "moss-image",
 ];
 
 /// Family tokens that are ALSO a builtin model id, and are therefore ambiguous on their own.

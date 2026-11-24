@@ -571,6 +571,15 @@ struct TrustedPinnedLedger {
     files: Vec<PortableArtifactFile>,
 }
 
+fn trusted_pinned_ledger_key(
+    base_url: &str,
+    repo: &str,
+    revision: &str,
+    selectors: &[String],
+) -> String {
+    format!("{base_url}\0{repo}\0{revision}\0{}", selectors.join("\0"))
+}
+
 fn trusted_pinned_ledger_path(data_dir: &Path, key: &str) -> PathBuf {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(key.as_bytes());
@@ -598,6 +607,42 @@ fn read_trusted_pinned_ledger(
         )
         .is_ok();
     (same_request && valid).then_some(recorded.files)
+}
+
+/// Older Krea installs record their entire BF16 tier. The imported route needs the same
+/// pinned sources with a single narrower selector for the transformer architecture config.
+fn read_trusted_krea_companions(
+    data_dir: &Path,
+    request: &TrustedPinnedLedger,
+) -> Option<Vec<PortableArtifactFile>> {
+    let mut full = request.clone();
+    let selector = full
+        .selectors
+        .iter_mut()
+        .find(|selector| *selector == "bf16/transformer/config.json")?;
+    *selector = "bf16/transformer/*".to_owned();
+    let key =
+        trusted_pinned_ledger_key(&full.base_url, &full.repo, &full.revision, &full.selectors);
+    let mut files = read_trusted_pinned_ledger(&trusted_pinned_ledger_path(data_dir, &key), &full)?;
+    let selectors = request
+        .selectors
+        .iter()
+        .map(|selector| glob::Pattern::new(selector))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    files.retain(|file| {
+        selectors
+            .iter()
+            .any(|selector| selector.matches(&file.relative_path.to_string_lossy()))
+    });
+    selectors
+        .iter()
+        .all(|selector| {
+            files
+                .iter()
+                .any(|file| selector.matches(&file.relative_path.to_string_lossy()))
+        })
+        .then_some(files)
 }
 
 fn write_trusted_pinned_ledger(path: &Path, ledger: &TrustedPinnedLedger) -> std::io::Result<()> {
@@ -3737,7 +3782,7 @@ pub(crate) fn trusted_pinned_ledger_recorded(state: &AppState, row: &Value) -> b
         return false;
     };
     let base_url = huggingface_base_url(state);
-    let key = format!("{base_url}\0{repo}\0{revision}\0{}", selectors.join("\0"));
+    let key = trusted_pinned_ledger_key(&base_url, repo, revision, &selectors);
     trusted_pinned_ledger_path(&state.settings.data_dir, &key).is_file()
 }
 
@@ -3778,7 +3823,7 @@ async fn resolve_trusted_pinned_files(
         return Ok(fixture(repo, revision, selectors));
     }
     let base_url = huggingface_base_url(state);
-    let key = format!("{base_url}\0{repo}\0{revision}\0{}", selectors.join("\0"));
+    let key = trusted_pinned_ledger_key(&base_url, repo, revision, selectors);
     let cache = PINNED_METADATA_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Some(files) = cache
         .lock()
@@ -3799,7 +3844,12 @@ async fn resolve_trusted_pinned_files(
     let ledger_path = trusted_pinned_ledger_path(&state.settings.data_dir, &key);
     let recorded = {
         let (path, ledger) = (ledger_path.clone(), ledger.clone());
-        blocking_source_capture(move || Ok(read_trusted_pinned_ledger(&path, &ledger))).await?
+        let data_dir = state.settings.data_dir.clone();
+        blocking_source_capture(move || {
+            Ok(read_trusted_pinned_ledger(&path, &ledger)
+                .or_else(|| read_trusted_krea_companions(&data_dir, &ledger)))
+        })
+        .await?
     };
     let files = if let Some(files) = recorded {
         files
@@ -5015,6 +5065,59 @@ mod tests {
             release.join().unwrap(),
             "a blocking content hash stalled the Tokio request task"
         );
+    }
+
+    #[test]
+    fn cached_krea_tier_authenticates_only_the_imported_companions() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |relative: &str| PortableArtifactFile {
+            relative_path: relative.into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        };
+        let config = file("bf16/transformer/config.json");
+        let encoder = file("bf16/text_encoder/model.safetensors");
+        let mut full = TrustedPinnedLedger {
+            schema_version: TRUSTED_PINNED_LEDGER_VERSION,
+            base_url: "https://huggingface.co".into(),
+            repo: "SceneWorks/krea-2-turbo-mlx".into(),
+            revision: "b".repeat(40),
+            selectors: vec!["bf16/transformer/*".into(), "bf16/text_encoder/*".into()],
+            files: vec![
+                config.clone(),
+                encoder.clone(),
+                file("bf16/transformer/unused.safetensors"),
+            ],
+        };
+        full.files.sort();
+        let key =
+            trusted_pinned_ledger_key(&full.base_url, &full.repo, &full.revision, &full.selectors);
+        let path = trusted_pinned_ledger_path(dir.path(), &key);
+        write_trusted_pinned_ledger(&path, &full).unwrap();
+        let mut request = TrustedPinnedLedger {
+            files: Vec::new(),
+            ..full.clone()
+        };
+        request.selectors[0] = "bf16/transformer/config.json".into();
+        let mut expected = vec![config, encoder];
+        expected.sort();
+        assert_eq!(
+            read_trusted_krea_companions(dir.path(), &request),
+            Some(expected)
+        );
+        request.revision = "c".repeat(40);
+        assert_eq!(read_trusted_krea_companions(dir.path(), &request), None);
+
+        request.revision.clone_from(&full.revision);
+        let member = full
+            .files
+            .iter_mut()
+            .find(|member| member.relative_path == Path::new("bf16/transformer/config.json"))
+            .unwrap();
+        member.relative_path = "bf16/transformer/CONFIG.JSON".into();
+        full.files.sort();
+        write_trusted_pinned_ledger(&path, &full).unwrap();
+        assert_eq!(read_trusted_krea_companions(dir.path(), &request), None);
     }
 
     /// A fresh API process has an empty process cache. Model the restart for one repository

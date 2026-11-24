@@ -15,6 +15,7 @@
 // `skipped` with its reason. Explicit Wan A14B witnesses require an equal verdict for every chosen route. An opt-in
 // --stage-wan pass may populate their selected cache before the read-only comparison. Each fresh
 // API data directory still needs the public Hugging Face metadata for its pinned source ledger.
+// The opt-in Krea suite stages its allowlisted pinned assets first (--stage-krea).
 //
 // Modes: --preflight-only (inputs, both checkouts, pins, tools, hub presence; no build, no model)
 //        --stage-wan      (opt-in pinned public Wan download before the comparison)
@@ -22,12 +23,13 @@
 //        --run            (the comparison; requires --build-only output from the same work dir)
 // Configuration is environment-only so the same invocation works from bash, cmd and PowerShell:
 //   TIER2_AB_BACKEND mlx|cuda, TIER2_AB_BASE_SHA/HEAD_SHA (40 hex), TIER2_AB_BASE_DIR/HEAD_DIR,
-//   TIER2_AB_WORK (absolute, under RUNNER_TEMP in Actions), TIER2_AB_ROUTES (empty = defaults,
+//   TIER2_AB_WORK (absolute, managed dev-host for Windows Krea and RUNNER_TEMP for other jobs),
+//   TIER2_AB_ROUTES (empty = defaults,
 //   or a JSON array / comma list of route ids), TIER2_AB_HUBS (empty = backend defaults, or a JSON
 //   array / ';'-separated list of hub roots), TIER2_AB_INFERENCE_SHA (optional cross-check).
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn, spawnSync } from "node:child_process";
-import { chmod, copyFile, cp, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,11 +38,29 @@ import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapBytes, scailRefusalBudget, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal } from "./lib/tier2-scail.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
+import { captureKreaCompanionLedger, replayKreaCompanionLedger } from "./krea-tier2-ledger.mjs";
+import { assertTerminalPhysicalContainment } from "./lib/starvector-terminal-pin-paths.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
-import { buildChildEnv, syntheticPng } from "./qwen-image-2-1-app-lifecycle.mjs";
-import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText } from "./flux3-image-klein-app-lifecycle.mjs";
+import { assertPins, buildChildEnv, syntheticPng } from "./qwen-image-2-1-app-lifecycle.mjs";
+import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText, utilityWorkerId } from "./flux3-image-klein-app-lifecycle.mjs";
+import {
+  KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_HF_ORIGIN, assertKreaPins, kreaRoutes, kreaAssetInventory,
+  assertKreaCatalogRows, assertStagedKreaAssets, priceKreaAssets, stageKreaAssets, importKreaRawAdapter, importLinkedKrea,
+  assertKreaEnhancementRefused, openKreaEvents, assertKreaEvents, assertKreaOutput, kreaRawOutputDiagnostics, kreaPerformance,
+} from "./krea-tier2-proof.mjs";
+import {
+  SAMPLER_SOURCE_FILE, KREA_PERF_ORDER, bindKreaSamplerOverlay, kreaOwnedCudaAttachment,
+  kreaSamplerReceipt, kreaPerformanceObservation, compareKreaPerformance,
+} from "./krea-tier2-performance.mjs";
+import { KREA_ALLOCATION_POOL_BYTES, KREA_ALLOCATION_MINUTES, KREA_WIDE_IM2COL_PIN, kreaAllocationReceipt, kreaWorkerLogEvents } from "./krea-tier2-allocation.mjs";
+import { startKreaWindowsWorkerMemory } from "./lib/krea-windows-worker-memory.mjs";
 import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
+import {
+  KREA_LINKED_SOURCE_REPAIR_CHECKOUT, KREA_LINKED_SOURCE_REPAIR_REVISION,
+  appleRawBaselineCargoEnv, appleRawProjectorReceipt, bindKreaAppleRawProjector, bindKreaLinkedSourceBuild,
+  withKreaAppleRawProjector, withKreaLinkedSourceBuild,
+} from "./krea-tier2-linked-source.mjs";
 
 const execFile = promisify(execFileCallback);
 const fact = (value, message) => assert.ok(value, message);
@@ -184,23 +204,53 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const absolute = (key) => { const value = env[key] ?? ""; fact(absoluteFor(platform, value), `${key} must be an absolute path`); return paths.resolve(value); };
   const baseDir = absolute("TIER2_AB_BASE_DIR"), headDir = absolute("TIER2_AB_HEAD_DIR"), work = absolute("TIER2_AB_WORK");
   fact(baseDir !== headDir, "base and head checkouts must be separate directories");
+  const suite = env.TIER2_AB_SUITE || "tier2-ab";
+  fact(["tier2-ab", KREA_SUITE].includes(suite), "unknown Tier 2 suite");
+  const krea = suite === KREA_SUITE;
+  const windowsKrea = krea && backend === "cuda";
+  let managedJobRoot, kreaCacheHub;
   for (const dir of [baseDir, headDir]) {
     const rel = paths.relative(dir, work);
     fact(rel.startsWith("..") || paths.isAbsolute(rel), "work directory must be outside both checkouts");
   }
   if (env.GITHUB_ACTIONS === "true") {
-    fact(env.RUNNER_TEMP && paths.isAbsolute(env.RUNNER_TEMP), "RUNNER_TEMP required in Actions");
-    const rel = paths.relative(paths.resolve(env.RUNNER_TEMP), work);
-    fact(rel && !rel.startsWith("..") && !paths.isAbsolute(rel), "TIER2_AB_WORK must be under RUNNER_TEMP in Actions");
+    if (windowsKrea) {
+      const devHost = absolute("DEV_HOST_ROOT");
+      managedJobRoot = absolute("DEV_HOST_JOB_ROOT");
+      const leaf = paths.relative(paths.join(devHost, "t"), managedJobRoot);
+      fact(/^D:[\\/]/i.test(devHost) && /^[a-f0-9]{8}$/.test(leaf), "Windows Krea requires a registered D: dev-host job root");
+      fact(paths.relative(managedJobRoot, work) === "tier2-ab", "Windows Krea work must be the tier2-ab child of DEV_HOST_JOB_ROOT");
+    } else {
+      fact(env.RUNNER_TEMP && paths.isAbsolute(env.RUNNER_TEMP), "RUNNER_TEMP required in Actions");
+      const rel = paths.relative(paths.resolve(env.RUNNER_TEMP), work);
+      fact(rel && !rel.startsWith("..") && !paths.isAbsolute(rel), "TIER2_AB_WORK must be under RUNNER_TEMP in Actions");
+    }
   }
-  const routes = selectRoutes(backend, env.TIER2_AB_ROUTES);
+  if (windowsKrea) {
+    const canonical = defaultHubs(backend)[0];
+    kreaCacheHub = managedJobRoot || env.HF_HUB_CACHE ? absolute("HF_HUB_CACHE") : canonical;
+    fact(paths.relative(canonical, kreaCacheHub) === "", "Windows Krea requires the canonical E: Hugging Face hub");
+  }
+  const perf = env.TIER2_AB_KREA_PERFORMANCE === "true";
+  const allocation = env.TIER2_AB_KREA_ALLOCATION === "true";
+  fact(!perf || krea, "Krea performance requires the explicit Krea suite");
+  fact(!allocation || (krea && backend === "cuda" && !perf), "Krea allocation requires the Candle suite and is separate from performance");
+  if (allocation) assert.equal(inferenceSha, KREA_WIDE_IM2COL_PIN, "wide Krea allocation requires the reviewed CUDA im2col fix");
+  const repairDir = krea && !allocation ? paths.join(paths.dirname(baseDir), KREA_LINKED_SOURCE_REPAIR_CHECKOUT) : null;
+  const routes = krea ? kreaRoutes(backend, { allocation }) : selectRoutes(backend, env.TIER2_AB_ROUTES);
+  const nativeProgress = krea && !allocation;
+  if (krea) {
+    assertKreaPins(baseSha, KREA_BASE_ENGINE, headSha, inferenceSha);
+    fact(!env.TIER2_AB_ROUTES && !env.TIER2_AB_HUBS, "Krea uses its fixed routes and attempt-owned staging hub");
+  }
   const hubs = listInput(env.TIER2_AB_HUBS, /[;\r\n]+/) ?? defaultHubs(backend, home);
   fact(hubs.length > 0 && hubs.every((hub) => absoluteFor(platform, hub)), "every hub root must be an absolute path");
   // Optional operator knob: one claim bound (minutes) for every route, e.g. to fail fast.
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { backend, physicalGpu: physicalGpu(env.TIER2_AB_PHYSICAL_GPU, backend, routes), baseSha, headSha, inferenceSha, baseDir, headDir, work, routes, hubs: hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
+  return { suite, krea, perf, allocation, nativeProgress, backend, physicalGpu: physicalGpu(env.TIER2_AB_PHYSICAL_GPU, backend, routes), baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes, managedJobRoot, kreaCacheHub,
+    hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
 // Pure selector for the registered dispatcher (memory-catalog-campaign.yml, profile tier2-ab).
@@ -211,10 +261,22 @@ export function dispatchOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, "tier2-ab");
   fact(SHA.test(dispatchedSha ?? "") && inputs.ref === dispatchedSha, "ref must equal the exact dispatched source SHA (the driver's own commit)");
   fact(["mlx", "candle"].includes(inputs.backend), "backend must be mlx or candle");
-  fact(inputs.qwen_persistent_weights !== true, "tier2-ab does not use qwen_persistent_weights");
   let options;
   try { options = JSON.parse(inputs.moss_options_json || "{}"); } catch { throw new Error("moss_options_json must be a JSON object"); }
   fact(options && typeof options === "object" && !Array.isArray(options), "tier2-ab options must be a JSON object");
+  if (options.suite === KREA_SUITE) {
+    fact(Object.keys(options).every((key) => ["suite", "head_sha", "preflight_only", "performance", "allocation"].includes(key)), "Krea selector accepts suite, head_sha, preflight_only, performance, and allocation");
+    fact(options.preflight_only === undefined || typeof options.preflight_only === "boolean", "preflight_only must be boolean");
+    fact(options.performance === undefined || typeof options.performance === "boolean", "performance must be boolean");
+    fact(options.allocation === undefined || typeof options.allocation === "boolean", "allocation must be boolean");
+    fact(!options.allocation || (inputs.backend === "candle" && !options.performance), "Krea allocation requires Candle and is separate from performance");
+    if (options.allocation) assert.equal(inputs.inference_sha, KREA_WIDE_IM2COL_PIN, "wide Krea allocation requires the reviewed CUDA im2col fix");
+    const preflight = options.preflight_only ?? true;
+    fact(!inputs.qwen_persistent_weights && (inputs.download_missing === true) === !preflight, "Krea execution requires download_missing; metadata preflight leaves it off");
+    assertKreaPins(KREA_BASE_APP, KREA_BASE_ENGINE, options.head_sha, inputs.inference_sha);
+    return { suite: KREA_SUITE, cuda_physical_index: CUDA_PHYSICAL_GPU, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha, krea_performance: options.performance ?? false, krea_allocation: options.allocation ?? false };
+  }
+  fact(inputs.qwen_persistent_weights !== true, "tier2-ab does not use qwen_persistent_weights");
   const unknown = Object.keys(options).filter((key) => !DISPATCH_OPTION_KEYS.includes(key));
   fact(unknown.length === 0, `unknown tier2-ab option(s): ${unknown.join(", ")}`);
   fact(SHA.test(options.base_sha ?? "") && SHA.test(options.head_sha ?? "") && options.base_sha !== options.head_sha, "base_sha and head_sha must be distinct exact 40-hex SHAs");
@@ -406,7 +468,7 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
           }
         }
         if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { refusal = { skipReason: `pinned download rows for ${route.model} (${rows.tier ?? "untiered"}) differ between base and head catalogs`, rows: { base: baseRows, head: rows } }; break; }
-        rowsByTier.push(rows);
+        rowsByTier.push(route.proof ? assertKreaCatalogRows(route, rows, evidence) : rows);
       } catch (error) { if (!route.tierCandidates) { refusal = { skipReason: error.message }; break; } }
     }
     if (refusal) { planned.push({ ...entry, status: "skipped", ...refusal }); continue; }
@@ -728,6 +790,15 @@ export function hubMutationAttribution(route) {
 // Full mutation listings go to report.json; the Markdown shows a handful.
 export const HUB_MUTATION_LISTING_LIMIT = 20_000;
 export function exitCodeFor(report) {
+  if (report.kind === KREA_SUITE) {
+    const expected = report.allocationProtocol ? 1 : 2;
+    if (report.fatal || report.routes.length !== expected) return 1;
+    if (report.mode === "preflight") return report.staging?.files?.length > 0 ? 0 : 1;
+    if (report.mode === "stage" || report.mode === "build") return report.summary.ready === expected ? 0 : 1;
+    const productPassed = report.routes.every((route) => route.status === "ran" && route.verdict === "equal");
+    if (report.allocationProtocol) return report.routes.every((route) => route.status === "ran" && route.allocationWitness?.status === "observed") ? 0 : 1;
+    return productPassed && (!report.performanceProtocol || report.routes.every((route) => route.performanceComparison?.status === "pass")) ? 0 : 1;
+  }
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
   if (report.routes.some((route) => ROUTES[route.id]?.wanA14b && route.verdict !== "equal")) return 1;
   if (report.routes.some((route) => ROUTES[route.id]?.scailCandidate && route.verdict !== "verified")) return 1;
@@ -740,11 +811,12 @@ export function exitCodeFor(report) {
 // bounds per route: claimMinutes from submission until the claim, timeoutMinutes from the claim
 // until completion. Either stops the run early with a specific reason instead of a long ceiling.
 const UNCLAIMED = new Set(["queued", "pending_caption", "pending_workflow"]);
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "canceled", "interrupted"]);
 export const jobClaimed = (job) => Boolean(job?.workerId) || (job?.status !== undefined && !UNCLAIMED.has(job.status));
 export function jobProgressDecision({ job, postedMs, claimedAtMs = null, nowMs, claimMinutes, timeoutMinutes }) {
   const where = `${job?.status ?? "?"}/${job?.stage ?? "?"}${job?.message ? ` (${String(job.message).slice(0, 200)})` : ""}`;
-  if (["failed", "canceled", "interrupted"].includes(job?.status)) return { state: "stop", reason: `job ${job.status}: ${job.error ?? job.message ?? "no error served"}` };
   if (job?.status === "completed") return { state: "completed" };
+  if (TERMINAL_JOB_STATUSES.has(job?.status)) return { state: "stop", reason: `job ${job.status}: ${job.error ?? job.message ?? "no error served"}` };
   if (!jobClaimed(job)) {
     if (nowMs - postedMs > claimMinutes * 60_000) return { state: "stop", reason: `unclaimed: job stayed ${where} for more than ${claimMinutes} min after submission` };
     return { state: "waiting_claim" };
@@ -867,6 +939,12 @@ async function sampleMacTree(pid) {
   fact(footprintBytes !== null, "worker footprint sample unavailable");
   return { pids: tree.length, rssBytes, footprintBytes };
 }
+async function sampleKreaMacLifetime(pid) {
+  const helper = fileURLToPath(new URL("./ci/iris-mlx-real-weights/tree_guard.py", import.meta.url));
+  const snippet = "import runpy, sys; value = runpy.run_path(sys.argv[1])['rusage'](int(sys.argv[2])); print(value[1] if value else '')";
+  const { stdout } = await execFile("python3.12", ["-I", "-c", snippet, helper, String(pid)], { timeout: 10_000 });
+  return Number(stdout.trim());
+}
 async function sampleWindowsProcess(pid) {
   const script = `$p = Get-Process -Id ${Number(pid)} -ErrorAction Stop; "$($p.WorkingSet64) $($p.PeakWorkingSet64) $($p.PrivateMemorySize64)"`;
   const out = (await execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { timeout: 15_000, windowsHide: true })).stdout.trim().split(/\s+/).map(Number);
@@ -956,7 +1034,9 @@ const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / GIB).toFixed(2)} Gi
 const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–");
 export function renderMarkdown(report) {
   const lines = [`# Tier 2 A/B (${report.backend}) — ${report.mode}`, "", `- status: **${report.status}** (exit ${report.exitCode})`, `- base: \`${report.base.sha}\` (inference ${report.base.inferencePin ?? "?"}, binary ${report.base.binarySha256 ?? "not built"})`, `- head: \`${report.head.sha}\` (inference ${report.head.inferencePin ?? "?"}, binary ${report.head.binarySha256 ?? "not built"})`, `- runner: ${report.runner.name ?? "local"} (${report.runner.platform}/${report.runner.arch}, ${gib(report.runner.totalMemoryBytes)} RAM)`, `- window: ${report.startedAt} → ${report.finishedAt ?? "running"}`, `- memory method: ${report.memoryMethod}`, `- fidelity method: decoded content (PNG→RGBA8, WAV→PCM samples, video→ffmpeg RGBA frames + s16le audio); file sha256 recorded separately`, ""];
-  if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Memory peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. WDDM reports no per-process GPU memory, so admission and attribution use device memory.used/free and the driver's process types.", "");
+  if (report.kreaLinkedSourceBuild) lines.push(`- The frozen Krea baseline build uses four files from repair \`${report.kreaLinkedSourceBuild.repairRevision}\`. The candidate uses its own files, verified against the source set reviewed at \`${report.kreaLinkedSourceBuild.candidateReviewRevision}\`. The unmodified baseline refuses the linked checkpoint before generation. Exact source hashes are in the JSON receipt.`, "");
+  if (report.kreaLinkedSourceBuild?.windowsRawRouting) lines.push(`- Both Windows builds use the same built-in Raw phase routing repair from candidate \`${report.kreaLinkedSourceBuild.windowsRawRouting.repairRevision}\`. The original frozen server routed that request only to Mac workers. The JSON receipt records both source fingerprints.`, "");
+  if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Device-wide diagnostic peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. NVIDIA device-wide readings and process types still govern the device lease.", "");
   if (Array.isArray(report.gpus)) {
     lines.push("| nvidia-smi index | PCI bus | UUID | display attached | used / total | util | processes (C, G, C+G) |", "|---|---|---|---|---|---|---|");
     for (const gpu of report.gpus) { const count = (type) => gpu.processes.filter((row) => row.type === type).length; lines.push(`| ${gpu.index} | ${gpu.pciBusId} | ${gpu.uuid} | ${gpu.displayAttached} | ${gpu.memoryUsed} / ${gpu.memoryTotal} | ${gpu.utilization} | C ${count("C")} (${gpu.processes.filter((row) => row.type === "C").map((row) => `${row.name}:${row.pid}`).join(" ")}), G ${count("G")}, C+G ${count("C+G")} |`); }
@@ -965,6 +1045,12 @@ export function renderMarkdown(report) {
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
   if (report.sourceMetadata) lines.push(report.sourceMetadata, "");
+  if (report.backend === "cuda" && report.kind === KREA_SUITE && (report.allocationProtocol || report.performanceProtocol)) {
+    lines.push("- Krea Windows memory uses sampled PDH dedicated-process accounting for the owned worker and leased CUDA adapter. Device-wide samples and the private CUDA pool have separate accounting domains.", "");
+  }
+  if (report.allocationProtocol) lines.push(`- Allocation witness: ${report.allocationProtocol}.`, "");
+  if (report.performanceProtocol) lines.push(`- Performance protocol: ${report.performanceProtocol}; results remain separate from output evidence.`, "");
+  if (report.kind === KREA_SUITE && report.staging) lines.push(`- Exact asset inventory: ${report.staging.files.length} files, ${gib(report.staging.bytes)}. ${report.staging.stagedFileCount ? "Digest-verified in the attempt-owned hub." : "Metadata pricing only."}`, "");
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
   for (const route of report.routes) {
@@ -985,7 +1071,14 @@ export function renderMarkdown(report) {
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
+    if (route.allocationWitness) lines.push(`- Allocation witness: ${route.allocationWitness.status}. See the candidate receipt in report.json.`);
+    if (route.performanceComparison) lines.push(`- PERF-1/2: ${route.performanceComparison.status}. ${route.performanceComparison.reason ?? "See six ordered pairs and domain verdicts in report.json."}`);
+    if (route.comparison?.observedPerformance && !report.performanceProtocol) {
+      const { base, head } = route.comparison.observedPerformance;
+      lines.push(`- Worker sampleMs per observed step: ${base.secondsPerObservedStep.toFixed(3)} s base, ${head.secondsPerObservedStep.toFixed(3)} s head. ${base.method}. Paired observations only.`, `- Observed memory: ${memoryCell(base.memory)} base, ${memoryCell(head.memory)} head.`);
+    }
     if (route.comparison?.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
+    if (route.comparison?.productPixelDifference) lines.push(`- Decoded channel differences between base#1 and head: ${JSON.stringify(route.comparison.productPixelDifference)}`);
     if (route.hubMutation?.changed) {
       const attribution = hubMutationAttribution(route);
       lines.push(attribution === "base_only"
@@ -998,7 +1091,8 @@ export function renderMarkdown(report) {
 }
 
 // ---- side identity, preflight -------------------------------------------------------------------
-async function git(cwd, ...args) { return (await execFile("git", args, { cwd, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })).stdout.trim(); }
+async function gitWithEnv(env, cwd, ...args) { return (await execFile("git", args, { cwd, env, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })).stdout.trim(); }
+const git = (...args) => gitWithEnv(undefined, ...args);
 export function pmetalSource(lock) { return /name = "pmetal-mlx-sys"\nversion = "[^"]+"\nsource = "([^"]+)"/.exec(lock.replace(/\r\n/g, "\n"))?.[1] ?? null; }
 async function sideIdentity(label, dir, sha) {
   const head = await git(dir, "rev-parse", "HEAD"), dirty = await git(dir, "status", "--porcelain");
@@ -1031,7 +1125,20 @@ export async function scailHostIdentity(backend, env, run = execFile) {
   return { ...identity, captureAdapter: { cuda_uuid: adapter.uuid, luid: adapter.luid, node_mask: adapter.node_mask } };
 }
 
-async function preflight(env, cfg, report) {
+async function readKreaLinkedSourceBuild(cfg) {
+  const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir, cfg.repairDir, {
+    windowsRawRoutingRevision: cfg.backend === "cuda" && !cfg.allocation ? cfg.headSha : undefined,
+  });
+  const [checkout, revision] = await Promise.all([
+    git(binding.repair, "rev-parse", "--show-toplevel"),
+    git(binding.repair, "rev-parse", "HEAD"),
+  ]);
+  fact(await realpath(checkout) === binding.repair && revision === KREA_LINKED_SOURCE_REPAIR_REVISION,
+    "Krea repair checkout does not match the reviewed revision");
+  return binding;
+}
+
+async function preflight(env, cfg, report, signal) {
   const platform = process.platform;
   if (cfg.backend === "mlx") fact(platform === "darwin" && process.arch === "arm64", "the mlx backend needs a native Apple-silicon Mac");
   else fact(platform === "win32", "the cuda backend needs the Windows CUDA runner");
@@ -1043,7 +1150,33 @@ async function preflight(env, cfg, report) {
   if (cfg.backend === "cuda") fact(env.CUDA_DEVICE_ORDER === "PCI_BUS_ID", "CUDA_DEVICE_ORDER=PCI_BUS_ID required");
   report.base = { ...report.base, ...(await sideIdentity("base", cfg.baseDir, cfg.baseSha)) };
   report.head = { ...report.head, ...(await sideIdentity("head", cfg.headDir, cfg.headSha)) };
-  if (cfg.inferenceSha) for (const side of [report.base, report.head]) fact(side.inferencePin === cfg.inferenceSha, `inference pin ${side.inferencePin} differs from the requested ${cfg.inferenceSha}`);
+  if (cfg.krea) {
+    assertKreaPins(report.base.sha, report.base.inferencePin, report.head.sha, report.head.inferencePin);
+    fact(report.head.inferencePin === cfg.inferenceSha, "candidate checkout does not source-pin the requested inference SHA");
+    const projector = appleRawProjectorReceipt(cfg.routes);
+    if (projector) {
+      assert.equal(report.base.inferencePin, projector.inferenceRevision, "Apple Raw projector repair requires the frozen inference pin");
+      report.base.kreaAppleRawProjector = projector;
+    }
+    if (cfg.repairDir) {
+      const binding = await readKreaLinkedSourceBuild(cfg);
+      if (env.GITHUB_ACTIONS === "true") {
+        const workspace = await realpath(env.GITHUB_WORKSPACE);
+        fact(binding.base === path.join(workspace, "tier2-ab-base"), "Krea source repair requires the attempt-owned workflow baseline checkout");
+        fact(binding.repair === path.join(workspace, KREA_LINKED_SOURCE_REPAIR_CHECKOUT), "Krea source repair requires the attempt-owned sparse checkout");
+      }
+      report.kreaLinkedSourceBuild = binding.receipt;
+    }
+    for (const side of cfg.allocation ? [report.head] : [report.base, report.head]) {
+      const manifests = ["Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml"];
+      const contents = await Promise.all(manifests.map((file) => readFile(path.join(side.checkout, file), "utf8")));
+      assertPins(contents, await readFile(path.join(side.checkout, "Cargo.lock"), "utf8"), side.inferencePin);
+      if (cfg.perf || cfg.allocation || cfg.nativeProgress) {
+        const { sourceSha256, overlaySha256 } = await bindKreaSamplerOverlay(await readFile(path.join(side.checkout, SAMPLER_SOURCE_FILE)), side.sha === cfg.baseSha ? "base" : "head", cfg);
+        side.samplerOverlay = { sourceSha256, overlaySha256 };
+      }
+    }
+  } else if (cfg.inferenceSha) for (const side of [report.base, report.head]) fact(side.inferencePin === cfg.inferenceSha, `inference pin ${side.inferencePin} differs from the requested ${cfg.inferenceSha}`);
   if (cfg.backend === "mlx") fact(report.base.pmetalSource && report.base.pmetalSource === report.head.pmetalSource, "base and head must pin the same pmetal-mlx-sys revision (one prebuilt MLX serves both builds)");
   const ffmpeg = env.SCENEWORKS_FFMPEG || "ffmpeg";
   report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, ffprobe: { command: ffprobePath(ffmpeg), ...(await tool(ffprobePath(ffmpeg), ["-version"])) }, git: await tool("git", ["--version"]) };
@@ -1095,6 +1228,30 @@ async function preflight(env, cfg, report) {
   if (cfg.routes.some((route) => route.wanA14b || route.scailCandidate)) {
     report.sourceMetadata = "Each fresh API data directory builds its trusted source ledger from the public Hugging Face tree at `https://huggingface.co/api/models/{repo}/tree/{revision}` for the exact selected revision. The worker verifies cached files against the ledger. These metadata requests require HTTPS access and use no credentials.";
     fact(report.tools.ffmpeg.available && report.tools.ffprobe.available, "the selected product witness requires ffmpeg and ffprobe for decoded output evidence");
+  }
+  if (cfg.krea) {
+    const inventory = kreaAssetInventory(evidence, cfg.routes);
+    const stageReceipt = path.join(cfg.work, "scratch", "krea-stage.json");
+    if (["preflight", "stage"].includes(report.mode)) {
+      report.staging = await priceKreaAssets(inventory, signal);
+      fact(report.routes.every((route) => route.rows?.required?.length), "Krea public catalog no longer provides the exact proof routes");
+      if (report.mode === "stage") {
+        report.stagingTransfers = [];
+        report.staging = await stageKreaAssets(cfg.hubs[0], report.staging, signal, {
+          cacheHub: cfg.kreaCacheHub,
+          progress(entry) {
+            report.stagingTransfers.push(entry);
+            progress({ phase: "krea_asset_stage", ...entry });
+          },
+        });
+        await writeFile(stageReceipt, JSON.stringify(report.staging) + "\n", { flag: "wx" });
+        report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
+      }
+    } else {
+      report.staging = JSON.parse(await readFile(stageReceipt, "utf8"));
+      await assertStagedKreaAssets(cfg.hubs[0], report.staging, inventory);
+    }
+    if (report.mode !== "preflight") fact(report.routes.every((route) => route.status === "ready"), "all selected pinned Krea cases must be eligible to run");
   }
   for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
     if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
@@ -1172,15 +1329,28 @@ async function runLogged(command, args, { cwd, env, log }) {
     return result;
   } finally { await handle.close(); }
 }
-async function tail(file, bytes = 8000) { try { const text = await readFile(file, "utf8"); return text.slice(-bytes); } catch { return ""; } }
+async function tail(file, bytes = 8000) {
+  let handle;
+  try {
+    handle = await open(file, "r");
+    const { size } = await handle.stat();
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, size - length);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } catch { return ""; }
+  finally { await handle?.close().catch(() => {}); }
+}
 function runSides(cfg) {
-  return cfg.routes.every((route) => route.scailCandidate) ? ["head"] : ["base", "head"];
+  return cfg.allocation || cfg.routes.every((route) => route.scailCandidate) ? ["head"] : ["base", "head"];
 }
 async function build(env, cfg, report) {
   const scratch = path.join(cfg.work, "scratch"), target = path.join(scratch, "target"), evidence = path.join(cfg.work, "evidence");
   await mkdir(target, { recursive: true }); await mkdir(evidence, { recursive: true });
   const exe = process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api";
   const built = {};
+  const linkedSourceBuild = cfg.repairDir ? await readKreaLinkedSourceBuild(cfg) : null;
+  if (linkedSourceBuild) assert.deepEqual(linkedSourceBuild.receipt, report.kreaLinkedSourceBuild);
   // Base first, then head: both share one target, so the second build reuses every unchanged
   // dependency unit. Each binary (plus loose native libraries) is copied out before the next build.
   for (const label of runSides(cfg)) {
@@ -1188,9 +1358,43 @@ async function build(env, cfg, report) {
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
-    const result = await runLogged("cargo", args, { cwd: dir, env: { ...scrubSecrets(env), CARGO_TARGET_DIR: target }, log });
+    let cargoEnv = { ...scrubSecrets(env), CARGO_TARGET_DIR: target };
+    let projector, projectorGit;
+    if (label === "base" && report.base.kreaAppleRawProjector) {
+      // Keep the locked Git source and its exact package identities. Cargo owns the private checkout.
+      cargoEnv = await appleRawBaselineCargoEnv(cargoEnv);
+      cargoEnv.CARGO_HOME = await mkdtemp(path.join(await realpath(scratch), "krea-apple-base-cargo-"));
+      projectorGit = (...args) => gitWithEnv(cargoEnv, ...args);
+      const { stdout } = await execFile("cargo", ["metadata", "--locked", "--format-version", "1", "--filter-platform", "aarch64-apple-darwin"], {
+        cwd: dir, env: cargoEnv, timeout: 10 * 60_000, maxBuffer: 64 * 1024 ** 2,
+      });
+      projector = await bindKreaAppleRawProjector(cargoEnv.CARGO_HOME, JSON.parse(stdout), projectorGit);
+      assert.deepEqual(projector.receipt, report.base.kreaAppleRawProjector);
+    }
+    const compile = async () => {
+      const cargo = () => runLogged("cargo", args, { cwd: dir, env: cargoEnv, log });
+      if (!cfg.perf && !cfg.allocation && !cfg.nativeProgress) return cargo();
+      const file = path.join(dir, SAMPLER_SOURCE_FILE);
+      const original = await readFile(file);
+      const overlay = await bindKreaSamplerOverlay(original, label, cfg);
+      assert.deepEqual(report[label].samplerOverlay, { sourceSha256: overlay.sourceSha256, overlaySha256: overlay.overlaySha256 });
+      try {
+        await writeFile(file, overlay.content);
+        return await cargo();
+      } finally {
+        await writeFile(file, original);
+      }
+    };
+    const compileApp = () => label === "base" && linkedSourceBuild
+      ? withKreaLinkedSourceBuild(linkedSourceBuild, compile)
+      : compile();
+    const result = projector ? await withKreaAppleRawProjector(projector, compileApp, log) : await compileApp();
     if (result.code !== 0) { await writeFile(path.join(evidence, `build-${label}.tail.log`), await tail(log, 64_000)); throw new Error(`${label} release build failed (${JSON.stringify(result)}); see build-${label}.tail.log`); }
     fact(await git(dir, "status", "--porcelain") === "" && await git(dir, "rev-parse", "HEAD") === sha, `${label} build changed its checkout`);
+    if (projector) {
+      fact(await projectorGit(projector.base, "status", "--porcelain", "--untracked-files=no") === "" &&
+        await projectorGit(projector.base, "rev-parse", "HEAD") === projector.receipt.inferenceRevision, "Apple Krea build changed its frozen inference checkout");
+    }
     let metallib = null;
     if (cfg.backend === "mlx") {
       const native = await bindMetallib({ messages: log, lockFile: path.join(dir, "Cargo.lock"), targetRoot: target, temporaryRoot: scratch, consumer: "app", explicitOverride: env.PMETAL_METALLIB_PATH ?? "", explicitNativeDirectory: env.PMETAL_MLX_PREBUILT_DIR ?? "" });
@@ -1199,10 +1403,15 @@ async function build(env, cfg, report) {
     const bin = path.join(scratch, "bin", label); await mkdir(bin, { recursive: true });
     for (const entry of await readdir(path.join(target, "release"), { withFileTypes: true })) if (entry.isFile() && (entry.name === exe || /\.(dll|dylib|so)$/i.test(entry.name))) await copyFile(path.join(target, "release", entry.name), path.join(bin, entry.name));
     const binary = path.join(bin, exe);
-    built[label] = { binary, binarySha256: await fileSha256(binary), metallib, buildSeconds: (Date.now() - started) / 1000 };
+    built[label] = { binary, binarySha256: await fileSha256(binary), samplerOverlay: report[label].samplerOverlay ?? null,
+      ...(projector && { kreaAppleRawProjector: projector.receipt }), metallib, buildSeconds: (Date.now() - started) / 1000 };
     report[label] = { ...report[label], binarySha256: built[label].binarySha256, buildSeconds: built[label].buildSeconds, metallibSha256: metallib?.sha256 ?? null };
   }
-  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, built }, null, 2) + "\n");
+  if (linkedSourceBuild) {
+    const restored = await readKreaLinkedSourceBuild(cfg);
+    assert.deepEqual(restored.receipt, linkedSourceBuild.receipt, "Krea source repair changed a checkout");
+  }
+  await writeFile(path.join(scratch, "build.json"), JSON.stringify({ baseSha: cfg.baseSha, headSha: cfg.headSha, backend: cfg.backend, perf: cfg.perf, allocation: cfg.allocation, kreaLinkedSourceBuild: report.kreaLinkedSourceBuild, built }, null, 2) + "\n");
   return built;
 }
 
@@ -1253,13 +1462,11 @@ export function childStdio(name, logFd) { return [CHILD_STDIN[name] ?? "ignore",
 // commits). Removes every *TOKEN*, *SECRET*, *PASSWORD*, *CREDENTIAL* and *_KEY variable, including
 // HF_TOKEN, HUGGING_FACE_HUB_TOKEN and HF_HUB_TOKEN.
 export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/i;
-// Ambient SCENEWORKS_* variables are cleared for the children (buildChildEnv); these are the only
-// ones put back, because the children need them and they are not secrets. SCENEWORKS_FFMPEG is the
-// ffmpeg preflight validated (media_process.rs resolves the API/worker's ffmpeg from it, else PATH),
-// and SCENEWORKS_FFMPEG_TIMEOUT_SECONDS bounds that ffmpeg. The product reads no ffprobe variable.
+// Pass the host's checked ffmpeg path and timeout after buildChildEnv clears SCENEWORKS_*.
+// media_process.rs resolves ffmpeg from SCENEWORKS_FFMPEG or PATH.
 export const FORWARDED_SCENEWORKS_ENV = Object.freeze(["SCENEWORKS_FFMPEG", "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS"]);
 export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
-export function childEnvironments(env, { backend, physicalGpu = CUDA_PHYSICAL_GPU, state, hub, xet, workerId, metallib }) {
+export function childEnvironments(env, { backend, physicalGpu = CUDA_PHYSICAL_GPU, state, hub, xet, workerId, metallib, allocation = false, pairedKreaHires = false }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
   if (backend === "cuda") {
@@ -1271,12 +1478,22 @@ export function childEnvironments(env, { backend, physicalGpu = CUDA_PHYSICAL_GP
   // gated ones are skipped at planning, so the API and worker get no token of any kind.
   base = scrubSecrets(base);
   for (const key of FORWARDED_SCENEWORKS_ENV) if (env[key]) base[key] = env[key];
-  return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1" }) };
+  if (pairedKreaHires) {
+    // Windows treats environment names case-insensitively. Pin the exact origin used by
+    // Krea staging and the companion ledger without inheriting either endpoint alias.
+    for (const key of Object.keys(base)) {
+      const name = key.toUpperCase();
+      if (name === "SCENEWORKS_HUGGINGFACE_BASE_URL" || name === "HF_ENDPOINT") delete base[key];
+    }
+    base.SCENEWORKS_HUGGINGFACE_BASE_URL = KREA_HF_ORIGIN;
+  }
+  return { api: bindOwnedEnv(base, { state, workerId }), worker: (url) => ({ ...bindOwnedEnv(base, { state, workerId }, url), SCENEWORKS_WORKER_ONLY: "1", ...(allocation ? { SCENEWORKS_CUDA_PROOF_POOL_BYTES: String(KREA_ALLOCATION_POOL_BYTES) } : {}) }) };
 }
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
 const decodedBuffers = new WeakMap();
-async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, effectiveCapBytes }) {
+const kreaImportFiles = [path.join("data", "checkpoints"), path.join("config", "manifests", "user.models.jsonc")];
+async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, previousImport, hiresLedger, effectiveCapBytes }) {
   const sideCfg = side === "base" ? { dir: cfg.baseDir, sha: cfg.baseSha } : { dir: cfg.headDir, sha: cfg.headSha };
   const slug = `${route.id}-${label.replace("#", "")}`;
   const runRoot = path.join(cfg.work, "scratch", "runs", slug), evidence = path.join(evidenceRoot, "runs", route.id, label.replace("#", ""));
@@ -1284,13 +1501,17 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const state = path.join(runRoot, "state"), xet = path.join(runRoot, "xet"), logs = path.join(runRoot, "logs");
   for (const dir of [path.join(state, "data", "projects"), path.join(state, "credentials"), xet, logs]) await mkdir(dir, { recursive: true });
   await cp(path.join(sideCfg.dir, "config"), path.join(state, "config"), { recursive: true });
+  if (previousImport) for (const file of kreaImportFiles) await cp(path.join(previousImport.state, file), path.join(state, file), { recursive: true });
   const workerId = `tier2-ab-${side}-${process.pid}-${Date.now().toString(36)}`;
   const claimMinutes = cfg.claimMinutesOverride ?? route.claimMinutes;
   const record = { label, side, sha: sideCfg.sha, binarySha256: built[side].binarySha256, workerId, status: "running", phase: "starting", startedAt: new Date().toISOString(), timing: {}, memory: {}, identity: {}, watchdog: { capBytes: null, claimMinutes, timeoutMinutes: route.timeoutMinutes } };
   // run.json is rewritten at every phase transition, so a cancelled job still leaves evidence.
   const persist = () => writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets)).catch(() => {});
   const phase = async (name, fields = {}) => { record.phase = name; progress({ route: route.id, run: label, phase: name, ...fields }); await persist(); };
-  const envs = childEnvironments(env, { backend: cfg.backend, physicalGpu: cfg.physicalGpu, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path });
+  const envs = childEnvironments(env, {
+    backend: cfg.backend, physicalGpu: cfg.physicalGpu, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path,
+    allocation: cfg.allocation, pairedKreaHires: Boolean(hiresLedger),
+  });
   const children = [], handles = [], controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason ?? new Error("A/B interrupted"));
   signal.addEventListener("abort", onAbort, { once: true });
@@ -1302,7 +1523,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     child.done = new Promise((resolve) => { child.once("error", (error) => resolve({ error: error.message })); child.once("exit", (code, sig) => resolve({ code, signal: sig })); });
     return child;
   };
-  let endpoint, apiUrl, job, accepted, samplers = [], sampling = false;
+  let endpoint, apiUrl, job, accepted, events, dedicatedMemory, samplers = [], sampling = false;
   const runStarted = Date.now();
   // Outer backstop only; the claim and execution bounds below stop a run first and say why.
   const runMinutes = claimMinutes + route.timeoutMinutes + 15;
@@ -1311,9 +1532,30 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const watchdog = (reason) => { if (!controller.signal.aborted) { record.watchdog.tripped = reason; controller.abort(new Error(`watchdog: ${reason}`)); } };
   const timer = setTimeout(() => watchdog(`per-run backstop ${runMinutes} min`), runMinutes * 60_000);
   let lastJob = null;
+  const ownedProcesses = () => Object.fromEntries(children.filter((child) => child.label !== "sentinel").map((child) => [child.label, processState(child)]));
+  const retainServiceLogs = async () => {
+    for (const name of ["api", "worker"]) {
+      const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
+      if (name === "worker" && route.proof && text) {
+        record.scopePolicyEvents = kreaWorkerLogEvents(text)
+          .filter(({ event, engine }) => event === "generation_memory_policy_applied" && String(engine).startsWith("krea_2"))
+          .map(({ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }) => ({ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }));
+      }
+      const redacted = redactSensitiveText(text, secrets);
+      if (record.status !== "completed" && record.status !== "refused") {
+        const diagnostics = (record.diagnostics ??= {});
+        const key = `${name}LogTail`;
+        if (redacted || !Object.hasOwn(diagnostics, key)) diagnostics[key] = lastLines(redacted, 50);
+      }
+      if (redacted) await writeFile(path.join(evidence, `${name}.log`), redacted).catch((error) => {
+        (record.logRetentionErrors ??= {})[name] = error.message;
+      });
+    }
+  };
   const alive = () => { if (controller.signal.aborted) throw controller.signal.reason; };
   const wait = async (probe, seconds, what) => { const end = Math.min(Date.now() + seconds * 1000, deadline); while (Date.now() < end) { alive(); const value = await probe(); if (value) return value; await delay(500); } throw new Error(`${what} timed out`); };
   try {
+    if (hiresLedger && label !== "base#1") record.companionLedger = await replayKreaCompanionLedger(hiresLedger.seed, state);
     // Desktop parent-death contract: API and worker exit gracefully when this sentinel ends.
     const sentinel = await launch("sentinel", process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env);
     envs.api.SCENEWORKS_PARENT_PID = String(sentinel.pid);
@@ -1350,7 +1592,8 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     await phase("services_up", { side, startup_s: record.timing.startupSeconds.toFixed(1) });
     const project = await endpoint.call("POST", "/api/v1/projects", { name: `SW-7033 tier2 A/B ${route.id} ${label}` });
     const projectPath = await realpath(project.path), stateReal = await realpath(state);
-    fact(!path.relative(stateReal, projectPath).startsWith(".."), "project escaped the run's own state");
+    const relativeProject = path.relative(stateReal, projectPath);
+    fact(relativeProject && !relativeProject.startsWith("..") && !path.isAbsolute(relativeProject), "project escaped the run's own state");
     const reference = route.referenceImage || route.referenceAudio
       ? await uploadReference(route, endpoint, project.id, evidence) : null;
     if (route.referenceImage) record.sourceImage = reference;
@@ -1358,13 +1601,33 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const media = await scailMedia(route, evidence, env.SCENEWORKS_FFMPEG || "ffmpeg");
       record.sources = await uploadScailMedia(route, endpoint, project.id, media, decodePng);
     }
+    const importOptions = { endpoint, hub: plan.hub, wait, trackJob: (job) => { accepted = job; }, ownsWorker: (id) => id === workerId || id === utilityWorkerId(workerId) || id?.startsWith(`${utilityWorkerId(workerId)}-`) };
+    if (route.proof === "raw") {
+      record.adapterImport = await importKreaRawAdapter({ ...importOptions, project, projectPath, signal: controller.signal });
+      accepted = null;
+      await phase("adapter_imported", { side, job: record.adapterImport.jobId, adapter: record.adapterImport.adapterId });
+    } else if (route.proof === "hires" && previousImport) {
+      const catalog = await endpoint.call("GET", "/api/v1/models");
+      const entry = catalog.find(({ id }) => id === route.body.model);
+      fact(entry?.importPlan?.checkpointId === previousImport.receipt.checkpointId, "cold performance worker did not reuse the exact linked checkpoint stamp");
+      record.import = { ...previousImport.receipt, reused: true };
+    } else if (route.proof === "hires") {
+      record.import = await importLinkedKrea(importOptions);
+      accepted = null;
+    }
     const body = requestBody(route, project.id, route.scailCandidate ? record.sources : reference?.id);
+    if (route.proof) {
+      const refused = await endpoint.exchange("POST", route.endpoint, { ...body, advanced: { ...body.advanced, enhancePrompt: true } });
+      assertKreaEnhancementRefused(refused);
+      record.enhancementRefusal = { status: refused.status, detail: refused.body.detail };
+      events = await openKreaEvents(endpoint, url, controller.signal);
+    }
     record.requestSha256 = normalizedRequestHash(route, body, reference?.sha256);
     if (record.sources) record.requestWithMediaSha256 = sha256(JSON.stringify({
       template: record.requestSha256, references: record.sources.references.map((s) => s.sha256), clip: record.sources.clip.sha256 }));
     fact(record.requestSha256 === plan.request.sha256, "request body diverged from the route template");
     // Memory baselines and samplers start before the POST and stop at completion.
-    const memory = { samples: 0, errors: 0, peakBytes: null };
+    const memory = record.memory = { samples: 0, errors: 0, peakBytes: null };
     sampling = true;
     if (cfg.backend === "mlx") {
       const cap = Math.min((route.scailCandidate ? 96 : 100) * GIB, Math.floor(os.totalmem() * 0.8)); record.watchdog.capBytes = cap;
@@ -1384,8 +1647,31 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       for (let i = 0; i < 5; i++) {
         const sample = await readGpu(i === 4);
         baseline.push(sample.usedBytes);
+        memory.gpuUuid ??= sample.uuid;
+        fact(memory.gpuUuid === sample.uuid, "physical GPU changed during pre-request admission sampling");
         if (route.scailCandidate) memory.preRequestGpuFreeBytes = sample.freeBytes;
         if (i < 4 || !route.scailCandidate) await delay(200);
+      }
+      if (cfg.perf || cfg.allocation) {
+        const uuid = memory.gpuUuid;
+        dedicatedMemory = startKreaWindowsWorkerMemory({ pid: worker.pid, executable: built[side].binary, gpuUuid: uuid, env });
+        memory.wddmDedicated = dedicatedMemory.record;
+        await dedicatedMemory.ready();
+        fact(worker.exitCode === null && worker.signalCode === null, "owned worker exited before the Windows memory observer armed");
+        samplers.push((async () => {
+          while (sampling) {
+            try {
+              // NVIDIA identifies the worker and rejects any unleased UUID.
+              // Its unavailable WDDM byte field is not part of the measurement.
+              const args = ["--query-compute-apps=pid,gpu_uuid", "--format=csv,noheader,nounits"];
+              const { stdout } = await execFile(smi, args, { timeout: 10_000, windowsHide: true });
+              if (kreaOwnedCudaAttachment(stdout, worker.pid, uuid)) dedicatedMemory.markActive();
+            } catch (error) {
+              memory.ownedGpuIdentityError ??= error.message;
+            }
+            await delay(500);
+          }
+        })());
       }
       memory.method = `nvidia-smi memory.used on physical GPU${cfg.physicalGpu} sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s`;
       memory.gpuBaselineBytes = Math.max(...baseline);
@@ -1394,7 +1680,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         record.timing.sharedGpu = env.TIER2_AB_GPU_POLICY === "shared-display"
           ? "times taken on the host's display GPU, alongside display work" : "times taken on the shared compute GPU";
       }
-      samplers.push((async () => { while (sampling) { try { const s = await readGpu(); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
+      samplers.push((async () => { while (sampling) { try { const s = await readGpu(); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuIdentityError ??= "physical GPU changed while sampling"; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
         if (route.scailCandidate) memory.minGpuFreeBytes = Math.min(memory.minGpuFreeBytes ?? s.freeBytes, s.freeBytes);
       } catch {
         memory.errors++;
@@ -1402,8 +1688,26 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
-    const posted = Date.now();
-    const response = await endpoint.exchange("POST", route.endpoint, body);
+    let posted;
+    let postedMonotonicMs;
+    const post = () => {
+      posted = Date.now();
+      return endpoint.exchange("POST", route.endpoint, body, cfg.perf ? { onRequest: () => { postedMonotonicMs = performance.now(); } } : undefined);
+    };
+    const sourceClaimDeadline = Math.min(deadline, Date.now() + 60_000);
+    let response = await post();
+    // The rendering worker may publish the newly imported digest on its next heartbeat.
+    // Retry only a refusal that could not have queued a job. Start timing at the accepted POST.
+    while (route.proof === "raw" && response.status === 409 && !response.body?.id &&
+      response.body?.code === "model_artifact_incomplete" &&
+      typeof response.body?.detail === "string" &&
+      response.body.detail.startsWith("no eligible worker advertises the complete local source closure for ") &&
+      Date.now() + 2000 < sourceClaimDeadline) {
+      await delay(2000);
+      alive();
+      record.sourceClaimRetries = (record.sourceClaimRetries ?? 0) + 1;
+      response = await post();
+    }
     record.acceptedStatus = response.status;
     fact(response.status < 300 && response.body?.id, `API refused the request (${response.status}): ${JSON.stringify(response.body).slice(0, 1500)}`);
     accepted = response.body; record.jobId = accepted.id;
@@ -1444,15 +1748,28 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       if (decision.state === "completed") { job = current; break; }
       await delay(500);
     }
+    if (route.proof) {
+      record.observedEvents = await events.collect(accepted.id, wait);
+      await events.close();
+      events = null;
+    }
     record.timing.enqueueToCompleteSeconds = (Date.now() - posted) / 1000;
     await phase("completed", { side, job: accepted.id, total_s: record.timing.enqueueToCompleteSeconds.toFixed(1) });
-    sampling = false; await Promise.all(samplers); samplers = [];
+    sampling = false;
+    await dedicatedMemory?.finish();
+    await Promise.all(samplers); samplers = [];
     if (cfg.backend === "cuda") {
       memory.peakBytes = memory.gpuPeakBytes ?? null;
       memory.peakAboveBaselineBytes = Number.isFinite(memory.gpuPeakBytes) ? Math.max(0, memory.gpuPeakBytes - memory.gpuBaselineBytes) : null;
     }
+    if (cfg.perf || cfg.allocation) {
+      try {
+        memory.hostLifetimePeakBytes = cfg.backend === "mlx" ? await sampleKreaMacLifetime(worker.pid) : (await sampleWindowsProcess(worker.pid)).peakWorkingSetBytes;
+      } catch (error) {
+        memory.hostLifetimeError = error.message;
+      }
+    }
     memory.workerReportedPeakGpuMemoryPct = job.peakGpuMemoryPct ?? null;
-    record.memory = memory;
     const at = (stage) => stages.find((item) => item.stage === stage)?.atSeconds;
     record.timing.claimSeconds ??= null;
     const loadStart = at("loading_model") ?? record.timing.claimSeconds, generate = at("generating") ?? at("rendering"), finish = at("saving") ?? at("muxing") ?? record.timing.enqueueToCompleteSeconds;
@@ -1468,11 +1785,39 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     fact(assets.length === 1, `expected exactly one ${route.kind} asset, saw ${assets.length}`);
     const relative = assets[0].file?.path;
     fact(typeof relative === "string" && relative && !relative.split("/").includes(".."), "saved asset path invalid");
+    if (route.proof) fact(assets[0].file?.mimeType === "image/png" && /^assets\/images\/[A-Za-z0-9_./-]+\.png$/.test(relative), "Krea worker must persist a project-local PNG");
     const media = path.resolve(projectPath, ...relative.split("/"));
     fact(!path.relative(projectPath, media).startsWith(".."), "saved asset escaped the project");
     const served = await endpoint.served(`/api/v1/projects/${project.id}/files/${relative.split("/").map(encodeURIComponent).join("/")}`);
     const saved = await readFile(media);
     fact(sha256(served.bytes) === sha256(saved), "API-served bytes differ from the saved project file");
+    if (route.proof) {
+      fact(job.backend === expectedGpu, `public job reported GPU ${job.backend}, expected ${expectedGpu}`);
+      const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
+      const sidecarFile = media.replace(/\.png$/, ".sceneworks.json");
+      const diskFiles = await readdir(path.join(projectPath, "assets", "images"), { recursive: true, withFileTypes: true });
+      const candidates = diskFiles.filter((entry) => entry.isFile() && /(?:\.png|\.sceneworks\.json)$/.test(entry.name)).map((entry) => path.join(entry.parentPath, entry.name));
+      assert.deepEqual(candidates.sort(), [media, sidecarFile].sort(), "project image directory must contain only the final PNG and its sidecar");
+      const sidecar = JSON.parse(await readFile(sidecarFile, "utf8"));
+      const { imageQualityStats, readWorkflowShareFromPng } = await import("./pag-acceptance.mjs");
+      const { width, height, rgba } = decodePng(saved);
+      const outputProof = {
+        route, job, asset: assets[0], library, sidecar, share: readWorkflowShareFromPng(saved),
+        width, height, workerId, projectId: project.id, adapterImport: record.adapterImport, dataRoot: path.join(stateReal, "data"),
+      };
+      try {
+        record.productProof = assertKreaOutput(outputProof);
+        record.productProof.imageStats = imageQualityStats(rgba);
+        fact(record.productProof.imageStats.channelStdDev > 0, "Krea output must contain varying pixels");
+      } catch (error) {
+        if (route.proof !== "raw") throw error;
+        record.rawOutputDiagnostics = {
+          ...kreaRawOutputDiagnostics(outputProof), width, height,
+          rgbaSha256: sha256(rgba), channelStdDev: imageQualityStats(rgba).channelStdDev,
+        };
+        throw new Error("Krea Raw output proof failed. See rawOutputDiagnostics.");
+      }
+    }
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
     record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
@@ -1501,41 +1846,95 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.identity.payload = redactPaths(identitySubset(job.payload), roots);
     record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
     fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
+    if (route.proof) {
+      const nativeLog = cfg.nativeProgress ? await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024) : undefined;
+      record.eventProof = assertKreaEvents(record.observedEvents, route, {
+        nativeLog, requireScope: route.proof === "hires" && side === "head" && cfg.backend === "cuda",
+        assetId: record.productProof.assetId,
+      });
+      if (cfg.allocation) {
+        try {
+          record.allocation = kreaAllocationReceipt(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), memory, record.watchdog.capBytes);
+        } catch (error) {
+          record.allocation = { status: "inconclusive", reason: error.message };
+        }
+      } else if (!cfg.perf) {
+        const metrics = await wait(async () => { const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`); return value?.sampleMs > 0 && value; }, 30, "Krea native metrics");
+        record.performance = kreaPerformance(metrics, route, memory);
+      } else {
+        try {
+          const nativeMetrics = await wait(async () => {
+            const value = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}/metrics`);
+            return value?.totalMs > 0 && value;
+          }, 30, "Krea native memory metrics");
+          const passes = kreaSamplerReceipt(nativeLog ?? await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route);
+          record.performance = kreaPerformanceObservation({ route, passes, postedMonotonicMs, events: record.observedEvents, memory, metrics: nativeMetrics, machine: os.hostname() });
+        } catch (error) {
+          record.performance = { eligibility: "inconclusive", reason: error.message };
+        }
+      }
+    }
     record.status = "completed";
   } catch (error) {
     record.status = "error"; record.error = error.message;
+    record.diagnostics = { processes: ownedProcesses(), lastJob: jobDiagnostics(lastJob) };
+    await phase("run_error_pending_cleanup", { side, job: accepted?.id, last_status: lastJob?.status });
+    // Preserve the first terminal error and service tails while the failed worker still exists.
+    await retainServiceLogs().catch(() => {});
+    await persist();
   } finally {
     clearTimeout(timer); signal.removeEventListener("abort", onAbort);
-    sampling = false; await Promise.all(samplers);
-    // A final in-flight physical read can finish after a typed refusal.
-    if (record.watchdog.gpuStop) {
-      record.status = "error";
-      record.error = `watchdog: ${record.watchdog.tripped}`;
+    sampling = false;
+    try {
+      await events?.close().catch(() => {});
+      await dedicatedMemory?.close();
+      await Promise.all(samplers);
+      // A final in-flight physical read can finish after a typed refusal.
+      if (record.watchdog.gpuStop) {
+        record.status = "error";
+        record.error = `watchdog: ${record.watchdog.tripped}`;
+      }
+      if (record.status !== "completed" && record.status !== "refused" && apiUrl) {
+        // The owned endpoint gate refuses requests once the watchdog has aborted.
+        const direct = async (route) => {
+          try {
+            const response = await fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) });
+            return response.ok ? await response.json() : null;
+          } catch { return null; }
+        };
+        if (accepted?.id) {
+          const refreshed = await direct(`/api/v1/jobs/${encodeURIComponent(accepted.id)}`);
+          if (refreshed?.id === accepted.id && typeof refreshed.status === "string") lastJob = refreshed;
+        }
+        const workers = await direct("/api/v1/workers");
+        const originalJob = record.diagnostics?.lastJob;
+        const diagnosedJob = TERMINAL_JOB_STATUSES.has(originalJob?.status) ? originalJob : jobDiagnostics(lastJob) ?? originalJob;
+        record.diagnostics = { ...record.diagnostics, processes: ownedProcesses(), workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: diagnosedJob, ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
+      }
+      if (accepted?.id && record.status !== "completed" && record.status !== "refused" && apiUrl && !TERMINAL_JOB_STATUSES.has(record.diagnostics?.lastJob?.status ?? lastJob?.status)) {
+        record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
+        // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
+        for (let i = 0; !record.watchdog.gpuStop && i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
+      }
+    } finally {
+      record.cleanup = await teardown(children);
+      endpoint?.close();
+      await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
     }
-    if (record.status !== "completed" && record.status !== "refused" && apiUrl) {
-      // What the API serves right now about this job and the owned worker (direct requests: the
-      // owned-endpoint gate refuses everything once the run has been aborted).
-      const direct = (route) => fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) }).then((response) => response.json(), () => null);
-      if (accepted?.id) lastJob = (await direct(`/api/v1/jobs/${encodeURIComponent(accepted.id)}`)) ?? lastJob;
-      const workers = await direct("/api/v1/workers");
-      // Process state BEFORE teardown: is each child alive, and how did it exit if not.
-      const processes = Object.fromEntries(children.filter((child) => child.label !== "sentinel").map((child) => [child.label, processState(child)]));
-      record.diagnostics = { processes, workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: jobDiagnostics(lastJob), ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
+    if (hiresLedger && label === "base#1" && record.jobId) {
+      // Admission already wrote the ledger. Verify it after sampling and owned service teardown.
+      try {
+        hiresLedger.seed = await captureKreaCompanionLedger({ state, hub: plan.hub, staging: hiresLedger.staging, sourceJobId: record.jobId, signal });
+        record.companionLedger = { ...hiresLedger.seed.receipt, mode: "recorded" };
+      } catch (error) {
+        record.companionLedger = { mode: "unavailable", reason: error.message };
+        if (record.status === "completed") {
+          record.status = "error";
+          record.error = `Krea baseline companion ledger verification failed: ${error.message}`;
+        }
+      }
     }
-    // Direct request: the owned-endpoint gate refuses every call once the watchdog has aborted.
-    if (accepted?.id && record.status !== "completed" && record.status !== "refused" && apiUrl) {
-      record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
-      // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
-      for (let i = 0; !record.watchdog.gpuStop && i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
-    }
-    record.cleanup = await teardown(children);
-    endpoint?.close();
-    await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
-    for (const name of ["api", "worker"]) {
-      const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
-      if (text) await writeFile(path.join(evidence, `${name}.log`), redactSensitiveText(text, secrets));
-      if (record.status !== "completed" && record.status !== "refused") (record.diagnostics ??= {})[`${name}LogTail`] = lastLines(redactSensitiveText(text, secrets), 50);
-    }
+    await retainServiceLogs();
     record.finishedAt = new Date().toISOString();
     await phase(record.status === "refused" ? "fit_refused" : record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
   }
@@ -1579,15 +1978,22 @@ async function runComparison(env, cfg, report, signal) {
   const scratch = path.join(cfg.work, "scratch"), evidence = path.join(cfg.work, "evidence");
   const recorded = JSON.parse(await readFile(path.join(scratch, "build.json"), "utf8"));
   fact(recorded.baseSha === cfg.baseSha && recorded.headSha === cfg.headSha && recorded.backend === cfg.backend, "build.json belongs to a different base/head/backend");
+  fact(Boolean(recorded.perf) === cfg.perf && Boolean(recorded.allocation) === cfg.allocation, "build.json belongs to a different instrumentation mode");
+  assert.deepEqual(recorded.kreaLinkedSourceBuild, report.kreaLinkedSourceBuild, "build used a different Krea linked-source repair");
   const built = recorded.built;
-  for (const side of runSides(cfg)) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
+  for (const side of runSides(cfg)) {
+    assert.deepEqual(built[side].kreaAppleRawProjector, report[side].kreaAppleRawProjector, "build used a different Apple Raw projector repair");
+    if (cfg.perf || cfg.allocation || cfg.nativeProgress) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
+    fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`);
+    report[side].binarySha256 = built[side].binarySha256;
+  }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
   for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
   let firstRoute = true, scailCapBytes;
   const verifiedSegmenters = new Set();
   for (const route of report.routes.filter((item) => item.status === "ready")) {
     if (route.status !== "ready") continue;
-    const definition = ROUTES[route.id];
+    const definition = cfg.routes.find(({ id }) => id === route.id);
     const repos = [...route.rows.required, ...route.rows.optional];
     if (definition.scailCandidate && !verifiedSegmenters.has(route.hub)) {
       await verifySam3(snapshotDir(route.hub, SAM3.repo, SAM3.revision));
@@ -1597,10 +2003,13 @@ async function runComparison(env, cfg, report, signal) {
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
+    const previousImport = {};
+    const hiresLedger = definition.proof === "hires" && !cfg.allocation ? { staging: report.staging } : null;
     const effectiveCapBytes = route.packagedRefusal?.capBytes ?? scailCapBytes;
     const run = async (label) => {
+      const side = label.startsWith("base") ? "base" : "head";
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal, effectiveCapBytes });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side, built, evidenceRoot: evidence, secrets, signal, previousImport: previousImport[side], hiresLedger, effectiveCapBytes });
       const base = route.runs[0];
       if (definition.wanA14b && record.status === "completed" && base?.status === "completed") {
         if (record.identity.claimedSource.boundMembersSha256 !== base.identity.claimedSource.boundMembersSha256) {
@@ -1610,11 +2019,29 @@ async function runComparison(env, cfg, report, signal) {
         }
         if (record.error) record.status = "error";
       }
+      if (cfg.perf && definition.proof === "hires" && record.status === "completed" && !previousImport[side]) {
+        const slug = `${definition.id}-${label.replace("#", "")}`;
+        previousImport[side] = { state: path.join(scratch, "runs", slug, "state"), receipt: record.import };
+      }
       const runAfter = await hubFingerprint(route.hub, repos);
       record.hubMutation = { changed: JSON.stringify(runBefore.repos) !== JSON.stringify(runAfter.repos), diff: diffObjects(runBefore.repos, runAfter.repos, HUB_MUTATION_LISTING_LIMIT) };
       if (record.hubMutation.changed) progress({ route: route.id, run: label, phase: "hub_mutation", entries: record.hubMutation.diff.count });
       route.runs.push(record); await writeReport(cfg, report); return record;
     };
+    if (cfg.allocation) {
+      const head = await run("head");
+      const after = await hubFingerprint(route.hub, repos);
+      const hubChanged = JSON.stringify(before.repos) !== JSON.stringify(after.repos);
+      route.status = "ran";
+      route.allocationWitness = hubChanged
+        ? { status: "inconclusive", reason: "pinned allocation witness asset metadata changed during the run" }
+        : (head.allocation ?? { status: "inconclusive", reason: head.error ?? "candidate allocation receipt missing" });
+      if (head.status !== "completed") route.allocationWitness = { status: "inconclusive", reason: head.error ?? "candidate application render did not complete" };
+      route.verdict = route.allocationWitness.status;
+      route.verdictReason = route.allocationWitness.reason;
+      await writeReport(cfg, report);
+      break;
+    }
     if (definition.scailCandidate) {
       const head = await run("head");
       const ok = head.status === (definition.refuse ? "refused" : "completed");
@@ -1640,12 +2067,40 @@ async function runComparison(env, cfg, report, signal) {
       const head = signal.aborted ? null : await run("head");
       let decision = verdictFor({ base1, head });
       let base2 = null;
-      if (decision.needBase2 && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
-      if (decision.verdict === null) decision = { verdict: "error", reason: "interrupted before base#2" };
+      if (decision.needBase2 && !cfg.perf && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
+      if (decision.verdict === null) decision = { verdict: "error", reason: cfg.perf ? "instrumented priming outputs differed" : "interrupted before base#2" };
       route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
       route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
       if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
-      if (decision.verdict === "head_differs") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
+      if (definition.proof && base1.status === "completed" && head?.status === "completed") {
+        if (cfg.backend === "cuda" && (!base1.memory.gpuUuid || base1.memory.gpuUuid !== head.memory.gpuUuid)) {
+          route.verdict = "error";
+          route.verdictReason = "the two CUDA arms must report the same admitted physical GPU UUID";
+        }
+        route.comparison.productOutputHashesMatch = contentOf(base1) === contentOf(head);
+        if (!route.comparison.productOutputHashesMatch) route.comparison.productPixelDifference = numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head));
+        route.comparison.observedPerformance = { base: base1.performance, head: head.performance, comparisonScope: "single paired observations on the same device; no performance claim" };
+      }
+      if (decision.verdict === "head_differs" && !definition.proof) Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
+      if (cfg.perf) {
+        const pairs = [];
+        route.performancePairs = pairs;
+        if (base1.performance?.eligibility === "valid" && head?.performance?.eligibility === "valid" && route.verdict === "equal") {
+          for (const [index, order] of KREA_PERF_ORDER.entries()) {
+            const pair = { order };
+            pairs.push(pair);
+            for (const side of order) {
+              if (signal.aborted) break;
+              pair[side] = await run(`${side}-pair-${index + 1}`);
+              if (pair[side].performance?.eligibility !== "valid") break;
+            }
+            if (order.some((side) => pair[side]?.performance?.eligibility !== "valid")) break;
+          }
+          route.performanceComparison = compareKreaPerformance(pairs, cfg.backend);
+        } else {
+          route.performanceComparison = { status: "inconclusive", reason: "priming arm did not prove its product route and attributed measurements" };
+        }
+      }
     }
     const after = await hubFingerprint(route.hub, repos);
     // Only the route's own repositories decide `changed`; the shared root listing can legitimately
@@ -1667,37 +2122,69 @@ async function writeReport(cfg, report) {
   await writeFile(path.join(dir, `${reportName(report.mode)}.md`), renderMarkdown(report));
 }
 
-// Workflow cleanup: the attempt-owned work dir and both side checkouts, never a hub root.
+// Workflow cleanup: the attempt-owned work dir and checkouts, never a hub root.
 async function cleanup(env, cfg) {
   const allowedRoots = [env.RUNNER_TEMP, env.GITHUB_WORKSPACE].filter(Boolean);
   fact(allowedRoots.length, "--cleanup needs RUNNER_TEMP or GITHUB_WORKSPACE to bound what it may remove");
-  const protectedRoots = [...cfg.hubs, ...defaultHubs(cfg.backend)];
+  const protectedRoots = [...(cfg.krea ? [] : cfg.hubs), ...defaultHubs(cfg.backend)];
   let failed = 0;
-  for (const target of [cfg.work, cfg.baseDir, cfg.headDir]) {
+  if (cfg.managedJobRoot) fact(env.DEV_HOST_WORK_UPLOADS_COMPLETE === "true", "Windows Krea cleanup needs confirmed artifact publication");
+  const checkouts = [cfg.baseDir, cfg.headDir];
+  if (cfg.repairDir && env.GITHUB_ACTIONS === "true") checkouts.push(cfg.repairDir);
+  // The dev-host post action owns Windows Krea's build/runtime directory and its activity guards.
+  for (const target of cfg.managedJobRoot ? checkouts : [cfg.work, ...checkouts]) {
     try { const result = await removeScratch(target, { allowedRoots, protectedRoots }); progress({ phase: "cleanup", target, removed: result.removed, restored_dirs: result.restoredDirectories, restored_files: result.restoredFiles }); }
     catch (error) { failed++; progress({ phase: "cleanup_failed", target, reason: error.message }); }
   }
   return failed ? 1 : 0;
 }
 
+async function assertManagedKreaStorage(env, cfg) {
+  if (!cfg.managedJobRoot) return;
+  await assertTerminalPhysicalContainment(env.DEV_HOST_ROOT, cfg.work);
+  const marker = path.join(cfg.managedJobRoot, ".actions-owner.json");
+  const info = await lstat(marker);
+  fact(info.isFile() && info.nlink === 1 && info.size <= 4096, "Windows Krea requires an ordinary dev-host owner record");
+  const owner = JSON.parse(await readFile(marker, "utf8"));
+  for (const [key, field] of Object.entries({ repository: "GITHUB_REPOSITORY", run: "GITHUB_RUN_ID", attempt: "GITHUB_RUN_ATTEMPT", job: "GITHUB_JOB", runner: "RUNNER_NAME" })) {
+    fact(env[field] && owner[key] === env[field], "Windows Krea dev-host ownership differs from this invocation");
+  }
+  fact(typeof owner.nonce === "string" && owner.nonce.length > 0, "Windows Krea dev-host ownership has no registration nonce");
+  await assertTerminalPhysicalContainment(path.parse(cfg.kreaCacheHub).root, cfg.kreaCacheHub);
+}
+
+export function requireKreaCudaRunLease(cfg, mode, env) {
+  if (mode === "run" && cfg.backend === "cuda" && (cfg.allocation || cfg.perf)) {
+    fact(/^\d+$/.test(env.SW_CI_CUDA_EXECUTION_ACTIVE ?? ""), "Krea Windows proof requires the existing exact-UUID CUDA execution guard");
+  }
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env) {
-  const modes = { "--preflight-only": "preflight", "--build-only": "build", "--stage-wan": "stage", "--run": "run", "--cleanup": "cleanup" };
-  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --build-only, --run, --cleanup or --stage-wan is required");
+  const modes = { "--stage-krea": "stage", "--stage-wan": "stage-wan", "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
+  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-krea, --stage-wan, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
+  await assertManagedKreaStorage(env, cfg);
   if (mode === "cleanup") return cleanup(env, cfg);
+  requireKreaCudaRunLease(cfg, mode, env);
+  if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
+  if (mode === "stage-wan") fact(!cfg.krea, "--stage-wan does not apply to the Krea suite");
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
-  const report = { schemaVersion: 1, kind: "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : `physical GPU${cfg.physicalGpu} nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM`, routes: [] };
+  const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : `physical GPU${cfg.physicalGpu} nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM`, routes: [] };
+  if (cfg.allocation) report.allocationProtocol = `one cold candidate Candle run at 1120 to 2240, private 64 GiB pool, ${KREA_ALLOCATION_MINUTES}-minute aggregate execution cap`;
+  if (cfg.perf) report.performanceProtocol = "cold one-job workers; one priming arm per side and route, then six fixed interleaved AB/BA pairs; 210-minute aggregate execution cap; no allowance beyond 1.02";
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("A/B interrupted by signal"));
+  const wallMinutes = cfg.allocation ? KREA_ALLOCATION_MINUTES : 210;
+  const runCeiling = cfg.krea && mode === "run" ? setTimeout(() => controller.abort(new Error(`Krea run reached its ${wallMinutes}-minute ceiling`)), wallMinutes * 60_000) : null;
   process.once("SIGTERM", interrupt); process.once("SIGINT", interrupt);
   try {
-    await preflight(env, cfg, report);
-    if (mode === "stage") {
+    await preflight(env, cfg, report, controller.signal);
+    if (mode === "stage-wan") {
       await stageWanSnapshots(env, cfg, report, controller.signal);
-      await preflight(env, cfg, report);
+      await preflight(env, cfg, report, controller.signal);
     }
-    for (const route of report.routes.filter((item) => (ROUTES[item.id].wanA14b || ROUTES[item.id].scailCandidate))) {
+    for (const route of report.routes.filter((item) => (ROUTES[item.id]?.wanA14b || ROUTES[item.id]?.scailCandidate))) {
       fact(route.status === "ready", `${route.id} preflight failed: ${route.skipReason}`);
     }
     if (mode === "build") await build(env, cfg, report);
@@ -1707,10 +2194,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   } catch (error) {
     report.status = "failed"; report.fatal = error.message;
   } finally {
+    clearTimeout(runCeiling);
     process.removeListener("SIGTERM", interrupt); process.removeListener("SIGINT", interrupt);
     report.finishedAt = new Date().toISOString();
     report.summary = summarize(report.routes);
-    report.exitCode = ["stage", "build"].includes(mode) ? (report.fatal ? 1 : 0) : exitCodeFor(report);
+    report.exitCode = mode === "stage-wan" || (mode === "build" && !cfg.krea) ? (report.fatal ? 1 : 0) : exitCodeFor(report);
     await writeReport(cfg, report).catch((error) => { process.stderr.write(`report write failed: ${error.message}\n`); report.exitCode = 1; });
   }
   process.stdout.write(renderMarkdown(report));

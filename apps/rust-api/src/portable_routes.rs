@@ -527,10 +527,7 @@ pub(crate) fn selected_route_source_rows_resolved(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("model entry lacks id")?;
-        if entry
-            .get("downloads")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
+        if !sceneworks_core::model_artifacts::artifact_selection::has_required_model_downloads_for_os(entry, platform)
         {
             if let Some(base) =
                 sceneworks_core::model_artifacts::artifact_selection::selected_resident_base_closure(
@@ -1490,10 +1487,17 @@ mod tests {
             ("krea_2", "SceneWorks/krea-2-turbo-mlx"),
             ("mage-flow", "SceneWorks/Mage-Flow-Components-mlx"),
         ] {
-            let entry = serde_json::json!({
+            let mut entry = serde_json::json!({
                 "id": "imported-checkpoint", "family": family,
                 "installedPath": "/registered/imported-checkpoint.safetensors"
             });
+            if family == "krea_2" {
+                entry["downloads"] = serde_json::json!([{
+                    "provider": "huggingface", "repo": "SceneWorks/krea-realtime-14b-mlx",
+                    "coRequisite": true, "required": "soft", "platforms": ["macos"],
+                    "files": ["q4/vae.safetensors"],
+                }]);
+            }
             let entries = [("modelManifestEntry".to_owned(), &entry)];
             let payload = serde_json::json!({"model":"imported-checkpoint"});
             let selected = selected_route_source_rows(
@@ -1521,6 +1525,22 @@ mod tests {
                             && download["revision"].as_str().is_some_and(|revision| revision.len() == 40)
                             && download["coRequisite"] == true)
             }));
+            if family == "krea_2" {
+                let SelectedSourceLocation::ManifestDownload(download) = &resident[0].source else {
+                    panic!("resident Krea source must be a manifest download");
+                };
+                assert_eq!(
+                    download["files"],
+                    serde_json::json!([
+                        "bf16/transformer/config.json",
+                        "bf16/text_encoder/*",
+                        "bf16/vae/*",
+                        "bf16/tokenizer/*",
+                        "bf16/scheduler/*",
+                        "bf16/model_index.json",
+                    ])
+                );
+            }
         }
     }
 

@@ -102,7 +102,7 @@ At publication on November 7, 2026, the unblocked starting items were **SW-6931*
 | SW-6961 | task | Migrate Krea multiphase and Candle residuals | SW-6960 |
 | SW-6962 | task | Migrate LTX and Wan adapter filtering | SW-6960 |
 | SW-6963 | task | Cut over imported Krea Hires.fix | SW-6961 |
-| SW-6964 | task | Delete replaced Candle adapter graphs | SW-6961, SW-6962 |
+| SW-6964 | task | Delete replaced Candle adapter graphs | SW-6960 |
 | SW-6965 | task | Integrate and accept Request-scoped scales + per-phase adapters | SW-6960, SW-6961, SW-6962, SW-6963, SW-6964 |
 
 ### SW-F337 · ENG-5 · FamilyDrivers I

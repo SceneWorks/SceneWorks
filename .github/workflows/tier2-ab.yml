@@ -7,8 +7,12 @@
 # scripts/tier2-ab.mjs: base#1, head, and (only when head differs) base#2 per route, against the
 # same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
 # The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
-# comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
-# the end of the job. Optional product staging fetches pinned files before the read-only comparison.
+# comparison live in the driver. The original suite uses read-only hubs; optional product staging
+# (download_missing with explicit Wan A14B or SCAIL-2 routes) fetches pinned files before the
+# read-only comparison. The opt-in Krea suite stages its fixed public assets into a separate
+# attempt-owned hub before building. Windows Krea lets the dev-host post action remove build and
+# runtime storage after evidence publication. All other scratch (checkouts, cargo target, API data
+# dirs) is removed at the end of the job.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
 # selector's trusted-ref rule), and their builds and processes receive no credential. Both fresh
@@ -37,6 +41,21 @@ on:
         required: false
         type: string
         default: "1"
+      suite:
+        description: "Empty for the original Tier 2 A/B, or krea-scoped-acceptance for SW-F336"
+        required: false
+        type: string
+        default: ""
+      krea_performance:
+        description: "Opt in to the separate six-pair Krea performance comparison"
+        required: false
+        type: boolean
+        default: false
+      krea_allocation:
+        description: "Opt in to one candidate-only linked Krea allocation witness, Candle only"
+        required: false
+        type: boolean
+        default: false
       routes:
         description: "JSON array of route ids; empty selects the backend's default routes"
         required: false
@@ -53,7 +72,7 @@ on:
         type: boolean
         default: false
       inference_sha:
-        description: "Optional cross-check: both checkouts must pin this inference revision"
+        description: "Optional common pin cross-check for A/B, or required exact candidate pin for Krea"
         required: false
         type: string
         default: ""
@@ -87,6 +106,9 @@ jobs:
       TIER2_AB_HEAD_SHA: ${{ inputs.head_sha }}
       TIER2_AB_BASE_DIR: ${{ github.workspace }}/tier2-ab-base
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}/tier2-ab-head
+      TIER2_AB_SUITE: ${{ inputs.suite }}
+      TIER2_AB_KREA_PERFORMANCE: ${{ inputs.krea_performance }}
+      TIER2_AB_KREA_ALLOCATION: ${{ inputs.krea_allocation }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -118,11 +140,25 @@ jobs:
           path: tier2-ab-head
           fetch-depth: 1
           persist-credentials: false
+      - name: Check out the four reviewed Krea baseline repair files
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.krea_allocation }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5b2c605c9371f7ecdf11dcbd6e76ac5e3d52d957
+          path: tier2-ab-krea-repair
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /apps/rust-api/src/portable_admission.rs
+            /apps/rust-api/src/portable_routes.rs
+            /crates/sceneworks-core/src/model_artifacts/artifact_selection.rs
+            /crates/sceneworks-worker/src/external_library_runtime.rs
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Stage selected product snapshots from their manifest pins
-        if: ${{ inputs.download_missing && !inputs.preflight_only }}
+        if: ${{ inputs.download_missing && !inputs.preflight_only && inputs.suite != 'krea-scoped-acceptance' }}
         run: |
           if ! command -v hf >/dev/null && ! command -v huggingface-cli >/dev/null; then
             python3.12 -m venv "$TIER2_AB_WORK/hf-cli"
@@ -132,6 +168,9 @@ jobs:
           node tier2-ab-driver/scripts/tier2-ab.mjs --stage-wan
       - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
         run: node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
+      - name: Stage and verify the allowlisted Krea assets into attempt-owned scratch
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.preflight_only }}
+        run: node tier2-ab-driver/scripts/tier2-ab.mjs --stage-krea
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ !inputs.preflight_only }}
         with:
@@ -197,6 +236,9 @@ jobs:
       TIER2_AB_HEAD_SHA: ${{ inputs.head_sha }}
       TIER2_AB_BASE_DIR: ${{ github.workspace }}\tier2-ab-base
       TIER2_AB_HEAD_DIR: ${{ github.workspace }}\tier2-ab-head
+      TIER2_AB_SUITE: ${{ inputs.suite }}
+      TIER2_AB_KREA_PERFORMANCE: ${{ inputs.krea_performance }}
+      TIER2_AB_KREA_ALLOCATION: ${{ inputs.krea_allocation }}
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
@@ -207,6 +249,7 @@ jobs:
       NVIDIA_VISIBLE_DEVICES: ${{ inputs.cuda_physical_index }}
       SCENEWORKS_GPU_ID: ${{ inputs.cuda_physical_index }}
       TIER2_AB_GPU_POLICY: ${{ inputs.cuda_physical_index == '0' && 'shared-compute' || 'shared-display' }}
+      DEV_HOST_WORK_UPLOADS_COMPLETE: "false"
       # Heavy candle lane: no sccache wrapper (windows-candle.yml / catalog walk, os error 10054).
       RUSTC_WRAPPER: ""
       CARGO_INCREMENTAL: "0"
@@ -214,6 +257,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - name: Set attempt-owned scratch directory
+        if: ${{ inputs.suite != 'krea-scoped-acceptance' }}
         run: Add-Content -Path $env:GITHUB_ENV -Value "TIER2_AB_WORK=$env:RUNNER_TEMP\t2ab-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
       - name: Check out the dispatched driver
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,6 +266,16 @@ jobs:
           path: tier2-ab-driver
           fetch-depth: 1
           persist-credentials: false
+      - name: Register disposable Windows Krea storage
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' }}
+        uses: ./tier2-ab-driver/.github/actions/cleanup-runner-storage
+        with:
+          dev-host: 'true'
+      - name: Set the registered Windows Krea work directory
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' }}
+        run: |
+          if (-not $env:DEV_HOST_JOB_ROOT) { throw 'Missing registered Windows Krea job storage' }
+          Add-Content -Path $env:GITHUB_ENV -Value "TIER2_AB_WORK=$env:DEV_HOST_JOB_ROOT\tier2-ab"
       - name: Check out base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -236,11 +290,25 @@ jobs:
           path: tier2-ab-head
           fetch-depth: 1
           persist-credentials: false
+      - name: Check out the four reviewed Krea baseline repair files
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.krea_allocation }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 5b2c605c9371f7ecdf11dcbd6e76ac5e3d52d957
+          path: tier2-ab-krea-repair
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /apps/rust-api/src/portable_admission.rs
+            /apps/rust-api/src/portable_routes.rs
+            /crates/sceneworks-core/src/model_artifacts/artifact_selection.rs
+            /crates/sceneworks-worker/src/external_library_runtime.rs
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Stage selected product snapshots from their manifest pins
-        if: ${{ inputs.download_missing && !inputs.preflight_only }}
+        if: ${{ inputs.download_missing && !inputs.preflight_only && inputs.suite != 'krea-scoped-acceptance' }}
         working-directory: tier2-ab-driver
         run: |
           if (!(Get-Command hf,huggingface-cli -CommandType Application -ErrorAction SilentlyContinue)) {
@@ -263,6 +331,11 @@ jobs:
         run: |
           node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab preflight failed' }
+      - name: Stage and verify the allowlisted Krea assets into attempt-owned scratch
+        if: ${{ inputs.suite == 'krea-scoped-acceptance' && !inputs.preflight_only }}
+        run: |
+          node tier2-ab-driver/scripts/tier2-ab.mjs --stage-krea
+          if ($LASTEXITCODE -ne 0) { throw 'Krea asset staging failed' }
       - name: Prepare the Rust toolchain
         if: ${{ !inputs.preflight_only }}
         uses: ./tier2-ab-driver/.github/actions/prepare-rust-runner
@@ -296,11 +369,21 @@ jobs:
           # 84 GiB plus its 6 GiB reserve. Other route sets use the established 74 GiB.
           $minFreeMiB = node --input-type=module -e "import { cudaLeaseMinFreeMiB } from './scripts/tier2-ab.mjs'; console.log(cudaLeaseMinFreeMiB(process.env.TIER2_AB_ROUTES))"
           if ($LASTEXITCODE -ne 0) { throw 'failed to resolve CUDA route headroom' }
-          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu_lease physical_index=$env:TIER2_AB_PHYSICAL_GPU policy=$env:TIER2_AB_GPU_POLICY min_free_mib=$minFreeMiB budget_min=540"
-          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib $minFreeMiB --budget-minutes 540 --cuda-ordinals 0 --require-physical-index $env:TIER2_AB_PHYSICAL_GPU -- node scripts/tier2-ab.mjs --run
+          if ($env:TIER2_AB_SUITE -eq 'krea-scoped-acceptance') {
+            # The wrapper and its child keep the same lease and write their receipts together.
+            $env:RUNNER_TEMP = Join-Path $env:TIER2_AB_WORK 'evidence'
+          }
+          # The separate Krea allocation witness has its own 85-minute budget.
+          if ($env:TIER2_AB_KREA_ALLOCATION -eq 'true') {
+            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu_lease physical_index=$env:TIER2_AB_PHYSICAL_GPU policy=$env:TIER2_AB_GPU_POLICY min_free_mib=$minFreeMiB budget_min=85"
+            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib $minFreeMiB --budget-minutes 85 --cuda-ordinals 0 --require-physical-index $env:TIER2_AB_PHYSICAL_GPU -- node scripts/tier2-ab.mjs --run
+          } else {
+            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu_lease physical_index=$env:TIER2_AB_PHYSICAL_GPU policy=$env:TIER2_AB_GPU_POLICY min_free_mib=$minFreeMiB budget_min=540"
+            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib $minFreeMiB --budget-minutes 540 --cuda-ordinals 0 --require-physical-index $env:TIER2_AB_PHYSICAL_GPU -- node scripts/tier2-ab.mjs --run
+          }
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
-        if: ${{ always() }}
+        if: ${{ always() && inputs.suite != 'krea-scoped-acceptance' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tier2-ab-cuda-${{ github.run_id }}-${{ github.run_attempt }}
@@ -309,10 +392,34 @@ jobs:
             ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-tier2-ab-cuda/
           if-no-files-found: warn
           retention-days: 30
+      - name: Retain the Windows Krea evidence
+        id: krea-evidence
+        if: ${{ always() && inputs.suite == 'krea-scoped-acceptance' && env.TIER2_AB_WORK != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier2-ab-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TIER2_AB_WORK }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Confirm Windows Krea evidence before dev-host cleanup
+        if: ${{ always() && steps.krea-evidence.outcome == 'success' }}
+        env:
+          ARTIFACT_ID: ${{ steps.krea-evidence.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.krea-evidence.outputs.artifact-digest }}
+        run: |
+          if ($env:ARTIFACT_ID -notmatch '^[1-9][0-9]*$' -or $env:ARTIFACT_DIGEST -notmatch '^[a-f0-9]{64}$') { throw 'Missing Windows Krea artifact receipt' }
+          $preflight = Join-Path $env:TIER2_AB_WORK 'evidence\preflight.json'
+          if (-not (Test-Path -LiteralPath $preflight -PathType Leaf) -or (Get-Item -LiteralPath $preflight).Length -eq 0) { throw 'Missing Windows Krea driver evidence' }
+          Add-Content -Path $env:GITHUB_ENV -Value 'DEV_HOST_WORK_UPLOADS_COMPLETE=true'
+      - name: Remove compared Krea source checkouts after evidence publication
+        if: ${{ always() && inputs.suite == 'krea-scoped-acceptance' && env.DEV_HOST_WORK_UPLOADS_COMPLETE == 'true' }}
+        run: |
+          node tier2-ab-driver/scripts/tier2-ab.mjs --cleanup
+          if ($LASTEXITCODE -ne 0) { throw 'Krea source checkout cleanup failed' }
       # Same read-only-bundle restore as the mlx job; multiply linked read-only files are refused
       # rather than changed, because they may share bytes with the hub.
       - name: Remove every scratch directory
-        if: ${{ always() }}
+        if: ${{ always() && inputs.suite != 'krea-scoped-acceptance' }}
         run: |
           $status = 0
           if (Test-Path -LiteralPath 'tier2-ab-driver\scripts\tier2-ab.mjs') { node tier2-ab-driver\scripts\tier2-ab.mjs --cleanup; $status = $LASTEXITCODE }

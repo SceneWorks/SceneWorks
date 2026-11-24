@@ -123,7 +123,7 @@ export const MARKER = new RegExp(
 const SPECIAL_AREAS = new Map([
   ["crates/media/candle-gen/candle-gen-flux/src/vae/native.rs", "candle-transformers-source"],
   ["crates/media/candle-gen/candle-gen-flux/src/vae/diffusers.rs", "candle-transformers-source"],
-  ["crates/media/candle-gen/candle-gen-flux/src/packed_te.rs", "candle-transformers-source"],
+  ["crates/media/candle-gen/candle-gen/src/text_encoder.rs", "candle-transformers-source"],
   ["crates/media/candle-gen/candle-gen-kolors/src/unet.rs", "candle-transformers-source"],
   ["crates/media/candle-gen/candle-gen-instantid/src/kps.rs", "opencv-source"],
   ["crates/media/mlx-gen/mlx-gen-instantid/src/kps.rs", "opencv-source"],

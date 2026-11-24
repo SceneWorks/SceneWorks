@@ -506,8 +506,6 @@ fn ltx_import_base_model_error(
     }
 }
 
-
-
 /// A single `expectedSha256` cannot identify both files in a paired Wan MoE upload. Reject that
 /// ambiguous contract before heartbeat, target creation, or moving either staged upload. Single-file
 /// imports retain their existing digest verification.
@@ -900,7 +898,27 @@ async fn import_plan_context_configuration(
     job: &JobSnapshot,
     source: &Path,
 ) -> WorkerResult<std::collections::BTreeMap<String, Value>> {
-    let entry = job.payload.get("manifestEntry").and_then(Value::as_object);
+    let mut normalized_entry = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned();
+    if let Some(entry) = normalized_entry.as_mut() {
+        if !entry.contains_key("family") && source.is_file() {
+            if let Ok(header) = sceneworks_core::lora_family::read_safetensors_header(source) {
+                if let BaseWeightDetection::Recognized(verdict) =
+                    sceneworks_core::base_weights::classify_base_header(&header)
+                {
+                    if let Some(family) = verdict.family {
+                        entry.insert("family".into(), json!(family));
+                    }
+                }
+            }
+        }
+        sceneworks_core::checkpoint_loader::apply_bound_base_defaults(entry)
+            .map_err(WorkerError::InvalidPayload)?;
+    }
+    let entry = normalized_entry.as_ref();
     let mut context = entry
         .map(sceneworks_core::model_artifacts::provenance::import_declaration_context)
         .transpose()
@@ -1266,8 +1284,10 @@ async fn run_linked_checkpoint_import_job(
                 .await;
             }
         }
-        let manifest_entry =
+        let mut manifest_entry =
             linked_checkpoint_manifest_entry(manifest_entry, &compiled, classification);
+        sceneworks_core::checkpoint_loader::apply_bound_base_defaults(&mut manifest_entry)
+            .map_err(WorkerError::InvalidPayload)?;
         let manifest_path = model_manifest_target(settings, &job.payload)?;
         check_cancel(api, &job.id, "Linked import canceled before registration.").await?;
         upsert_manifest_entry(&manifest_path, "models", manifest_entry).await?;
@@ -1494,7 +1514,9 @@ async fn authenticated_import_claim(
         .payload
         .get(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY)
         .and_then(Value::as_str)
-        .ok_or_else(|| WorkerError::InvalidPayload("Import claim lacks private worker proof".into()))?;
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Import claim lacks private worker proof".into())
+        })?;
     let response: ImportClaimProbeResponse = api
         .post_json(
             &format!("/api/v1/jobs/{}/import-claim", claimed_job.id),
@@ -2338,6 +2360,8 @@ pub(crate) async fn run_model_import_job(
             .and_then(Value::as_str)
             .map(str::to_owned);
         apply_model_manifest_defaults(&mut manifest_entry, &model_type, family.as_deref());
+        sceneworks_core::checkpoint_loader::apply_bound_base_defaults(&mut manifest_entry)
+            .map_err(WorkerError::InvalidPayload)?;
         // `paths.model` names the directory this job actually INSTALLED into, so every entry that
         // reaches here gets one — including a MANAGED plan-backed entry, which carries both the
         // install path and `importPlan.checkpointId` and whose bespoke lane still serves the

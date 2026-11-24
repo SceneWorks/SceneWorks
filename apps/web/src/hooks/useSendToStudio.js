@@ -132,7 +132,7 @@ export function useSendToStudio({
     setSelectedAssetId(asset.id);
     closePreview();
     await launchImageRecipe({
-      ...mossSeededRecipeReplay(asset, recipe, replaySeed),
+      ...mossSeededRecipeReplay(asset, recipe, replaySeed, imageModels.find((entry) => entry.id === recipe.model) ?? recipe.model),
       assetId: asset.id,
       sourceAssetId: asset.lineage?.sourceAssetId ?? null,
     });

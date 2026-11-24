@@ -241,6 +241,7 @@ pub fn generate_with_scope(
         generator,
         request,
         context,
+        None,
         on_progress,
         |generator, request, _, on_progress| generator.generate(request, on_progress),
     )
@@ -260,6 +261,7 @@ pub fn generate_with_scope_report(
         generator,
         request,
         context,
+        None,
         on_progress,
         |generator, request, _, on_progress| generator.generate_with_report(request, on_progress),
     )
@@ -279,6 +281,7 @@ pub fn generate_with_scope_report_planned(
         generator,
         request,
         context,
+        Some(plan),
         on_progress,
         |generator, request, scope, on_progress| {
             generator.generate_planned(request, plan, scope, on_progress)
@@ -300,6 +303,7 @@ pub fn generate_with_scope_execution_report_planned(
         generator,
         request,
         context,
+        Some(plan),
         on_progress,
         |generator, request, scope, on_progress| {
             generator.generate_planned_with_execution_report(request, plan, scope, on_progress)
@@ -319,6 +323,7 @@ pub fn generate_with_scope_execution_report(
         generator,
         request,
         context,
+        None,
         on_progress,
         |generator, request, _, on_progress| {
             generator.generate_with_execution_report(request, on_progress)
@@ -354,6 +359,7 @@ fn run_with_scope<T>(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,
     context: Option<&gen_core::MemoryRunContext>,
+    plan: Option<&gen_core::RenderPlan>,
     on_progress: &mut dyn FnMut(gen_core::Progress),
     run: impl FnOnce(
         &dyn gen_core::Generator,
@@ -399,12 +405,16 @@ fn run_with_scope<T>(
     let Some(context) = context else {
         return run(generator, request, None, on_progress);
     };
-    if let gen_core::MemorySafetyDecision::Reject { reason } =
-        generator.memory_strategy_safety_check(context)
-    {
-        return Err(gen_core::Error::Unsupported(reason));
-    }
-    let mut scope = generator.begin_memory_strategy_request(context)?;
+    let mut scope = if let Some(plan) = plan {
+        generator.begin_planned_memory_strategy_request(request, plan, context)?
+    } else {
+        if let gen_core::MemorySafetyDecision::Reject { reason } =
+            generator.memory_strategy_safety_check(context)
+        {
+            return Err(gen_core::Error::Unsupported(reason));
+        }
+        generator.begin_memory_strategy_request(context)?
+    };
     if context.selection.strategy.is_optimized() && scope.is_none() {
         return Err(gen_core::Error::Unsupported(format!(
             "{} accepted an optimized memory-strategy selection without opening a request scope",

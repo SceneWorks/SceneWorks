@@ -1,0 +1,52 @@
+// Build-only record of native Krea callbacks before the worker publishes progress snapshots.
+#[derive(Default)]
+struct KreaNativeProgress {
+    coordinates: [(u32, u32); 10],
+    step_count: usize,
+    decode_count: u32,
+    invalid: bool,
+}
+
+impl KreaNativeProgress {
+    fn observe(&mut self, progress: &gen_core::Progress) {
+        match progress {
+            gen_core::Progress::Step { current, total } => {
+                if self.decode_count != 0 || self.step_count == self.coordinates.len() {
+                    self.invalid = true;
+                } else {
+                    self.coordinates[self.step_count] = (*current, *total);
+                    self.step_count += 1;
+                }
+            }
+            gen_core::Progress::Decoding => self.decode_count += 1,
+            _ => {}
+        }
+    }
+
+    fn publish(
+        &self,
+        engine: &str,
+        request: &gen_core::GenerationRequest,
+        context: Option<&gen_core::MemoryRunContext>,
+        scope_configured: bool,
+    ) {
+        tracing::info!(
+            event = "sgaf336_krea_native_progress",
+            engine,
+            width = request.width,
+            height = request.height,
+            authored_steps = request.steps.unwrap_or(0),
+            phase_steps = %serde_json::json!(request.phases.iter().flatten().map(|phase| phase.steps).collect::<Vec<_>>()),
+            reference_count = request.image_reference_count(),
+            context_present = context.is_some(),
+            context_width = context.map(|context| context.geometry.width).unwrap_or(0),
+            context_height = context.map(|context| context.geometry.height).unwrap_or(0),
+            context_reference_count = context.map(|context| context.geometry.reference_count).unwrap_or(0),
+            scope_configured,
+            coordinates = %serde_json::json!(&self.coordinates[..self.step_count]),
+            decode_count = self.decode_count,
+            valid = !self.invalid,
+            "Native Krea callbacks observed through successful provider return"
+        );
+    }
+}

@@ -1545,6 +1545,21 @@ async fn validate_merged_job_loras(
     Ok(())
 }
 
+fn replay_selection_uses_moss(model: &str, entry: Option<&JsonObject>) -> bool {
+    if sceneworks_core::moss_image::is_moss(model) {
+        return true;
+    }
+    entry
+        .filter(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
+        .and_then(|entry| {
+            sceneworks_core::checkpoint_loader::bound_base(entry)
+                .ok()
+                .flatten()
+        })
+        .and_then(|base| base.get("id").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|model| sceneworks_core::moss_image::is_moss(&model))
+}
+
 /// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
 /// payloads are immutable, so reading and merging before the create transaction cannot race with a
 /// payload update. Returning the complete merged payload is intentional: the store's shallow merge
@@ -1683,27 +1698,34 @@ async fn validate_and_canonicalize_merged_generation_payload(
         };
         validate_raw_job_payload(state, &job_type, &mut merged, license_validation).await?;
     }
+    let persisted_model = persisted.get("model").and_then(Value::as_str).unwrap_or("");
+    let merged_model = merged.get("model").and_then(Value::as_str).unwrap_or("");
+    let persisted_moss = replay_selection_uses_moss(
+        persisted_model,
+        persisted
+            .get("modelManifestEntry")
+            .and_then(Value::as_object),
+    );
+    let merged_moss = if merged_model == persisted_model {
+        persisted_moss
+    } else if matches!(
+        job_type,
+        JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+    ) {
+        // A model patch cannot lend its authored manifest carrier to the new selection.
+        let target = crate::models::find_model_by_id(state, merged_model).await?;
+        replay_selection_uses_moss(merged_model, target.as_ref().and_then(Value::as_object))
+    } else {
+        false
+    };
     // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
     // reach validation, so headless clients cannot silently drop a conflicting authored setting.
     if merged.get("model") != persisted.get("model")
         && !(sceneworks_core::moss_image::is_edit(&persisted)
             && sceneworks_core::moss_image::is_edit(&merged)
-            && persisted
-                .get("model")
-                .and_then(Value::as_str)
-                .is_some_and(sceneworks_core::moss_image::is_moss)
-            && merged
-                .get("model")
-                .and_then(Value::as_str)
-                .is_some_and(sceneworks_core::moss_image::is_moss))
-        && (persisted
-            .get("model")
-            .and_then(Value::as_str)
-            .is_some_and(sceneworks_core::moss_image::is_moss)
-            || merged
-                .get("model")
-                .and_then(Value::as_str)
-                .is_some_and(sceneworks_core::moss_image::is_moss))
+            && persisted_moss
+            && merged_moss)
+        && (persisted_moss || merged_moss)
         && !payload_changes.contains_key("advanced")
     {
         if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
@@ -1724,16 +1746,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
     // Edit options are server-defaulted and compatible across Base/SFT, but must not leak into
     // another model or ordinary generation. An explicit advanced replacement remains authored
     // input and reaches strict validation unchanged.
-    let is_moss_edit = |payload: &JsonObject| {
-        payload
-            .get("model")
-            .and_then(Value::as_str)
-            .is_some_and(sceneworks_core::moss_image::is_moss)
-            && sceneworks_core::moss_image::is_edit(payload)
-    };
     if !payload_changes.contains_key("advanced")
-        && is_moss_edit(&persisted)
-        && !is_moss_edit(&merged)
+        && persisted_moss
+        && sceneworks_core::moss_image::is_edit(&persisted)
+        && !(merged_moss && sceneworks_core::moss_image::is_edit(&merged))
     {
         if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
             advanced.remove(sceneworks_core::moss_image::EDIT_OPTIONS_KEY);
@@ -3369,6 +3385,11 @@ async fn apply_progress_side_effects(
     // accumulated training-sample history into the submitted object.
     let accepted_result = job.result.clone();
     let mut result = accepted_result.clone();
+    if let Some(component_jobs) =
+        crate::models::acquire_autodetected_import_components(state, &job).await?
+    {
+        result.insert("componentJobIds".into(), json!(component_jobs));
+    }
     // On a completing real training run, register the produced adapter as a
     // SceneWorks LoRA after authoritative completion acceptance, then fold the
     // registration outcome into the persisted result (story 1418).
@@ -4339,6 +4360,26 @@ pub(crate) async fn register_trained_control_overlay(
     })
     .await?;
     Ok(Some((overlay_id, manifest_path)))
+}
+
+#[cfg(test)]
+mod imported_policy_replay_tests {
+    use super::replay_selection_uses_moss;
+    use serde_json::json;
+
+    #[test]
+    fn replay_policy_follows_the_selected_checkpoint_and_its_compatible_base() {
+        let entry = json!({"id":"serenity","family":"moss-image","baseModel":"moss_image_base"});
+        assert!(replay_selection_uses_moss("serenity", entry.as_object()));
+        // A saved carrier cannot lend the old model's policy to a switched selection.
+        assert!(!replay_selection_uses_moss("different", entry.as_object()));
+        let incompatible = json!({"id":"serenity","family":"krea_2","baseModel":"moss_image_base","policyModel":"moss_image_base"});
+        assert!(!replay_selection_uses_moss(
+            "serenity",
+            incompatible.as_object()
+        ));
+        assert!(replay_selection_uses_moss("moss_image_sft", None));
+    }
 }
 
 #[cfg(test)]

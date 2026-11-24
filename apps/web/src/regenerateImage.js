@@ -7,7 +7,7 @@ import { isMossImage, isMossEdit, mossComponentState, mossEditReferenceIds, moss
 
 // Older assets can outlive their job row. Replay their recorded inputs without opening a form.
 // The prompt is already composed; reapplying its preset/style would wrap it a second time.
-export function imageRecipeRequest(asset) {
+export function imageRecipeRequest(asset, models = []) {
   const shared = upgradeCarrier(asset.generationSet?.recipe ?? {}, "recipe");
   const own = upgradeCarrier(asset.recipe ?? {}, "recipe");
   const recipe = { ...shared, ...own,
@@ -16,9 +16,10 @@ export function imageRecipeRequest(asset) {
   if (!recipe.model) throw new Error("This image has no recorded generation model.");
   const settings = recipe.normalizedSettings;
   const raw = recipe.rawAdapterSettings;
+  const selectedModel = models.find((model) => model.id === recipe.model) ?? recipe.model;
   // Old sidecars did not record all edit inputs. Never turn a masked/multi-reference edit into
   // an unmasked single-source generation just because the original job has been purged.
-  if (recipe.mode === "edit_image" && !isMossEdit(recipe.model, recipe.mode) && !["sourceAssetId", "referenceAssetIds", "maskAssetId", "fitMode"].every((key) => Object.hasOwn(raw, key) || Object.hasOwn(settings, key))) {
+  if (recipe.mode === "edit_image" && !isMossEdit(selectedModel, recipe.mode) && !["sourceAssetId", "referenceAssetIds", "maskAssetId", "fitMode"].every((key) => Object.hasOwn(raw, key) || Object.hasOwn(settings, key))) {
     throw new Error("The original edit job is no longer stored and this recipe lacks its complete source/mask settings. Use this recipe to review the inputs before generating.");
   }
   const [width, height] = (recipeResolution(recipe) ?? "").split("x").map(Number);
@@ -53,7 +54,7 @@ export function imageRecipeRequest(asset) {
     loras: recipe.loras ?? [],
     characterId: settings.characterId ?? null,
     characterLookId: settings.characterLookId ?? null,
-    sourceAssetId: raw.sourceAssetId ?? settings.sourceAssetId ?? (isMossEdit(recipe.model, recipe.mode) ? null : asset.lineage?.sourceAssetId ?? null),
+    sourceAssetId: raw.sourceAssetId ?? settings.sourceAssetId ?? (isMossEdit(selectedModel, recipe.mode) ? null : asset.lineage?.sourceAssetId ?? null),
     referenceAssetId: raw.referenceAssetId ?? settings.referenceAssetId ?? null,
     referenceAssetIds: raw.referenceAssetIds ?? settings.referenceAssetIds ?? [],
     maskAssetId: raw.maskAssetId ?? settings.maskAssetId ?? null,
@@ -68,11 +69,11 @@ export function imageRecipeRequest(asset) {
 
 // Background replay uses the same MOSS pre-enqueue checks as the visible Studio.
 async function validateMossReplay(request, { models = [], assets = [], projectId }) {
-  if (!isMossImage(request?.model)) return;
-  const advanced = request.advanced ?? {}, model = models.find((item) => item.id === request.model);
+  const advanced = request?.advanced ?? {}, model = models.find((item) => item.id === request?.model);
+  if (!isMossImage(model ?? request?.model)) return;
   if (!model) throw new Error("The recorded MOSS model is unavailable. Refresh Models before regenerating.");
   if (!mossComponentState(model, advanced.mossImage, request.mode).ready) throw new Error("Install or repair the exact selected MOSS component before regenerating.");
-  if (!isMossEdit(request.model, request.mode)) return;
+  if (!isMossEdit(model, request.mode)) return;
   if (advanced.mossImage?.acceleration && advanced.mossImage.acceleration !== "off") throw new Error("Disable 8-step acceleration before regenerating a MOSS edit.");
   const references = mossEditReferenceIds(request);
   if (references.some((id) => !assets.some((item) => item.id === id && item.type === "image" && item.projectId === projectId))) throw new Error("A MOSS reference is missing from this project. Reacquire that exact slot before regenerating.");
@@ -99,7 +100,7 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
   }
   if (!isCurrentProject()) return null;
   if (!original) {
-    const request = imageRecipeRequest(asset);
+    const request = imageRecipeRequest(asset, models);
     await validateMossReplay(request, { models, assets, projectId });
     if ((await beforeCreate()) === false || !isCurrentProject()) return null;
     const job = await imageApi.imageJobs(token, {
@@ -116,7 +117,8 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
   if ((await beforeCreate()) === false || !isCurrentProject()) return null;
   // Duplicate bypasses the typed image route's random-seed generation. A null seed would reuse
   // the old seeds array (or the worker's deterministic fallback), so supply fresh randomness.
-  const seed = isMossEdit(original.payload?.model, original.payload?.mode) && original.payload?.advanced?.mossImageAdvanced?.noise ? null : crypto.getRandomValues(new Uint32Array(1))[0];
+  const originalModel = models?.find((model) => model.id === original.payload?.model) ?? original.payload?.model;
+  const seed = isMossEdit(originalModel, original.payload?.mode) && original.payload?.advanced?.mossImageAdvanced?.noise ? null : crypto.getRandomValues(new Uint32Array(1))[0];
   const job = await jobsApi.duplicate(jobId, token, {
     method: "POST",
     body: JSON.stringify({ requestedGpu, payloadChanges: { seed, seeds: [] } }),

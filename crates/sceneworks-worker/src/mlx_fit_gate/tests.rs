@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn reusable_loader_footprint_excludes_replaced_weights_in_both_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("base");
+    let shared = temp.path().join("shared");
+    let imported = temp.path().join("serenity.safetensors");
+    let text = shared.join("text_encoder/model.safetensors");
+    let vae = shared.join("vae/model.safetensors");
+    for (path, bytes) in [
+        (base.join("transformer/model.safetensors"), 9000),
+        (shared.join("transformer/model.safetensors"), 8000),
+        (imported.clone(), 100),
+        (text.clone(), 200),
+        (vae.clone(), 300),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![0_u8; bytes]).unwrap();
+    }
+    let mut spec = LoadSpec::new(WeightsSource::Dir(base))
+        .with_checkpoint_component("transformer", WeightsSource::File(imported.clone()))
+        .with_component("moss-shared-snapshot", WeightsSource::Dir(shared));
+    spec.prepare_with_file_pins(
+        [imported, text, vae]
+            .iter()
+            .map(|path| gen_core::PinnedWeightsFile::pin(path).unwrap()),
+    )
+    .unwrap();
+    let consumed = PerComponentBytes {
+        dit: 1000,
+        text_encoder: 200,
+        vae: 300,
+    };
+    for (total, encoder, _) in [
+        spec_component_bytes_with_provider_footprint("moss_image_base", &spec, Some(consumed)),
+        spec_component_bytes_with_provider_footprint_checked(
+            "moss_image_base",
+            &spec,
+            Some(consumed),
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(
+            total, 1500,
+            "provider footprint owns the decoded imported component and selected companion closure"
+        );
+        assert_eq!(encoder, 200);
+    }
+}
+
+#[test]
 fn flux3_cfg_source_allowance_tracks_forward_rows_not_jobs_weights_or_decode() {
     assert_eq!(flux3_conditioning_forward_batch("flux3_klein_base"), 2);
     assert_eq!(flux3_conditioning_forward_batch("flux3_klein"), 1);
@@ -1764,6 +1813,7 @@ fn request_plan() -> MlxRequestPlan {
         asset_bytes: gib_to_bytes(6.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
         // sitting exactly on the reserve would model resolution-blind and silently stop
         // exercising the sc-16195 scaling at all.
@@ -2295,6 +2345,7 @@ fn fixture_plan() -> MlxRequestPlan {
         asset_bytes: gib_to_bytes(3.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
         // sitting exactly on the reserve would model resolution-blind and silently stop
         // exercising the sc-16195 scaling at all.
@@ -2786,6 +2837,7 @@ fn packaged_krea_plan() -> Option<MlxRequestPlan> {
         asset_bytes: gib_to_bytes(30.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(2.0),
         fixed_reserve_bytes: 0,
         calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
@@ -4657,6 +4709,7 @@ fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admiss
         asset_bytes: gib_to_bytes(40.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(6.0),
         fixed_reserve_bytes: gib_to_bytes(2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -4868,6 +4921,7 @@ impl SdxlSelectorFixture {
             asset_bytes: gib_to_bytes(40.0),
             folded_control_bytes: 0,
             folded_adapter_bytes: 0,
+            request_workspace_bytes: 0,
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
@@ -5214,6 +5268,7 @@ fn shipped_plain_sdxl_without_a_binding_preserves_the_four_rung_estimate_path() 
         asset_bytes: gib_to_bytes(40.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(6.0),
         fixed_reserve_bytes: gib_to_bytes(2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -10714,6 +10769,7 @@ fn generic_request_peak_is_invariant_in_the_job_image_count() {
         asset_bytes: 35_666_644_396,
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
         fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -10835,6 +10891,7 @@ fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
         asset_bytes: gib_to_bytes(asset_gb),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
         fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
         calibration: MlxCalibrationConfig::Absent,
@@ -10910,6 +10967,7 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
             asset_bytes: gib_to_bytes(asset_gb),
             folded_control_bytes: 0,
             folded_adapter_bytes: 0,
+            request_workspace_bytes: 0,
             activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),
             fixed_reserve_bytes,
             calibration: MlxCalibrationConfig::Absent,
@@ -11003,6 +11061,7 @@ fn legacy_provider_credits_only_the_known_generator_assets_on_a_warm_run() {
         asset_bytes: gib_to_bytes(6.0),
         folded_control_bytes: 0,
         folded_adapter_bytes: 0,
+        request_workspace_bytes: 0,
         // Deliberately ABOVE the 2 GiB fixed reserve so the area term is non-zero: a fixture
         // sitting exactly on the reserve would model resolution-blind and silently stop
         // exercising the sc-16195 scaling at all.
@@ -16269,6 +16328,52 @@ fn the_minimax_h3_image_floor_residue_is_the_staged_regime_and_only_on_an_always
         }
     }
     assert_eq!(residue(coresident_lane), None);
+}
+
+#[test]
+fn phase_adapter_workspace_is_charged_to_measured_and_estimated_peaks() {
+    let bundle = fixture_bundle();
+    let generator = fixture_generator();
+    let plan = fixture_plan();
+    let inputs = fixture_inputs(1024, 1024);
+    let workspace = gib_to_bytes(1.5);
+    let evaluate = |plan: &MlxRequestPlan, budget, bundle| {
+        evaluate_request_with_budget_using_bundle(
+            &generator,
+            plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+            fixture_budget(budget),
+            gib_to_bytes(5.0),
+            0,
+            &[],
+            bundle,
+            None,
+        )
+    };
+    let staged = plan.clone().with_request_workspace(workspace);
+    assert!(evaluate(&plan, 8.0, Some(&bundle)).is_ok());
+    assert!(evaluate(&staged, 8.0, Some(&bundle)).is_err());
+    let measured = evaluate(&plan, 16.0, Some(&bundle)).unwrap();
+    let measured_with_workspace = evaluate(&staged, 16.0, Some(&bundle)).unwrap();
+    assert_eq!(
+        measured_with_workspace.context.predicted_peak_bytes,
+        measured.context.predicted_peak_bytes + workspace
+    );
+
+    let legacy = MlxRequestPlan {
+        calibration: MlxCalibrationConfig::Absent,
+        ..plan
+    };
+    let estimated = evaluate(&legacy, 16.0, None).unwrap();
+    let estimated_with_workspace =
+        evaluate(&legacy.with_request_workspace(workspace), 16.0, None).unwrap();
+    assert_eq!(
+        estimated_with_workspace.context.predicted_peak_bytes,
+        estimated.context.predicted_peak_bytes + workspace
+    );
 }
 
 #[test]

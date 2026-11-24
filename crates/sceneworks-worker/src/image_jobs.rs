@@ -1386,6 +1386,79 @@ fn image_execution_receipt(
 
 #[cfg(test)]
 #[test]
+fn checkpoint_prompt_batch_total_preserves_recipe_count_and_completes_receipt() {
+    let project = tempfile::tempdir().unwrap();
+    let mut entry = serde_json::json!({
+        "id":"serenity-batch", "family":"moss-image", "baseModel":"moss_image_base",
+        "catalogScope":"user"
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    sceneworks_core::checkpoint_loader::apply_bound_base_defaults(&mut entry).unwrap();
+    let payload = serde_json::json!({
+        "projectId":"p", "model":"serenity-batch", "prompt":"first",
+        "prompts":["first","second"], "count":2, "width":16, "height":16,
+        "seed":42, "modelManifestEntry":entry
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+    let settings = crate::test_env::offline_settings();
+    #[cfg(target_os = "macos")]
+    let total = routing::ImageRoute::CheckpointPlan.image_count(&request, &settings);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let total = routing::CandleImageRoute::CheckpointPlan.image_count(&request, &settings);
+    #[cfg(not(native_lane))]
+    let total = {
+        let _ = settings;
+        request.image_count()
+    };
+    assert_eq!(total, 4);
+    let plan = ImagePlan::with_count(&request, total, Some(Arc::new(payload)));
+    assert_eq!(plan.generation_set["count"], 4);
+    let mut facts = Vec::new();
+    for index in 0..total as usize {
+        let fact = write_image_asset(
+            &plan,
+            index,
+            42 + index as i64,
+            16,
+            16,
+            vec![0; 16 * 16 * 3],
+            plan.adapter,
+            JsonObject::new(),
+            project.path(),
+        )
+        .unwrap();
+        assert_eq!(fact["count"], 2);
+        assert_eq!(fact["model"], "serenity-batch");
+        assert_eq!(
+            fact["prompt"],
+            ["first", "first", "second", "second"][index]
+        );
+        let share = sceneworks_core::workflow_png::read_workflow_chunk_file(
+            &project.path().join(fact["mediaPath"].as_str().unwrap()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(share.count, Some(2));
+        facts.push(Value::Object(fact));
+    }
+    let receipt = image_execution_receipt(project.path(), &facts, total as usize).unwrap();
+    assert_eq!(receipt.outputs.len(), 4);
+    assert_eq!(receipt.outputs[3].output_index, 3);
+    let result = serde_json::json!({"expectedCount":total,"assetWrites":facts});
+    sceneworks_core::execution_receipt::validate_worker_receipt(
+        &receipt,
+        result.as_object().unwrap(),
+    )
+    .unwrap();
+}
+
+#[cfg(test)]
+#[test]
 fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
     let project = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -2784,7 +2857,8 @@ pub(crate) fn write_image_asset(
     if !request.prompts.is_empty() {
         raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
     }
-    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+    if sceneworks_core::moss_image::is_moss(request.policy_model()) && request.mode == "edit_image"
+    {
         // Lineage anchors the first source only. History needs every semantic slot, including
         // repeated identities; never trust a stale reference vector supplied inside `advanced`.
         let carriers = json!({"referenceAssetIds":request.reference_asset_ids,"sourceAssetId":request.source_asset_id,"referenceAssetId":request.reference_asset_id});
@@ -2848,7 +2922,7 @@ pub(crate) fn write_image_asset(
         if let Some(sampler) = resolved_sampler_for_share(adapter, &raw_settings) {
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
-        if sceneworks_core::moss_image::is_moss(&request.model) {
+        if sceneworks_core::moss_image::is_moss(request.policy_model()) {
             if let Some(index) = raw_settings
                 .get("mossImageSampleIndex")
                 .and_then(Value::as_u64)
@@ -2871,7 +2945,7 @@ pub(crate) fn write_image_asset(
                     .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
             }
         }
-        if sceneworks_core::moss_image::is_moss(&request.model) {
+        if sceneworks_core::moss_image::is_moss(request.policy_model()) {
             if let Some(report) = raw_settings
                 .get(sceneworks_core::moss_image::EDIT_REPORT_KEY)
                 .and_then(sceneworks_core::workflow_share::sanitize_moss_edit_execution_report)
@@ -2948,7 +3022,7 @@ pub(crate) fn write_image_asset(
         "normalizedHeight": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { height } else { request.height },
         // MOSS records the whole native prompt batch in the recipe. Its replay count is
         // images per prompt; the generation set and expectedCount retain the total.
-        "count": if sceneworks_core::moss_image::is_moss(&request.model) { request.count } else { plan.image_count },
+        "count": if sceneworks_core::moss_image::is_moss(request.policy_model()) { request.count } else { plan.image_count },
         "family": plan.family,
         "seed": seed,
         "index": index,
@@ -2967,7 +3041,8 @@ pub(crate) fn write_image_asset(
         "rawAdapterSettings": raw_settings,
     });
     let mut fact = fact.as_object().cloned().expect("json! object literal");
-    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+    if sceneworks_core::moss_image::is_moss(request.policy_model()) && request.mode == "edit_image"
+    {
         fact.insert("parents".into(), json!(moss_input_parents(request)?));
         fact.insert("batchIndex".into(), json!(index));
     }

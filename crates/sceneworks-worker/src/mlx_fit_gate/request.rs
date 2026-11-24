@@ -706,8 +706,10 @@ pub(super) fn select_request_with_budget_using_bundle(
         )?
     } else {
         0
-    }
-    .saturating_add(inputs.pag_workspace_bytes);
+    };
+    let request_workspace_bytes = reference_workspace_bytes
+        .saturating_add(inputs.pag_workspace_bytes)
+        .saturating_add(plan.request_workspace_bytes);
 
     // Component precision floors are a provider property, not a manifest guess. Bind them only
     // from the exact registry descriptor or loaded generator, then use that tier for every evidence/cache identity
@@ -1177,7 +1179,7 @@ pub(super) fn select_request_with_budget_using_bundle(
             if candidate_budget.effective_gb().is_some_and(|available| {
                 exact
                     .predicted_peak_bytes
-                    .saturating_add(reference_workspace_bytes) as f64
+                    .saturating_add(request_workspace_bytes) as f64
                     / BYTES_PER_GIB
                     <= available
             }) {
@@ -1320,7 +1322,7 @@ pub(super) fn select_request_with_budget_using_bundle(
             } else {
                 0
             };
-            let request_extra = shortfall.saturating_add(reference_workspace_bytes);
+            let request_extra = shortfall.saturating_add(request_workspace_bytes);
             (request_extra > 0).then(|| {
                 let mut corrected = (*evidence).clone();
                 corrected.predicted_peak_bytes =
@@ -1655,7 +1657,7 @@ pub(super) fn select_request_with_budget_using_bundle(
         };
         needed_gb = evidence
             .predicted_peak_bytes
-            .saturating_add(reference_workspace_bytes)
+            .saturating_add(request_workspace_bytes)
             .saturating_add(prefix_kv_cache_extra)
             .saturating_add(reserve) as f64
             / BYTES_PER_GIB;
@@ -1665,7 +1667,7 @@ pub(super) fn select_request_with_budget_using_bundle(
         selected_record_id = Some(candidate.record_id.clone());
         evidence
             .predicted_peak_bytes
-            .saturating_add(reference_workspace_bytes)
+            .saturating_add(request_workspace_bytes)
     } else if selection == resident_selection
         || synthesized_estimates
             .iter()
@@ -1678,11 +1680,11 @@ pub(super) fn select_request_with_budget_using_bundle(
             .iter()
             .find(|candidate| candidate.selection == selection)
             .map_or(
-                predicted_peak_bytes.saturating_add(reference_workspace_bytes),
+                predicted_peak_bytes.saturating_add(request_workspace_bytes),
                 |candidate| candidate.evidence.predicted_peak_bytes,
             )
     } else {
-        predicted_peak_bytes.saturating_add(reference_workspace_bytes)
+        predicted_peak_bytes.saturating_add(request_workspace_bytes)
     };
     // The demand the admission approved: a cached selection was graded at its (corrected) shed
     // peak + the cache surcharge (`prefix_kv_cache_extra`).
