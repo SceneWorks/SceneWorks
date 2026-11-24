@@ -12,7 +12,15 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { directInferenceCrates, parseCliArgs, prepareInferencePatches, withInferenceCheckout } from "./bump-inference.mjs";
+import {
+  directInferenceCrates,
+  parseCliArgs,
+  prepareCandleNnPatch,
+  prepareInferencePatches,
+  reconcileCargoLock,
+  verifyCandleNnResolution,
+  withInferenceCheckout,
+} from "./bump-inference.mjs";
 import { SECURITY_BACKPORT } from "./ci/zip9-source-overrides.mjs";
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "bump-inference.mjs");
@@ -36,6 +44,59 @@ test("a newer inference pin retires only the exact old engine security overrides
   assert.throws(() => prepareInferencePatches(manifest.replace(
     'mlx-gen = { path = "vendor/zip9-mlx-gen" }', 'mlx-gen = { path = "vendor/unreviewed" }'), SHA),
   /review changed inference security overrides/);
+});
+
+test("the bump mirrors the target Candle NN fork only in the Candle git patch table", () => {
+  const header = '[patch."https://github.com/huggingface/candle"]';
+  const registry = '[patch.crates-io]\nregex = { path = "vendor/clip-regex/regex" }';
+  const older = `${header}\ncandle-core = { path = "vendor/candle-core" }\n${registry}\n`;
+  const vendor = 'candle-nn = { path = "crates/media/candle-gen/vendor/candle-nn" }';
+  const newer = older.replace(header, `${header}\n${vendor}`);
+  const git = `{ git = "https://github.com/SceneWorks/inference", rev = "${SHA}" }`;
+  const app = `${header}\ncandle-core = ${git}\n[workspace.dependencies]\ncandle-nn = "0.10"\n`;
+  const required = app.replace(header, `${header}\ncandle-nn = ${git}`);
+  for (const invalid of [
+    'candle-nn = { git = "https://example.org/candle-nn", rev = "other" }',
+    'candle-nn = { path = "unrelated/candle-nn" }',
+    `${vendor}\n${vendor}`,
+  ]) {
+    assert.throws(() => prepareCandleNnPatch(required, newer.replace(vendor, invalid), SHA),
+      /unrecognized inference candle-nn patch/);
+  }
+  assert.equal(prepareCandleNnPatch(app, older, SHA), app);
+  assert.equal(prepareCandleNnPatch(app, newer, SHA), required);
+  assert.equal(prepareCandleNnPatch(required, newer, SHA), required);
+  assert.equal(prepareCandleNnPatch(required, older, SHA), app);
+  const lock = `[[package]]\nname = "candle-nn"\nversion = "0.10.2"\nsource = "git+https://github.com/SceneWorks/inference?rev=${SHA}#${SHA}"\n`;
+  const foreign = lock.replace("SceneWorks/inference", "huggingface/candle");
+  verifyCandleNnResolution(required, lock, SHA);
+  verifyCandleNnResolution(app, foreign, SHA);
+  for (const broken of [foreign, lock + foreign, foreign + lock.replace("[[package]]", "[[patch.unused]]")]) {
+    assert.throws(() => verifyCandleNnResolution(required, broken, SHA), /one resolved candle-nn/);
+  }
+  assert.throws(() => prepareCandleNnPatch(required.replace(git, '{ path = "foreign" }'), newer, SHA),
+    /root Candle .*candle-nn/);
+});
+
+test("an interrupted same-pin Candle NN transition repairs the lock once", () => {
+  const repo = "https://github.com/SceneWorks/inference";
+  const target = `git+${repo}?rev=${SHA}#${SHA}`;
+  const manifest = `[patch."https://github.com/huggingface/candle"]\ncandle-nn = { git = "${repo}", rev = "${SHA}" }\n`;
+  const core = `[[package]]\nname = "sceneworks-gen-core"\nversion = "0.1.0"\nsource = "${target}"\n`;
+  const nn = `[[package]]\nname = "candle-nn"\nversion = "0.10.2"\nsource = "${target}"\n`;
+  for (const interrupted of [core, core + nn.replace(target, "git+https://github.com/huggingface/candle#old")]) {
+    let lock = interrupted;
+    const calls = [];
+    const retry = () => reconcileCargoLock(SHA, true, {
+      rootManifest: manifest,
+      readLock: () => lock,
+      update: () => { calls.push("update"); lock = core + nn; },
+      verify: () => calls.push("verify"),
+    });
+    assert.equal(retry(), "updated");
+    assert.equal(retry(), "verified");
+    assert.deepEqual(calls, ["update", "verify"]);
+  }
 });
 
 // Stands in for the shallow fetch: records where it was asked to clone and leaves clone-shaped

@@ -641,6 +641,16 @@ pub(crate) async fn run_video_generate_job(
         })?;
     request.portable_aux = portable_aux.clone();
     video_preflight(&request)?;
+    // MLX route discovery may fetch the fallback snapshot. Reject missing physical
+    // evidence before either backend resolves a project, source media, tier or SAM3.
+    #[cfg(native_lane)]
+    if request.mode == "animate_character" && scail2_engine_id(&request.model).is_some() {
+        crate::video_admission::check_scail2_plural_package(
+            &settings.gpu_id,
+            request.reference_asset_ids.len(),
+        )
+        .await?;
+    }
     // VACE-Fun has one real route only: dual-expert person replacement. Refuse a replayed request
     // that cannot reach that provider before even resolving the project or creating the output
     // directory; a procedural clip is never an honest substitute for this capability.

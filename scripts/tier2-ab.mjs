@@ -12,9 +12,13 @@
 // base#1 != base#2 -> `nondeterministic_on_runner` (numeric difference recorded once, no more
 // runs); base#1 == base#2 -> `head_differs` (non-zero exit, payload diff printed). Time and memory
 // are observations and never fail the job. A route whose weights are absent from every hub root is
-// `skipped` with its reason. The opt-in Krea suite stages its allowlisted pinned assets first.
+// `skipped` with its reason. Explicit Wan A14B witnesses require an equal verdict for every chosen route. An opt-in
+// --stage-wan pass may populate their selected cache before the read-only comparison. Each fresh
+// API data directory still needs the public Hugging Face metadata for its pinned source ledger.
+// The opt-in Krea suite stages its allowlisted pinned assets first (--stage-krea).
 //
 // Modes: --preflight-only (inputs, both checkouts, pins, tools, hub presence; no build, no model)
+//        --stage-wan      (opt-in pinned public Wan download before the comparison)
 //        --build-only     (release API/worker for base then head into one shared scratch target)
 //        --run            (the comparison; requires --build-only output from the same work dir)
 // Configuration is environment-only so the same invocation works from bash, cmd and PowerShell:
@@ -32,12 +36,13 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapBytes, scailRefusalBudget, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal } from "./lib/tier2-scail.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { captureKreaCompanionLedger, replayKreaCompanionLedger } from "./krea-tier2-ledger.mjs";
 import { assertTerminalPhysicalContainment } from "./lib/starvector-terminal-pin-paths.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { lockedInferenceRevision } from "./select-windows-cargo-cache.mjs";
-import { assertPins, buildChildEnv } from "./qwen-image-2-1-app-lifecycle.mjs";
+import { assertPins, buildChildEnv, syntheticPng } from "./qwen-image-2-1-app-lifecycle.mjs";
 import { bindOwnedEnv, boundApiUrl, ownedApiController, redactSensitiveText, utilityWorkerId } from "./flux3-image-klein-app-lifecycle.mjs";
 import {
   KREA_SUITE, KREA_BASE_APP, KREA_BASE_ENGINE, KREA_HF_ORIGIN, assertKreaPins, kreaRoutes, kreaAssetInventory,
@@ -60,14 +65,21 @@ import {
 const execFile = promisify(execFileCallback);
 const fact = (value, message) => assert.ok(value, message);
 const GIB = 1024 ** 3;
+const SCAIL_CUDA_CAP = 84 * GIB;
+const SCAIL_CUDA_RESERVE = 6 * GIB;
 export const SHA = /^[0-9a-f]{40}$/;
 export const BACKENDS = Object.freeze(["mlx", "cuda"]);
 export const RUN_LABELS = Object.freeze(["base#1", "head", "base#2"]);
 export const VERDICTS = Object.freeze(["equal", "nondeterministic_on_runner", "head_differs", "error", "skipped"]);
-// The physical CUDA card every existing real-weight CUDA acceptance lane uses (load-progress,
-// catalog walk): logical CUDA 0 masked to physical GPU1. The workflow sets the masks; preflight
-// refuses anything else.
+// The existing proof lanes default to physical GPU1. GPU0 is an explicit SW-F334 target.
 export const CUDA_PHYSICAL_GPU = "1";
+const FEATURE_GPU0_UUID = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0";
+function physicalGpu(index, backend, routes) {
+  if (index === undefined || index === "1") return CUDA_PHYSICAL_GPU;
+  fact(index === "0" && backend === "cuda" && routes.length > 0 && routes.every((r) => r.scailCandidate || ["cuda-wan22-a14b-t2v-uni_pc", "cuda-wan22-a14b-i2v-uni_pc"].includes(r.id)),
+    "physical GPU0 requires explicit CUDA SCAIL or Wan A14B routes");
+  return index;
+}
 export const MLX_RUNNER = "nax-macos-2";
 export const CUDA_RUNNERS = Object.freeze(["cuda-windows", "cuda-windows-2"]);
 
@@ -81,7 +93,31 @@ const PROMPT_IMAGE = "A red glass apple beside a blue ceramic cup, studio photog
 // An untiered request instead carries `tierCandidates`: the worker's own preference order for an
 // unselected tier, so presence succeeds when the tier the product would actually select is complete.
 const IMAGE_ROUTE = (id, backend, model, tier, group, body, tierCandidates = null) => ({ id, backend, model, kind: "image", mode: "text_to_image", tier, tierCandidates, group, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20, body });
+// Explicit SW-F334 witnesses. Each mode selects its own dual-expert provider and snapshot.
+function wanA14bRoute(backend, mode, sampler) {
+  const referenceImage = mode === "i2v";
+  const operation = referenceImage ? "image_to_video" : "text_to_video";
+  const model = `wan_2_2_${mode}_14b`;
+  return {
+    id: `${backend}-wan22-a14b-${mode}-${sampler}`, backend, model, mode: operation,
+    kind: "video", wanA14b: true, referenceImage, tier: "q4", group: null,
+    // The 13-frame engine request has four latent frames. The MLX VAE emits 4F frames
+    // without trimming; Candle's causal VAE emits 1 + 4(F - 1). The worker encodes all of them.
+    engineFrames: 13, savedFrames: backend === "mlx" ? 16 : 13,
+    endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 30,
+    body: {
+      model, mode: operation, prompt: "A turquoise disc rolls slowly across a pale yellow table.",
+      negativePrompt: "", seed: 33401, width: 832, height: 480, duration: 1, fps: 16, loras: [],
+      advanced: { mlxQuantize: 4, steps: 6, guidanceScale: 3.5, sampler, lightning: false },
+    },
+  };
+}
 export const ROUTES = Object.freeze(Object.fromEntries([
+  ...scailRoutes,
+  ...["t2v", "i2v"].flatMap((mode) => [
+    wanA14bRoute("mlx", mode, "uni_pc"), wanA14bRoute("mlx", mode, "heun"),
+    wanA14bRoute("cuda", mode, "uni_pc"),
+  ]),
   // Untiered: crates/sceneworks-worker/src/image_jobs/tier_resolver.rs `preferred_tier` (line 241,
   // q8 unless a `minQualityTier` floor above q8; flux_dev declares none) and `standard_tier_subdir`
   // (line 417, documented at 397-404: q8 -> bf16 -> q4 over complete installed tiers). Head's admission freezes the same
@@ -144,8 +180,18 @@ export function selectRoutes(backend, value) {
     fact(Object.hasOwn(ROUTES, id), `unknown route ${id}; known: ${Object.keys(ROUTES).join(", ")}`);
     fact(ROUTES[id].backend === backend, `route ${id} belongs to the ${ROUTES[id].backend} backend, not ${backend}`);
   }
-  return ids.map((id) => ROUTES[id]);
+  const selected = ids.map((id) => ROUTES[id]);
+  for (const [i, route] of selected.entries()) if (route.refuse && selected.length > 1) {
+    fact(selected.slice(0, i).some((r) => r.scailCandidate && r.references === 6 && !r.refuse),
+      "a capped SCAIL refusal requires a preceding accepted six-character witness");
+  }
+  return selected;
 }
+export function cudaLeaseMinFreeMiB(selection) {
+  return selectRoutes("cuda", selection).some((route) => route.scailCandidate)
+    ? (SCAIL_CUDA_CAP + SCAIL_CUDA_RESERVE) / 1024 ** 2 : 75776;
+}
+
 export function resolveConfig(env, { platform = process.platform, home = os.homedir() } = {}) {
   const paths = pathsFor(platform);
   const backend = env.TIER2_AB_BACKEND;
@@ -203,14 +249,14 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
   const claimMinutesOverride = claimText === "" ? null : Number(claimText);
   fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
-  return { suite, krea, perf, allocation, nativeProgress, backend, baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes, managedJobRoot, kreaCacheHub,
+  return { suite, krea, perf, allocation, nativeProgress, backend, physicalGpu: physicalGpu(env.TIER2_AB_PHYSICAL_GPU, backend, routes), baseSha, headSha, inferenceSha, baseDir, headDir, repairDir, work, routes, managedJobRoot, kreaCacheHub,
     hubs: krea ? [paths.join(work, "scratch", "krea-hf", "hub")] : hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
 // Pure selector for the registered dispatcher (memory-catalog-campaign.yml, profile tier2-ab).
 // It cannot build, start or load anything. moss_options_json carries the profile's options
 // because the dispatcher is at GitHub's 25-input ceiling (same convention as load-progress).
-export const DISPATCH_OPTION_KEYS = Object.freeze(["base_sha", "head_sha", "routes", "hubs", "preflight_only"]);
+export const DISPATCH_OPTION_KEYS = Object.freeze(["base_sha", "head_sha", "routes", "hubs", "preflight_only", "cuda_physical_index"]);
 export function dispatchOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, "tier2-ab");
   fact(SHA.test(dispatchedSha ?? "") && inputs.ref === dispatchedSha, "ref must equal the exact dispatched source SHA (the driver's own commit)");
@@ -228,9 +274,9 @@ export function dispatchOptions(inputs, dispatchedSha) {
     const preflight = options.preflight_only ?? true;
     fact(!inputs.qwen_persistent_weights && (inputs.download_missing === true) === !preflight, "Krea execution requires download_missing; metadata preflight leaves it off");
     assertKreaPins(KREA_BASE_APP, KREA_BASE_ENGINE, options.head_sha, inputs.inference_sha);
-    return { suite: KREA_SUITE, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha, krea_performance: options.performance ?? false, krea_allocation: options.allocation ?? false };
+    return { suite: KREA_SUITE, cuda_physical_index: CUDA_PHYSICAL_GPU, base_sha: KREA_BASE_APP, head_sha: options.head_sha, backend: inputs.backend === "mlx" ? "mlx" : "cuda", routes: "", hubs: "", preflight_only: preflight, inference_sha: inputs.inference_sha, krea_performance: options.performance ?? false, krea_allocation: options.allocation ?? false };
   }
-  fact(inputs.download_missing !== true && inputs.qwen_persistent_weights !== true, "tier2-ab never downloads; leave download_missing and qwen_persistent_weights off");
+  fact(inputs.qwen_persistent_weights !== true, "tier2-ab does not use qwen_persistent_weights");
   const unknown = Object.keys(options).filter((key) => !DISPATCH_OPTION_KEYS.includes(key));
   fact(unknown.length === 0, `unknown tier2-ab option(s): ${unknown.join(", ")}`);
   fact(SHA.test(options.base_sha ?? "") && SHA.test(options.head_sha ?? "") && options.base_sha !== options.head_sha, "base_sha and head_sha must be distinct exact 40-hex SHAs");
@@ -239,8 +285,12 @@ export function dispatchOptions(inputs, dispatchedSha) {
   const backend = inputs.backend === "mlx" ? "mlx" : "cuda";
   for (const key of ["routes", "hubs"]) fact(options[key] === undefined || (Array.isArray(options[key]) && options[key].every((item) => typeof item === "string" && item.trim())), `${key} must be an array of strings`);
   const routes = selectRoutes(backend, options.routes ? JSON.stringify(options.routes) : "").map((route) => route.id);
+  if (inputs.download_missing) {
+    fact(options.routes && routes.every((id) => ROUTES[id].wanA14b || ROUTES[id].scailCandidate), "download_missing requires explicit Wan A14B or SCAIL-2 routes");
+    fact(options.preflight_only === false, "metadata-only preflight cannot stage weights");
+  }
   if (options.hubs) fact(options.hubs.length > 0 && options.hubs.every((hub) => absoluteFor(backend === "mlx" ? "darwin" : "win32", hub)), "hubs must be absolute paths for the selected backend's OS");
-  return { base_sha: options.base_sha, head_sha: options.head_sha, backend, routes: options.routes ? JSON.stringify(routes) : "", hubs: options.hubs ? JSON.stringify(options.hubs) : "", preflight_only: options.preflight_only ?? true, inference_sha: inputs.inference_sha || "" };
+  return { cuda_physical_index: physicalGpu(options.cuda_physical_index, backend, routes.map((id) => ROUTES[id])), base_sha: options.base_sha, head_sha: options.head_sha, backend, routes: options.routes ? JSON.stringify(routes) : "", hubs: options.hubs ? JSON.stringify(options.hubs) : "", preflight_only: options.preflight_only ?? true, inference_sha: inputs.inference_sha || "" };
 }
 
 // ---- trusted-ref rule ----------------------------------------------------------------------------
@@ -375,13 +425,48 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     const entry = { id: route.id, model: route.model, kind: route.kind, mode: route.mode, group: route.group, request: requestTemplate(route) };
     const baseModel = baseCatalog.find((model) => model.id === route.model), headModel = headCatalog.find((model) => model.id === route.model);
     if (!baseModel || !headModel) { planned.push({ ...entry, status: "skipped", skipReason: `model ${route.model} is not in the ${!baseModel ? "base" : "head"} catalog` }); continue; }
-    // One candidate tier for an explicit request; the product's ordered preference for an untiered one.
+    if (route.scailCandidate) {
+      const baseSupport = baseModel.ui?.scail2MultiReference;
+      fact(baseSupport === undefined || baseSupport === false,
+        `${route.id}: candidate-only witness requires a base without the plural character descriptor`);
+      fact(platform === (route.backend === "mlx" ? "darwin" : "win32") && headModel.ui?.scail2MultiReference === true,
+        `${route.id}: candidate must expose the production plural character descriptor`);
+      entry.pluralCharacterSupport = { base: false, head: true };
+    }
+    if (route.wanA14b) {
+      fact(platform === (route.backend === "mlx" ? "darwin" : "win32"), `${route.id}: unsupported platform ${platform}`);
+      for (const model of [baseModel, headModel]) {
+        const limits = route.backend === "mlx" ? { ...model.limits, ...model.mlx?.limits } : model.limits;
+        fact(model.capabilities?.includes(route.mode) && limits?.samplers?.includes(route.body.advanced.sampler)
+          && route.body.duration >= (limits.hardMinDuration ?? 1) && route.body.duration <= (limits.hardMaxDuration ?? 30)
+          && limits.fps?.includes(route.body.fps) && limits.resolutions?.includes(`${route.body.width}x${route.body.height}`),
+          `${route.id}: mode, sampler or clip geometry unavailable in ${model.id}`);
+      }
+    }
+    // An explicit tier has one candidate. An untiered request follows the product preference.
     const candidates = route.tierCandidates ?? [route.tier];
     const rowsByTier = [];
     let refusal = null;
     for (const tier of candidates) {
       try {
         const rows = routeDownloadRows(headModel, { platform, tier }), baseRows = routeDownloadRows(baseModel, { platform, tier });
+        if (route.wanA14b) {
+          for (const rowsForSide of [baseRows, rows]) {
+            const primary = rowsForSide.required.filter((row) => !row.coRequisite);
+            fact(primary.length === 1 && primary[0].variant === "q4" && primary[0].files.includes("q4/*"),
+              `${route.id}: missing platform q4 snapshot`);
+          }
+        }
+        if (route.scailCandidate) {
+          for (const [set, catalog] of [[baseRows, baseCatalog], [rows, headCatalog]]) {
+            fact(set.required.length === 1 && set.required[0].repo === "SceneWorks/scail2-mlx" && set.required[0].revision === SCAIL_REVISION
+              && set.required[0].variant === "q4" && JSON.stringify(set.required[0].files) === '["q4/*"]', "SCAIL q4 source changed");
+            const segmenter = routeDownloadRows(catalog.find((m) => m.id === "sam3_person_segment"), { platform }).required;
+            fact(segmenter.length === 1 && segmenter[0].repo === SAM3.repo && segmenter[0].revision === SAM3.revision
+              && JSON.stringify(segmenter[0].files) === JSON.stringify(Object.keys(SAM3.files)), "SAM3 source changed");
+            set.required.push(...segmenter);
+          }
+        }
         if (JSON.stringify(baseRows) !== JSON.stringify(rows)) { refusal = { skipReason: `pinned download rows for ${route.model} (${rows.tier ?? "untiered"}) differ between base and head catalogs`, rows: { base: baseRows, head: rows } }; break; }
         rowsByTier.push(route.proof ? assertKreaCatalogRows(route, rows, evidence) : rows);
       } catch (error) { if (!route.tierCandidates) { refusal = { skipReason: error.message }; break; } }
@@ -412,12 +497,135 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
   }
   return planned;
 }
-export function requestTemplate(route) {
-  const body = { projectId: "<project>", ...(route.referenceAudio ? { referenceAudioAssetId: "<reference-audio>" } : {}), ...route.body };
-  return { endpoint: route.endpoint, body, sha256: sha256(JSON.stringify(body)) };
+function referenceBinding(route, assetId) {
+  if (route.scailCandidate) return scailBinding(route, assetId);
+  if (route.referenceImage) return { sourceAssetId: assetId };
+  if (route.referenceAudio) return { referenceAudioAssetId: assetId };
+  return {};
 }
-export function requestBody(route, projectId, referenceAudioAssetId) {
-  return { projectId, ...(route.referenceAudio ? { referenceAudioAssetId } : {}), ...structuredClone(route.body) };
+export function requestBody(route, projectId, referenceId) {
+  return { projectId, ...referenceBinding(route, referenceId), ...structuredClone(route.body) };
+}
+function wanReferenceImage(route) {
+  return syntheticPng(false, route.body.width, route.body.height);
+}
+function normalizedRequestHash(route, body, referenceSha256) {
+  const normalized = { ...body, projectId: "<project>", ...referenceBinding(route, route.scailCandidate ? null : route.referenceImage ? "<source-image>" : "<reference-audio>") };
+  return sha256(JSON.stringify(route.referenceImage ? { body: normalized, sourceImageSha256: referenceSha256 } : normalized));
+}
+export function requestTemplate(route) {
+  const body = requestBody(route, "<project>", route.scailCandidate ? null : route.referenceImage ? "<source-image>" : "<reference-audio>");
+  const source = route.referenceImage ? { sourceImageSha256: sha256(wanReferenceImage(route)) } : {};
+  return { endpoint: route.endpoint, body, ...source, sha256: normalizedRequestHash(route, body, source.sourceImageSha256) };
+}
+export async function uploadReference(route, endpoint, projectId, evidenceDir) {
+  const image = route.referenceImage;
+  const bytes = image ? wanReferenceImage(route) : referenceWav();
+  const name = image ? "source.png" : "reference.wav";
+  if (image) await writeFile(path.join(evidenceDir, name), bytes);
+  const form = new FormData();
+  form.append("file", new Blob([bytes], { type: image ? "image/png" : "audio/wav" }), name);
+  const upload = await endpoint.exchange("POST", `/api/v1/projects/${projectId}/assets`, form, { multipart: true });
+  fact(upload.status < 300 && upload.body?.id, `reference upload refused (${upload.status}): ${JSON.stringify(upload.body).slice(0, 600)}`);
+  const digest = sha256(bytes);
+  if (image) {
+    const relative = upload.body.file?.path;
+    fact(upload.body.projectId === projectId && upload.body.type === "image"
+      && typeof relative === "string" && relative.startsWith("assets/") && !relative.includes("\\")
+      && relative.split("/").every((part) => part && part !== "." && part !== ".."), "invalid uploaded source image");
+    const served = await endpoint.served(`/api/v1/projects/${projectId}/files/${relative.split("/").map(encodeURIComponent).join("/")}`);
+    fact(sha256(served.bytes) === digest, "stored source image differs from the uploaded PNG");
+  }
+  return { id: upload.body.id, sha256: digest };
+}
+
+// The private claim records which source the owning worker accepted. A public job's manifest
+// lists every available tier; echoing that list or the requested quant would not prove selection.
+export function wanClaimSource(route, plan, selected) {
+  const backend = route.backend === "mlx" ? "mlx" : "candle";
+  const platform = backend === "mlx" ? "macos" : "windows";
+  fact(selected?.backend === backend && selected.platform === platform, "Wan claim backend/platform changed");
+  const [model] = selected.models ?? [];
+  fact(selected.models?.length === 1 && model.slot === "modelManifestEntry" && model.modelId === route.model
+    && model.backend === backend && model.tier === "q4" && model.variant === "q4", "Wan claim model or storage tier changed");
+  const primary = model.members.filter((member) => member.role === "primary");
+  const expected = plan.rows.required.find((row) => row.variant === "q4");
+  fact(primary.length === 1 && expected && primary[0].tier === "q4", "Wan q4 primary binding missing");
+  const source = primary[0].source;
+  fact(source.kind === "revision" && source.identity.repository === expected.repo
+    && source.identity.revision === expected.revision && source.identity.variant === "q4", "Wan selected snapshot differs from the pinned q4 source");
+  fact(primary[0].files?.length && primary[0].files.every((file) => /^q4[/\\]/.test(file.relativePath)
+    && /^sha256:[0-9a-f]{64}$/.test(file.sha256) && file.sizeBytes > 0), "Wan q4 file closure missing");
+  if (route.scailCandidate) verifyScailClaim(primary[0].files);
+  const members = model.members.map(({ role, source, tier, files }) => ({
+    role, source, tier, files: [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+  }));
+  return { backend, platform, model: model.modelId, tier: model.tier, repo: expected.repo,
+    revision: expected.revision, boundMembersSha256: sha256(JSON.stringify(members)) };
+}
+export async function readWanClaim(dbPath, jobId, workerId) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const row = db.prepare("SELECT execution_claim_source_route_json AS source FROM jobs WHERE id = ? AND worker_id = ? AND status = 'completed'").get(jobId, workerId);
+    fact(row?.source, "owned completed job has no claimed source route");
+    return JSON.parse(row.source);
+  } finally { db.close(); }
+}
+export function verifyWanRecipe(route, recipe, sourceAssetId, expectedRepo) {
+  const adapter = route.backend === "mlx" ? "mlx_wan" : "candle_wan";
+  fact(recipe?.mode === route.mode && recipe.model === route.model && recipe.adapter === adapter,
+    "Wan asset recipe has a different mode, model or adapter");
+  fact(recipe.prompt === route.body.prompt && recipe.seed === route.body.seed, "Wan asset recipe changed the prompt or seed");
+  fact(recipe.rawAdapterSettings?.realModelInference === true && recipe.rawAdapterSettings.lightning === false
+    && Array.isArray(recipe.loras) && recipe.loras.length === 0, "Wan output requires real inference without Lightning or user adapters");
+  if (route.backend === "cuda") fact(recipe.rawAdapterSettings.repo === expectedRepo, "Candle runtime selected a different Wan repository");
+  fact((recipe.normalizedSettings?.sourceAssetId ?? null) === (sourceAssetId ?? null), "Wan output lost its source image binding");
+}
+// Both providers publish the consumed numerical schedule through the completed job receipt.
+export function wanExecutionFacts(route, receipt, jobId, outputId) {
+  const backend = route.backend === "mlx" ? "mlx" : "candle";
+  fact(receipt?.version === 1 && receipt.jobId === jobId && receipt.acceptedBackend === backend, "Wan execution receipt identity mismatch");
+  const output = receipt.outputs?.[0];
+  fact(receipt.outputs?.length === 1 && output.artifactIds?.length === 1 && output.artifactIds[0] === outputId,
+    "Wan execution receipt must bind the saved video");
+  const execution = output.execution ?? receipt.execution;
+  fact(execution?.state === "resolved", `Wan execution identity unavailable: ${JSON.stringify(execution?.reason)}`);
+  const identity = execution.identity;
+  const provider = route.referenceImage ? "wan2_2_i2v_14b" : "wan2_2_t2v_14b";
+  fact(identity?.provider_id === provider && identity.backend === backend, "Wan provider substitution");
+  const sampling = identity.sampling, schedules = identity.schedule;
+  fact(sampling?.state === "resolved" && sampling.value?.length === 1
+    && schedules?.state === "resolved" && schedules.value?.length === 1, "Wan executed sampling or schedule absent");
+  const [sample] = sampling.value, [schedule] = schedules.value;
+  const mlx = backend === "mlx";
+  const solver = mlx ? sample.solver : sample;
+  const expectedSolver = mlx ? (route.body.advanced.sampler === "heun" ? "Heun" : "UniPC") : "wan_flow_unipc_bh2_order2_v1";
+  fact(solver === expectedSolver && (mlx ? sample.stage === schedule.stage : schedule.sampler === solver)
+    && (mlx ? sample.estimator : schedule.estimator) === "flow_velocity", "Wan executed solver or estimator differs from the fixture");
+  const digest = mlx ? schedule.digest : schedule.schedule;
+  fact(digest?.element === (mlx ? "f32_le_bits" : "f64_le_bits") && digest.count === route.body.advanced.steps + 1
+    && /^[a-f0-9]{64}$/.test(digest.sha256), "Wan numerical schedule digest absent or invalid");
+  return { provider, backend, solver, schedule: digest };
+}
+export function wanObservations(route, metrics, content) {
+  const video = content.shape?.video;
+  fact(content.method === "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams" && video?.width === route.body.width
+    && video.height === route.body.height && video.decodedFrames === route.savedFrames && video.avgFrameRate === "16/1",
+    `${route.backend} Wan output must decode to ${route.savedFrames} frames at 832x480 and 16 fps`);
+  const { advanced, width, height, seed } = route.body;
+  const expected = { model: route.model, backend: route.backend, sampler: advanced.sampler, steps: advanced.steps,
+    guidanceScale: advanced.guidanceScale, width, height, seed };
+  for (const [key, value] of Object.entries(expected)) {
+    fact(metrics?.[key] === value, `Wan worker metrics ${key}: expected ${value}, observed ${metrics?.[key]}`);
+  }
+  // MLX loads its already packed q4 directory with Quant::None. Metrics call that load-time
+  // setting "bf16". Candle carries the tier marker through as Quant::Q4.
+  fact(metrics.quantLabel === (route.backend === "cuda" ? "q4" : "bf16"), "Wan load-time quant marker changed");
+  for (const key of ["sampleMs", "totalMs"]) fact(Number.isFinite(metrics[key]) && metrics[key] > 0, `Wan worker metric ${key} missing`);
+  return { ...expected, engineRequestFrames: route.engineFrames, decodedFrames: video.decodedFrames, loadQuantLabel: metrics.quantLabel, workerTotalMs: metrics.totalMs,
+    progressSampleIntervalMs: metrics.sampleMs, workerPeakMemoryBytes: metrics.peakMemoryBytes ?? null,
+    sampleBasis: "Worker interval from first observed step progress until decoding or completion" };
 }
 
 // ---- decoded-content fidelity -------------------------------------------------------------------
@@ -592,6 +800,8 @@ export function exitCodeFor(report) {
     return productPassed && (!report.performanceProtocol || report.routes.every((route) => route.performanceComparison?.status === "pass")) ? 0 : 1;
   }
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
+  if (report.routes.some((route) => ROUTES[route.id]?.wanA14b && route.verdict !== "equal")) return 1;
+  if (report.routes.some((route) => ROUTES[route.id]?.scailCandidate && route.verdict !== "verified")) return 1;
   const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || (route.hubMutation?.changed && hubMutationAttribution(route) !== "base_only"));
   return bad || report.summary.ran === 0 || report.fatal ? 1 : 0;
 }
@@ -744,10 +954,46 @@ async function sampleWindowsProcess(pid) {
 export function nvidiaSmiPath(env = process.env, platform = process.platform) {
   return platform === "win32" ? path.win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe") : "nvidia-smi";
 }
-async function sampleGpu(smi) {
-  const out = (await execFile(smi, ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,memory.used,utilization.gpu", "--format=csv,noheader,nounits"], { timeout: 10_000, windowsHide: true })).stdout.trim().split(",").map((v) => v.trim());
-  fact(out.length === 4 && out[0] === CUDA_PHYSICAL_GPU && /^GPU-/.test(out[1]) && /^\d+$/.test(out[2]), "physical GPU1 telemetry unavailable");
-  return { uuid: out[1], usedBytes: Number(out[2]) * 1024 ** 2, utilization: Number(out[3]) };
+async function sampleGpu(smi, index) {
+  const out = (await execFile(smi, ["-i", index === "0" ? FEATURE_GPU0_UUID : index, "--query-gpu=index,uuid,memory.used,utilization.gpu,memory.free", "--format=csv,noheader,nounits"], { timeout: 10_000, windowsHide: true })).stdout.trim().split(",").map((v) => v.trim());
+  fact(out.length === 5 && out[0] === index && (index === "0" ? out[1] === FEATURE_GPU0_UUID : /^GPU-/.test(out[1])) && /^\d+$/.test(out[2]), `physical GPU${index} telemetry unavailable`);
+  return { uuid: out[1], usedBytes: Number(out[2]) * 1024 ** 2, utilization: Number(out[3]),
+    freeBytes: /^\d+$/.test(out[4]) ? Number(out[4]) * 1024 ** 2 : null };
+}
+
+export function scailCudaMemoryViolation(sample, beforeRequest = false) {
+  if (sample.usedBytes > SCAIL_CUDA_CAP) return "exceeded the 84 GiB SCAIL device memory cap";
+  if (!Number.isSafeInteger(sample.freeBytes)) return "could not measure free GPU memory for SCAIL";
+  if (sample.freeBytes < SCAIL_CUDA_RESERVE) return "fell below the 6 GiB SCAIL free memory reserve";
+  if (beforeRequest && sample.freeBytes < SCAIL_CUDA_CAP + SCAIL_CUDA_RESERVE) return "has less than 90 GiB free before the SCAIL request";
+  return null;
+}
+
+// SCAIL runs its CUDA model in this exact worker. The ChildProcess handle is
+// owned by startWorker; a PID lookup could select a different process at exit.
+export function scailCudaSampler(read, worker, record, controller, physicalGpu) {
+  return async (beforeRequest = false) => {
+    let sample, violation;
+    try {
+      sample = await read();
+      violation = scailCudaMemoryViolation(sample, beforeRequest);
+    } catch (error) {
+      violation = `SCAIL telemetry unavailable: ${error.message}`;
+    }
+    if (!violation) return sample;
+    const stop = { pid: worker.pid, usedBytes: sample?.usedBytes ?? null, freeBytes: sample?.freeBytes ?? null };
+    if (!record.watchdog.gpuStop) {
+      record.watchdog.gpuStop = stop;
+      record.watchdog.tripped = `physical GPU${physicalGpu} ${violation}`;
+      try { stop.killIssued = processState(worker).alive && worker.kill("SIGKILL"); }
+      catch (error) { stop.killIssued = false; stop.error = error.message; }
+    }
+    const error = new Error(`watchdog: ${record.watchdog.tripped}`);
+    record.error = error.message;
+    record.status = "error";
+    controller.abort(error);
+    throw error;
+  };
 }
 
 // Every GPU's identity from nvidia-smi CSV (index, bus id) joined with the driver XML (display,
@@ -773,6 +1019,8 @@ export function summarize(routes) {
     if (route.status === "skipped") summary.skipped++;
     else if (route.verdict && route.verdict !== "skipped" && Object.hasOwn(summary, route.verdict)) summary[route.verdict]++;
   }
+  const verified = routes.filter((r) => r.verdict === "verified").length;
+  if (verified) summary.verified = verified;
   return summary;
 }
 // CUDA memory is the peak above the pre-request baseline, shown with that baseline; MLX is the
@@ -796,6 +1044,7 @@ export function renderMarkdown(report) {
   }
   const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
   if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
+  if (report.sourceMetadata) lines.push(report.sourceMetadata, "");
   if (report.backend === "cuda" && report.kind === KREA_SUITE && (report.allocationProtocol || report.performanceProtocol)) {
     lines.push("- Krea Windows memory uses sampled PDH dedicated-process accounting for the owned worker and leased CUDA adapter. Device-wide samples and the private CUDA pool have separate accounting domains.", "");
   }
@@ -811,7 +1060,14 @@ export function renderMarkdown(report) {
   }
   for (const route of report.routes.filter((item) => item.comparison || item.runs?.length)) {
     lines.push("", `## ${route.id}`, "", `- hub: ${route.hub}`, `- request sha256: ${route.request.sha256}`);
-    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}${runRecord.output?.content?.decoderError ? ` (${String(runRecord.output.content.decoderError).slice(0, 160)})` : ""}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.processes?.worker ? `; worker ${runRecord.diagnostics.processes.worker.alive ? "alive" : `exited code ${runRecord.diagnostics.processes.worker.exitCode} signal ${runRecord.diagnostics.processes.worker.signal}`} (stdin ${runRecord.diagnostics.processes.worker.stdin})` : ""}${Array.isArray(runRecord.diagnostics?.workersResponse) ? `; /workers: ${runRecord.diagnostics.workersResponse.map((row) => `${row.id}=${row.status}`).join(", ").slice(0, 300)}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
+    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}${runRecord.output?.content?.decoderError ? ` (${String(runRecord.output.content.decoderError).slice(0, 160)})` : ""}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, observed generating-stage interval ${secs(runRecord.timing?.generatingStagePollIntervalSeconds ?? runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.processes?.worker ? `; worker ${runRecord.diagnostics.processes.worker.alive ? "alive" : `exited code ${runRecord.diagnostics.processes.worker.exitCode} signal ${runRecord.diagnostics.processes.worker.signal}`} (stdin ${runRecord.diagnostics.processes.worker.stdin})` : ""}${Array.isArray(runRecord.diagnostics?.workersResponse) ? `; /workers: ${runRecord.diagnostics.workersResponse.map((row) => `${row.id}=${row.status}`).join(", ").slice(0, 300)}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
+    for (const run of route.runs ?? []) {
+      if (run.workerObservations) lines.push(`- ${run.label} worker total ${run.workerObservations.workerTotalMs} ms, step-progress interval ${run.workerObservations.progressSampleIntervalMs} ms, worker peak ${run.workerObservations.workerPeakMemoryBytes ?? "unavailable"} bytes`);
+    }
+    if (ROUTES[route.id]?.scailCandidate) {
+      lines.push(`- Candidate witness: ${route.verdictReason ?? route.skipReason ?? route.status}`);
+      continue;
+    }
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
@@ -848,6 +1104,30 @@ async function sideIdentity(label, dir, sha) {
 async function tool(command, args) { try { const { stdout, stderr } = await execFile(command, args, { timeout: 20_000, windowsHide: true }); return { available: true, version: `${stdout}${stderr}`.split(/\r?\n/)[0].slice(0, 200) }; } catch (error) { return { available: false, error: error.message.slice(0, 200) }; } }
 async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: true }); return Number(fs.bavail * fs.bsize); } catch { return null; } }
 
+// Match the worker's hardware identity in video_admission/scail2.rs on the leased device.
+export async function scailHostIdentity(backend, env, run = execFile) {
+  const mlx = backend === "mlx";
+  const [command, args] = mlx ? ["/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string", "kern.osversion"]]
+    : [nvidiaSmiPath(env, "win32"), [`--id=${env.TIER2_AB_PHYSICAL_GPU ?? CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version,memory.total,uuid", "--format=csv,noheader,nounits"]];
+  const { stdout } = await run(command, args, { timeout: 3_000, windowsHide: true });
+  const fields = stdout.trim().split(mlx ? /\r?\n/ : ",").map((s) => s.trim());
+  fact(fields.length === (mlx ? 2 : 4) && fields.every((s) => s && !/[,\r\n]/.test(s))
+    && (mlx || (/^[1-9]\d*$/.test(fields[2]) && Number.isSafeInteger(Number(fields[2])))), "SCAIL device and runtime identity unavailable");
+  const identity = { device: fields[0], runtime: fields[1] };
+  if (mlx) return identity;
+  // The worker matches the CUDA class (model, total memory, driver); the adapter is provenance.
+  identity.deviceTotalMib = Number(fields[2]);
+  const script = fileURLToPath(new URL("./ci/windows_cuda_metadata.py", import.meta.url));
+  const probe = await run("python", ["-I", script, "--wddm-adapter"], { timeout: 10_000, windowsHide: true, env });
+  const packet = JSON.parse(probe.stdout), [adapter] = packet.devices;
+  fact(packet.context_created === false && packet.devices.length === 1 && adapter.ordinal === 0
+    && adapter.uuid === fields[3] && /^GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(adapter.uuid)
+    && /^luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}$/.test(adapter.luid) && adapter.luid !== "luid_0x00000000_0x00000000"
+    && Number.isInteger(adapter.node_mask) && adapter.node_mask > 0 && adapter.node_mask <= 2 ** 31
+    && (adapter.node_mask & (adapter.node_mask - 1)) === 0, "SCAIL logical CUDA 0 and selected physical adapter differ");
+  return { ...identity, captureAdapter: { cuda_uuid: adapter.uuid, luid: adapter.luid, node_mask: adapter.node_mask } };
+}
+
 async function readKreaLinkedSourceBuild(cfg) {
   const binding = await bindKreaLinkedSourceBuild(cfg.baseDir, cfg.headDir, cfg.repairDir, {
     windowsRawRoutingRevision: cfg.backend === "cuda" && !cfg.allocation ? cfg.headSha : undefined,
@@ -869,7 +1149,7 @@ async function preflight(env, cfg, report, signal) {
     if (cfg.backend === "mlx") fact(env.RUNNER_NAME === MLX_RUNNER, `mlx A/B must run on ${MLX_RUNNER} (rw-mage), not ${env.RUNNER_NAME}`);
     else fact(CUDA_RUNNERS.includes(env.RUNNER_NAME), `cuda A/B must run on a real-weights CUDA listener (${CUDA_RUNNERS.join(", ")}), not ${env.RUNNER_NAME}`);
   }
-  if (cfg.backend === "cuda") for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) fact(env[key] === CUDA_PHYSICAL_GPU, `${key}=${CUDA_PHYSICAL_GPU} required (physical GPU1)`);
+  if (cfg.backend === "cuda") for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) fact(env[key] === cfg.physicalGpu, `${key} must match physical GPU${cfg.physicalGpu}`);
   if (cfg.backend === "cuda") fact(env.CUDA_DEVICE_ORDER === "PCI_BUS_ID", "CUDA_DEVICE_ORDER=PCI_BUS_ID required");
   report.base = { ...report.base, ...(await sideIdentity("base", cfg.baseDir, cfg.baseSha)) };
   report.head = { ...report.head, ...(await sideIdentity("head", cfg.headDir, cfg.headSha)) };
@@ -905,15 +1185,20 @@ async function preflight(env, cfg, report, signal) {
   report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, ffprobe: { command: ffprobePath(ffmpeg), ...(await tool(ffprobePath(ffmpeg), ["-version"])) }, git: await tool("git", ["--version"]) };
   if (cfg.backend === "mlx") report.tools.python312 = await tool("python3.12", ["--version"]);
   if (cfg.backend === "cuda") {
-    report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, "nvidia-smi cannot query physical GPU1");
+    report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", cfg.physicalGpu, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, `nvidia-smi cannot query physical GPU${cfg.physicalGpu}`);
     // Every GPU's identity, so one preflight answers which card the lease and the worker use.
     try {
       const smi = nvidiaSmiPath(env);
       const csv = (await execFile(smi, ["--query-gpu=index,uuid,pci.bus_id,name", "--format=csv,noheader"], { timeout: 30_000, windowsHide: true })).stdout;
       const xml = (await execFile(smi, ["-q", "-x"], { timeout: 30_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })).stdout;
       report.gpus = gpuInventory(csv, xml);
-      report.gpuBinding = { leasedPhysicalIndex: CUDA_PHYSICAL_GPU, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES, cudaDeviceOrder: env.CUDA_DEVICE_ORDER, note: "nvidia-smi index is PCI bus order; with CUDA_DEVICE_ORDER=PCI_BUS_ID, CUDA_VISIBLE_DEVICES=1 exposes that same card as the worker's logical CUDA 0", policy: env.TIER2_AB_GPU_POLICY || "strict-idle" };
+      report.gpuBinding = { leasedPhysicalIndex: cfg.physicalGpu, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES, cudaDeviceOrder: env.CUDA_DEVICE_ORDER, note: `CUDA_VISIBLE_DEVICES=${cfg.physicalGpu} exposes the leased PCI_BUS_ID device as worker ordinal 0`, policy: env.TIER2_AB_GPU_POLICY || "strict-idle" };
     } catch (error) { report.gpus = { error: error.message.slice(0, 300) }; }
+    if (cfg.physicalGpu === "0") {
+      const gpu = Array.isArray(report.gpus) && report.gpus.find((row) => row.index === 0);
+      fact(gpu?.uuid === FEATURE_GPU0_UUID && gpu.pciBusId.toUpperCase() === "00000000:21:00.0",
+        "physical index 0 does not identify the authorized GPU0 PCI address and UUID");
+    }
   }
   if (cfg.backend === "mlx") fact(report.tools.python312.available, "python3.12 is required by the shared Metal execution lock");
   await mkdir(cfg.work, { recursive: true });
@@ -925,6 +1210,28 @@ async function preflight(env, cfg, report, signal) {
   const evidence = headEvidence.size ? headEvidence : await readPatternEvidence(cfg.baseDir);
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
+  if (cfg.routes.some((route) => route.scailCandidate)) {
+    const config = (name) => readFile(path.join(cfg.headDir, "config", name));
+    const standalone = cfg.routes.length === 1 && cfg.routes[0].refuse;
+    const authenticate = standalone || cfg.backend === "cuda";
+    const [index, coverage, closures] = await Promise.all([config("scail2-plural-memory.json"),
+      config("scail2-memory-pin-coverage.json").catch((error) => { if (!authenticate && error.code === "ENOENT") return "[]"; throw error; }),
+      config("inference-provider-closures.json")]);
+    let host, packageDigests;
+    if (authenticate) {
+      const approvals = await readFile(path.join(cfg.headDir, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8");
+      packageDigests = scailPackageDigests(index, coverage, approvals);
+      host = await scailHostIdentity(cfg.backend, env);
+    }
+    const evidence = scailFitEvidence(JSON.parse(index), cfg.backend, { compiledPin: report.head.inferencePin,
+      coverage: JSON.parse(coverage), closures: JSON.parse(closures), host: host && { ...host, env } });
+    for (const item of report.routes.filter((r) => ROUTES[r.id].scailCandidate)) item.nativeFitEvidence = evidence;
+    if (standalone) report.routes[0].packagedRefusal = { ...host, ...packageDigests, capBytes: scailPackagedRefusalCapBytes(evidence) };
+  }
+  if (cfg.routes.some((route) => route.wanA14b || route.scailCandidate)) {
+    report.sourceMetadata = "Each fresh API data directory builds its trusted source ledger from the public Hugging Face tree at `https://huggingface.co/api/models/{repo}/tree/{revision}` for the exact selected revision. The worker verifies cached files against the ledger. These metadata requests require HTTPS access and use no credentials.";
+    fact(report.tools.ffmpeg.available && report.tools.ffprobe.available, "the selected product witness requires ffmpeg and ffprobe for decoded output evidence");
+  }
   if (cfg.krea) {
     const inventory = kreaAssetInventory(evidence, cfg.routes);
     const stageReceipt = path.join(cfg.work, "scratch", "krea-stage.json");
@@ -955,6 +1262,67 @@ async function preflight(env, cfg, report, signal) {
   }
 }
 
+// Both CUDA q4 revisions contain q4/.gitattributes. Product admission binds it along with
+// the weights. The catalog walk deliberately excludes dotfiles, so use the CLI's literal
+// filenames for this exact checked-in closure, retaining its normal cache/resume semantics.
+async function literalDownloadArgs(row, hub, evidence, fs) {
+  const segmenter = row.repo === SAM3.repo;
+  fact(segmenter ? row.revision === SAM3.revision && JSON.stringify(row.files) === JSON.stringify(Object.keys(SAM3.files))
+    : row.variant === "q4" && row.files.length === 1 && row.files[0] === "q4/*", "staging requires the exact selected manifest row");
+  const key = `${row.repo}@${row.revision}`;
+  const [base, head] = evidence.map((listing) => row.files.flatMap((selector) => expandSelector(selector, listing.get(key) ?? [])).sort());
+  fact(head.length && JSON.stringify(base) === JSON.stringify(head), `missing or divergent pinned q4 file listings for ${key}`);
+  if (segmenter || row.repo === "SceneWorks/scail2-mlx") {
+    const expected = segmenter ? Object.keys(SAM3.files).sort() : scailMembers;
+    fact(JSON.stringify(head) === JSON.stringify(expected), `incomplete or unrecognized product file listing for ${key}`);
+  }
+  fact(head.every((file) => file.split("/").every((part) => /^[A-Za-z0-9_.-]+$/.test(part) && part !== "." && part !== "..")),
+    `invalid q4 snapshot member in ${key}`);
+  const snapshot = snapshotDir(hub, row.repo, row.revision);
+  const missing = (await Promise.all(row.files.map((selector) => selectorProblems(snapshot, selector, { fs, evidenceFiles: head })))).flat();
+  for (const file of missing) {
+    // A partial or dangling destination is evidence of a damaged cache. Never overwrite it.
+    try { await fs.lstat(path.join(snapshot, ...file.split("/"))); }
+    catch (error) { if (error.code === "ENOENT") continue; throw error; }
+    throw new Error(`refusing to overwrite an existing unusable Wan snapshot member: ${key}/${file}`);
+  }
+  return missing.length ? [["download", row.repo, ...missing, "--revision", row.revision, "--cache-dir", hub]] : [];
+}
+
+// Stage once before either compared binary starts, using the catalog campaign's HF CLI and its
+// manifest-pinned per-selector downloads. HF_HUB_OFFLINE restricts the Hugging Face client.
+// Production admission separately fetches the pinned repository file metadata over HTTPS
+// into each fresh API data directory, using its empty credentials directory.
+export async function stageWanSnapshots(env, cfg, report, signal, runDownload = null, fs = { stat, lstat }) {
+  fact(cfg.routes.length && cfg.routes.every((route) => (route.wanA14b || route.scailCandidate) && route.backend === cfg.backend), "staging requires explicit Wan A14B or SCAIL-2 routes");
+  const { firstAvailableHfCli, hfDownloadArgvs } = await import("./measure-memory-catalog.mjs");
+  const downloadEnv = { ...scrubSecrets(env), HF_ENDPOINT: "https://huggingface.co", HF_HUB_OFFLINE: "0", HF_HUB_DISABLE_IMPLICIT_TOKEN: "1" };
+  const needed = new Map();
+  const evidence = cfg.backend === "cuda" || cfg.routes.some((r) => r.scailCandidate)
+    ? await Promise.all([readPatternEvidence(cfg.baseDir), readPatternEvidence(cfg.headDir)]) : null;
+  for (const route of report.routes) {
+    if (route.status === "ready" && cfg.backend === "mlx" && !ROUTES[route.id].scailCandidate) continue;
+    fact(route.presence?.length && route.rows?.required, `cannot stage ${route.id}: ${route.skipReason}`);
+    for (const row of route.rows.required) {
+      fact(SHA.test(row.revision) && row.files.length > 0, "staging requires pinned files");
+      const hub = route.hub ?? cfg.hubs[0];
+      const commands = cfg.backend === "cuda" || ROUTES[route.id].scailCandidate ? await literalDownloadArgs(row, hub, evidence, fs)
+        : hfDownloadArgvs({ repo: row.repo, revision: row.revision, include: row.files }, hub);
+      for (const args of commands) {
+        needed.set(JSON.stringify(args), args);
+      }
+    }
+  }
+  if (!needed.size) return;
+  const cli = runDownload ? null : await firstAvailableHfCli({ env: downloadEnv });
+  fact(runDownload || cli, "Hugging Face CLI missing for Wan snapshot staging");
+  for (const args of needed.values()) {
+    progress({ phase: "stage_wan_snapshot", repo: args[1], revision: args[args.indexOf("--revision") + 1] });
+    if (runDownload) await runDownload(args);
+    else await execFile(cli, args, { env: downloadEnv, signal, timeout: 60 * 60_000, maxBuffer: 16 * 1024 * 1024 });
+  }
+}
+
 // ---- build --------------------------------------------------------------------------------------
 async function runLogged(command, args, { cwd, env, log }) {
   const handle = await open(log, "w");
@@ -976,6 +1344,9 @@ async function tail(file, bytes = 8000) {
   } catch { return ""; }
   finally { await handle?.close().catch(() => {}); }
 }
+function runSides(cfg) {
+  return cfg.allocation || cfg.routes.every((route) => route.scailCandidate) ? ["head"] : ["base", "head"];
+}
 async function build(env, cfg, report) {
   const scratch = path.join(cfg.work, "scratch"), target = path.join(scratch, "target"), evidence = path.join(cfg.work, "evidence");
   await mkdir(target, { recursive: true }); await mkdir(evidence, { recursive: true });
@@ -985,8 +1356,8 @@ async function build(env, cfg, report) {
   if (linkedSourceBuild) assert.deepEqual(linkedSourceBuild.receipt, report.kreaLinkedSourceBuild);
   // Base first, then head: both share one target, so the second build reuses every unchanged
   // dependency unit. Each binary (plus loose native libraries) is copied out before the next build.
-  const sides = cfg.allocation ? [["head", cfg.headDir, cfg.headSha]] : [["base", cfg.baseDir, cfg.baseSha], ["head", cfg.headDir, cfg.headSha]];
-  for (const [label, dir, sha] of sides) {
+  for (const label of runSides(cfg)) {
+    const [dir, sha] = label === "head" ? [cfg.headDir, cfg.headSha] : [cfg.baseDir, cfg.baseSha];
     const args = ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics", ...(cfg.backend === "cuda" ? ["--features", "backend-candle", "--bin", "sceneworks-rust-api"] : [])];
     const log = path.join(scratch, `build-${label}.jsonl`), started = Date.now();
     // Build scripts of the compared commits run here: they get no credential the runner may hold.
@@ -1098,11 +1469,11 @@ export const SECRET_ENV = /TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY$|^KEY$|API_KEY/
 // media_process.rs resolves ffmpeg from SCENEWORKS_FFMPEG or PATH.
 export const FORWARDED_SCENEWORKS_ENV = Object.freeze(["SCENEWORKS_FFMPEG", "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS"]);
 export function scrubSecrets(env) { return Object.fromEntries(Object.entries(env).filter(([key]) => !SECRET_ENV.test(key))); }
-export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib, allocation = false, pairedKreaHires = false }) {
+export function childEnvironments(env, { backend, physicalGpu = CUDA_PHYSICAL_GPU, state, hub, xet, workerId, metallib, allocation = false, pairedKreaHires = false }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
   if (backend === "cuda") {
-    base = { ...base, SCENEWORKS_GPU_ID: CUDA_PHYSICAL_GPU, SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" };
+    base = { ...base, SCENEWORKS_GPU_ID: physicalGpu, SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true" };
     delete base.SCENEWORKS_MLX_REQUIRED; delete base.SCENEWORKS_MLX_UNSUPPORTED_MODE;
   }
   if (metallib) base.PMETAL_METALLIB_PATH = metallib;
@@ -1125,7 +1496,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Decoded output buffers stay in memory (never serialized) for one numeric difference metric.
 const decodedBuffers = new WeakMap();
 const kreaImportFiles = [path.join("data", "checkpoints"), path.join("config", "manifests", "user.models.jsonc")];
-async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, previousImport, hiresLedger }) {
+async function executeRun({ env, cfg, route, plan, label, side, built, evidenceRoot, secrets, signal, previousImport, hiresLedger, effectiveCapBytes }) {
   const sideCfg = side === "base" ? { dir: cfg.baseDir, sha: cfg.baseSha } : { dir: cfg.headDir, sha: cfg.headSha };
   const slug = `${route.id}-${label.replace("#", "")}`;
   const runRoot = path.join(cfg.work, "scratch", "runs", slug), evidence = path.join(evidenceRoot, "runs", route.id, label.replace("#", ""));
@@ -1141,7 +1512,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const persist = () => writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets)).catch(() => {});
   const phase = async (name, fields = {}) => { record.phase = name; progress({ route: route.id, run: label, phase: name, ...fields }); await persist(); };
   const envs = childEnvironments(env, {
-    backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path,
+    backend: cfg.backend, physicalGpu: cfg.physicalGpu, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path,
     allocation: cfg.allocation, pairedKreaHires: Boolean(hiresLedger),
   });
   const children = [], handles = [], controller = new AbortController();
@@ -1174,7 +1545,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
           .map(({ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }) => ({ engine, strategy, scope_configured, stage_residency, stream_transformer_blocks, window_component }));
       }
       const redacted = redactSensitiveText(text, secrets);
-      if (record.status !== "completed") {
+      if (record.status !== "completed" && record.status !== "refused") {
         const diagnostics = (record.diagnostics ??= {});
         const key = `${name}LogTail`;
         if (redacted || !Object.hasOwn(diagnostics, key)) diagnostics[key] = lastLines(redacted, 50);
@@ -1196,7 +1567,19 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     apiUrl = url;
     endpoint = ownedApiController({ url, state, api, controller });
     record.identity.health = await wait(async () => { try { return await endpoint.verify(); } catch (error) { if (controller.signal.aborted) throw error; return false; } }, 180, "API readiness");
-    const worker = await endpoint.startWorker(() => launch("worker", built[side].binary, [], { ...envs.worker(url), SCENEWORKS_PARENT_PID: String(sentinel.pid) }));
+    const scailEnv = {};
+    if (route.scailCandidate) {
+      scailEnv.SCENEWORKS_LOG_FORMAT = "json";
+      scailEnv.RUST_LOG = "info";
+      scailEnv.SCENEWORKS_SAM3_WEIGHTS = snapshotDir(plan.hub, SAM3.repo, SAM3.revision);
+      if (route.refuse) {
+        record.refusalBudget = scailRefusalBudget(cfg.backend, effectiveCapBytes);
+        const capGiB = record.refusalBudget.rawCapBytes / GIB;
+        scailEnv[cfg.backend === "mlx" ? "SCENEWORKS_MLX_MEMORY_CAP_GB" : "SCENEWORKS_CUDA_VRAM_CAP_GB"] = String(capGiB);
+        record.capGiB = capGiB;
+      }
+    }
+    const worker = await endpoint.startWorker(() => launch("worker", built[side].binary, [], { ...envs.worker(url), ...scailEnv, SCENEWORKS_PARENT_PID: String(sentinel.pid) }));
     // Registration fails fast, with a cause, when the worker exits or reports offline.
     let offlineSince = null;
     const registration = await wait(async () => {
@@ -1205,7 +1588,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       if (row?.status === "offline") { offlineSince ??= Date.now(); if (Date.now() - offlineSince > 15_000) { record.failureClass = "worker_registration"; throw new Error("owned worker registered but reports offline (it requested its own shutdown)"); } } else offlineSince = null;
       return row?.status === "idle" && row;
     }, 300, "owned worker registration").catch((error) => { record.failureClass ??= "worker_registration"; throw error; });
-    const expectedGpu = cfg.backend === "mlx" ? "mlx" : CUDA_PHYSICAL_GPU;
+    const expectedGpu = cfg.backend === "mlx" ? "mlx" : cfg.physicalGpu;
     fact(registration.gpuId === expectedGpu, `owned worker registered gpuId ${registration.gpuId}, expected ${expectedGpu}`);
     record.identity.worker = { id: registration.id, gpuId: registration.gpuId, gpuName: registration.gpuName, capabilities: registration.capabilities };
     record.timing.startupSeconds = (Date.now() - runStarted) / 1000;
@@ -1214,12 +1597,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const projectPath = await realpath(project.path), stateReal = await realpath(state);
     const relativeProject = path.relative(stateReal, projectPath);
     fact(relativeProject && !relativeProject.startsWith("..") && !path.isAbsolute(relativeProject), "project escaped the run's own state");
-    let referenceAudioAssetId;
-    if (route.referenceAudio) {
-      const form = new FormData(); form.append("file", new Blob([referenceWav()], { type: "audio/wav" }), "reference.wav");
-      const upload = await endpoint.exchange("POST", `/api/v1/projects/${project.id}/assets`, form, { multipart: true });
-      fact(upload.status < 300 && upload.body?.id, `reference audio upload refused (${upload.status}): ${JSON.stringify(upload.body).slice(0, 600)}`);
-      referenceAudioAssetId = upload.body.id;
+    const reference = route.referenceImage || route.referenceAudio
+      ? await uploadReference(route, endpoint, project.id, evidence) : null;
+    if (route.referenceImage) record.sourceImage = reference;
+    if (route.scailCandidate) {
+      const media = await scailMedia(route, evidence, env.SCENEWORKS_FFMPEG || "ffmpeg");
+      record.sources = await uploadScailMedia(route, endpoint, project.id, media, decodePng);
     }
     const importOptions = { endpoint, hub: plan.hub, wait, trackJob: (job) => { accepted = job; }, ownsWorker: (id) => id === workerId || id === utilityWorkerId(workerId) || id?.startsWith(`${utilityWorkerId(workerId)}-`) };
     if (route.proof === "raw") {
@@ -1235,32 +1618,42 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       record.import = await importLinkedKrea(importOptions);
       accepted = null;
     }
-    const body = requestBody(route, project.id, referenceAudioAssetId);
+    const body = requestBody(route, project.id, route.scailCandidate ? record.sources : reference?.id);
     if (route.proof) {
       const refused = await endpoint.exchange("POST", route.endpoint, { ...body, advanced: { ...body.advanced, enhancePrompt: true } });
       assertKreaEnhancementRefused(refused);
       record.enhancementRefusal = { status: refused.status, detail: refused.body.detail };
       events = await openKreaEvents(endpoint, url, controller.signal);
     }
-    record.requestSha256 = sha256(JSON.stringify({ ...body, projectId: "<project>", ...(route.referenceAudio ? { referenceAudioAssetId: "<reference-audio>" } : {}) }));
+    record.requestSha256 = normalizedRequestHash(route, body, reference?.sha256);
+    if (record.sources) record.requestWithMediaSha256 = sha256(JSON.stringify({
+      template: record.requestSha256, references: record.sources.references.map((s) => s.sha256), clip: record.sources.clip.sha256 }));
     fact(record.requestSha256 === plan.request.sha256, "request body diverged from the route template");
     // Memory baselines and samplers start before the POST and stop at completion.
     const memory = record.memory = { samples: 0, errors: 0, peakBytes: null };
     sampling = true;
     if (cfg.backend === "mlx") {
-      const cap = Math.min(100 * GIB, Math.floor(os.totalmem() * 0.8)); record.watchdog.capBytes = cap;
+      const cap = Math.min((route.scailCandidate ? 96 : 100) * GIB, Math.floor(os.totalmem() * 0.8)); record.watchdog.capBytes = cap;
       memory.method = "macOS top MEM (phys_footprint, includes Metal allocations) + ps RSS, summed over the worker process tree, sampled about every 2 s";
       samplers.push((async () => { while (sampling) { try { const s = await sampleMacTree(worker.pid); memory.samples++; memory.peakBytes = Math.max(memory.peakBytes ?? 0, s.footprintBytes); memory.peakRssBytes = Math.max(memory.peakRssBytes ?? 0, s.rssBytes); if (Math.max(s.footprintBytes, s.rssBytes) > cap) watchdog(`worker footprint ${gib(s.footprintBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(1000); } })());
     } else {
-      const cap = Math.floor(os.totalmem() * 0.75); record.watchdog.capBytes = cap;
+      const cap = Math.min(route.scailCandidate ? 64 * GIB : Infinity, Math.floor(os.totalmem() * 0.75)); record.watchdog.capBytes = cap;
+      if (route.scailCandidate) {
+        record.memory = memory;
+        record.watchdog.gpuCapBytes = SCAIL_CUDA_CAP;
+        record.watchdog.gpuFreeReserveBytes = SCAIL_CUDA_RESERVE;
+      }
       const smi = nvidiaSmiPath(env);
+      const readCard = () => sampleGpu(smi, cfg.physicalGpu);
+      const readGpu = route.scailCandidate ? scailCudaSampler(readCard, worker, record, controller, cfg.physicalGpu) : readCard;
       const baseline = [];
       for (let i = 0; i < 5; i++) {
-        const sample = await sampleGpu(smi);
+        const sample = await readGpu(i === 4);
         baseline.push(sample.usedBytes);
         memory.gpuUuid ??= sample.uuid;
         fact(memory.gpuUuid === sample.uuid, "physical GPU changed during pre-request admission sampling");
-        await delay(200);
+        if (route.scailCandidate) memory.preRequestGpuFreeBytes = sample.freeBytes;
+        if (i < 4 || !route.scailCandidate) await delay(200);
       }
       if (cfg.perf || cfg.allocation) {
         const uuid = memory.gpuUuid;
@@ -1283,10 +1676,19 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
           }
         })());
       }
-      memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
+      memory.method = `nvidia-smi memory.used on physical GPU${cfg.physicalGpu} sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s`;
       memory.gpuBaselineBytes = Math.max(...baseline);
-      if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
-      samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuIdentityError ??= "physical GPU changed while sampling"; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
+      if (["shared-display", "shared-compute"].includes(env.TIER2_AB_GPU_POLICY)) {
+        memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`;
+        record.timing.sharedGpu = env.TIER2_AB_GPU_POLICY === "shared-display"
+          ? "times taken on the host's display GPU, alongside display work" : "times taken on the shared compute GPU";
+      }
+      samplers.push((async () => { while (sampling) { try { const s = await readGpu(); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); if ((cfg.perf || cfg.allocation) && memory.gpuUuid !== s.uuid) memory.ownedGpuIdentityError ??= "physical GPU changed while sampling"; else memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true;
+        if (route.scailCandidate) memory.minGpuFreeBytes = Math.min(memory.minGpuFreeBytes ?? s.freeBytes, s.freeBytes);
+      } catch {
+        memory.errors++;
+        if (record.watchdog.gpuStop) return;
+      } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
     let posted;
@@ -1312,6 +1714,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.acceptedStatus = response.status;
     fact(response.status < 300 && response.body?.id, `API refused the request (${response.status}): ${JSON.stringify(response.body).slice(0, 1500)}`);
     accepted = response.body; record.jobId = accepted.id;
+    if (route.scailCandidate) {
+      const binding = scailBinding(route, record.sources);
+      fact(JSON.stringify(accepted.payload?.referenceAssetIds) === JSON.stringify(binding.referenceAssetIds)
+        && accepted.payload?.sourceClipAssetId === binding.sourceClipAssetId, "queued SCAIL assets differ from the uploaded order");
+      record.segmentationSource = SAM3;
+    }
     const roots = { hub: plan.hub, "hf-home": path.dirname(plan.hub), state: await realpath(state), checkout: sideCfg.dir, work: cfg.work, home: os.homedir() };
     // Recorded at submission so a run that never completes still carries its payload identity.
     record.identity.payload = redactPaths(identitySubset(accepted.payload ?? {}), roots);
@@ -1330,6 +1738,15 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         else await phase(`stage_${current.stage}`, { side, job: accepted.id, status: current.status, at_s: ((Date.now() - posted) / 1000).toFixed(1) });
       }
       const decision = jobProgressDecision({ job: current, postedMs: posted, claimedAtMs, nowMs: Date.now(), claimMinutes, timeoutMinutes: route.timeoutMinutes });
+      if (route.refuse && current.status === "failed" && current.workerId === workerId) {
+        record.fit = scailFitEvents(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route, current.id, false, record.sources, plan.nativeFitEvidence);
+        verifyScailRefusal(record.fit, record.refusalBudget.effectiveCapBytes, current.error);
+        fact(!current.result?.assets?.length, "failed SCAIL job returned an output");
+        const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
+        const inputs = [record.sources.clip.id, ...record.sources.references.map((ref) => ref.id)];
+        fact(Array.isArray(library) && JSON.stringify(library.map((asset) => asset.id).sort()) === JSON.stringify(inputs.sort()), "failed SCAIL job published an output");
+        record.refusal = current.error; record.status = "refused"; return record;
+      }
       if (decision.state === "stop") { record.stopReason = decision.reason; throw new Error(decision.reason); }
       if (decision.state === "completed") { job = current; break; }
       await delay(500);
@@ -1360,7 +1777,9 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.timing.claimSeconds ??= null;
     const loadStart = at("loading_model") ?? record.timing.claimSeconds, generate = at("generating") ?? at("rendering"), finish = at("saving") ?? at("muxing") ?? record.timing.enqueueToCompleteSeconds;
     record.timing.loadSeconds = Number.isFinite(loadStart) && Number.isFinite(generate) ? generate - loadStart : null;
-    record.timing.denoiseSeconds = Number.isFinite(generate) ? finish - generate : null;
+    const generatingInterval = Number.isFinite(generate) ? finish - generate : null;
+    if (route.wanA14b || route.scailCandidate) record.timing.generatingStagePollIntervalSeconds = generatingInterval;
+    else record.timing.denoiseSeconds = generatingInterval;
     record.timing.splitSource = "first poll (500 ms) observing job stage loading_model / generating / saving";
     // Terminal status can precede API persistence of the worker's asset writes.
     const persisted = await wait(async () => { const current = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}`); return Array.isArray(current.result?.assets) && current.result.assets.length > 0 && current.result.assetWrites === undefined && current; }, 120, "API asset persistence");
@@ -1405,7 +1824,28 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const output = path.join(evidence, `output${path.extname(relative)}`); await writeFile(output, saved);
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
     record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
-    decodedBuffers.set(record, content.buffer);
+    if (route.wanA14b || route.scailCandidate) {
+      const receipt = await endpoint.call("GET", `/api/v1/jobs/${job.id}/execution-receipt`);
+      if (route.wanA14b) record.identity.execution = wanExecutionFacts(route, receipt, job.id, assets[0].id);
+      const selected = await readWanClaim(envs.api.SCENEWORKS_JOBS_DB_PATH, job.id, workerId);
+      record.identity.claimedSource = wanClaimSource(route, plan, selected);
+      const library = await endpoint.call("GET", `/api/v1/projects/${project.id}/assets`);
+      const asset = library.find((item) => item.id === assets[0].id);
+      const recipe = asset?.generationSet?.recipe ?? asset?.recipe ?? assets[0].recipe;
+      if (route.wanA14b) verifyWanRecipe(route, recipe, reference?.id, record.identity.claimedSource.repo);
+      const metrics = await wait(async () => {
+        const result = await endpoint.call("GET", `/api/v1/jobs/${job.id}/metrics`);
+        return result?.model && result?.totalMs && result;
+      }, 15, "worker generation metrics");
+      if (route.scailCandidate) {
+        fact(!route.refuse, "capped insufficient SCAIL request unexpectedly rendered");
+        record.scailOutput = verifyScailOutput(route, content, receipt, job.id, assets[0].id, recipe, record.sources, metrics);
+        record.fit = scailFitEvents(await tail(path.join(logs, "worker.log"), 2 * 1024 * 1024), route, job.id, true, record.sources, plan.nativeFitEvidence);
+      } else record.workerObservations = wanObservations(route, metrics, content);
+      fact(memory.samples > 0 && memory.peakBytes > 0, "external peak memory observation missing");
+      if (route.scailCandidate && cfg.backend === "cuda") fact(memory.hostPeakWorkingSetBytes > 0, "Windows worker host peak observation missing");
+    }
+    if (!route.scailCandidate) decodedBuffers.set(record, content.buffer);
     record.identity.payload = redactPaths(identitySubset(job.payload), roots);
     record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
     fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
@@ -1452,7 +1892,12 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       await events?.close().catch(() => {});
       await dedicatedMemory?.close();
       await Promise.all(samplers);
-      if (record.status !== "completed" && apiUrl) {
+      // A final in-flight physical read can finish after a typed refusal.
+      if (record.watchdog.gpuStop) {
+        record.status = "error";
+        record.error = `watchdog: ${record.watchdog.tripped}`;
+      }
+      if (record.status !== "completed" && record.status !== "refused" && apiUrl) {
         // The owned endpoint gate refuses requests once the watchdog has aborted.
         const direct = async (route) => {
           try {
@@ -1469,10 +1914,10 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
         const diagnosedJob = TERMINAL_JOB_STATUSES.has(originalJob?.status) ? originalJob : jobDiagnostics(lastJob) ?? originalJob;
         record.diagnostics = { ...record.diagnostics, processes: ownedProcesses(), workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: diagnosedJob, ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
       }
-      if (accepted?.id && record.status !== "completed" && apiUrl && !TERMINAL_JOB_STATUSES.has(record.diagnostics?.lastJob?.status ?? lastJob?.status)) {
+      if (accepted?.id && record.status !== "completed" && record.status !== "refused" && apiUrl && !TERMINAL_JOB_STATUSES.has(record.diagnostics?.lastJob?.status ?? lastJob?.status)) {
         record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
         // Give the worker a bounded chance to leave its owner drive before the graceful shutdown.
-        for (let i = 0; i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
+        for (let i = 0; !record.watchdog.gpuStop && i < 60; i++) { const status = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}`, { signal: AbortSignal.timeout(5_000) }).then((response) => response.json()).then((value) => value.status, () => null); if (!["queued", "running"].includes(status)) break; await delay(1000); }
       }
     } finally {
       record.cleanup = await teardown(children);
@@ -1494,7 +1939,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     }
     await retainServiceLogs();
     record.finishedAt = new Date().toISOString();
-    await phase(record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
+    await phase(record.status === "refused" ? "fit_refused" : record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
   }
   return record;
 }
@@ -1539,7 +1984,7 @@ async function runComparison(env, cfg, report, signal) {
   fact(Boolean(recorded.perf) === cfg.perf && Boolean(recorded.allocation) === cfg.allocation, "build.json belongs to a different instrumentation mode");
   assert.deepEqual(recorded.kreaLinkedSourceBuild, report.kreaLinkedSourceBuild, "build used a different Krea linked-source repair");
   const built = recorded.built;
-  for (const side of cfg.allocation ? ["head"] : ["base", "head"]) {
+  for (const side of runSides(cfg)) {
     assert.deepEqual(built[side].kreaAppleRawProjector, report[side].kreaAppleRawProjector, "build used a different Apple Raw projector repair");
     if (cfg.perf || cfg.allocation || cfg.nativeProgress) assert.deepEqual(built[side].samplerOverlay, report[side].samplerOverlay, "build used a different Krea sampler overlay");
     fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`);
@@ -1547,21 +1992,36 @@ async function runComparison(env, cfg, report, signal) {
   }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
   for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
-  let firstRoute = true;
+  let firstRoute = true, scailCapBytes;
+  const verifiedSegmenters = new Set();
   for (const route of report.routes.filter((item) => item.status === "ready")) {
     if (route.status !== "ready") continue;
     const definition = cfg.routes.find(({ id }) => id === route.id);
     const repos = [...route.rows.required, ...route.rows.optional];
+    if (definition.scailCandidate && !verifiedSegmenters.has(route.hub)) {
+      await verifySam3(snapshotDir(route.hub, SAM3.repo, SAM3.revision));
+      verifiedSegmenters.add(route.hub);
+    }
     const before = await hubFingerprint(route.hub, repos);
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
     const previousImport = {};
     const hiresLedger = definition.proof === "hires" && !cfg.allocation ? { staging: report.staging } : null;
+    const effectiveCapBytes = route.packagedRefusal?.capBytes ?? scailCapBytes;
     const run = async (label) => {
       const side = label.startsWith("base") ? "base" : "head";
       const runBefore = await hubFingerprint(route.hub, repos);
-      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side, built, evidenceRoot: evidence, secrets, signal, previousImport: previousImport[side], hiresLedger });
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side, built, evidenceRoot: evidence, secrets, signal, previousImport: previousImport[side], hiresLedger, effectiveCapBytes });
+      const base = route.runs[0];
+      if (definition.wanA14b && record.status === "completed" && base?.status === "completed") {
+        if (record.identity.claimedSource.boundMembersSha256 !== base.identity.claimedSource.boundMembersSha256) {
+          record.error = "Wan bound source file closure differs from base#1";
+        } else if (record.identity.execution.schedule.sha256 !== base.identity.execution.schedule.sha256) {
+          record.error = "Wan executed numerical schedule differs from base#1";
+        }
+        if (record.error) record.status = "error";
+      }
       if (cfg.perf && definition.proof === "hires" && record.status === "completed" && !previousImport[side]) {
         const slug = `${definition.id}-${label.replace("#", "")}`;
         previousImport[side] = { state: path.join(scratch, "runs", slug, "state"), receipt: record.import };
@@ -1585,53 +2045,64 @@ async function runComparison(env, cfg, report, signal) {
       await writeReport(cfg, report);
       break;
     }
-    const base1 = await run("base#1");
-    // A worker that cannot register on the very first run will not register on the next five
-    // either (same host, same launch); stop the whole comparison with that verdict.
-    if (base1.failureClass === "worker_registration" && firstRoute) {
-      route.status = "ran"; route.verdict = "error"; route.verdictReason = `base#1 worker registration failed: ${base1.error}`;
-      for (const other of report.routes.filter((item) => item.status === "ready")) { other.status = "not_run"; other.skipReason = "stopped: the owned worker could not register on base#1 of the first route"; }
-      report.fatal = `owned worker registration failed on base#1 of the first route (${base1.error}); remaining runs not attempted`;
-      progress({ route: route.id, phase: "verdict", verdict: "error", reason: report.fatal });
-      await writeReport(cfg, report);
-      break;
-    }
-    firstRoute = false;
-    const head = signal.aborted ? null : await run("head");
-    let decision = verdictFor({ base1, head });
-    let base2 = null;
-    if (decision.needBase2 && !cfg.perf && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
-    if (decision.verdict === null) decision = { verdict: "error", reason: cfg.perf ? "instrumented priming outputs differed" : "interrupted before base#2" };
-    route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
-    route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
-    if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
-    if (definition.proof && base1.status === "completed" && head?.status === "completed") {
-      if (cfg.backend === "cuda" && (!base1.memory.gpuUuid || base1.memory.gpuUuid !== head.memory.gpuUuid)) {
-        route.verdict = "error";
-        route.verdictReason = "the two CUDA arms must report the same admitted physical GPU UUID";
+    if (definition.scailCandidate) {
+      const head = await run("head");
+      const ok = head.status === (definition.refuse ? "refused" : "completed");
+      route.status = "ran"; route.verdict = ok ? "verified" : "error";
+      route.verdictReason = ok ? (definition.refuse ? "observed insufficient accelerator budget" : "exported plural character animation") : head.error;
+      if (ok && !definition.refuse && definition.references === 6) {
+        scailCapBytes = scailRefusalCapBytes(head.fit, route.nativeFitEvidence);
       }
-      route.comparison.productOutputHashesMatch = contentOf(base1) === contentOf(head);
-      if (!route.comparison.productOutputHashesMatch) route.comparison.productPixelDifference = numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head));
-      route.comparison.observedPerformance = { base: base1.performance, head: head.performance, comparisonScope: "single paired observations on the same device; no performance claim" };
-    }
-    if (decision.verdict === "head_differs" && !definition.proof) Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
-    if (cfg.perf) {
-      const pairs = [];
-      route.performancePairs = pairs;
-      if (base1.performance?.eligibility === "valid" && head?.performance?.eligibility === "valid" && route.verdict === "equal") {
-        for (const [index, order] of KREA_PERF_ORDER.entries()) {
-          const pair = { order };
-          pairs.push(pair);
-          for (const side of order) {
-            if (signal.aborted) break;
-            pair[side] = await run(`${side}-pair-${index + 1}`);
-            if (pair[side].performance?.eligibility !== "valid") break;
-          }
-          if (order.some((side) => pair[side]?.performance?.eligibility !== "valid")) break;
+      if (!ok) report.fatal = `${route.id}: ${head.error ?? head.status}`;
+    } else {
+      const base1 = await run("base#1");
+      // A worker that cannot register on the very first run will not register on the next five
+      // either (same host, same launch); stop the whole comparison with that verdict.
+      if (base1.failureClass === "worker_registration" && firstRoute) {
+        route.status = "ran"; route.verdict = "error"; route.verdictReason = `base#1 worker registration failed: ${base1.error}`;
+        for (const other of report.routes.filter((item) => item.status === "ready")) { other.status = "not_run"; other.skipReason = "stopped: the owned worker could not register on base#1 of the first route"; }
+        report.fatal = `owned worker registration failed on base#1 of the first route (${base1.error}); remaining runs not attempted`;
+        progress({ route: route.id, phase: "verdict", verdict: "error", reason: report.fatal });
+        await writeReport(cfg, report);
+        break;
+      }
+      firstRoute = false;
+      const head = signal.aborted ? null : await run("head");
+      let decision = verdictFor({ base1, head });
+      let base2 = null;
+      if (decision.needBase2 && !cfg.perf && !signal.aborted) { base2 = await run("base#2"); decision = verdictFor({ base1, head, base2 }); }
+      if (decision.verdict === null) decision = { verdict: "error", reason: cfg.perf ? "instrumented priming outputs differed" : "interrupted before base#2" };
+      route.status = "ran"; route.verdict = decision.verdict; route.verdictReason = decision.reason;
+      route.comparison = { payloadIdentityDiff: diffObjects(base1.identity?.payload ?? {}, head?.identity?.payload ?? {}), resultIdentityDiff: diffObjects(base1.identity?.result ?? {}, head?.identity?.result ?? {}) };
+      if (decision.verdict === "nondeterministic_on_runner") Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs base#2", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(base2)) });
+      if (definition.proof && base1.status === "completed" && head?.status === "completed") {
+        if (cfg.backend === "cuda" && (!base1.memory.gpuUuid || base1.memory.gpuUuid !== head.memory.gpuUuid)) {
+          route.verdict = "error";
+          route.verdictReason = "the two CUDA arms must report the same admitted physical GPU UUID";
         }
-        route.performanceComparison = compareKreaPerformance(pairs, cfg.backend);
-      } else {
-        route.performanceComparison = { status: "inconclusive", reason: "priming arm did not prove its product route and attributed measurements" };
+        route.comparison.productOutputHashesMatch = contentOf(base1) === contentOf(head);
+        if (!route.comparison.productOutputHashesMatch) route.comparison.productPixelDifference = numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head));
+        route.comparison.observedPerformance = { base: base1.performance, head: head.performance, comparisonScope: "single paired observations on the same device; no performance claim" };
+      }
+      if (decision.verdict === "head_differs" && !definition.proof) Object.assign(route.comparison, { numericDifferenceOf: "base#1 vs head", numericDifference: numericDifference(decodedBuffers.get(base1), decodedBuffers.get(head)) });
+      if (cfg.perf) {
+        const pairs = [];
+        route.performancePairs = pairs;
+        if (base1.performance?.eligibility === "valid" && head?.performance?.eligibility === "valid" && route.verdict === "equal") {
+          for (const [index, order] of KREA_PERF_ORDER.entries()) {
+            const pair = { order };
+            pairs.push(pair);
+            for (const side of order) {
+              if (signal.aborted) break;
+              pair[side] = await run(`${side}-pair-${index + 1}`);
+              if (pair[side].performance?.eligibility !== "valid") break;
+            }
+            if (order.some((side) => pair[side]?.performance?.eligibility !== "valid")) break;
+          }
+          route.performanceComparison = compareKreaPerformance(pairs, cfg.backend);
+        } else {
+          route.performanceComparison = { status: "inconclusive", reason: "priming arm did not prove its product route and attributed measurements" };
+        }
       }
     }
     const after = await hubFingerprint(route.hub, repos);
@@ -1639,9 +2110,9 @@ async function runComparison(env, cfg, report, signal) {
     // change under another runner job, so it is recorded but never fails this one.
     route.hubMutation = { changed: JSON.stringify(before.repos) !== JSON.stringify(after.repos), rootChanged: JSON.stringify([before.root, before.hfHome]) !== JSON.stringify([after.root, after.hfHome]), diff: diffObjects(before, after, HUB_MUTATION_LISTING_LIMIT), method: "readdir/stat of the hub root, its parent, and each route repository's dir/refs/snapshots/blobs (metadata only)" };
     progress({ route: route.id, phase: "verdict", verdict: route.verdict, reason: route.verdictReason });
-    if (decision.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
+    if (route.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
     await writeReport(cfg, report);
-    if (signal.aborted) break;
+    if (signal.aborted || report.fatal) break;
   }
 }
 
@@ -1692,16 +2163,17 @@ export function requireKreaCudaRunLease(cfg, mode, env) {
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
-  const modes = { "--stage-krea": "stage", "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
-  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-krea, --build-only, --run, --cleanup is required");
+  const modes = { "--stage-krea": "stage", "--stage-wan": "stage-wan", "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
+  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --stage-krea, --stage-wan, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
   await assertManagedKreaStorage(env, cfg);
   if (mode === "cleanup") return cleanup(env, cfg);
   requireKreaCudaRunLease(cfg, mode, env);
   if (mode === "stage") fact(cfg.krea, "--stage-krea requires the explicit Krea suite");
+  if (mode === "stage-wan") fact(!cfg.krea, "--stage-wan does not apply to the Krea suite");
   progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
-  const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
+  const report = { schemaVersion: 1, kind: cfg.krea ? KREA_SUITE : "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : `physical GPU${cfg.physicalGpu} nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM`, routes: [] };
   if (cfg.allocation) report.allocationProtocol = `one cold candidate Candle run at 1120 to 2240, private 64 GiB pool, ${KREA_ALLOCATION_MINUTES}-minute aggregate execution cap`;
   if (cfg.perf) report.performanceProtocol = "cold one-job workers; one priming arm per side and route, then six fixed interleaved AB/BA pairs; 210-minute aggregate execution cap; no allowance beyond 1.02";
   const controller = new AbortController();
@@ -1711,6 +2183,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   process.once("SIGTERM", interrupt); process.once("SIGINT", interrupt);
   try {
     await preflight(env, cfg, report, controller.signal);
+    if (mode === "stage-wan") {
+      await stageWanSnapshots(env, cfg, report, controller.signal);
+      await preflight(env, cfg, report, controller.signal);
+    }
+    for (const route of report.routes.filter((item) => (ROUTES[item.id]?.wanA14b || ROUTES[item.id]?.scailCandidate))) {
+      fact(route.status === "ready", `${route.id} preflight failed: ${route.skipReason}`);
+    }
     if (mode === "build") await build(env, cfg, report);
     if (mode === "run") await runComparison(env, cfg, report, controller.signal);
     if (controller.signal.aborted) throw controller.signal.reason;
@@ -1722,7 +2201,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     process.removeListener("SIGTERM", interrupt); process.removeListener("SIGINT", interrupt);
     report.finishedAt = new Date().toISOString();
     report.summary = summarize(report.routes);
-    report.exitCode = mode === "build" && !cfg.krea ? (report.fatal ? 1 : 0) : exitCodeFor(report);
+    report.exitCode = mode === "stage-wan" || (mode === "build" && !cfg.krea) ? (report.fatal ? 1 : 0) : exitCodeFor(report);
     await writeReport(cfg, report).catch((error) => { process.stderr.write(`report write failed: ${error.message}\n`); report.exitCode = 1; });
   }
   process.stdout.write(renderMarkdown(report));

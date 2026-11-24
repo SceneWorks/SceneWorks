@@ -797,9 +797,13 @@ pub(crate) async fn query_mlx_utilization() -> Option<WorkerUtilizationSnapshot>
     // per-probe timeouts (sysctl 2s + vm_stat 2s + ioreg 3s) could stack to ~7s of latency on a hung
     // machine and push a heartbeat past the sweep budget; `join!` bounds the wait to the slowest
     // single probe (~3s) instead (sc-8928).
-    let (total_mb, used_mb, gpu_load_percent) =
-        tokio::join!(sysctl_memsize_mb(), vm_stat_used_mb(), ioreg_gpu_load(),);
-    mlx_utilization_from(total_mb, used_mb, gpu_load_percent)
+    let (total_mb, used_bytes, gpu_load_percent) =
+        tokio::join!(sysctl_memsize_mb(), vm_stat_used_bytes(), ioreg_gpu_load(),);
+    mlx_utilization_from(
+        total_mb,
+        used_bytes.map(|bytes| bytes >> 20),
+        gpu_load_percent,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -970,15 +974,22 @@ async fn ioreg_gpu_load() -> Option<f64> {
         .map(|value| *value as f64)
 }
 
-/// System-wide used memory (MB) from `vm_stat`, i.e. Activity Monitor's
+/// System-wide used memory (bytes) from `vm_stat`, i.e. Activity Monitor's
 /// "Memory Used" = App Memory + Wired + Compressed. Returns `None` when the
 /// page size or the required counters can't be read.
 #[cfg(target_os = "macos")]
-async fn vm_stat_used_mb() -> Option<u64> {
+async fn vm_stat_used_bytes() -> Option<u64> {
     let output = run_bounded_command(Command::new("vm_stat"), Duration::from_secs(2))
         .await
         .ok()?;
-    system_used_mb_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
+    system_used_bytes_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Physical capacity still available for a new request, including reclaimable file cache.
+#[cfg(target_os = "macos")]
+pub(crate) async fn available_unified_memory_bytes() -> Option<u64> {
+    let used = vm_stat_used_bytes().await?;
+    total_unified_memory_bytes()?.checked_sub(used)
 }
 
 /// The page size (bytes) from the `vm_stat` header `(page size of N bytes)`.
@@ -1009,12 +1020,12 @@ fn parse_vm_stat_counts(output: &str) -> BTreeMap<String, u64> {
     counts
 }
 
-/// Compute Activity Monitor's "Memory Used" (App + Wired + Compressed) in MB from
+/// Compute Activity Monitor's "Memory Used" (App + Wired + Compressed) in bytes from
 /// raw `vm_stat` output. App Memory = anonymous pages minus the purgeable (cache)
 /// pages that can be reclaimed. `None` if the page size or any required counter is
 /// absent.
 #[cfg(target_os = "macos")]
-fn system_used_mb_from_vm_stat(output: &str) -> Option<u64> {
+fn system_used_bytes_from_vm_stat(output: &str) -> Option<u64> {
     let page_size = parse_vm_stat_page_size(output)?;
     let counts = parse_vm_stat_counts(output);
     let anonymous = counts.get("Anonymous pages").copied()?;
@@ -1022,8 +1033,10 @@ fn system_used_mb_from_vm_stat(output: &str) -> Option<u64> {
     let compressed = counts.get("Pages occupied by compressor").copied()?;
     let purgeable = counts.get("Pages purgeable").copied().unwrap_or(0);
     let app_pages = anonymous.saturating_sub(purgeable);
-    let used_pages = app_pages + wired + compressed;
-    Some(used_pages.saturating_mul(page_size) / (1024 * 1024))
+    app_pages
+        .checked_add(wired)?
+        .checked_add(compressed)?
+        .checked_mul(page_size)
 }
 
 /// Build the snapshot from the unified-memory total, system-wide used memory, and
@@ -1401,18 +1414,21 @@ Pages occupied by compressor:                2483449.
 
     #[test]
     fn vm_stat_used_is_app_plus_wired_plus_compressed() {
-        let used = system_used_mb_from_vm_stat(VM_STAT_SAMPLE).expect("used computed");
+        let used = system_used_bytes_from_vm_stat(VM_STAT_SAMPLE).expect("used computed");
         // App (anonymous - purgeable) + wired + compressed, in 16 KB pages.
-        let expected = (3_033_035u64 - 18_353 + 1_655_232 + 2_483_449) * 16_384 / (1024 * 1024);
+        let expected = (3_033_035u64 - 18_353 + 1_655_232 + 2_483_449) * 16_384;
         assert_eq!(used, expected);
         // ~109 GB on this sample — system-wide, not the ~few-GB GPU-resident figure.
-        assert!(used > 100_000, "expected system-wide used, got {used} MB");
+        assert!(
+            used > 100_000 << 20,
+            "expected system-wide used, got {used} bytes"
+        );
     }
 
     #[test]
     fn vm_stat_used_is_none_without_required_counters() {
-        assert!(system_used_mb_from_vm_stat("Pages free: 10.\n").is_none());
-        assert!(system_used_mb_from_vm_stat("garbage").is_none());
+        assert!(system_used_bytes_from_vm_stat("Pages free: 10.\n").is_none());
+        assert!(system_used_bytes_from_vm_stat("garbage").is_none());
     }
 
     #[test]

@@ -39,8 +39,11 @@ pub(crate) use bernini::*;
 mod wan_vace;
 pub(crate) use wan_vace::*;
 
+// Only the native lanes (and tests) seal or price SCAIL-2 carriers.
+#[cfg(any(native_lane, test))]
 #[path = "video_admission/scail2.rs"]
 mod scail2;
+#[cfg(any(native_lane, test))]
 pub(crate) use scail2::*;
 
 #[path = "video_admission/krea.rs"]
@@ -105,7 +108,8 @@ fn video_curve_overlay(overlay: Option<&str>) -> Option<String> {
                 && !axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN)
                 && !axis.starts_with(BERNINI_ADS2V_SEAL_DOMAIN)
                 && !axis.starts_with(WAN_VACE_REPLACE_SEAL_DOMAIN)
-                && !axis.starts_with(SCAIL2_CARRIER_SEAL_DOMAIN)
+                && !axis.starts_with("scail2-carrier-request-seal-v1-")
+                && !axis.starts_with("scail2-carrier-request-seal-v2-")
                 && !axis.starts_with(KREA_V2V_SEAL_DOMAIN)
         })
         .collect::<Vec<_>>();
@@ -620,6 +624,7 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// Borrowed resolved carrier; row bounds are re-derived at each admitted geometry, never
     /// inferred from a filename, reference count or another request's cached identity.
     native_quant_request: Option<NativeQuantRequest<'a>>,
+    planned: Option<(&'a PlannedVideoReservation, OffloadPolicy)>,
     budget: Option<Budget>,
     /// The activation-headroom allowance the caller already charges this load. Supplied, never
     /// derived here — see the module doc.
@@ -701,6 +706,7 @@ impl<'a> LadderVideoSelector<'a> {
             identity,
             contract,
             native_quant_request: None,
+            planned: None,
             budget,
             headroom_bytes,
             curves,
@@ -1780,6 +1786,29 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 excluded_profile_error = Some(error);
                 continue;
             }
+            let mut phase_peaks = phase_peaks;
+            if let Some((planned, load_policy)) = self.planned {
+                // The measured stage may already include these buffers. Compare it with the
+                // independently known simultaneous allocations before crediting resident weights.
+                let (denoise_weights, decode_weights) =
+                    planned_stage_weights(self.contract, self.identity.lane, strategy, load_policy);
+                let with_credit = |live, stage_weight| {
+                    planned_phase_before_credit(
+                        live,
+                        stage_weight,
+                        self.contract.total_resident_bytes(),
+                        self.attributable_resident_bytes,
+                    )
+                };
+                let denoise = with_credit(planned.denoise_live_bytes, denoise_weights);
+                let decode = with_credit(planned.decode_live_bytes, decode_weights);
+                let (Some(denoise), Some(decode)) = (denoise, decode) else {
+                    self.accounting_error = Some("planned video phase byte bound overflow".into());
+                    return VideoRungSelection::Undecidable;
+                };
+                phase_peaks.denoise_bytes = phase_peaks.denoise_bytes.max(denoise);
+                phase_peaks.decode_bytes = phase_peaks.decode_bytes.max(decode);
+            }
             let absolute_predicted_peak_bytes = phase_peaks.peak_bytes();
             let Some(predicted_peak_bytes) =
                 absolute_predicted_peak_bytes.checked_sub(self.attributable_resident_bytes)
@@ -1989,6 +2018,15 @@ pub(crate) struct VideoAdmissionOutcome {
     pub(crate) refusal: Option<String>,
 }
 
+impl VideoAdmissionOutcome {
+    fn refused(reason: impl Into<String>) -> Self {
+        Self {
+            refusal: Some(reason.into()),
+            ..Self::default()
+        }
+    }
+}
+
 /// Route one video generation through the video gate and turn its verdict into per-request rung
 /// knobs (sc-18814). The video lane's counterpart to the image lane's
 /// `mlx_fit_gate::evaluate_request`, and deliberately at the same position: after the load, before
@@ -2083,7 +2121,8 @@ pub(crate) fn packaged_video_evidence_covers_request(
     // Native allocation facts are an ESTIMATOR, not packaged measured evidence. They still
     // supply a request-scoped demand basis and must reach the same live-budget/ladder path.
     // Other providers (None) retain their existing abstention behavior.
-    (request.native_quant_request.is_some()
+    request.planned.is_some_and(|planned| planned.provider_tier.is_some())
+        || (request.native_quant_request.is_some()
         && contract
             .phase_facts
             .as_ref()
@@ -2431,38 +2470,25 @@ fn admit_video_generation_with_curves_and_profiles(
     );
     selector.encode_profile = encode_profile;
     selector.native_quant_request = request.native_quant_request;
-    let verdict = if request.native_quant_request.is_some()
+    selector.planned = request
+        .planned
+        .map(|planned| (planned.reservation, runtime.load_policy));
+    let provider_routed = request.native_quant_request.is_some()
         && contract
             .phase_facts
             .as_ref()
-            .and_then(|phase| phase.native_quant.as_ref())
-            .is_some()
+            .is_some_and(|facts| facts.native_quant.is_some());
+    let verdict = if provider_routed
+        || sceneworks_core::video_request::video_admission_surface(request.model_id, request.lane)
+            .routed
     {
-        // The loaded provider's typed allocation facts establish this route, including imported
-        // ids absent from the built-in catalog. Keep the actual id throughout evidence/refusals;
-        // an unknown decoder cap remains honestly unmodelled at the actual request geometry.
         sceneworks_core::video_request::video_admission_for_geometries(
             request.model_id,
-            sceneworks_core::video_request::video_admission_geometries(
-                request.model_id,
-                request.lane,
-                request.width,
-                request.height,
-                request.frames,
-                request.decode_chunk_size,
-            ),
+            request.geometries().iter().copied(),
             &mut selector,
         )
     } else {
-        sceneworks_core::video_request::video_admission(
-            request.model_id,
-            request.lane,
-            request.width,
-            request.height,
-            request.frames,
-            request.decode_chunk_size,
-            &mut selector,
-        )
+        sceneworks_core::video_request::VideoAdmission::NotRouted
     };
     if let Some(error) = selector.accounting_error {
         return VideoAdmissionOutcome {
@@ -2510,7 +2536,7 @@ fn admit_video_generation_with_curves_and_profiles(
             } else {
                 gen_core::MemoryOptimizationAuthority::Resident
             };
-            let context = MemoryRunContext {
+            let mut context = MemoryRunContext {
                 selection: selected.selection,
                 optimization_authority,
                 calibration_abi: calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |id| id.abi),
@@ -2526,13 +2552,7 @@ fn admit_video_generation_with_curves_and_profiles(
                 has_phases: false,
                 // Provider safety needs the ACTUAL request geometry even when the interior
                 // single-pass cap supplied the binding peak and selection.
-                geometry: MemoryGeometry {
-                    width: request.width,
-                    height: request.height,
-                    batch: 1,
-                    frames: request.frames,
-                    reference_count: request.reference_count,
-                },
+                geometry: request.scope_geometry(),
                 reference_resources: None,
                 overlay: request.overlay.map(str::to_owned),
                 budget: runtime.budget,
@@ -2551,7 +2571,50 @@ fn admit_video_generation_with_curves_and_profiles(
                 binding_frames = selected.binding_geometry.estimate_frames(),
                 request_frames = request.frames,
             );
+            if let Some(planned) = request.planned {
+                // The incoming overlay includes the worker's ordered carrier seal, computed from
+                // the same request the provider is about to project. The provider may translate
+                // the evidence identity, but it must preserve the actual admission decision.
+                // This is the immutable pre-load product receipt, including SCAIL source pixels.
+                if context.overlay != planned.reservation.overlay {
+                    return VideoAdmissionOutcome::refused(
+                        "video scope crossed its priced overlay",
+                    );
+                }
+                let mut admitted = context.clone();
+                match generator.project_video_memory_context(
+                    &planned.reservation.plan,
+                    planned.request,
+                    &mut context,
+                ) {
+                    Ok(false) if planned.provider_tier.is_some() => {
+                        return VideoAdmissionOutcome::refused(
+                            "the loaded provider declined the video policy it declared eligible",
+                        );
+                    }
+                    Ok(false) => return VideoAdmissionOutcome::default(),
+                    Err(error) => return VideoAdmissionOutcome::refused(error.to_string()),
+                    Ok(true) => {}
+                }
+                // The provider can translate the catalog task and source receipt. All other
+                // fields are the decision already taken by admission, including optional
+                // reference and transition facts and the selected calibration fingerprint.
+                admitted.mode.clone_from(&context.mode);
+                admitted.overlay.clone_from(&context.overlay);
+                admitted
+                    .evidence_revision
+                    .clone_from(&context.evidence_revision);
+                if context != admitted {
+                    return VideoAdmissionOutcome::refused(format!("{} provider projection changed the admitted video geometry, policy or budget", request.route));
+                }
+            }
             if let Some(reason) = engine_declines_advisory_context(generator, &context) {
+                if request
+                    .planned
+                    .is_some_and(|planned| planned.provider_tier.is_some())
+                {
+                    return VideoAdmissionOutcome::refused(reason);
+                }
                 tracing::info!(
                     event = "video_memory_context_declined_by_provider",
                     route = request.route,
@@ -2668,14 +2731,7 @@ fn curve_evidence_covers_request(
     else {
         return false;
     };
-    let geometries = sceneworks_core::video_request::video_admission_geometries(
-        request.model_id,
-        request.lane,
-        request.width,
-        request.height,
-        request.frames,
-        request.decode_chunk_size,
-    );
+    let geometries = request.geometries();
     let curve_overlay = video_curve_overlay(request.overlay);
     curves.curves.iter().any(|curve| {
         curve.model_id == request.model_id
@@ -2799,8 +2855,160 @@ impl<'a> NativeQuantRequest<'a> {
     }
 }
 
+fn planned_stage_weights(
+    contract: &MemoryProviderContract,
+    lane: VideoLane,
+    strategy: MemoryStrategy,
+    placement: OffloadPolicy,
+) -> (u64, u64) {
+    if strategy != MemoryStrategy::Resident
+        || contract.load_shape != gen_core::LoadShape::EagerMaterialization
+        || placement != OffloadPolicy::Resident
+    {
+        return (0, 0);
+    }
+    if lane == VideoLane::Candle && contract.provider_id == "scail2_14b" {
+        // The Candle provider loads TE, CLIP, DiT and VAE as one cached Components value
+        // during the first generation. All four survive denoise and output conversion.
+        let resident = contract.total_resident_bytes();
+        return (resident, resident);
+    }
+    (
+        contract.asset_facts.transformer_bytes,
+        contract.asset_facts.decoder_bytes,
+    )
+}
+
+/// The ladder subtracts the observed weight credit once from the final phase envelope.
+/// Include that credit here so it can never cancel new live buffers. Without per-component
+/// attribution, any weight outside the cached set could belong to this stage.
+fn planned_phase_before_credit(
+    live: u64,
+    stage_weight: u64,
+    total_weights: u64,
+    credit: u64,
+) -> Option<u64> {
+    let uncovered = stage_weight.min(total_weights.checked_sub(credit)?);
+    live.checked_add(uncovered)?.checked_add(credit)
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn admit_video_host_bytes(
+    needed: u64,
+    available: Option<u64>,
+) -> crate::WorkerResult<()> {
+    if needed == 0 {
+        return Ok(());
+    }
+    match available {
+        Some(available) if needed <= available => Ok(()),
+        Some(available) => Err(crate::WorkerError::InvalidPayload(format!(
+            "planned video output needs {needed} additional host bytes, only {available} are available"
+        ))),
+        None => Err(crate::WorkerError::InvalidPayload(format!(
+            "planned video output needs {needed} additional host bytes, but available host RAM could not be verified"
+        ))),
+    }
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn additional_physical_host_bytes(
+    plan: &gen_core::VideoRenderPlan,
+    domain: gen_core::MemoryBudgetDomain,
+) -> gen_core::Result<u64> {
+    // A live physical-RAM probe sees the request's existing RGB storage. All provider-side
+    // resized inputs, including driving/mask f32 stacks, are still future allocations.
+    plan.minimum_live_bytes(domain)?
+        .checked_sub(plan.source_bytes(domain))
+        .ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "video host peak is below its live input allocation".into(),
+            )
+        })
+}
+
+/// A weights-free projection of the provider plan. The gate grades each distinct physical
+/// geometry, including its interior codec write cap. Logical output and scope identity remain
+/// provider-owned even when a padded segment or a decoder chunk binds the reservation.
+pub(crate) struct PlannedVideoReservation {
+    pub(crate) plan: gen_core::VideoRenderPlan,
+    pub(crate) overlay: Option<String>,
+    geometries: Vec<VideoAdmissionGeometry>,
+    decode_live_bytes: u64,
+    denoise_live_bytes: u64,
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    pub(crate) additional_host_bytes: u64,
+}
+
+impl PlannedVideoReservation {
+    pub(crate) fn geometries(&self) -> &[VideoAdmissionGeometry] {
+        &self.geometries
+    }
+
+    pub(crate) fn new(
+        plan: gen_core::VideoRenderPlan,
+        model: &str,
+        lane: VideoLane,
+        overlay: Option<String>,
+    ) -> gen_core::Result<Self> {
+        use gen_core::MemoryBudgetDomain::{DeviceVram, UnifiedMemory};
+        let domain = match lane {
+            VideoLane::Mlx => UnifiedMemory,
+            VideoLane::Candle => DeviceVram,
+        };
+        let layout = plan.layout();
+        if layout.domain != domain {
+            return Err(gen_core::Error::Unsupported(format!(
+                "{model} video plan uses {:?} on the {} lane",
+                layout.domain,
+                lane.as_key()
+            )));
+        }
+        let mut geometries = Vec::new();
+        for phase in &layout.phases {
+            let geometry = phase.identity.geometry;
+            for candidate in sceneworks_core::video_request::video_admission_for_decode_pass(
+                model,
+                lane,
+                geometry.width,
+                geometry.height,
+                geometry.frames,
+                phase.decode_chunk_frames,
+            ) {
+                if !geometries.contains(&candidate) {
+                    geometries.push(candidate);
+                }
+            }
+        }
+        let decode_live_bytes = plan.minimum_decode_live_bytes(domain)?;
+        let denoise_live_bytes = plan.minimum_denoise_live_bytes(domain)?;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let additional_host_bytes =
+            additional_physical_host_bytes(&plan, gen_core::MemoryBudgetDomain::HostRam)?;
+        Ok(Self {
+            plan,
+            overlay,
+            geometries,
+            decode_live_bytes,
+            denoise_live_bytes,
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            additional_host_bytes,
+        })
+    }
+}
+
+/// Both borrows refer to the same attempt. The provider projects its sealed revision from these
+/// exact request bytes after the existing ladder selects a rung.
+#[derive(Clone, Copy)]
+pub(crate) struct PlannedVideoRequest<'a> {
+    pub(crate) reservation: &'a PlannedVideoReservation,
+    pub(crate) request: &'a gen_core::GenerationRequest,
+    pub(crate) provider_tier: Option<MemoryNumericTier>,
+}
+
 /// Everything `admit_video_generation` needs that is not on the generator.
 pub(crate) struct VideoAdmissionInputs<'a> {
+    pub(crate) planned: Option<PlannedVideoRequest<'a>>,
     pub(crate) native_quant_request: Option<NativeQuantRequest<'a>>,
     pub(crate) model_id: &'a str,
     /// The resolved catalog family, not the engine descriptor family.
@@ -2838,6 +3046,37 @@ pub(crate) struct VideoRuntimeMemoryState {
     /// Fixed backend-committed delta captured around this generator's cold load. This is not
     /// recomputed from a historical external baseline on warm requests.
     pub(crate) provider_resident_bytes: u64,
+}
+
+impl VideoAdmissionInputs<'_> {
+    fn geometries(&self) -> std::borrow::Cow<'_, [VideoAdmissionGeometry]> {
+        match self.planned {
+            Some(planned) => std::borrow::Cow::Borrowed(planned.reservation.geometries()),
+            None => {
+                std::borrow::Cow::Owned(sceneworks_core::video_request::video_admission_geometries(
+                    self.model_id,
+                    self.lane,
+                    self.width,
+                    self.height,
+                    self.frames,
+                    self.decode_chunk_size,
+                ))
+            }
+        }
+    }
+
+    fn scope_geometry(&self) -> MemoryGeometry {
+        self.planned.map_or_else(
+            || MemoryGeometry {
+                width: self.width,
+                height: self.height,
+                batch: 1,
+                frames: self.frames,
+                reference_count: self.reference_count,
+            },
+            |planned| planned.reservation.plan.geometry(),
+        )
+    }
 }
 
 impl VideoRuntimeMemoryState {

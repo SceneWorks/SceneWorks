@@ -11,6 +11,7 @@ import ctypes
 from ctypes import wintypes
 import json
 import os
+import argparse
 from pathlib import Path
 import uuid
 
@@ -21,7 +22,7 @@ class CUuuid(ctypes.Structure):
     _fields_ = [("bytes", ctypes.c_char * 16)]
 
 
-def visible_devices(library=None):
+def visible_devices(library=None, *, include_adapter=False):
     if library is None:
         if os.name != "nt":
             raise RuntimeError("CUDA metadata probe requires Windows")
@@ -43,6 +44,8 @@ def visible_devices(library=None):
         "cuDeviceGet": [ctypes.POINTER(ctypes.c_int), ctypes.c_int],
         "cuDeviceGetUuid": [ctypes.POINTER(CUuuid), ctypes.c_int],
     }
+    if include_adapter:
+        signatures["cuDeviceGetLuid"] = [ctypes.POINTER(ctypes.c_ubyte), ctypes.POINTER(ctypes.c_uint), ctypes.c_int]
     for name, arguments in signatures.items():
         function = getattr(library, name)
         function.argtypes = arguments
@@ -64,7 +67,15 @@ def visible_devices(library=None):
         checked("cuDeviceGetUuid", ctypes.byref(identifier), device.value)
         # c_char-array attribute conversion can truncate at NUL. Read all16 ABI bytes.
         raw = ctypes.string_at(ctypes.addressof(identifier), ctypes.sizeof(identifier))
-        result.append({"ordinal": ordinal, "uuid": "GPU-" + str(uuid.UUID(bytes=raw))})
+        row = {"ordinal": ordinal, "uuid": "GPU-" + str(uuid.UUID(bytes=raw))}
+        if include_adapter:
+            luid, mask = (ctypes.c_ubyte * 8)(), ctypes.c_uint()
+            checked("cuDeviceGetLuid", luid, ctypes.byref(mask), device.value)
+            if not any(luid) or not mask.value or mask.value & (mask.value - 1):
+                raise RuntimeError("CUDA device has no unique WDDM adapter node")
+            high, low = int.from_bytes(luid[4:], "little"), int.from_bytes(luid[:4], "little")
+            row.update(luid=f"luid_0x{high:08x}_0x{low:08x}", node_mask=mask.value)
+        result.append(row)
     if len({row["uuid"] for row in result}) != len(result):
         raise RuntimeError("CUDA-visible UUID mapping is ambiguous")
     return {"schema_version": 1, "context_created": False,
@@ -75,4 +86,6 @@ def visible_devices(library=None):
 
 
 if __name__ == "__main__":
-    print(json.dumps(visible_devices()))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--wddm-adapter", action="store_true")
+    print(json.dumps(visible_devices(include_adapter=parser.parse_args().wddm_adapter)))

@@ -9,34 +9,879 @@ use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use gen_core::AdapterKind;
 
-/// Admission must see the exact temporal chunk already resolved onto the engine input. Re-reading
-/// the sparse payload or dropping this field would turn the real 25-frame/chunk-8 SVD execution
-/// into a fictional 25-frame VAE invocation.
-#[test]
-fn video_admission_captures_the_resolved_decode_chunk_from_the_engine_input() {
-    const WAN: &str = include_str!("wan.rs");
-    let capture = WAN
-        .split_once("let admission_geometry = (")
-        .expect("shared video funnel captures its admission geometry")
-        .1
-        .split_once(");")
-        .expect("admission geometry tuple closes")
-        .0;
-    assert!(
-        capture.contains("input.decode_chunk_size"),
-        "the admission shape must capture the provider-resolved decode chunk: {capture}"
-    );
+#[cfg(native_lane)]
+fn video_admission_overlay(
+    input: &VideoGenInput,
+    mode: &str,
+    contract: Option<&gen_core::MemoryProviderContract>,
+) -> WorkerResult<Option<String>> {
+    video_admission_overlay_for_carrier(input, &input.conditioning, mode, contract)
+}
 
-    let inputs = WAN
-        .split_once("let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {")
-        .expect("shared video funnel invokes admission")
-        .1
-        .split_once("};")
-        .expect("admission inputs close")
-        .0;
+#[cfg(native_lane)]
+fn admit_video_fixture(
+    generator: &VideoLifecycleGenerator,
+    reservation: &crate::video_admission::PlannedVideoReservation,
+    request: &GenerationRequest,
+    input: &VideoGenInput,
+    model: &str,
+    mode: &str,
+    warm: bool,
+) -> crate::video_admission::VideoAdmissionOutcome {
+    use crate::video_admission::*;
+    let geometry = reservation.plan.geometry();
+    let tier = video_lifecycle_context(gen_core::MemoryStrategy::Resident)
+        .selection
+        .tier;
+    let resident = generator
+        .contract
+        .as_ref()
+        .filter(|_| warm)
+        .map_or(0, |contract| contract.total_resident_bytes());
+    admit_video_generation(
+        generator,
+        VideoAdmissionInputs {
+            planned: Some(PlannedVideoRequest {
+                reservation,
+                request,
+                provider_tier: generator
+                    .video_memory_evidence_tier(&reservation.plan, request)
+                    .unwrap(),
+            }),
+            native_quant_request: None,
+            model_id: model,
+            model_family: model,
+            route: input.engine_id,
+            mode,
+            reference_count: geometry.reference_count,
+            reference_shape: video_admission_reference_shape(model, mode, &request.conditioning),
+            overlay: reservation.overlay.as_deref(),
+            lane: LANE,
+            tier,
+            transformer_variant: None,
+            decoder: None,
+            width: geometry.width,
+            height: geometry.height,
+            frames: geometry.frames,
+            decode_chunk_size: request.decode_chunk_size,
+            fps: input.fps,
+            runtime: Some(VideoRuntimeMemoryState {
+                budget: gen_core::MemoryBudget {
+                    total_bytes: 128 << 30,
+                    committed_bytes: resident,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: 0,
+                },
+                cache_state: if warm {
+                    gen_core::MemoryCacheState::Warm
+                } else {
+                    gen_core::MemoryCacheState::Cold
+                },
+                load_policy: gen_core::OffloadPolicy::Resident,
+                provider_resident_bytes: resident,
+            }),
+            headroom_bytes: 0,
+        },
+    )
+}
+
+#[cfg(native_lane)]
+fn resident_video_fixture(engine_id: &str) -> VideoLifecycleGenerator {
+    let mut generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
+    let realization = match crate::video_admission::LANE {
+        sceneworks_core::video_request::VideoLane::Mlx => {
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: false,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: false,
+                cache_eviction: true,
+            }
+        }
+        sceneworks_core::video_request::VideoLane::Candle => {
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: false,
+                host_to_device_block_materialization: false,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            }
+        }
+    };
+    let mut contract =
+        gen_core::MemoryProviderContract::compatibility_default(engine_id, realization);
+    contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+        "worker-video-fixture-v1",
+        contract.load_shape,
+    ));
+    contract.asset_facts.base_bytes = 1 << 30;
+    contract.asset_facts.transformer_bytes = 1 << 30;
     assert!(
-        inputs.contains("decode_chunk_size: admission_geometry.3"),
-        "the captured chunk must reach VideoAdmissionInputs: {inputs}"
+        contract.conformance_errors().is_empty(),
+        "{:?}",
+        contract.conformance_errors()
+    );
+    generator.contract = Some(contract);
+    generator
+}
+
+/// An unsealed SVD request still carries the actual reference canvas, denoise clip and
+/// temporal decode chunk through the pre-load reservation. No weights or cache are involved.
+#[cfg(native_lane)]
+#[test]
+fn svd_reservation_preserves_geometry_and_the_unpriced_encoder_refusal() {
+    let mut input = VideoGenInput {
+        engine_id: "svd_xt",
+        model_dir: PathBuf::from("svd-metadata-fixture"),
+        width: 1024,
+        height: 576,
+        frames: 25,
+        decode_chunk_size: Some(8),
+        fps: 7,
+        steps: Some(2),
+        conditioning: vec![Conditioning::Reference {
+            image: gen_core::Image {
+                width: 3,
+                height: 2,
+                pixels: vec![17; 18],
+            },
+            strength: None,
+        }],
+        ..Default::default()
+    };
+    let spec = video_load_spec(&input);
+    let request = take_video_request(&mut input, &CancelFlag::new());
+    let reservation = prepare_video_reservation(&spec, &input, &request, "svd", "image_to_video")
+        .expect("SVD geometry is metadata only")
+        .expect("registered SVD plan");
+    let plan = &reservation.plan;
+    let geometry = plan.geometry();
+    assert_eq!(
+        (
+            geometry.width,
+            geometry.height,
+            geometry.frames,
+            geometry.reference_count
+        ),
+        (1024, 576, 25, 1)
+    );
+    let reference = &plan.layout().references[0];
+    assert_eq!((reference.width, reference.height), (3, 2));
+    let candidate = reservation.geometries()[0];
+    assert_eq!((candidate.frames, candidate.decode_pass_frames), (25, 8));
+
+    let generator = resident_video_fixture(input.engine_id);
+    let outcome = admit_video_fixture(
+        &generator,
+        &reservation,
+        &request,
+        &input,
+        "svd",
+        "image_to_video",
+        true,
+    );
+    assert!(outcome.refusal.unwrap().contains("encodes conditioning"));
+    assert!(outcome.context.is_none());
+    assert_eq!(generator.record.lock().unwrap().begin_calls, 0);
+}
+
+#[cfg(native_lane)]
+fn scail_plural_reservation_input() -> VideoGenInput {
+    let image = |pixel| gen_core::Image {
+        width: 32,
+        height: 32,
+        pixels: vec![pixel; 32 * 32 * 3],
+    };
+    let mut input = VideoGenInput {
+        engine_id: "scail2_14b",
+        width: 32,
+        height: 32,
+        frames: 61,
+        fps: 16,
+        steps: Some(2),
+        video_mode: Some("animation".into()),
+        model_dir: PathBuf::from("scail-metadata-fixture"),
+        ..Default::default()
+    };
+    for ordinal in 1..=6 {
+        input.conditioning.push(Conditioning::Reference {
+            image: image(ordinal),
+            strength: None,
+        });
+        input.conditioning.push(Conditioning::Mask {
+            image: image(ordinal + 10),
+        });
+    }
+    // The assembled driving clip, rather than the sparse payload's duration, controls execution.
+    input.conditioning.push(Conditioning::ControlClip {
+        frames: vec![image(3); 45],
+        mask: vec![image(4); 45],
+        masking_strength: 1.,
+        start_frame: 0,
+        mode: gen_core::ReplacementMode::default(),
+    });
+    input
+}
+
+#[cfg(native_lane)]
+fn scail_fit_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["config.json", "tokenizer.json"] {
+        std::fs::write(root.path().join(name), b"{}").unwrap();
+    }
+    for name in [
+        "dit.safetensors",
+        "t5_encoder.safetensors",
+        "clip.safetensors",
+        "vae.safetensors",
+    ] {
+        write_tiny_safetensors(&root.path().join(name));
+    }
+    root
+}
+
+#[cfg(native_lane)]
+fn scail_fit_input(root: &Path, count: usize) -> VideoGenInput {
+    let mut input = scail_plural_reservation_input();
+    input.model_dir = root.to_owned();
+    input.conditioning.drain(2 * count..12);
+    input
+}
+
+#[cfg(native_lane)]
+async fn drive_scail_fit(input: VideoGenInput, probe: &ArmProbe) -> WorkerResult<DecodedVideo> {
+    let settings = offline_settings();
+    let mut job = mochi_job_snapshot();
+    job.payload.insert("model".into(), json!("scail2_14b"));
+    job.payload
+        .insert("mode".into(), json!("animate_character"));
+    generate_video_using(
+        &ApiClient::new(&settings),
+        &settings,
+        &job,
+        crate::video_admission::LANE.as_key(),
+        (&Default::default(), &Default::default()),
+        input,
+        probe.loader(),
+    )
+    .await
+}
+
+#[cfg(native_lane)]
+fn scail_fit_witness(
+    root: &Path,
+    count: usize,
+) -> gen_core::generator::scail2_fit::Scail2FitWitness {
+    use gen_core::generator::scail2_fit::{Scail2FitProfile, Scail2FitWitness};
+    let mut input = scail_fit_input(root, count);
+    let mut spec = video_load_spec(&input);
+    let request = take_video_request(&mut input, &CancelFlag::new());
+    Scail2FitProfile::prepare_load(&mut spec, &request).unwrap();
+    let plan =
+        prepare_video_reservation(&spec, &input, &request, "scail2_14b", "animate_character")
+            .unwrap()
+            .unwrap()
+            .plan;
+    let profile = Scail2FitProfile::from_plan(&spec, &plan, &request)
+        .unwrap()
+        .unwrap();
+    let axes = profile.axes().clone();
+    let unified = plan.layout().domain == gen_core::MemoryBudgetDomain::UnifiedMemory;
+    let gross = 64 << 20;
+    Scail2FitWitness {
+        axes,
+        text_tokens: 512,
+        gross_unified_bytes: if unified { gross } else { 0 },
+        gross_device_bytes: if unified { 0 } else { gross },
+        gross_host_bytes: if unified { 0 } else { gross },
+        mlx_decode_budget_bytes: unified.then_some(gross),
+    }
+}
+
+#[cfg(native_lane)]
+fn scail_fit_budgets(
+    rows: Vec<gen_core::generator::scail2_fit::Scail2FitWitness>,
+    free: u64,
+    host: Option<u64>,
+) -> crate::video_admission::Scail2FitFixture {
+    crate::video_admission::Scail2FitFixture {
+        rows,
+        budget: gen_core::MemoryBudget {
+            total_bytes: free,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        physical_host: host,
+    }
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_reservation_refuses_unverified_fit_before_cache_or_factory() {
+    let root = scail_fit_root();
+    let mut input = scail_fit_input(root.path(), 6);
+    input.scail2_fit_fixture = Some(scail_fit_budgets(vec![], u64::MAX, Some(u64::MAX)));
+    let probe = ArmProbe::default();
+    let result = drive_scail_fit(input, &probe).await;
+    let Err(WorkerError::InvalidPayload(reason)) = result else {
+        panic!("unproven plural fit must return a typed refusal before load");
+    };
+    assert!(
+        reason.contains(
+            "no verified accelerator and host memory fit for 6 ordered character references"
+        ),
+        "{reason}"
+    );
+    assert!(!probe.loaded());
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_fit_admits_each_ordered_count_within_its_physical_budgets() {
+    let gross = 64 << 20;
+    for count in 2..=6 {
+        let root = scail_fit_root();
+        let witness = scail_fit_witness(root.path(), count);
+        let host = gross - witness.axes.source_bytes;
+        let mut input = scail_fit_input(root.path(), count);
+        // Source values and prompt do not change native memory topology.
+        input.prompt = format!("A new prompt with {count} characters.");
+        input.conditioning.swap(0, 2);
+        input.conditioning.swap(1, 3);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness], gross, Some(host)));
+        let probe = ArmProbe::default();
+        drive_scail_fit(input, &probe).await.unwrap();
+        let record = probe.request.lock().unwrap();
+        let actual = record.as_ref().unwrap();
+        let refs: Vec<_> = actual
+            .conditioning
+            .iter()
+            .filter_map(|c| match c {
+                Conditioning::Reference { image, .. } => Some(image.pixels[0]),
+                _ => None,
+            })
+            .collect();
+        let mut expected: Vec<_> = (1..=count as u8).collect();
+        expected.swap(0, 1);
+        assert_eq!(refs, expected);
+    }
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_fit_refuses_short_unknown_or_stale_evidence_before_factory() {
+    let gross = 64 << 20;
+    let root = scail_fit_root();
+    let witness = scail_fit_witness(root.path(), 2);
+    let host = gross - witness.axes.source_bytes;
+    for (free, physical, expected) in [
+        (gross - 1, Some(host), "accelerator bytes"),
+        (gross, Some(host - 1), "physical host bytes"),
+        (gross, None, "could not be verified"),
+    ] {
+        let mut input = scail_fit_input(root.path(), 2);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness.clone()], free, physical));
+        let probe = ArmProbe::default();
+        let Err(WorkerError::InvalidPayload(reason)) = drive_scail_fit(input, &probe).await else {
+            panic!("short or missing budget must refuse")
+        };
+        assert!(reason.contains(expected), "{reason}");
+        assert!(!probe.loaded());
+    }
+    std::fs::write(root.path().join("config.json"), br#"{"num_heads":16}"#).unwrap();
+    let mut input = scail_fit_input(root.path(), 2);
+    input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness], gross, Some(host)));
+    let probe = ArmProbe::default();
+    let Err(WorkerError::InvalidPayload(reason)) = drive_scail_fit(input, &probe).await else {
+        panic!("crossed source must refuse")
+    };
+    assert!(reason.contains("no completed measurement"), "{reason}");
+    assert!(!probe.loaded());
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_fit_prices_at_the_nearest_covering_count_not_a_cheaper_higher_one() {
+    let gross = 64 << 20;
+    let root = scail_fit_root();
+    let own = scail_fit_witness(root.path(), 2);
+    // A higher-count measurement that came out cheaper also covers two references (its
+    // windows dominate this plan's).
+    let mut cheaper = own.clone();
+    cheaper.axes.references = 4;
+    for bytes in [
+        &mut cheaper.gross_unified_bytes,
+        &mut cheaper.gross_device_bytes,
+        &mut cheaper.gross_host_bytes,
+    ] {
+        *bytes = bytes.saturating_sub(1 << 20);
+    }
+    cheaper.mlx_decode_budget_bytes = cheaper.mlx_decode_budget_bytes.map(|b| b - (1 << 20));
+    let host = gross - own.axes.source_bytes;
+    for rows in [
+        vec![cheaper.clone(), own.clone()],
+        vec![own.clone(), cheaper.clone()],
+    ] {
+        let mut input = scail_fit_input(root.path(), 2);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(rows.clone(), gross - 1, Some(host)));
+        let probe = ArmProbe::default();
+        let Err(WorkerError::InvalidPayload(reason)) = drive_scail_fit(input, &probe).await else {
+            panic!("the cheaper four-reference row must not price a two-reference job")
+        };
+        assert!(reason.contains("accelerator bytes"), "{reason}");
+        assert!(!probe.loaded());
+        let mut input = scail_fit_input(root.path(), 2);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(rows, gross, Some(host)));
+        drive_scail_fit(input, &ArmProbe::default()).await.unwrap();
+    }
+    // Without a two-reference row the four-reference measurement still covers the job.
+    let mut input = scail_fit_input(root.path(), 2);
+    input.scail2_fit_fixture = Some(scail_fit_budgets(vec![cheaper], gross - 1, Some(host)));
+    drive_scail_fit(input, &ArmProbe::default()).await.unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn scail_plural_cold_fit_keeps_measured_residency_under_generic_sequential_pressure() {
+    use gen_core::generator::scail2_fit::Scail2FitProfile;
+    let root = scail_fit_root();
+    let gross = 64 << 20;
+    let witness = scail_fit_witness(root.path(), 6);
+    let host = gross - witness.axes.source_bytes;
+    let mut control = scail_fit_input(root.path(), 6);
+    let mut spec = video_load_spec(&control);
+    let request = take_video_request(&mut control, &CancelFlag::new());
+    Scail2FitProfile::prepare_load(&mut spec, &request).unwrap();
+    temp_env_var(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "8", || {
+        let generic = crate::mlx_fit_gate::apply_residency_policy(spec, "scail2_14b").unwrap();
+        assert_eq!(generic.offload_policy, gen_core::OffloadPolicy::Sequential);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut input = scail_fit_input(root.path(), 6);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(
+            vec![witness.clone()],
+            gross - 1,
+            Some(host),
+        ));
+        let refused = ArmProbe::default();
+        let Err(WorkerError::InvalidPayload(reason)) =
+            runtime.block_on(drive_scail_fit(input, &refused))
+        else {
+            panic!("insufficient measured capacity must refuse before factory");
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "SCAIL-2 plural fit requires {gross} accelerator bytes, only {} are available",
+                gross - 1
+            )
+        );
+        assert!(!refused.loaded());
+
+        let mut input = scail_fit_input(root.path(), 6);
+        input.scail2_fit_fixture = Some(scail_fit_budgets(vec![witness], gross, Some(host)));
+        let admitted = ArmProbe::default();
+        runtime.block_on(drive_scail_fit(input, &admitted)).unwrap();
+        assert_eq!(
+            admitted
+                .spec
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .offload_policy,
+            gen_core::OffloadPolicy::Resident,
+        );
+    });
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_warm_fit_credits_only_committed_provider_weights_and_rejects_replaced_members(
+) {
+    use crate::generator_cache::LoadIdentity;
+    use crate::video_admission::{Scail2FitProbe, Scail2PluralFit};
+    use gen_core::{generator::scail2_fit::Scail2FitProfile, MemoryCacheState};
+    let root = scail_fit_root();
+    let mut input = scail_fit_input(root.path(), 2);
+    let request = take_video_request(&mut input, &CancelFlag::new());
+    let mut spec = video_load_spec(&input);
+    Scail2FitProfile::prepare_load(&mut spec, &request).unwrap();
+    let key = LoadIdentity::try_from_load_spec("scail2_14b", &spec).unwrap();
+    let plan =
+        prepare_video_reservation(&spec, &input, &request, "scail2_14b", "animate_character")
+            .unwrap()
+            .unwrap();
+    let row = scail_fit_witness(root.path(), 2);
+    let gross = 64 << 20;
+    let resident = 16 << 20;
+    let mut fixture = scail_fit_budgets(vec![row], gross, Some(gross));
+    fixture.budget.committed_bytes = resident;
+    let probe = Scail2FitProbe {
+        runtime: tokio::runtime::Handle::current(),
+        gpu: "fixture".into(),
+        fixture: Some(fixture),
+    };
+    let rows = probe.witnesses(2).unwrap();
+    let fit = Scail2PluralFit::prepare(&plan, &spec, &request, "warm", probe, &rows).unwrap();
+    assert!(matches!(
+        fit.with_execution(|| Ok(1)),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    for credit in [0, resident - 1] {
+        assert!(matches!(
+            fit.check_live(&spec, MemoryCacheState::Warm, "execution", credit),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+    }
+    fit.check_live(&spec, MemoryCacheState::Warm, "execution", resident)
+        .unwrap();
+    assert_eq!(fit.with_execution(|| Ok(7)).unwrap(), 7);
+
+    std::fs::write(root.path().join("tokenizer.json"), b"{ }").unwrap();
+    assert!(matches!(
+        fit.check_live(&spec, MemoryCacheState::Warm, "execution", resident),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    let mut changed = video_load_spec(&input);
+    Scail2FitProfile::prepare_load(&mut changed, &request).unwrap();
+    assert_ne!(
+        key,
+        LoadIdentity::try_from_load_spec("scail2_14b", &changed).unwrap()
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices() {
+    use crate::video_admission::scail2_verified_test_quotes;
+    use sceneworks_core::hashing::sha256_bytes;
+    let root = scail_fit_root();
+    let row = scail_fit_witness(root.path(), 2);
+    let revision = "1".repeat(40);
+    let cap = 64_u64 << 20;
+    let env = json!({"basis":"guarded_ceiling","observed_peak_bytes": cap-256, "guard_ceiling_bytes": cap, "unsampled_overshoot_upper_bytes": 128});
+    let (os, bounds) = if cfg!(target_os = "macos") {
+        (
+            "macos",
+            json!({"measurement":"darwin_lifetime_footprint","unified":env,"mlx_decode_budget_bytes":cap}),
+        )
+    } else {
+        (
+            "windows",
+            json!({"measurement":"windows_job_and_wddm","capture_adapter":{"cuda_uuid":"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0","luid":"luid_0x00000000_0x00000001","node_mask":1},"device_total_mib":97887,"host":env,"device":env}),
+        )
+    };
+    let tokens = vec![
+        512;
+        if row.axes.classifier_free_guidance {
+            2
+        } else {
+            1
+        }
+    ];
+    let projection = json!([{"platform":os, "device":"fixture", "runtime":"native-v1", "inference_revision":revision,
+        "artifact_id":123, "receipt_sha256":"a".repeat(64), "guard_policy_sha256":"b".repeat(64), "accepted":true,
+        "post_execution_verified":true, "guard_exit_code":0, "axes":row.axes, "prompt_tokens":tokens, "bounds":bounds}]);
+    let bytes = serde_json::to_vec(&projection).unwrap();
+    let approved = sha256_bytes(&bytes);
+    let verify =
+        |bytes: &[u8], digest: &str| scail2_verified_test_quotes(bytes, digest, os, &revision, 2);
+    let qualified = verify(&bytes, &approved).unwrap().pop().unwrap();
+    assert_eq!(
+        qualified
+            .gross_unified_bytes
+            .max(qualified.gross_device_bytes),
+        cap + 128
+    );
+    assert!(
+        scail2_verified_test_quotes(&bytes, &approved, os, &"2".repeat(40), 2)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        scail2_verified_test_quotes(&bytes, &approved, os, &revision, 6)
+            .unwrap()
+            .is_empty()
+    );
+    let mut empirical = projection.clone();
+    let pool = if os == "macos" { "unified" } else { "device" };
+    empirical[0]["bounds"][pool] = json!({"basis":"measured_aggregate","observed_peak_bytes":cap-256,"classified_peak_bytes":cap,
+        "co_live_extra_bytes":512,"uncertainty_allowance_bytes":256,"review_sha256":"c".repeat(64)});
+    let bytes_empirical = serde_json::to_vec(&empirical).unwrap();
+    let price = verify(&bytes_empirical, &sha256_bytes(&bytes_empirical))
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        price.gross_unified_bytes.max(price.gross_device_bytes),
+        cap + 768
+    );
+    let mut altered = projection.clone();
+    altered[0]["axes"]["width"] = json!(64);
+    assert!(verify(&serde_json::to_vec(&altered).unwrap(), &approved).is_err());
+    for mutation in [
+        "guard_exit_code",
+        "missing_overrun",
+        "linux",
+        "fake_price",
+        "archived_artifact_as_accepted",
+        "archived_receipt_as_accepted",
+        "unchecked_claim",
+    ] {
+        let mut fake = projection.clone();
+        match mutation {
+            "guard_exit_code" => fake[0]["guard_exit_code"] = json!(125),
+            "missing_overrun" => {
+                let pool = if os == "macos" { "unified" } else { "device" };
+                fake[0]["bounds"][pool]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("unsampled_overshoot_upper_bytes");
+            }
+            "linux" => fake[0]["platform"] = json!("linux"),
+            "fake_price" => fake[0]["gross_device_bytes"] = json!(1),
+            "archived_artifact_as_accepted" => fake[0]["artifact_id"] = json!(14_719_969_057_u64),
+            "archived_receipt_as_accepted" => {
+                fake[0]["receipt_sha256"] =
+                    json!("750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f")
+            }
+            _ => fake[0]["post_execution_verified"] = json!(false),
+        }
+        let fake = serde_json::to_vec(&fake).unwrap();
+        assert!(verify(&fake, &approved).is_err());
+        assert!(verify(&fake, &sha256_bytes(&fake)).is_err());
+    }
+}
+
+#[cfg(native_lane)]
+#[tokio::test]
+async fn scail_plural_product_arm_refuses_missing_capture_before_media_or_tier_access() {
+    let settings = offline_settings();
+    let mut job = mochi_job_snapshot();
+    job.payload = json!({"projectId":"absent-project", "model":"scail2_14b", "mode":"animate_character",
+        "prompt":"animate", "referenceAssetIds":["absent-a","absent-b"], "sourceClipAssetId":"absent-driving"})
+        .as_object().unwrap().clone();
+    job.payload.insert(
+        "modelManifestEntry".into(),
+        Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("scail2_14b")
+                .unwrap()
+                .clone(),
+        ),
+    );
+    let api = ApiClient::new(&settings);
+    let result = crate::video_admission::SCAIL2_TEST_MACHINE
+        .scope(
+            (
+                "unqualified fixture".into(),
+                "unqualified runtime".into(),
+                None,
+            ),
+            super::run_video_generate_job(&api, &settings, &job, &Default::default()),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(WorkerError::InvalidPayload(ref reason)) if reason.contains("no verified accelerator and host memory fit for 2 ordered character references")),
+        "{result:?}"
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
+fn scail_animation_reservation_preserves_ordered_characters_and_decoder_padding() {
+    let mut input = scail_plural_reservation_input();
+    let spec = video_load_spec(&input);
+    let mut request = take_video_request(&mut input, &CancelFlag::new());
+    let reserve = |request: &GenerationRequest| {
+        prepare_video_reservation(&spec, &input, request, "scail2_14b", "animate_character")
+    };
+    let reservation = reserve(&request).unwrap().unwrap();
+    assert_eq!(reservation.plan.geometry().reference_count, 6);
+    assert_eq!(
+        (request.frames, reservation.plan.geometry().frames),
+        (Some(61), 45)
+    );
+    // The live process owns 6 original pairs and 45 driving/mask pairs at 32x32. The
+    // provider builds both resized f32 stacks at the render size after this snapshot.
+    let mut resized = request.clone();
+    resized.width = 512;
+    resized.height = 512;
+    let resized = reserve(&resized).unwrap().unwrap().plan;
+    let physical_host = if cfg!(target_os = "macos") {
+        gen_core::MemoryBudgetDomain::UnifiedMemory
+    } else {
+        gen_core::MemoryBudgetDomain::HostRam
+    };
+    let held = (2 * 6 + 2 * 45) * 32 * 32 * 3;
+    let future_stacks = 2 * 45 * 512 * 512 * 3 * 4;
+    assert_eq!(resized.source_bytes(physical_host), held);
+    let additional =
+        crate::video_admission::additional_physical_host_bytes(&resized, physical_host).unwrap();
+    assert_eq!(
+        additional + held,
+        resized.minimum_live_bytes(physical_host).unwrap()
+    );
+    assert!(additional >= future_stacks);
+    let candidate = reservation.geometries()[0];
+    let phase = &reservation.plan.layout().phases[0];
+    assert_eq!(
+        (candidate.frames, candidate.decode_pass_frames),
+        (45, phase.decode_chunk_frames)
+    );
+    assert_eq!(
+        phase.decoded_frames,
+        if cfg!(target_os = "macos") { 48 } else { 45 }
+    );
+    let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
+    let outcome = admit_video_fixture(
+        &generator,
+        &reservation,
+        &request,
+        &input,
+        "scail2_14b",
+        "animate_character",
+        false,
+    );
+    assert_eq!(
+        outcome,
+        crate::video_admission::VideoAdmissionOutcome::default()
+    );
+    assert_eq!(generator.record.lock().unwrap().begin_calls, 0);
+    let mut long_request = request.clone();
+    let Some(Conditioning::ControlClip { frames, mask, .. }) = long_request.conditioning.last_mut()
+    else {
+        panic!("missing driving clip")
+    };
+    frames.resize(161, frames[0].clone());
+    mask.resize(161, mask[0].clone());
+    let long = reserve(&long_request).unwrap().unwrap();
+    assert!(long.plan.layout().phases.len() > 1);
+    assert!(long.plan.layout().phases[1].history_frames > 0);
+    assert_eq!(
+        admit_video_fixture(
+            &generator,
+            &long,
+            &long_request,
+            &input,
+            "scail2_14b",
+            "animate_character",
+            false
+        ),
+        crate::video_admission::VideoAdmissionOutcome::default(),
+    );
+    let original = reservation.overlay.unwrap();
+    // Keep each pair valid but reorder two equal-sized character images and masks.
+    request.conditioning.swap(0, 2);
+    request.conditioning.swap(1, 3);
+    let reordered = reserve(&request).unwrap().unwrap().overlay.unwrap();
+    assert_ne!(original, reordered);
+    assert_eq!(
+        crate::video_admission::video_curve_overlay_for_test(Some(&original)),
+        crate::video_admission::video_curve_overlay_for_test(Some(&reordered))
+    );
+    let missing = request.conditioning.remove(1);
+    assert!(matches!(
+        reserve(&request),
+        Err(WorkerError::InvalidPayload(_))
+    ));
+    request.conditioning.insert(1, missing);
+
+    // A calibrated one-character contract reaches the ordinary ladder. The fixture substitutes
+    // only the loaded provider's source evidence and completion, so no weights are opened.
+    request.conditioning.drain(2..12);
+    let reservation = reserve(&request).unwrap().unwrap();
+    let plan = &reservation.plan;
+    let geometry = plan.geometry();
+    let generator = resident_video_fixture(input.engine_id);
+    let admit = |warm| {
+        admit_video_fixture(
+            &generator,
+            &reservation,
+            &request,
+            &input,
+            "scail2_14b",
+            "animate_character",
+            warm,
+        )
+    };
+    let cold = admit(false);
+    assert!(cold.refusal.is_none(), "{:?}", cold.refusal);
+    let warm = admit(true);
+    assert!(warm.refusal.is_none(), "{:?}", warm.refusal);
+    let mut context = warm
+        .context
+        .expect("the existing ladder selected a resident scope");
+    assert_eq!(
+        context.selection.strategy,
+        gen_core::MemoryStrategy::Resident
+    );
+    assert_eq!(context.geometry, geometry);
+    assert_eq!(
+        cold.context.unwrap().predicted_peak_bytes - context.predicted_peak_bytes,
+        1 << 30,
+        "warm admission credits exactly its attributable resident bytes"
+    );
+    run_prepared_video_generation(
+        &generator,
+        &mut request,
+        Some(&context),
+        Some((plan, &spec)),
+        &mut |_| {},
+    )
+    .unwrap();
+    {
+        let calls = generator.record.lock().unwrap();
+        assert_eq!(
+            (
+                calls.begin_calls,
+                calls.configure_calls,
+                calls.generate_calls
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            calls.phase_geometries.as_slice(),
+            &[(geometry, plan.layout().phases[0].latent_frames)]
+        );
+        assert_eq!(calls.finishes, [gen_core::MemoryRunOutcome::Complete]);
+    }
+
+    // Crossing a priced geometry, or replacing a same-size reference in the carrier, refuses
+    // before the provider's generation method. The same mutable scope owns failure cleanup.
+    context.geometry.frames -= 1;
+    assert!(run_prepared_video_generation(
+        &generator,
+        &mut request,
+        Some(&context),
+        Some((plan, &spec)),
+        &mut |_| {}
+    )
+    .is_err());
+    context.geometry = geometry;
+    let Conditioning::Reference { image, .. } = &mut request.conditioning[0] else {
+        panic!("lost character reference")
+    };
+    image.pixels[0] ^= 1;
+    assert!(run_prepared_video_generation(
+        &generator,
+        &mut request,
+        Some(&context),
+        Some((plan, &spec)),
+        &mut |_| {}
+    )
+    .is_err());
+    let calls = generator.record.lock().unwrap();
+    assert_eq!(
+        (
+            calls.begin_calls,
+            calls.configure_calls,
+            calls.generate_calls,
+            calls.finishes.len()
+        ),
+        (3, 3, 1, 3)
     );
 }
 
@@ -420,7 +1265,7 @@ fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
     let replacement = overlay_for("scail2_14b", "replace_person", scail2(1))
         .unwrap()
         .expect("sealed SCAIL-2 carrier");
-    assert!(animation.contains(crate::video_admission::SCAIL2_CARRIER_RECEIPT_DOMAIN));
+    assert!(animation.contains("scail2-carrier-v1:"));
     assert_ne!(
         animation, replacement,
         "the two SCAIL-2 tasks must not share one admission identity"
@@ -981,6 +1826,7 @@ struct VideoLifecycleRecord {
     configure_calls: usize,
     generate_calls: usize,
     generated_memory: Vec<Option<gen_core::GenerationMemory>>,
+    phase_geometries: Vec<(gen_core::MemoryGeometry, u32)>,
     finishes: Vec<gen_core::MemoryRunOutcome>,
 }
 
@@ -1003,6 +1849,19 @@ impl gen_core::MemoryRequestScope for VideoLifecycleScope {
         } else {
             Ok(())
         }
+    }
+
+    fn enter_video_phase(
+        &mut self,
+        identity: &gen_core::render::RenderPhaseIdentity,
+        latent_frames: u32,
+    ) -> gen_core::Result<()> {
+        self.record
+            .lock()
+            .unwrap()
+            .phase_geometries
+            .push((identity.geometry, latent_frames));
+        Ok(())
     }
 
     fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
@@ -1043,6 +1902,7 @@ impl gen_core::MemoryRequestScope for VideoLifecycleScope {
 #[cfg(native_lane)]
 struct VideoLifecycleGenerator {
     descriptor: gen_core::ModelDescriptor,
+    contract: Option<gen_core::MemoryProviderContract>,
     behavior: VideoLifecycleBehavior,
     record: std::sync::Arc<std::sync::Mutex<VideoLifecycleRecord>>,
 }
@@ -1062,6 +1922,7 @@ impl VideoLifecycleGenerator {
                 encoder_contract: None,
                 denoiser_output_latent_space: None,
             },
+            contract: None,
             behavior,
             record: Default::default(),
         }
@@ -1072,6 +1933,32 @@ impl VideoLifecycleGenerator {
 impl Generator for VideoLifecycleGenerator {
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         &self.descriptor
+    }
+
+    fn memory_strategy_contract(&self) -> Option<&gen_core::MemoryProviderContract> {
+        self.contract.as_ref()
+    }
+
+    fn video_memory_evidence_tier(
+        &self,
+        _plan: &gen_core::VideoRenderPlan,
+        _request: &GenerationRequest,
+    ) -> gen_core::Result<Option<gen_core::MemoryNumericTier>> {
+        Ok(self.contract.as_ref().map(|_| {
+            video_lifecycle_context(gen_core::MemoryStrategy::Resident)
+                .selection
+                .tier
+        }))
+    }
+
+    fn project_video_memory_context(
+        &self,
+        plan: &gen_core::VideoRenderPlan,
+        _request: &GenerationRequest,
+        context: &mut gen_core::MemoryRunContext,
+    ) -> gen_core::Result<bool> {
+        assert_eq!(context.geometry, plan.geometry());
+        Ok(self.contract.is_some())
     }
 
     fn validate(&self, _request: &GenerationRequest) -> gen_core::Result<()> {
@@ -1101,6 +1988,22 @@ impl Generator for VideoLifecycleGenerator {
             record: self.record.clone(),
             configure_error: self.behavior == VideoLifecycleBehavior::ConfigureError,
         })))
+    }
+
+    fn generate_video_planned_with_execution_report(
+        &self,
+        request: &GenerationRequest,
+        plan: &gen_core::VideoRenderPlan,
+        scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+        let scope =
+            scope.expect("the worker forwards the configured scope to the planned provider");
+        for phase in &plan.layout().phases {
+            scope.enter_video_phase(&phase.identity, phase.latent_frames)?;
+            scope.leave_phase(gen_core::MemoryPhase::Denoise)?;
+        }
+        self.generate_with_execution_report(request, progress)
     }
 
     fn generate(
@@ -1330,8 +2233,9 @@ fn production_admission_handoff_drives_provider_safety_and_lifecycle() {
         decode_overlap: Some(32),
         ..Default::default()
     };
-    apply_video_admission_outcome(
-        &mut input,
+    let mut request = take_video_request(&mut input, &CancelFlag::new());
+    let context = apply_video_admission_outcome(
+        &mut request,
         crate::video_admission::VideoAdmissionOutcome {
             memory: Some(selected_memory),
             context: Some(video_lifecycle_context(
@@ -1341,8 +2245,14 @@ fn production_admission_handoff_drives_provider_safety_and_lifecycle() {
         },
     )
     .expect("selected admission reaches the loaded input");
-    run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
-        .expect("production handoff generates");
+    run_prepared_video_generation(
+        &generator,
+        &mut request,
+        context.as_ref(),
+        None,
+        &mut |_| {},
+    )
+    .expect("production handoff generates");
     let record = generator.record.lock().unwrap();
     assert_eq!(record.safety_checks, 1);
     assert_eq!(record.begin_calls, 1);
@@ -1380,9 +2290,7 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         .find("PreparedH3Load::prepare_authorized_with_check(")
         .expect("imported source authority must prepare the same native load spec");
     assert!(
-        spec_preparation < sealed_preparation
-            && funnel.contains("&mut spec,")
-            && funnel.contains("(spec, prepared_h3_context),"),
+        spec_preparation < sealed_preparation && funnel.contains("&mut spec,"),
         "the prepared source identity and native spec must reach the original request-aware \
          callback together, not an alternate cache route or an identity-free LoadSpec"
     );
@@ -1390,6 +2298,8 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
     assert!(
         funnel.contains("h3_preparation_checkpoint(")
             && funnel.contains("input.imported_h3_authority.clone()")
+            && normalized_funnel.contains("let prepared_h3_context = h3_receipt .as_ref() .map(|receipt| crate::generator_cache::PreparedH3CacheContext {")
+            && normalized_funnel.contains("receipt: receipt.clone(), });")
             && normalized_funnel.contains(
                 "sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure_with_staging( &preparation_data_dir, &assembly, receipt.files(), &receipt.component_staging(), )",
             ),
@@ -1397,10 +2307,25 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
          checkpoint, the imported source authority, and the staging-aware frozen component-closure \
          comparison over the acquired receipt files and staging authority"
     );
-    assert_eq!(
-        funnel.matches("(spec, prepared_h3_context),").count(),
-        2,
-        "both native-platform and Candle cached paths must forward the prepared context"
+    let (candle, mlx) = normalized_funnel
+        .split_once("#[cfg(target_os = \"macos\")] let result = {")
+        .expect("the native cache acquisition must include the MLX branch");
+    assert!(
+        candle.contains("with_cached_generator_for_request_using( engine_id, (spec, prepared_h3_context), \"video load failed\", load_generator, run,")
+            && mlx.contains("GeneratorRequestLoad::from((spec, prepared_h3_context))")
+            && mlx.contains("with_cached_generator_for_request_using( engine_id, load, \"video load failed\", load_generator, run,"),
+        "both platform routes must hand the prepared H3 source and its checked loader to the cache"
+    );
+    let (_, loader) = normalized_funnel
+        .split_once("let cold_h3_receipt = h3_receipt.clone(); let load_generator = move")
+        .expect("the checked loader must capture the original prepared receipt");
+    let (before_load, after_load) = loader
+        .split_once("let generator = load_generator(id, spec)?;")
+        .expect("the checked loader must invoke the native factory with the actual spec");
+    let check = "if let Some(receipt) = &cold_h3_receipt { receipt .validate(spec) .map_err(gen_core::Error::Unsupported)?; }";
+    assert!(
+        before_load.trim_end().ends_with(check) && after_load.trim_start().starts_with(check),
+        "the loader must validate the prepared H3 seal before and after the native factory"
     );
     const CACHE: &str = include_str!("../generator_cache.rs");
     let callback = CACHE
@@ -1412,13 +2337,28 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         callback.contains("with_cached_generator_for_request_using_cache(")
             && callback.contains("with_cached_generator_for_request_using_cache_prepared(")
             && callback.contains("engine_id, load, load_error_context,")
-            && callback.contains("let GeneratorRequestLoad { spec, prepared_h3 } = load.into();")
             && callback.contains(
                 "with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared("
             )
-            && callback.contains("engine_id, spec, prepared_h3, load_error_context,"),
+            && callback.contains("engine_id, load.into(), load_error_context,"),
         "the original callback must forward the sealed context, rather than silently substituting \
          None before the cold/warm, policy, external-baseline and provider-delta handoff"
+    );
+    let cache = CACHE.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (_, owner) = cache
+        .split_once("async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared<P, R>(")
+        .expect("the cache owner must receive the prepared request");
+    assert!(
+        cache.contains("fn from((spec, prepared_h3): (LoadSpec, Option<PreparedH3CacheContext>)) -> Self { Self { spec, prepared_h3,")
+            && owner.contains("let GeneratorRequestLoad { spec, prepared_h3,")
+            && owner.contains("} = load;")
+            && owner.contains("LoadIdentity::try_from_load_spec_with_h3(engine_id, &spec, prepared_h3.as_ref())?")
+            && owner.contains("let generator = load_generator(engine_id, &spec)"),
+        "the cache owner must build its key with the prepared context carried by GeneratorRequestLoad"
+    );
+    assert!(
+        cache.contains("context .receipt .validate(spec) .map_err(crate::WorkerError::InvalidPayload)?; key.imported_h3 = Some((context.identity.clone(), context.receipt.files().to_vec()));"),
+        "an imported H3 cache key must validate and retain the prepared identity and receipt files"
     );
     assert!(
         funnel.contains("with_uncached_generator("),
@@ -1430,7 +2370,7 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         "the uncached Candle load may not forge a zero-byte provider attribution"
     );
     assert!(
-        funnel.contains("apply_video_admission_outcome(&mut input, outcome)?;"),
+        funnel.contains("apply_video_admission_outcome(&mut request, outcome)?;"),
         "the production callback must pass both selected memory and lifecycle context through the \
          same handoff exercised by production_admission_handoff_drives_provider_safety_and_lifecycle"
     );
@@ -3100,6 +4040,13 @@ fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
             _ => (false, 0),
         };
         let manifest = if quantized {
+            // A shipped packed tier carries `quantize_config.json`; the pinned candle loader reads
+            // the tier's bits from it and refuses a `spec.quantize` it cannot confirm.
+            std::fs::write(
+                root.join(tier).join("quantize_config.json"),
+                json!({ "quantization": { "bits": bits, "group_size": 64 } }).to_string(),
+            )
+            .unwrap();
             json!({ "quantized": true, "quantization_bits": bits, "quantization_group_size": 64 })
         } else {
             json!({ "quantized": false })
@@ -3114,6 +4061,9 @@ fn mochi_root(tag: &str, tiers: &[&str], shared: bool) -> tempfile::TempDir {
         for component in ["text_encoder", "tokenizer", "vae"] {
             std::fs::create_dir_all(root.join(component)).unwrap();
         }
+        // The pinned video plan reads the shared codec geometry before any weights; `{}` takes
+        // the real checkpoint's defaults (as `mochi_root_real_sized` does).
+        std::fs::write(root.join("vae/config.json"), b"{}").unwrap();
     }
     root_guard
 }
@@ -3850,6 +4800,8 @@ fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
         // disk outright (see `crate::test_fixture_disk`).
         crate::test_fixture_disk::create_sparse_weights(&root.join(relative), len);
     }
+    // The production plan reads the codec geometry before the recording factory is opened.
+    std::fs::write(root.join("vae/config.json"), b"{}").unwrap();
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     std::fs::write(
         root.join("q4").join("split_model.json"),
@@ -4586,6 +5538,20 @@ impl Generator for ProbeGenerator {
 
     fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
         self.adapter_reports.lock().unwrap().clone()
+    }
+
+    fn generate_video_planned_with_execution_report(
+        &self,
+        request: &GenerationRequest,
+        _plan: &gen_core::VideoRenderPlan,
+        scope: Option<&mut dyn gen_core::MemoryRequestScope>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+        assert!(
+            scope.is_none(),
+            "this recording factory has no memory contract"
+        );
+        self.generate_with_execution_report(request, progress)
     }
 
     fn generate(

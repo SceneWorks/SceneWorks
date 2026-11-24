@@ -1,0 +1,21 @@
+{
+  "artifact_id": 14884839491,
+  "domains": {
+    "device": {
+      "basis": "measured_aggregate",
+      "co_live_extra_bytes": 0,
+      "uncertainty_allowance_bytes": 15904923648
+    },
+    "host": {
+      "basis": "measured_aggregate",
+      "co_live_extra_bytes": 0,
+      "uncertainty_allowance_bytes": 77594624
+    }
+  },
+  "hosted_plan_sha256": "7db89ca1229594a2ae64e18ffcd530ec3f3cd2c0eb22f1702d91a2afb3451128",
+  "rationale": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition physical index 0 (GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0), driver 596.36, inference db90739be, 6 references, run 45307476240/1, supervisor-owned Windows Job. Accepted by inference --verify-artifacts. Device: the classified peak already takes the largest of native pool, owned PID, WDDM dedicated, floor and tenant-adjusted growth, so co_live_extra is 0; the uncertainty allowance is the whole allocation burst (15904923648 B): the growth across the continuous rising run of 250 ms polls that holds the largest single step, taking the larger of the owned WDDM dedicated and card owned/fallback series, so a burst split across polls is not understated. Host: the classified Job commit plus WDDM shared peak covers co-live memory; the allowance is the WDDM shared burst by the same rule (77594624 B).",
+  "receipt_sha256": "bfc7dcf86929f54ccca172acada37265f48c1199404e0cf34c56577a2c3a14f6",
+  "references": 6,
+  "run_attempt": 1,
+  "run_id": 45307476240
+}
