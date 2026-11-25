@@ -6,7 +6,7 @@ import { deferred } from "../testUtils/async.js";
 
 const confirm = vi.hoisted(() => vi.fn(async () => false));
 vi.mock("../appConfirm.jsx", () => ({ appConfirm: confirm, useConfirm: () => confirm, ConfirmHost: () => null }));
-let root, container, leaveGuard;
+let root, container, leaveGuard, trainingProps;
 beforeEach(() => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   localStorage.clear();
@@ -21,19 +21,26 @@ afterEach(async () => {
   container.remove();
   vi.unstubAllGlobals();
 });
-async function renderTraining(createTrainingJob) {
-  await act(async () => root.render(withTrainingStudioContext({
-    activeProject: { id: "project", name: "Project" },
+async function renderTraining(createTrainingJob, activeProject = { id: "project", name: "Project" }) {
+  trainingProps = {
+    activeProject,
     datasets: [{ id: "dataset", name: "Portraits", modality: "image", itemCount: 1 }],
     loadDataset: async () => ({ id: "dataset", name: "Portraits", version: 1,
       items: [{ id: "item", assetId: "image", path: "images/portrait.png", caption: { text: "portrait", source: "manual" } }] }),
     trainingTargets: [zImageTrainingTarget], gpuOptions: ["auto"], createTrainingJob,
     registerLeaveGuard: (guard) => { leaveGuard = guard; return () => { leaveGuard = null; }; },
-  })));
+  };
+  await act(async () => root.render(withTrainingStudioContext(trainingProps)));
   await settle();
+  if (!activeProject) return;
   await changeField(field(container, "Dataset"), "dataset");
   await settle();
   await changeField(field(container, "Steps"), "4321");
+}
+async function switchProject(id) {
+  trainingProps = { ...trainingProps, activeProject: { id, name: id } };
+  await act(async () => root.render(withTrainingStudioContext(trainingProps)));
+  await settle();
 }
 async function submit() {
   const button = [...container.querySelectorAll("button")].find((node) => node.textContent === "Start training");
@@ -76,4 +83,22 @@ it("keeps edits made while enqueue is pending separate from the saved request", 
   expect(await leaveGuard()).toBe(false);
   await changeField(field(container, "Steps"), "4321");
   expect(await leaveGuard()).toBe(true);
+});
+
+it("allows leaving the no-workspace screen before any request has been queued", async () => {
+  await renderTraining(vi.fn(), null);
+  expect(await leaveGuard()).toBe(true);
+  expect(confirm).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("clears the saved baseline across workspace A → B → A (submission pending: %s)", async (pendingSubmission) => {
+  const pending = deferred();
+  await renderTraining(vi.fn(() => pendingSubmission ? pending.promise : Promise.resolve({ id: "queued" })));
+  await submit();
+  await switchProject("other-project");
+  expect(await leaveGuard()).toBe(true);
+  await switchProject("project");
+  if (pendingSubmission) await act(async () => pending.resolve({ id: "queued" }));
+  expect(await leaveGuard()).toBe(true);
+  expect(confirm).not.toHaveBeenCalled();
 });
