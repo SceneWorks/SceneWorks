@@ -6589,6 +6589,102 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
     }
 }
 
+#[tokio::test]
+async fn prompt_lora_directives_work_for_image_video_batches_and_replays() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_lora_gate_catalog(&temp_dir);
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt LoRAs").await;
+    let project_id = project["id"].as_str().unwrap();
+    for (route, model, mode, name, id) in [
+        (
+            "image",
+            "z_image_turbo",
+            "text_to_image",
+            "Good Style",
+            "good_style",
+        ),
+        (
+            "video",
+            "ltx_2_3",
+            "text_to_video",
+            "Motion Style",
+            "motion_style",
+        ),
+    ] {
+        advertise_fixture_lora_sources(
+            &app,
+            &[
+                (
+                    "good_style",
+                    &temp_dir.path().join("data/loras/good.safetensors"),
+                ),
+                (
+                    "motion_style",
+                    &temp_dir.path().join("data/loras/motion.safetensors"),
+                ),
+            ],
+            if route == "image" {
+                "image_generate"
+            } else {
+                "video_generate"
+            },
+        )
+        .await;
+        // Studio prompt batches fan out to this same endpoint, with directives expanded per item.
+        for strength in [2.0, -0.5, 0.0] {
+            let (status, job) = request(
+                app.clone(), "POST", &format!("/api/v1/{route}/jobs"),
+                json!({
+                    "projectId":project_id, "model":model, "mode":mode, "count":1,
+                    "prompt":format!("scene<lora:{name}:{strength}><lora:{id}:3><lora:missing:1><lora:Qwen Style:1><lora:Deleted Style:1>"),
+                }),
+            ).await;
+            assert_eq!(status, StatusCode::CREATED, "{job}");
+            assert_eq!(job["payload"]["prompt"], "scene");
+            assert_eq!(job["payload"]["loras"].as_array().unwrap().len(), 1);
+            assert_eq!(job["payload"]["loras"][0]["id"], id);
+            assert_eq!(job["payload"]["loras"][0]["weight"], strength);
+            assert!(job.get("warnings").is_none());
+            assert!(job["payload"].get("warnings").is_none());
+        }
+
+        let (status, selected) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/{route}/jobs"),
+            json!({
+                "projectId":project_id, "model":model, "mode":mode, "count":1,
+                "prompt":format!("scene<lora:{name}:2>"),
+                "loras":[{"id":id,"weight":0.25}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{selected}");
+        assert_eq!(selected["payload"]["loras"].as_array().unwrap().len(), 1);
+        assert_eq!(selected["payload"]["loras"][0]["weight"], 0.25);
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!(
+                    "/api/v1/jobs/{}/{operation}",
+                    selected["id"].as_str().unwrap()
+                ),
+                json!({"payloadChanges":{
+                    "prompt":format!("replay<lora:{name}:2><lora:missing:1>"),
+                }}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{replay}");
+            assert_eq!(replay["payload"]["prompt"], "replay");
+            assert_eq!(replay["payload"]["loras"].as_array().unwrap().len(), 1);
+            assert_eq!(replay["payload"]["loras"][0]["weight"], 0.25);
+        }
+    }
+}
+
 async fn advertise_fixture_lora_source(
     app: &axum::Router,
     lora_id: &str,

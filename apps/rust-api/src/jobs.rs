@@ -1468,6 +1468,7 @@ async fn validate_merged_job_loras(
     if permitted_inline.is_empty() {
         return validate_job_lora_compatibility(state, project_id, merged, false).await;
     }
+    crate::loras::prompt_directives::resolve_for_inline_replay(state, project_id, merged).await?;
     let Some(loras) = merged
         .get("loras")
         .and_then(Value::as_array)

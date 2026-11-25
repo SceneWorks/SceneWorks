@@ -282,6 +282,9 @@ pub(crate) async fn create_image_job(
     // no-op for a web request (which sends the already-composed prompt + presetPromptResolvedClientSide
     // and no top-level styleId), so a web-composed prompt is never double-folded.
     crate::styles::apply_style_to_image_payload(&state, &payload, &mut job_payload).await?;
+    // Strip prompt directives before caption expansion and prompt-batch/negative-prompt gates.
+    // Resolve them at the ordinary LoRA gate, preserving request-validation error precedence.
+    let prompt_loras = crate::loras::prompt_directives::take_from_payload(&mut job_payload);
     // Prompt enhancement is route-specific, so validate the canonical post-preset model rather
     // than trusting the DTO's pre-expansion model. This is also where client attempts to forge the
     // worker-owned report block are refused.
@@ -608,6 +611,7 @@ pub(crate) async fn create_image_job(
         &mut job_payload,
         false,
         Some(&catalogs),
+        Some(prompt_loras),
     )
     .await?;
     // Resolve a selected control overlay id → its installed `.safetensors` path (sc-10165, B4), so a
@@ -2696,6 +2700,8 @@ pub(crate) async fn create_video_job(
         .await?;
     }
 
+    let prompt_loras = crate::loras::prompt_directives::take_from_payload(&mut job_payload);
+
     // Resolve the model manifest entry here so the GPU worker never re-parses
     // builtin/user.models.jsonc itself — Rust owns manifest parsing/merging
     // (story 1653). An unknown model resolves to {}, matching the worker's
@@ -2906,6 +2912,7 @@ pub(crate) async fn create_video_job(
         &mut job_payload,
         false,
         Some(&catalogs),
+        Some(prompt_loras),
     )
     .await?;
     // **THE NO-LANE GATE (sc-19504).** Last, on the payload actually about to be enqueued, so it
