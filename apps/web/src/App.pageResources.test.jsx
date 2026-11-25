@@ -1,12 +1,14 @@
 import React, { act, useEffect } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "./App.jsx";
-import { useAppContext } from "./context/AppContext.js";
+import { useAppContext, useAppStatic } from "./context/AppContext.js";
+import * as portableValidation from "./portableValidation.js";
 import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
 import { mountRoot, unmountRoot } from "./testUtils/dom.js";
 
 const captures = vi.hoisted(() => ({ current: null, unmounted: [] }));
 function Probe({ page }) {
+  captures.static = useAppStatic();
   captures.current = { ...useAppContext(), page };
   useEffect(() => () => { captures.unmounted.push(page); }, [page]);
   return <div data-page={page}>{page}</div>;
@@ -42,7 +44,7 @@ beforeEach(() => {
     return response([]);
   }));
 });
-afterEach(() => { unmountRoot(root, container); vi.unstubAllGlobals(); });
+afterEach(() => { unmountRoot(root, container); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 async function navigate(label) {
   await act(async () => [...container.querySelectorAll(".nav-item")].find((button) => button.textContent === label).click());
   await settle();
@@ -81,4 +83,35 @@ it("releases Assets on Queue entry, then releases Queue details and ignores off-
   expect(captures.current.assets.map((asset) => asset.id)).toEqual(["source", "output"]);
   expect(captures.current.jobs[0].result).toEqual({});
   expect(assetListRequests()).toBe(initialLists + 1);
+});
+
+it("keeps static catalog consumers stable while a background batch updates its aggregate progress", async () => {
+  vi.spyOn(portableValidation, "validatePortableRequest").mockResolvedValue({ state: "valid" });
+  await act(async () => root.render(<App />));
+  await settle();
+  const before = captures.static;
+  await act(async () => captures.current.backgroundImageBatch.runBatch({
+    BATCH_ACTIVE_JOB_LIMIT: 1, batchPrompts: ["one"], batchVariables: {}, resolutionOptions: [],
+    structuredPromptModel: false, batchJobCount: 1, selectedModel: null,
+    buildBatchJobRequest: (prompt) => ({ prompt, count: 1 }),
+    createImageJob: async () => ({ id: "batch", status: "queued" }),
+  }));
+  const update = (status, revision) => ({ id: "batch", type: "image_generate", projectId: "project", status,
+    revision, createdAt: "2026-11-25T12:00:00Z", updatedAt: `2026-11-25T12:0${revision}:00Z`, payload: {}, result: {} });
+  await act(async () => FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(update("running", 1)) }));
+  expect(captures.current.backgroundImageBatch.batchRunProgress).toMatchObject({ running: 1, queued: 0 });
+  expect(captures.static).toBe(before);
+  await act(async () => FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(update("completed", 2)) }));
+  expect(captures.current.backgroundImageBatch.batchRunProgress.completed).toBe(1);
+});
+
+it("acquires fresh output status on Queue entry instead of reusing embedded job snapshots", async () => {
+  const originalFetch = fetch;
+  vi.stubGlobal("fetch", vi.fn((url, options) => new URL(url).pathname.endsWith("/assets/output")
+    ? Promise.resolve(response({ ...output, status: { trashed: true } })) : originalFetch(url, options)));
+  await act(async () => root.render(<App />));
+  await settle();
+  await navigate("Queue");
+  expect(captures.current.assets).toEqual([{ ...output, status: { trashed: true } }]);
+  expect(captures.current.jobs[0].result.assets[0].status).toEqual({});
 });

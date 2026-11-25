@@ -3,6 +3,16 @@ import { assetsApi } from "./api/assetsResources.js";
 import { loadQueueAssets } from "./queueAssets.js";
 afterEach(() => vi.restoreAllMocks());
 
+it("refreshes embedded output snapshots when entering Queue after an asset was trashed", async () => {
+  const stale = { id: "output", status: { trashed: false } };
+  const current = { ...stale, status: { trashed: true } };
+  const item = vi.spyOn(assetsApi, "item").mockResolvedValue(current);
+  expect(await loadQueueAssets("project", "token", {}, [
+    { projectId: "project", result: { assets: [stale] } },
+  ])).toEqual([current]);
+  expect(item).toHaveBeenCalledWith("project", "output", "token", { signal: undefined });
+});
+
 it("loads only Queue output IDs and reuses known records instead of loading the asset library", async () => {
   const source = { id: "unrelated-source" };
   const output = { id: "output" };

@@ -2,10 +2,10 @@ import { useState } from "react";
 
 export function useStrictControlState(saved) {
   const [controlMode, setControlMode] = useState(saved.controlMode ?? "pose");
-  const [controlImageAssetId, setControlImageAssetId] = useState("");
-  const [controlImagePassthrough, setControlImagePassthrough] = useState(false);
+  const [controlImageAssetId, setControlImageAssetId] = useState(saved.controlImageAssetId ?? "");
+  const [controlImagePassthrough, setControlImagePassthrough] = useState(saved.controlImagePassthrough ?? false);
   const [controlScale, setControlScale] = useState(saved.controlScale ?? null);
-  const [controlOverlayId, setControlOverlayId] = useState(null);
+  const [controlOverlayId, setControlOverlayId] = useState(saved.controlOverlayId ?? null);
   return {
     controlMode, setControlMode, controlImageAssetId, setControlImageAssetId,
     controlImagePassthrough, setControlImagePassthrough, controlScale,

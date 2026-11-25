@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { retainPageJobs } from "./pageJobState.js";
+import { isEditorJob } from "./jobTypes.js";
 
 function jobs(count) {
   return Array.from({ length: count }, (_, index) => ({
@@ -45,4 +46,15 @@ it("keeps global keypoint extraction results for capture while a workspace is se
     status: "completed", payload: { sourcePath: "staged-face.png" }, result: { detected: true, kps: [[10, 20]] } };
   expect(retainPageJobs([extraction], { route: "Keypoints", projectId: "workspace" })[0]).toBe(extraction);
   expect(retainPageJobs([extraction], { route: "Library", projectId: "workspace" })[0].result).toEqual({});
+});
+
+it("preserves Editor activity attribution after releasing a timeline generation payload", () => {
+  const job = { ...jobs(1)[0], type: "video_generate", status: "running",
+    payload: { prompt: "private timeline prompt", advanced: { timelineAction: "extend", timelineContext: { timelineId: "timeline" } } } };
+  const policy = { route: "Library", projectId: "project" };
+  const [summary] = retainPageJobs([job], policy);
+  expect(isEditorJob(summary)).toBe(true);
+  expect(summary.payload).toEqual({ advanced: { timelineAction: "extend" } });
+  expect(summary.result).toEqual({});
+  expect(retainPageJobs([summary], policy)[0]).toBe(summary);
 });

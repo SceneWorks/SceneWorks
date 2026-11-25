@@ -484,7 +484,7 @@ export function ImageStudio() {
   } = useStudioAdvancedSettings(saved, { schedulerShift: mossEdit ? 5 : null, steps: mossEdit ? 30 : "", guidanceScale: mossEdit ? 4 : "" });
 
   const [resolution, setResolution] = useState(saved.resolution ?? (mossEdit ? "512x512" : "1024x1024"));
-  const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
+  const [sourceAssetId, setSourceAssetId] = useState(saved.sourceAssetId ?? selectedAsset?.id ?? "");
   // Multi-image reference set for a multi-reference edit (sc-6211, FLUX.2-dev). Drives the plural
   // `referenceAssetIds` payload when the model declares `ui.multiReference` and the user is in
   // edit_image mode (replaces the single source picker). Empty for every other model/mode.
@@ -500,7 +500,7 @@ export function ImageStudio() {
   // instruction describes how to combine them). Only surfaced when the model declares
   // `ui.editReferences`; empty otherwise. When set, submit sends an ordered
   // `referenceAssetIds: [image1, image2]` pair instead of the single `sourceAssetId`.
-  const [editSecondAssetId, setEditSecondAssetId] = useState("");
+  const [editSecondAssetId, setEditSecondAssetId] = useState(saved.editSecondAssetId ?? "");
   // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [characterId, setCharacterId] = useState(saved.characterId ?? "");
@@ -515,7 +515,7 @@ export function ImageStudio() {
   // strength on an img2img-capable model (Krea 2 Turbo). Distinct from the character `referenceAssetId`
   // above — same picker, different purpose. Default 0.5 (the full-range slider midpoint; the usable
   // band is model-specific, so no clamp beyond the slider's 0–1).
-  const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
+  const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState(saved.img2imgReferenceAssetId ?? "");
   const referenceChangeState = useRef(null);
   const changeReference = useCallback((field, id, setter, explicit = true) => {
     const current = referenceChangeState.current;
@@ -568,9 +568,10 @@ export function ImageStudio() {
   // InstantID canonical head angle ("" = match the reference's own angle). Rides advanced.viewAngle.
   const [viewAngle, setViewAngle] = useState(saved.viewAngle ?? "");
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
-  // (one image per pose) instead of the normal variations count. Transient (not saved).
-  const [selectedPoseIds, setSelectedPoseIds] = useState([]);
-  const [workflowPoses, setWorkflowPoses] = useState([]);
+  // (one image per pose) instead of the normal variations count. Save IDs and imported
+  // skeleton definitions so navigation can release the page without losing its selections.
+  const [selectedPoseIds, setSelectedPoseIds] = useState(saved.selectedPoseIds ?? []);
+  const [workflowPoses, setWorkflowPoses] = useState(saved.workflowPoses ?? []);
   const [poseLibraryReplayOpen, setPoseLibraryReplayOpen] = useState(false);
   // Strict-control panel (epic 8236, sc-8245). The selected control type (pose / canny / depth),
   // gated to the backbone's `ui.controlModes`. Pose reuses `selectedPoseIds`; canny/depth use a
@@ -2435,10 +2436,24 @@ export function ImageStudio() {
     widthOverride,
     heightOverride,
     fitMode,
+    sourceAssetId,
+    editSecondAssetId,
+    img2imgReferenceAssetId,
+    img2imgStrength,
+    selectedPoseIds,
+    workflowPoses,
+    controlMode,
+    controlImageAssetId,
+    controlImagePassthrough,
+    controlScale,
+    controlOverlayId,
+    textStyleGain,
     referenceAssetIds,
     referenceDimensionIntent,
     orderedCharacterReferences,
-    ...(isFlux3ImageModel(selectedModel) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
+    characterId,
+    characterLookId,
+    referenceAssetId,
     flux3Layout,
     flux3ReferenceSlots,
     ipAdapterScale,

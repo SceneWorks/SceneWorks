@@ -142,6 +142,72 @@ describe("foreground page lifetime", () => {
     expect(JSON.parse(window.localStorage.getItem("sceneworks-studio-image-project-1"))).toMatchObject({ batchVariableValues: { coat: ["red", "blue"] } });
   });
 
+  it("restores an img2img reference and selected workflow pose after releasing Image Studio", async () => {
+    const asset = { id: "reference", projectId: "project-1", type: "image", displayName: "Portrait reference",
+      status: {}, file: { path: "assets/reference.png", mimeType: "image/png", width: 1024, height: 1024 } };
+    const model = { id: "z_image_turbo", name: "Z-Image", type: "image", family: "z-image",
+      capabilities: ["text_to_image"], ui: { img2img: true, controlModes: ["pose"] } };
+    const pose = { id: "workflow:test:0", label: "Shared workflow pose 1", category: "Shared workflow", source: "workflow", keypoints: [[0.1, 0.2]] };
+    mockFetch({ models: [model], assets: [asset] });
+    window.localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify({ model: model.id,
+      ipAdapterScale: 0.6, workflowPoses: [pose] }));
+    await renderApp();
+    await clickButton("Image");
+    const button = (prefix) => [...document.querySelectorAll("button")].find((node) => node.textContent.trim().startsWith(prefix));
+    await act(async () => button("Image reference").click());
+    await settle();
+    await act(async () => button("Select reference image").click());
+    await settle();
+    await act(async () => document.querySelector(".asset-picker-card").click());
+    await settle();
+    await act(async () => button("Use Selection").click());
+    await settle();
+    // Open the strict-control disclosure and select the imported pose.
+    await act(async () => document.querySelector(".control-panel .advanced-section-toggle").click());
+    await settle();
+    await act(async () => document.querySelector('[aria-label="Select pose Shared workflow pose 1"]').click());
+    await settle();
+    await clickButton("Queue");
+    expect(imageStudio()).toBeNull();
+    await clickButton("Image");
+    expect(document.querySelector('[aria-label="Active image reference"]').textContent).toContain("Portrait reference");
+    await act(async () => document.querySelector(".control-panel .advanced-section-toggle").click());
+    await settle();
+    expect(document.body.textContent).toContain("1 pose selected");
+    expect(JSON.parse(localStorage.getItem("sceneworks-studio-image-project-1"))).toMatchObject({
+      img2imgReferenceAssetId: asset.id, selectedPoseIds: [pose.id], workflowPoses: [pose],
+    });
+  });
+
+  it("restores both edit source selections after a page navigation", async () => {
+    const assets = ["First", "Second"].map((name) => ({ id: name.toLowerCase(), projectId: "project-1", type: "image",
+      displayName: name, createdAt: "2026-11-25T12:00:00Z", status: {}, file: { path: `assets/${name}.png`, mimeType: "image/png" } }));
+    mockFetch({ assets, models: [{ id: "krea_2_turbo", name: "Krea", type: "image", family: "krea2",
+      capabilities: ["edit_image"], ui: { editReferences: {} } }] });
+    localStorage.setItem("sceneworks-studio-image-project-1", JSON.stringify({ model: "krea_2_turbo", mode: "edit_image" }));
+    await renderApp();
+    await clickButton("Image");
+    for (const index of [0, 1]) {
+      const sourceField = [...document.querySelectorAll(".asset-picker-field")].find((node) =>
+        node.querySelector(".asset-picker-label")?.textContent === (index === 0 ? "Image 1" : "Image 2 (optional)"));
+      const select = sourceField.querySelector('[aria-haspopup="dialog"]');
+      await act(async () => select.click());
+      await settle();
+      await act(async () => [...document.querySelectorAll(".asset-picker-card")].find((card) => card.textContent.includes(assets[index].displayName)).click());
+      await settle();
+      await act(async () => [...document.querySelectorAll(".asset-picker-modal button")].find((button) => button.textContent.trim() === "Use Selection").click());
+      await settle();
+    }
+    await clickButton("Queue");
+    await clickButton("Image");
+    expect(imageStudio().textContent).toContain("First");
+    expect(imageStudio().textContent).toContain("Second");
+    const snapshot = JSON.parse(localStorage.getItem("sceneworks-studio-image-project-1"));
+    expect(snapshot).toMatchObject({
+      sourceAssetId: "first", editSecondAssetId: "second",
+    });
+  });
+
   it("unmounts both catalog pages and creative pages on navigation", async () => {
     await renderApp();
 

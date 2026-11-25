@@ -11,7 +11,8 @@ export async function loadQueueAssets(projectId, token, { signal } = {}, jobs = 
     const owner = job.projectId ?? projectId;
     if (!owner) continue;
     for (const asset of job.result?.assets ?? []) {
-      if (!known.has(asset.id)) known.set(asset.id, asset);
+      // Job snapshots predate library edits (trash, ratings, etc.). Acquire the
+      // current record even when the job embeds an older copy of that output.
       wanted.add(asset.id);
       owners.set(asset.id, owner);
     }

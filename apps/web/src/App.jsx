@@ -704,14 +704,6 @@ export function App() {
     [settlePendingWorkflowGeneration],
   );
 
-  const openWorkflowSharingSettings = useCallback(() => {
-    setWorkflowEmbedNoticeOpen(false);
-    setWorkflowEmbedDecisionError("");
-    settlePendingWorkflowGeneration(false);
-    setSettingsSharingFocusRequest((request) => request + 1);
-    setSimpleActiveScreen("settings");
-    setActiveView("Settings");
-  }, [settlePendingWorkflowGeneration]);
   // A completed choice is mirrored to other mounted tabs so they cannot ask independently.
   useEffect(
     () =>
@@ -796,20 +788,36 @@ export function App() {
     (getClaimedIds) => editorScratchRegistry.registerClaim(getClaimedIds, () => jobsRef.current),
     [editorScratchRegistry],
   );
-  const navTo = useCallback((viewId) => {
-    if (viewId === activeViewRef.current) return;
+  const requestPageExit = useCallback((onAccepted) => {
     const guards = [...leaveGuardsRef.current];
     function proceed(index) {
-      if (index === guards.length) { setActiveView(viewId); return; }
+      if (index === guards.length) { onAccepted(); return true; }
       const decision = guards[index]();
       if (decision && typeof decision.then === "function") {
-        decision.then((ok) => { if (ok) proceed(index + 1); });
-      } else if (decision !== false) {
-        proceed(index + 1);
+        return decision.then((ok) => ok !== false && proceed(index + 1));
       }
+      return decision !== false && proceed(index + 1);
     }
-    proceed(0);
+    return proceed(0);
   }, []);
+  const navTo = useCallback((viewId) => {
+    if (viewId === activeViewRef.current) return true;
+    return requestPageExit(() => setActiveView(viewId));
+  }, [requestPageExit]);
+  const changeUiMode = useCallback((next) => {
+    if (next === uiMode) return true;
+    return requestPageExit(() => setUiModeOverride(next));
+  }, [requestPageExit, uiMode]);
+  const openWorkflowSharingSettings = useCallback(() => {
+    requestPageExit(() => {
+      setWorkflowEmbedNoticeOpen(false);
+      setWorkflowEmbedDecisionError("");
+      settlePendingWorkflowGeneration(false);
+      setSettingsSharingFocusRequest((request) => request + 1);
+      setSimpleActiveScreen("settings");
+      setActiveView("Settings");
+    });
+  }, [requestPageExit, settlePendingWorkflowGeneration]);
 
   // A screen holding an unsaved draft (Training Studio / Data Sets, sc-11970) can register
   // a guard consulted before the active PROJECT is switched — which would otherwise silently
@@ -1676,6 +1684,7 @@ export function App() {
   //     cold-only consumers reading via useAppStatic() no longer re-render on job ticks.
   // Owner-memoized domain values are composed without mirrored dependency lists.
   const appLiveValue = useAppDomainValue({
+    backgroundImageBatch,
     // Jobs / queue (high-churn — new identity per SSE tick)
     jobs,
     filteredJobs,
@@ -1691,7 +1700,6 @@ export function App() {
   });
 
   const shellContext = useAppDomainValue({
-    backgroundImageBatch,
     activeProject,
     mediaAssets,
     setPreviewAsset: openPreview,
@@ -1811,7 +1819,7 @@ export function App() {
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
             onEmbedWorkflowChange={changeEmbedWorkflow}
-            onModeChange={setUiModeOverride}
+            onModeChange={changeUiMode}
             onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
             requestedScreen={simpleActiveScreen}
@@ -1911,7 +1919,7 @@ export function App() {
             <button
               aria-label="Switch to Simple UI"
               className="icon-btn"
-              onClick={() => setUiModeOverride(SIMPLE_MODE)}
+              onClick={() => changeUiMode(SIMPLE_MODE)}
               title="Switch to Simple UI"
               type="button"
             >
@@ -1921,7 +1929,7 @@ export function App() {
             <SimpleModeSwitch
               locked={uiModeLocked}
               mode={ADVANCED_MODE}
-              onChange={setUiModeOverride}
+              onChange={changeUiMode}
             />
           )}
         </div>
@@ -1939,7 +1947,7 @@ export function App() {
                 Clicking through opens the Queue, where the per-worker/job detail lives. */}
             <button
               className={health?.status === "ok" ? "status-pill status-summary" : "status-pill status-summary warning"}
-              onClick={() => setActiveView("Queue")}
+              onClick={() => navTo("Queue")}
               title="Workers and GPU activity — open the Queue for detail"
               type="button"
             >
@@ -2017,7 +2025,7 @@ export function App() {
             onComplete={completeSetupWizard}
             onCreateProject={createProject}
             onDownloadModel={createModelDownloadJob}
-            onOpenQueue={() => setActiveView("Queue")}
+            onOpenQueue={() => navTo("Queue")}
           />
         ) : setupGateLoading ? null : needsFirstProject ? (
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />

@@ -5,6 +5,15 @@ import { isEditorJob, terminalStatuses } from "./jobTypes.js";
 const EMPTY_DETAIL = Object.freeze({});
 const DOWNLOAD_TYPES = new Set(["model_download", "model_import", "model_convert", "lora_download", "lora_import"]);
 
+function shellPayload(job) {
+  const action = job.payload?.advanced?.timelineAction;
+  if (!action) return EMPTY_DETAIL;
+  // The shell's Editor activity indicator uses this small routing field. Keep
+  // it without retaining the timeline context, prompts, or other request data.
+  if (Object.keys(job.payload).length === 1 && Object.keys(job.payload.advanced).length === 1) return job.payload;
+  return { advanced: { timelineAction: action } };
+}
+
 function pageUsesJob(job, route, simple) {
   if (route === "Queue" || (simple && route === "queue")) return true;
   if (route === "Setup" || route === "Models" || (simple && route === "models")) return DOWNLOAD_TYPES.has(job.type);
@@ -40,9 +49,11 @@ export function retainPageJobs(jobs, { route, simple = false, projectId, ownsScr
     if (relevant && terminalStatuses.has(job.status)) history.set(bucket, count + 1);
     const limit = route === "Library" || (simple && route === "assets") ? MAX_TERMINAL_JOBS : localJobStackLimit;
     const detail = relevant && (!terminalStatuses.has(job.status) || queue || count < limit);
-    if (detail || ownsScratch(job.id) || (job.payload === EMPTY_DETAIL && job.result === EMPTY_DETAIL)) return job;
+    if (detail || ownsScratch(job.id)) return job;
+    const payload = shellPayload(job);
+    if (job.payload === payload && job.result === EMPTY_DETAIL) return job;
     changed = true;
-    return { ...job, payload: EMPTY_DETAIL, result: EMPTY_DETAIL };
+    return { ...job, payload, result: EMPTY_DETAIL };
   });
   return changed ? next : jobs;
 }
