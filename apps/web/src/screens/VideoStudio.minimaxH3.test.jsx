@@ -592,6 +592,56 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(fieldLabelled("Reference audio")).toBeTruthy();
   });
 
+  it("removes individual references and clears the persisted image selection without restarting", async () => {
+    const ids = ["img_1", "img_2", "img_3"];
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "reference_to_video", model: MINIMAX_REF.id, prompt: "A cellist on a rooftop",
+      referenceAssetIds: ids,
+    }));
+    const context = baseContext({
+      videoModels: [MINIMAX_REF], preferencesHydrated: true,
+      assets: ids.map((id) => asset(id, "image", id)),
+    });
+    await render(context);
+    const generate = () => [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.includes("Render clip"),
+    );
+    const edit = () => fieldLabelled("Reference images").querySelector('button[aria-haspopup="dialog"]');
+    const confirm = () => [...document.querySelectorAll(".asset-picker-footer button")].find((button) =>
+      button.textContent.trim() === "Use Selection",
+    );
+    const referenceCard = (id) => [...document.querySelectorAll(".asset-picker-card")].find((card) =>
+      card.textContent.includes(id),
+    );
+
+    await click(edit());
+    await click(referenceCard("img_2"));
+    await click(confirm());
+    await click(generate());
+    expect(context.createVideoJob.mock.calls.at(-1)[0].referenceAssetIds).toEqual(["img_1", "img_3"]);
+
+    await click(edit());
+    await click(referenceCard("img_1"));
+    await click(referenceCard("img_3"));
+    expect(confirm().disabled).toBe(false);
+    await click(confirm());
+    expect(fieldLabelled("Reference images").textContent).toContain("No reference images selected");
+    expect(generate().disabled).toBe(true);
+    expect(JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1")).referenceAssetIds)
+      .toEqual([]);
+
+    // The direct Remove control clears a new selection too, without opening the picker.
+    await click(edit());
+    await click(referenceCard("img_2"));
+    await click(confirm());
+    const remove = fieldLabelled("Reference images").querySelector(".asset-picker-clear");
+    expect(remove).toBeTruthy();
+    await click(remove);
+    expect(generate().disabled).toBe(true);
+    expect(JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1")).referenceAssetIds)
+      .toEqual([]);
+  });
+
   it("gives Bernini's reference→video images only, not clips or audio", async () => {
     // The per-model half of the gate. Bernini declares no reference-clip or audio cap, so the
     // blanket clip default (8) must NOT be read as "this model takes reference clips" — its engine

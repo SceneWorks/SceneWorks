@@ -1732,7 +1732,7 @@ mod tests {
     }
 
     /// sc-19563 — **every MiniMax-H3 turbo entry declares the ONE partition it is distilled for**,
-    /// and the ref2v one is the odd one out.
+    /// including both reference-conditioned step counts.
     ///
     /// This reads the embedded manifest, so it is the guard on the declaration itself; the gate that
     /// reads it lives in `apps/rust-api/src/loras.rs::validate_lora_specs_for_model` and is proved
@@ -1741,17 +1741,18 @@ mod tests {
     ///
     /// The `assert_ne!` at the end is the half that matters. Family membership cannot express this
     /// pairing — both partitions are one architecture and both declare `family: minimax-h3` — so a
-    /// table that gave all four the same `modelIds` would be exactly as wrong as declaring none, and
+    /// table that gave every adapter the same `modelIds` would be as wrong as declaring none, and
     /// would sail past a test that only checked the key was present.
     #[test]
     fn every_minimax_h3_turbo_lora_declares_its_partition() {
         // The expected pairing, spelled out rather than derived from the filename, so a manifest
         // edit that pointed the ref2v adapter at the fl2v partition reds here.
-        const EXPECTED: [(&str, &str); 4] = [
+        const EXPECTED: [(&str, &str); 5] = [
             ("minimax_h3_turbo_4step_768p", "minimax_h3"),
             ("minimax_h3_turbo_8step", "minimax_h3"),
             ("minimax_h3_turbo_4step_v01", "minimax_h3"),
             ("minimax_h3_ref2v_turbo_4step", "minimax_h3_ref"),
+            ("minimax_h3_ref2v_turbo_8step_768p", "minimax_h3_ref"),
         ];
         let mut seen = 0;
         for lora in builtin_loras() {

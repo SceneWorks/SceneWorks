@@ -1467,6 +1467,54 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
 
 #[cfg(native_lane)]
 #[test]
+fn reference_video_admission_classifies_ordered_native_references() {
+    let image = || Image {
+        width: 32,
+        height: 32,
+        pixels: vec![0; 32 * 32 * 3],
+    };
+    let mut conditioning: Vec<_> = (0..3)
+        .map(|_| Conditioning::Reference {
+            image: image(),
+            strength: None,
+        })
+        .collect();
+    // The actual H3 reference carrier, including an imported checkpoint's catalog id.
+    for model in ["minimax_h3_ref", "community_h3_reference"] {
+        assert_eq!(
+            video_admission_reference_shape(model, "reference_to_video", &conditioning),
+            "multi_image"
+        );
+        assert_eq!(
+            video_admission_reference_count(model, "reference_to_video", &conditioning),
+            3
+        );
+    }
+    conditioning.push(Conditioning::ReferenceVideo {
+        frames: vec![image()],
+        fps: 24.0,
+        audio: None,
+    });
+    assert_eq!(
+        video_admission_reference_shape("minimax_h3_ref", "reference_to_video", &conditioning),
+        "image+reference_video"
+    );
+    assert_eq!(
+        video_admission_reference_count("minimax_h3_ref", "reference_to_video", &conditioning),
+        4
+    );
+    assert_eq!(
+        video_admission_reference_shape("minimax_h3_ref", "reference_to_video", &[]),
+        "none"
+    );
+    assert_eq!(
+        video_admission_reference_shape("minimax_h3_ref", "text_to_video", &conditioning),
+        "none"
+    );
+}
+
+#[cfg(native_lane)]
+#[test]
 fn bernini_v2v_admission_records_one_video_clip_not_a_generic_reference() {
     let clip = Conditioning::VideoClip {
         frames: vec![Image {
