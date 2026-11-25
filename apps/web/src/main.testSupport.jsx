@@ -110,6 +110,7 @@ export function withTrainingStudioContext(p) {
       writeTrainingDatasetCaptionSidecars: p.writeCaptionSidecars,
       createTrainingDatasetCaptionJob: p.createCaptionJob,
       createTrainingJob: p.createTrainingJob,
+      registerLeaveGuard: p.registerLeaveGuard,
       trainingPresets: { presets: p.trainingPresets },
       trainingPresetsError: p.trainingPresetsError,
       trainingTargets: { targets: p.trainingTargets },
