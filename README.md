@@ -136,6 +136,15 @@ each screen remembers the last tier you picked per model, and a model can declar
 a minimum quality floor so it never quietly renders below it. Model licenses vary
 — see [Licensing](#licensing).
 
+Image and video prompts, including batch prompts, can add installed LoRAs with
+`<lora:DirectFlash:2>` (`<lora:name:strength>`). Names and catalog IDs match without
+case sensitivity against adapters compatible with the current model. Directives
+are removed from the generated prompt text. LoRAs selected in the UI take
+precedence, including their strength; repeated directives never load an adapter
+twice. Missing, unavailable, incompatible, or malformed directives are skipped
+with a server log warning only. Native single-pass prompt batches share their
+combined adapter set; ordinary batch processing resolves each job separately.
+
 ## Reuse an existing ComfyUI library
 
 If you already keep models under a ComfyUI `models/` tree, SceneWorks can read

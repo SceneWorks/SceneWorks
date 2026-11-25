@@ -6589,6 +6589,102 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
     }
 }
 
+#[tokio::test]
+async fn prompt_lora_directives_work_for_image_video_batches_and_replays() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_lora_gate_catalog(&temp_dir);
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt LoRAs").await;
+    let project_id = project["id"].as_str().unwrap();
+    for (route, model, mode, name, id) in [
+        (
+            "image",
+            "z_image_turbo",
+            "text_to_image",
+            "Good Style",
+            "good_style",
+        ),
+        (
+            "video",
+            "ltx_2_3",
+            "text_to_video",
+            "Motion Style",
+            "motion_style",
+        ),
+    ] {
+        advertise_fixture_lora_sources(
+            &app,
+            &[
+                (
+                    "good_style",
+                    &temp_dir.path().join("data/loras/good.safetensors"),
+                ),
+                (
+                    "motion_style",
+                    &temp_dir.path().join("data/loras/motion.safetensors"),
+                ),
+            ],
+            if route == "image" {
+                "image_generate"
+            } else {
+                "video_generate"
+            },
+        )
+        .await;
+        // Studio prompt batches fan out to this same endpoint, with directives expanded per item.
+        for strength in [2.0, -0.5, 0.0] {
+            let (status, job) = request(
+                app.clone(), "POST", &format!("/api/v1/{route}/jobs"),
+                json!({
+                    "projectId":project_id, "model":model, "mode":mode, "count":1,
+                    "prompt":format!("scene<lora:{name}:{strength}><lora:{id}:3><lora:missing:1><lora:Qwen Style:1><lora:Deleted Style:1>"),
+                }),
+            ).await;
+            assert_eq!(status, StatusCode::CREATED, "{job}");
+            assert_eq!(job["payload"]["prompt"], "scene");
+            assert_eq!(job["payload"]["loras"].as_array().unwrap().len(), 1);
+            assert_eq!(job["payload"]["loras"][0]["id"], id);
+            assert_eq!(job["payload"]["loras"][0]["weight"], strength);
+            assert!(job.get("warnings").is_none());
+            assert!(job["payload"].get("warnings").is_none());
+        }
+
+        let (status, selected) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/{route}/jobs"),
+            json!({
+                "projectId":project_id, "model":model, "mode":mode, "count":1,
+                "prompt":format!("scene<lora:{name}:2>"),
+                "loras":[{"id":id,"weight":0.25}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{selected}");
+        assert_eq!(selected["payload"]["loras"].as_array().unwrap().len(), 1);
+        assert_eq!(selected["payload"]["loras"][0]["weight"], 0.25);
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!(
+                    "/api/v1/jobs/{}/{operation}",
+                    selected["id"].as_str().unwrap()
+                ),
+                json!({"payloadChanges":{
+                    "prompt":format!("replay<lora:{name}:2><lora:missing:1>"),
+                }}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{replay}");
+            assert_eq!(replay["payload"]["prompt"], "replay");
+            assert_eq!(replay["payload"]["loras"].as_array().unwrap().len(), 1);
+            assert_eq!(replay["payload"]["loras"][0]["weight"], 0.25);
+        }
+    }
+}
+
 async fn advertise_fixture_lora_source(
     app: &axum::Router,
     lora_id: &str,
@@ -16166,6 +16262,76 @@ async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
     }
     let (status, body) = post("iris_3b", "a cat", json!(["a cat", ""]), 1).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn prompt_lora_directives_are_stripped_before_native_batch_replay_validation() {
+    let _hf_cache = isolate_hf_cache();
+    let (temp_dir, app, project_id) = iris_and_plain_app().await;
+    let adapter = temp_dir.path().join("data/loras/batch.safetensors");
+    std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+    let header = serde_json::to_vec(&json!({"__metadata__":{
+        "family":"iris", "irisTask":"generation", "baseModel":"iris_3b",
+    }}))
+    .unwrap();
+    std::fs::write(
+        &adapter,
+        [(header.len() as u64).to_le_bytes().as_slice(), &header].concat(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp_dir.path().join("config/manifests/user.loras.jsonc"),
+        json!({"schemaVersion":1,"loras":[{
+            "id":"batch_style", "name":"Batch Style", "family":"iris",
+            "irisTask":"generation", "baseModel":"iris_3b",
+            "source":{"provider":"local","path":"loras/batch.safetensors"},
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    advertise_fixture_lora_source(&app, "batch_style", &adapter, "image_generate").await;
+
+    let mut body = json!({
+        "projectId":project_id,"model":"iris_3b","prompt":"cat",
+        "prompts":["cat","dog"],"width":768,"height":768,"count":1,"seed":11,
+        "loras":[{"id":"batch_style","weight":0.25}],
+    });
+    let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    body["prompt"] = json!("cat<lora:Batch Style:2>");
+    body["loras"] = json!([]);
+    let (status, fresh) = request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{fresh}");
+    assert_eq!(fresh["payload"]["loras"][0]["weight"], 2.0);
+
+    for operation in ["retry", "duplicate"] {
+        // A retry retains its frozen source selection and UI strength. Clearing the explicit
+        // selection on a duplicate resolves the directive again against that same adapter.
+        let changes = if operation == "retry" {
+            json!({"prompt":"cat<lora:Batch Style:2>"})
+        } else {
+            json!({"prompt":"cat<lora:Batch Style:2>","loras":[]})
+        };
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/jobs/{}/{operation}",
+                original["id"].as_str().unwrap()
+            ),
+            json!({"payloadChanges":changes}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(replay["payload"]["prompt"], "cat");
+        assert_eq!(replay["payload"]["prompts"], json!(["cat", "dog"]));
+        assert_eq!(replay["payload"]["loras"].as_array().unwrap().len(), 1);
+        assert_eq!(replay["payload"]["loras"][0]["id"], "batch_style");
+        assert_eq!(
+            replay["payload"]["loras"][0]["weight"],
+            if operation == "retry" { 0.25 } else { 2.0 }
+        );
+    }
 }
 
 /// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —
