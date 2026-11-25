@@ -15,6 +15,7 @@ use super::pid::resolve_pid_weights;
 use super::render::drive_hires_passes;
 #[cfg(target_os = "macos")]
 use super::render::hires_first_pass_context;
+use super::render::resolve_hires_fix_plan;
 use super::render::HiresFixPlan;
 use super::render::WorkerExecutionReport;
 use super::resolve_seed;
@@ -802,35 +803,6 @@ pub(super) fn validate_sdxl_imported_hires_scheduler(
     Ok(())
 }
 
-pub(super) fn resolve_sdxl_imported_hires(
-    request: &ImageRequest,
-    first_pass_steps: u32,
-    first_pass_guidance: f32,
-) -> Option<HiresFixPlan> {
-    if request.hires_fix.is_disabled() {
-        return None;
-    }
-    let upscale_by = request.hires_fix.effective_upscale_by();
-    let denoising_strength = request.hires_fix.effective_denoising_strength();
-    let cfg = request
-        .hires_fix
-        .effective_cfg_scale(Some(first_pass_guidance));
-    Some(HiresFixPlan {
-        width: sceneworks_core::image_request::hires_fix_target_dimension(
-            request.width,
-            upscale_by,
-        ),
-        height: sceneworks_core::image_request::hires_fix_target_dimension(
-            request.height,
-            upscale_by,
-        ),
-        steps: request.hires_fix.effective_steps(first_pass_steps),
-        guidance: Some(cfg.unwrap_or_default()),
-        true_cfg: None,
-        provider_reference_strength: denoising_strength,
-    })
-}
-
 #[cfg(target_os = "macos")]
 fn sdxl_imported_reference_count(conditioning: &[Conditioning]) -> u32 {
     conditioning.iter().fold(0_u32, |count, item| {
@@ -1529,7 +1501,7 @@ pub(super) async fn generate_sdxl_imported_stream(
     let (width, height) = (request.width, request.height);
     let (conditioning, mode_tag, strength) =
         resolve_imported_sdxl_conditioning(request, settings, project_path)?;
-    let hires_fix = resolve_sdxl_imported_hires(request, steps, guidance);
+    let hires_fix = resolve_hires_fix_plan(request, steps, Some(guidance), None);
     validate_sdxl_imported_hires_conditioning(&conditioning, hires_fix)?;
     validate_sdxl_imported_hires_scheduler(descriptor.id, scheduler.as_deref(), hires_fix)?;
     let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported SDXL")?;

@@ -1242,19 +1242,19 @@ def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_
                     "uuid": tool["GPU0"],
                     "index": 0,
                     "estimate_source": "scail2-plural-reviewed-device-peak-v1",
-                    "estimate_bytes": 60 << 30,
-                    "required_free_bytes": 66 << 30,
+                    "estimate_bytes": 62 << 30,
+                    "required_free_bytes": 68 << 30,
                     "total_mib": 97887,
                     "used_mib": 40000,
                     "free_mib": 57887,
-                    "refusal": "57887 MiB free < 67584 MiB required",
+                    "refusal": "57887 MiB free < 69632 MiB required",
                 },
                 {
                     "uuid": GPU1,
                     "index": 1,
                     "estimate_source": "scail2-plural-reviewed-device-peak-v1",
-                    "estimate_bytes": 60 << 30,
-                    "required_free_bytes": 66 << 30,
+                    "estimate_bytes": 62 << 30,
+                    "required_free_bytes": 68 << 30,
                     "total_mib": 97887,
                     "used_mib": 900,
                     "free_mib": 96987,
@@ -1280,7 +1280,7 @@ def test_ordinary_full_owned_job_captures_bind_the_hosted_plan_and_real_job(tmp_
             ]
         claim["claim_gpu_estimate"] = {
             "source": "scail2-plural-reviewed-device-peak-v1",
-            "estimate_bytes": 60 << 30,
+            "estimate_bytes": 62 << 30,
         }
         # GPU1 drives the display: its idle card holds memory before admission and after release.
         claim["admission_background_activity"] = {

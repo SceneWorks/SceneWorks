@@ -3593,7 +3593,7 @@ mod hires_report_tests {
         assert!(krea_imported.contains("compile_hires_multi_pass_plan("));
         assert!(krea_imported.contains("drive_hires_passes("));
         assert!(krea_imported.contains("generate_with_scope_report_planned("));
-        assert!(!sdxl_imported.contains("resolve_hires_fix_plan("));
+        assert!(sdxl_imported.contains("resolve_hires_fix_plan("));
         assert!(!sdxl_imported.contains("generate_one_with_hires_on_surface("));
         assert!(!sdxl_imported.contains("hires_fix_reference_count()"));
         assert!(sdxl_imported.contains("compile_hires_multi_pass_plan("));

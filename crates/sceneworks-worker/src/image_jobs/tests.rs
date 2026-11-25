@@ -45,7 +45,7 @@ use super::adapters::resolve_adapters;
     any(native_lane, all(unix, native_lane))
 ))]
 use super::adapters::resolve_prepared_adapters;
-#[cfg(target_os = "macos")]
+#[cfg(native_lane)]
 use super::adapters::PreparedAdapters;
 #[cfg(native_lane)]
 use super::apply_inline_iris_restore;
@@ -655,6 +655,8 @@ use super::render::hires_fix_reference_count;
 #[cfg(native_lane)]
 use super::render::lane_reference_count;
 #[cfg(native_lane)]
+use super::render::resolve_hires_fix_plan;
+#[cfg(native_lane)]
 use super::render::HiresFixPlan;
 use super::resolve_adapter_file;
 use super::resolve_pinned_native_package;
@@ -736,8 +738,6 @@ use super::sdxl_imported::promote_cached_sdxl_component;
 use super::sdxl_imported::resolve_imported_sdxl_file;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::resolve_imported_sdxl_pin;
-#[cfg(native_lane)]
-use super::sdxl_imported::resolve_sdxl_imported_hires;
 #[cfg(target_os = "macos")]
 use super::sdxl_imported::sdxl_imported_available;
 #[cfg(native_lane)]
@@ -2883,7 +2883,7 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
         },
         "modelManifestEntry": { "family": "sdxl" }
     }));
-    let hires = resolve_sdxl_imported_hires(&req, 6, 7.0).expect("SDXL hires plan");
+    let hires = resolve_hires_fix_plan(&req, 6, Some(7.0), None).expect("SDXL hires plan");
     assert_eq!((hires.width, hires.height), (1024, 1024));
     assert_eq!(hires.steps, 4);
     assert_eq!(hires.guidance, Some(6.5));
@@ -2898,7 +2898,7 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
         "height": 512,
         "modelManifestEntry": { "family": "sdxl" }
     }));
-    assert!(resolve_sdxl_imported_hires(&disabled_req, 6, 7.0).is_none());
+    assert!(resolve_hires_fix_plan(&disabled_req, 6, Some(7.0), None).is_none());
 
     validate_sdxl_imported_hires_conditioning(&[], Some(hires))
         .expect("prompt-only hires is admitted");
