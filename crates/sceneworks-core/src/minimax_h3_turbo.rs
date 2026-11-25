@@ -9,11 +9,10 @@ mod tests {
         json!({ "id": id })
     }
 
-    /// The shipped catalog carries EXACTLY the four published turbo adapters, each with the recipe
-    /// upstream's model-specs table publishes.
+    /// The shipped catalog carries the supported turbo adapters with their upstream recipes.
     ///
     /// Every triple is spelled out rather than derived, because the whole point of the per-entry
-    /// declaration is that the four disagree: an implementation that returned one constant for all
+    /// declaration is that the variants disagree: returning one constant for all
     /// of them, or that read the shift off the family, fails at least two arms here.
     #[test]
     fn the_shipped_catalog_declares_every_published_turbo_variant() {
@@ -36,6 +35,7 @@ mod tests {
                 ("minimax_h3_turbo_8step", 8, 12.0, 3.0),
                 ("minimax_h3_turbo_4step_v01", 4, 12.0, 3.0),
                 ("minimax_h3_ref2v_turbo_4step", 4, 12.0, 3.0),
+                ("minimax_h3_ref2v_turbo_8step_768p", 8, 12.0, 3.0),
             ],
             "the shipped turbo recipes"
         );
@@ -131,6 +131,7 @@ mod tests {
         assert_eq!(edge("minimax_h3_turbo_8step"), Some(544));
         assert_eq!(edge("minimax_h3_turbo_4step_v01"), Some(544));
         assert_eq!(edge("minimax_h3_ref2v_turbo_4step"), Some(544));
+        assert_eq!(edge("minimax_h3_ref2v_turbo_8step_768p"), Some(768));
     }
 
     /// The resolver: no accelerator ⇒ the base regime, one ⇒ its own recipe, and the recipe follows
@@ -159,6 +160,20 @@ mod tests {
         .expect("resolves")
         .expect("a recipe");
         assert_eq!((eight.steps, eight.video_shift), (8, 12.0));
+        let reference_eight = resolve_turbo_recipe(
+            "minimax_h3_ref",
+            &[lora("minimax_h3_ref2v_turbo_8step_768p")],
+        )
+        .expect("reference 8-step resolves")
+        .expect("a recipe");
+        assert_eq!(
+            (
+                reference_eight.steps,
+                reference_eight.video_shift,
+                reference_eight.audio_shift
+            ),
+            (8, 12.0, 3.0)
+        );
     }
 
     /// Two accelerators asking for different schedules is refused by name, not silently first-wins.

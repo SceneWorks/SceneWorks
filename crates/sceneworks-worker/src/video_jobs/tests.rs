@@ -22425,6 +22425,12 @@ fn every_turbo_variant_with_veda_drives_its_own_recipe_to_the_engine() {
         ("minimax_h3", "minimax_h3_turbo_8step", 8, 12.0),
         ("minimax_h3", "minimax_h3_turbo_4step_v01", 4, 12.0),
         ("minimax_h3_ref", "minimax_h3_ref2v_turbo_4step", 4, 12.0),
+        (
+            "minimax_h3_ref",
+            "minimax_h3_ref2v_turbo_8step_768p",
+            8,
+            12.0,
+        ),
     ] {
         let lora = minimax_h3_turbo_lora(tiers.path(), lora_id);
         let veda = json!({"enabled":true,"generated":"90%","reference":"12",

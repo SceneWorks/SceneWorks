@@ -1583,10 +1583,9 @@ mod tests {
         assert_eq!(revision, "952f49d49653cb42e7d6cf7cbfad74738073ec7d");
     }
 
-    /// The four DIFFUSERS turbo files published by `lightx2v/Minimax-h3-Turbo`, paired with the
-    /// catalog id that must carry each. Transcribed from the real published headers at revision
-    /// `5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1` (sc-18724 verified all four).
-    const MINIMAX_H3_TURBO_FILES: [(&str, &str); 4] = [
+    /// Native Diffusers turbo files, paired with their catalog ids. The original four retain the
+    /// sc-18724 revision; the 768p reference 8-step adapter is pinned to its later upstream release.
+    const MINIMAX_H3_TURBO_FILES: [(&str, &str); 5] = [
         (
             "minimax_h3_turbo_4step_768p",
             "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors",
@@ -1602,6 +1601,10 @@ mod tests {
         (
             "minimax_h3_ref2v_turbo_4step",
             "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        ),
+        (
+            "minimax_h3_ref2v_turbo_8step_768p",
+            "minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors",
         ),
     ];
 
@@ -1638,11 +1641,8 @@ mod tests {
 
     #[test]
     fn minimax_h3_turbo_loras_are_registered_and_sha_pinned() {
-        // sc-18725 (epic 17137). All FOUR published diffusers checkpoints register as weight-load-only
-        // accelerators. Pin every non-default field so this discriminates a real registration from an
-        // empty or renamed one, and assert the COUNT so a fifth entry (or a dropped fourth — the
-        // story's own table listed only three until sc-18724 found the ref2v file) has to be
-        // deliberate.
+        // Pin every adapter's registration, source file and revision. Extending the supported
+        // catalog must preserve the original adapters' download identities.
         let loras = builtin_loras();
         let registered: Vec<&serde_json::Value> = loras
             .iter()
@@ -1694,7 +1694,12 @@ mod tests {
                 "{id} must pin a full 40-hex commit SHA (a floating `main` would drift the \
                  accelerator weights under a pinned DiT); got {revision:?}"
             );
-            assert_eq!(revision, "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1", "{id}");
+            let expected_revision = if id == "minimax_h3_ref2v_turbo_8step_768p" {
+                "ff0edf44b7a96e1b1b4a0c84287dfe9f6a7d133e"
+            } else {
+                "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1"
+            };
+            assert_eq!(revision, expected_revision, "{id}");
         }
     }
 
