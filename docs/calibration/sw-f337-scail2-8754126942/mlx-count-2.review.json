@@ -1,0 +1,15 @@
+{
+  "artifact_id": 15041108721,
+  "domains": {
+    "unified": {
+      "basis": "measured_aggregate",
+      "co_live_extra_bytes": 0,
+      "uncertainty_allowance_bytes": 851188808
+    }
+  },
+  "rationale": "Apple M5 Max (nax-macos), inference 8754126942, 2 references, run 45648688269/1. Accepted by inference --verify-artifacts. The Darwin kernel lifetime footprint (29213582264 B) is the whole-process peak and covers every co-live allocation, so co_live_extra is 0. The uncertainty allowance raises the price to the native 30064771072-byte MLX VAE decode budget when the measured peak is below it (851188808 B), the same rule as the earlier packaged MLX reviews.",
+  "receipt_sha256": "3571beb895b3aec7874edb99486d0c2374b98f45dc53a5c6e2dfcf3c6dcb0622",
+  "references": 2,
+  "run_attempt": 1,
+  "run_id": 45648688269
+}

@@ -1,7 +1,5 @@
 use super::adapters::resolve_prepared_adapters;
 use super::adapters::PreparedAdapters;
-#[cfg(not(target_os = "macos"))]
-use super::admit_candle_load_spec_floor;
 use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
 use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 use super::conditioning::load_reference_image;
@@ -14,9 +12,12 @@ use super::krea_imported::imported_dit_file;
 use super::krea_imported::imported_model_quant;
 use super::mlx_model;
 use super::pid::resolve_pid_weights;
-use super::render::generate_one_with_hires_on_surface;
+use super::render::drive_hires_passes;
+#[cfg(target_os = "macos")]
+use super::render::hires_first_pass_context;
 use super::render::resolve_hires_fix_plan;
-use super::render::LaneRgbaSurface;
+use super::render::HiresFixPlan;
+use super::render::WorkerExecutionReport;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
 use super::sampling::normalize_sampling_knob;
@@ -29,12 +30,22 @@ use super::sdxl::SDXL_EDIT_STRENGTH;
 #[cfg(target_os = "macos")]
 use super::sdxl::SDXL_INPAINT_STRENGTH;
 use super::stream::drive_gen_items;
-use super::stream::start_cached_gen_stream;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::stream::start_cached_gen_stream_after_cold_admission_with_placement;
+#[cfg(target_os = "macos")]
+use super::stream::start_cached_gen_stream_with_request_state;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::stream::ColdLoadAdmission;
+use super::stream::GenEvent;
+use super::CancelFlag;
 use super::Conditioning;
 use super::GenerationOutput;
 use super::GenerationRequest;
+use super::Generator;
+use super::Image;
 use super::ImageRequest;
 use super::LoadSpec;
+use super::Progress;
 use super::PromptEnhance;
 use super::WeightsSource;
 use crate::ApiClient;
@@ -767,6 +778,655 @@ pub(super) fn resolve_sdxl_imported_component_cache_only(
     Ok(Some((destination_dir.to_path_buf(), pin)))
 }
 
+pub(super) fn validate_sdxl_imported_hires_conditioning(
+    conditioning: &[Conditioning],
+    hires_fix: Option<HiresFixPlan>,
+) -> WorkerResult<()> {
+    if !conditioning.is_empty() && hires_fix.is_some() {
+        return Err(WorkerError::InvalidPayload(
+            "Imported SDXL img2img/edit conditioning cannot be combined with Hires.fix".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_sdxl_imported_hires_scheduler(
+    engine_id: &str,
+    scheduler: Option<&str>,
+    hires_fix: Option<HiresFixPlan>,
+) -> WorkerResult<()> {
+    if hires_fix.is_some() && scheduler == Some("discrete") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{engine_id}: Imported SDXL Hires.fix is not supported with the \"discrete\" scheduler; select a curated scheduler instead"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn sdxl_imported_reference_count(conditioning: &[Conditioning]) -> u32 {
+    conditioning.iter().fold(0_u32, |count, item| {
+        let increment = match item {
+            Conditioning::Reference { .. }
+            | Conditioning::ReferenceRgba { .. }
+            | Conditioning::Mask { .. } => 1,
+            Conditioning::MultiReference { images } => {
+                u32::try_from(images.len()).unwrap_or(u32::MAX)
+            }
+            _ => 0,
+        };
+        count.saturating_add(increment)
+    })
+}
+
+fn loaded_sdxl_spec(
+    spec: &LoadSpec,
+    placement: crate::generator_cache::ExecutionPolicy,
+) -> Option<LoadSpec> {
+    if crate::generator_cache::ExecutionPolicy::from_load_spec(spec) == placement {
+        return None;
+    }
+    let mut spec = spec.clone();
+    spec.offload_policy = placement.offload_policy;
+    spec.load_shape = placement.load_shape;
+    spec.load_shape_declaration_result = placement.load_shape_declaration_result;
+    Some(spec)
+}
+
+pub(super) struct SdxlHiresMemory {
+    #[cfg(target_os = "macos")]
+    output_size: (u32, u32),
+    #[cfg(target_os = "macos")]
+    reference_count: u32,
+    workspace_bytes: u64,
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    host_bytes: u64,
+}
+
+type SdxlImportedPassOutput = (u32, u32, Vec<u8>, gen_core::generator::ExecutionIdentity);
+type SdxlImportedOutput = (u32, u32, Vec<u8>, WorkerExecutionReport);
+
+fn sdxl_imported_pass_request(
+    prompt: &str,
+    seed: i64,
+    prototype: &GenerationRequest,
+    conditioning: Vec<Conditioning>,
+) -> GenerationRequest {
+    GenerationRequest {
+        prompt: prompt.to_owned(),
+        seed: Some(seed as u64),
+        conditioning,
+        ..prototype.clone()
+    }
+}
+
+fn render_sdxl_imported_pass(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    plan: Option<&gen_core::RenderPlan>,
+    memory_context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<SdxlImportedPassOutput> {
+    let completed = match plan {
+        Some(plan) => crate::memory_strategy::generate_with_scope_execution_report_planned(
+            generator,
+            &mut request,
+            plan,
+            memory_context,
+            on_progress,
+        ),
+        None => crate::memory_strategy::generate_with_scope_execution_report(
+            generator,
+            &mut request,
+            memory_context,
+            on_progress,
+        ),
+    }
+    .map_err(|error| {
+        crate::generation_error("SDXL imported checkpoint generation failed", error)
+    })?;
+    match completed.generation.output {
+        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::Engine("SDXL imported checkpoint produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels, completed.execution))
+        }
+        Some(GenerationOutput::Images(images)) => Err(WorkerError::Engine(format!(
+            "SDXL imported checkpoint pass returned {} images, expected one",
+            images.len()
+        ))),
+        _ => Err(WorkerError::Engine(
+            "SDXL imported checkpoint returned non-image output".to_owned(),
+        )),
+    }
+}
+
+pub(super) struct PreparedSdxlHires {
+    requests: [GenerationRequest; 2],
+    plan: gen_core::MultiPassRenderPlan,
+    spec: std::sync::Arc<LoadSpec>,
+    hires: HiresFixPlan,
+    enhance: PromptEnhance,
+}
+
+impl PreparedSdxlHires {
+    pub(super) fn prepare(
+        registry: &gen_core::ProviderRegistry,
+        engine_id: &str,
+        spec: std::sync::Arc<LoadSpec>,
+        first: GenerationRequest,
+        hires: HiresFixPlan,
+        enhance: PromptEnhance,
+    ) -> WorkerResult<Self> {
+        let mut first = first;
+        // Enhancement belongs only to the final persisted refinement pass.
+        first.enhance_prompt = false;
+        first.enhance_temperature = None;
+        first.enhance_max_tokens = None;
+        first.prompt_enhancement = gen_core::PromptEnhancementSink::default();
+
+        validate_sdxl_imported_hires_scheduler(engine_id, first.scheduler.as_deref(), Some(hires))?;
+
+        let mut refine = GenerationRequest {
+            width: hires.width,
+            height: hires.height,
+            steps: Some(hires.steps),
+            guidance: hires.guidance,
+            use_pid: false,
+            conditioning: Vec::new(),
+            low_res_start: None,
+            source_image: None,
+            strength: None,
+            ..first.clone()
+        };
+        enhance.apply(&mut refine, gen_core::PromptEnhancementSink::default());
+        let plan = super::render::compile_hires_multi_pass_plan(
+            registry, engine_id, &spec, &first, &refine, &hires,
+        )?
+        .ok_or_else(|| {
+            WorkerError::Engine(format!(
+                "{engine_id}: Hires.fix route has no registered pre-load render planner"
+            ))
+        })?;
+        Ok(Self {
+            requests: [first, refine],
+            plan,
+            spec,
+            hires,
+            enhance,
+        })
+    }
+
+    pub(super) fn passes(&self) -> (&gen_core::RenderPlan, &gen_core::RenderPlan) {
+        (&self.plan.passes()[0], &self.plan.passes()[1])
+    }
+
+    pub(super) fn memory(&self) -> WorkerResult<SdxlHiresMemory> {
+        let (first, refine) = self.passes();
+        let base = first.output_size();
+        let target = refine.output_size();
+        let domain = if cfg!(target_os = "macos") {
+            gen_core::MemoryBudgetDomain::UnifiedMemory
+        } else {
+            gen_core::MemoryBudgetDomain::DeviceVram
+        };
+        let enhance_workspace_bytes = if self.enhance.enabled {
+            128 * 1024 * 1024
+        } else {
+            0
+        };
+        let pricing = crate::execution_planner::price_eng2_hires_fix_request_live_set_plan(
+            "sdxl",
+            domain,
+            base.0,
+            base.1,
+            first.executed_steps() as u32,
+            target.0,
+            target.1,
+            refine.executed_steps() as u32,
+            1,
+            &[],
+            None,
+            self.enhance.enabled,
+            self.requests[0].use_pid,
+            0,
+            0,
+            0,
+            0,
+            enhance_workspace_bytes,
+            0,
+            0,
+            0,
+            0,
+        )?;
+        Ok(SdxlHiresMemory {
+            #[cfg(target_os = "macos")]
+            output_size: target,
+            #[cfg(target_os = "macos")]
+            reference_count: refine.reference_count(),
+            workspace_bytes: if domain == gen_core::MemoryBudgetDomain::UnifiedMemory {
+                pricing.transition_peak_bytes
+            } else {
+                pricing.priced_domain_peak.request_peak_bytes
+            },
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            host_bytes: crate::execution_planner::krea_hires_host_workspace_bytes(base, target),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    fn generate_mlx(
+        self,
+        generator: &dyn Generator,
+        loaded_policy: crate::generator_cache::ExecutionPolicy,
+        evaluation: &crate::mlx_fit_gate::MlxRequestEvaluation,
+        preview: gen_core::PreviewSink,
+        prompt_enhancement: gen_core::PromptEnhancementSink,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<SdxlImportedOutput> {
+        let (base, _) = self.passes();
+        let (width, height) = base.output_size();
+        let mut base_context =
+            hires_first_pass_context(&evaluation.context, width, height, base.reference_count());
+        base_context.use_pid = self.requests[0].use_pid;
+        self.generate(
+            generator,
+            loaded_policy,
+            Some(evaluation.memory),
+            [Some(&base_context), Some(&evaluation.context)],
+            preview,
+            prompt_enhancement,
+            cancel,
+            on_progress,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn generate(
+        self,
+        generator: &dyn Generator,
+        loaded_policy: crate::generator_cache::ExecutionPolicy,
+        request_memory: Option<gen_core::GenerationMemory>,
+        contexts: [Option<&gen_core::MemoryRunContext>; 2],
+        preview: gen_core::PreviewSink,
+        prompt_enhancement: gen_core::PromptEnhancementSink,
+        cancel: &CancelFlag,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> WorkerResult<SdxlImportedOutput> {
+        let Self {
+            requests,
+            plan,
+            spec,
+            hires,
+            enhance,
+        } = self;
+        let plan = if let Some(loaded_spec) = loaded_sdxl_spec(&spec, loaded_policy) {
+            plan.rebind_load_placement(&loaded_spec).map_err(|error| {
+                crate::generation_error("SDXL Hires.fix placement changed", error)
+            })?
+        } else {
+            plan
+        };
+        let first_plan = &plan.passes()[0];
+        let refine_plan = &plan.passes()[1];
+        let mut requests = requests;
+        for request in &mut requests {
+            request.memory = request_memory;
+            request.preview = preview.clone();
+            request.cancel = cancel.clone();
+        }
+        let [first, mut refine] = requests;
+        let [first_context, refine_context] = contexts;
+        let steps = first.steps.unwrap_or(0);
+        let (base_execution, (width, height, pixels, refine_execution)) = drive_hires_passes(
+            steps,
+            &hires,
+            Some(refine_plan),
+            cancel,
+            on_progress,
+            |progress| {
+                let (width, height, pixels, execution) = render_sdxl_imported_pass(
+                    generator,
+                    first,
+                    Some(first_plan),
+                    first_context,
+                    progress,
+                )?;
+                Ok((
+                    Image {
+                        width,
+                        height,
+                        pixels,
+                    },
+                    execution,
+                ))
+            },
+            |reference, progress| {
+                let strength = refine_plan
+                    .produced_reference()
+                    .and_then(|reference| reference.strength);
+                refine.conditioning = vec![Conditioning::Reference {
+                    image: reference,
+                    strength,
+                }];
+                enhance.apply(&mut refine, prompt_enhancement);
+                render_sdxl_imported_pass(
+                    generator,
+                    refine,
+                    Some(refine_plan),
+                    refine_context,
+                    progress,
+                )
+            },
+        )?;
+        let report = super::render::completed_hires_report(vec![
+            ("base", WorkerExecutionReport::Provider(base_execution)),
+            ("refine", WorkerExecutionReport::Provider(refine_execution)),
+        ])?;
+        Ok((width, height, pixels, report))
+    }
+}
+
+pub(super) enum SdxlImportedItem {
+    Ordinary(String),
+    Hires(Box<PreparedSdxlHires>),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sdxl_imported_generate_one(
+    generator: &dyn Generator,
+    prompt: &str,
+    seed: i64,
+    prototype: &GenerationRequest,
+    conditioning: &[Conditioning],
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<SdxlImportedOutput> {
+    let request = GenerationRequest {
+        prompt: prompt.to_owned(),
+        seed: Some(seed as u64),
+        conditioning: conditioning.to_vec(),
+        memory: memory_evaluation.map(|evaluation| evaluation.memory),
+        preview,
+        cancel: cancel.clone(),
+        ..prototype.clone()
+    };
+    let (width, height, pixels, execution) = render_sdxl_imported_pass(
+        generator,
+        request,
+        None,
+        memory_evaluation.map(|evaluation| &evaluation.context),
+        on_progress,
+    )?;
+    Ok((
+        width,
+        height,
+        pixels,
+        WorkerExecutionReport::Provider(execution),
+    ))
+}
+
+/// Request identity handed to MLX admission for the imported SDXL assembly. Hires admission names
+/// the heavier final refinement (one generated-image reference); its first pass receives a derived
+/// base-size context immediately before execution.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn sdxl_imported_memory_inputs(
+    request: &ImageRequest,
+    spec: &LoadSpec,
+    conditioning: &[Conditioning],
+    hires: Option<&SdxlHiresMemory>,
+    adapter_count: usize,
+    use_pid: bool,
+    guidance: f32,
+    negative_prompt: Option<&str>,
+) -> crate::mlx_fit_gate::MlxRequestInputs {
+    let request_reference_count = sdxl_imported_reference_count(conditioning);
+    let reference_count = hires.map_or(request_reference_count, |hires| hires.reference_count);
+    let (width, height) = hires.map_or((request.width, request.height), |hires| hires.output_size);
+    let has_mask = conditioning
+        .iter()
+        .any(|item| matches!(item, Conditioning::Mask { .. }));
+    let mut overlays = Vec::new();
+    if request_reference_count > 0 {
+        overlays.push(format!("references:{request_reference_count}"));
+    }
+    if has_mask {
+        overlays.push("mask".to_owned());
+    }
+    if adapter_count > 0 {
+        overlays.push(format!("adapters:{adapter_count}"));
+    }
+    if use_pid {
+        overlays.push("pid".to_owned());
+    }
+    crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
+        width,
+        height,
+        count: request.count,
+        mode: request.mode.clone(),
+        overlay: (!overlays.is_empty()).then(|| overlays.join("+")),
+        adapter_count,
+        has_reference: reference_count > 0,
+        reference_count,
+        use_pid: if hires.is_some() { false } else { use_pid },
+        has_phases: false,
+        conditioning_windows: Some(crate::mlx_fit_gate::clip_windows_for_spec(
+            "sdxl",
+            spec,
+            &request.prompt,
+            &request.negative_prompt,
+        )),
+        negative_branch: crate::execution_planner::evaluates_negative_branch(
+            negative_prompt.unwrap_or_default(),
+            None,
+            Some(guidance),
+        ),
+        prefix_kv_cache_eligible: false,
+        reference_resources: None,
+        pag_workspace_bytes: 0,
+    }
+}
+
+/// Exact request-state driver installed into the imported-SDXL MLX cache callback.
+///
+/// Keeping the evaluator injectable makes the cache/admission handoff testable without loading a
+/// multi-gigabyte checkpoint, while production passes [`crate::mlx_fit_gate::evaluate_request`]
+/// directly. One evaluation is performed for every sequential image item. Hires remains one
+/// admitted request with two planned provider passes, each with its own geometry and scope.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn drive_sdxl_imported_mlx_items<E>(
+    generator: &dyn Generator,
+    memory_plan: &crate::mlx_fit_gate::MlxRequestPlan,
+    memory_inputs: &crate::mlx_fit_gate::MlxRequestInputs,
+    initial_cache_state: gen_core::MemoryCacheState,
+    loaded_policy: crate::generator_cache::ExecutionPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
+    external_committed_bytes: u64,
+    work: Vec<(i64, SdxlImportedItem)>,
+    prototype: GenerationRequest,
+    conditioning: Vec<Conditioning>,
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    cancel: CancelFlag,
+    source_context: Option<&super::stream::ImportedCheckpointPublisher>,
+    mut evaluate_request: E,
+) -> WorkerResult<()>
+where
+    E: FnMut(
+        &dyn Generator,
+        &crate::mlx_fit_gate::MlxRequestPlan,
+        &crate::mlx_fit_gate::MlxRequestInputs,
+        gen_core::MemoryCacheState,
+        gen_core::OffloadPolicy,
+        crate::execution_planner::WarmPolicyProposal,
+        u64,
+    ) -> WorkerResult<crate::mlx_fit_gate::MlxRequestEvaluation>,
+{
+    let mut cache_state = initial_cache_state;
+    let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+    let facts_tx = tx.clone();
+    drive_gen_items(
+        tx,
+        work,
+        move |index, (seed, item), preview, on_progress| {
+            if cancel.is_cancelled() {
+                return Ok(None);
+            }
+            let memory_evaluation = evaluate_request(
+                generator,
+                memory_plan,
+                memory_inputs,
+                cache_state,
+                loaded_policy.offload_policy,
+                warm_policy.take(),
+                external_committed_bytes,
+            )?;
+            cache_state = gen_core::MemoryCacheState::Warm;
+            let _request_memory_limit = memory_evaluation
+                .process_limit_bytes
+                .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+            let generated = match item {
+                SdxlImportedItem::Hires(render) => render.generate_mlx(
+                    generator,
+                    loaded_policy,
+                    &memory_evaluation,
+                    preview,
+                    gen_core::PromptEnhancementSink::default(),
+                    &cancel,
+                    on_progress,
+                ),
+                SdxlImportedItem::Ordinary(prompt) => sdxl_imported_generate_one(
+                    generator,
+                    &prompt,
+                    seed,
+                    &prototype,
+                    &conditioning,
+                    Some(&memory_evaluation),
+                    preview,
+                    &cancel,
+                    on_progress,
+                ),
+            };
+            let (out_width, out_height, pixels, report) = match generated {
+                Ok(image) => image,
+                // A poisoned process keeps its fatal class even when cancellation raced it.
+                Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
+                Err(_) if cancel.is_cancelled() => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let mut facts = crate::JsonObject::new();
+            report.insert_image_facts(&mut facts)?;
+            let _ = facts_tx.blocking_send(GenEvent::ImageFacts { index, facts });
+            if let Some(checkpoint) = source_context {
+                checkpoint.publish(&facts_tx, generator);
+            }
+            Ok(Some((seed, out_width, out_height, pixels)))
+        },
+    )
+}
+
+fn pin_weights_source_file(
+    source: WeightsSource,
+    pins: &mut Vec<gen_core::PinnedWeightsFile>,
+    label: &str,
+) -> WorkerResult<WeightsSource> {
+    match source {
+        WeightsSource::File(path) => {
+            let pin = gen_core::PinnedWeightsFile::pin(&path)
+                .map_err(|error| crate::classify_engine_error(label, error))?;
+            let loader_path = pin.loader_path().to_path_buf();
+            pins.push(pin);
+            Ok(WeightsSource::File(loader_path))
+        }
+        dir @ WeightsSource::Dir(_) => Ok(dir),
+    }
+}
+
+pub(super) fn prepare_sdxl_imported_load_spec(
+    checkpoint_pin: gen_core::PinnedWeightsFile,
+    prepared_adapters: PreparedAdapters,
+    quant: Option<gen_core::Quant>,
+    pid_weights: Option<gen_core::PidWeights>,
+) -> WorkerResult<LoadSpec> {
+    let mut spec = LoadSpec::new(WeightsSource::File(
+        checkpoint_pin.loader_path().to_path_buf(),
+    ));
+    if !prepared_adapters.specs.is_empty() {
+        spec = spec.with_adapters(prepared_adapters.specs);
+    }
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    let mut extra_pins = Vec::new();
+    if let Some(pid) = pid_weights {
+        let checkpoint = pin_weights_source_file(
+            pid.checkpoint,
+            &mut extra_pins,
+            "SDXL imported PiD source preparation failed",
+        )?;
+        let gemma = pin_weights_source_file(
+            pid.gemma,
+            &mut extra_pins,
+            "SDXL imported PiD source preparation failed",
+        )?;
+        spec = spec.with_pid(checkpoint, gemma);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(
+        &mut spec,
+        std::iter::once(checkpoint_pin)
+            .chain(prepared_adapters.pins)
+            .chain(extra_pins),
+        "SDXL imported source preparation failed",
+    )?;
+    Ok(spec)
+}
+
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(super) fn sdxl_imported_candle_floor_companion_dirs(spec: &LoadSpec) -> Vec<&Path> {
+    let mut companions: Vec<&Path> = spec
+        .components
+        .values()
+        .filter_map(|source| match source {
+            WeightsSource::Dir(dir) => Some(dir.as_path()),
+            WeightsSource::File(_) => None,
+        })
+        .collect();
+    if let Some(pid) = &spec.pid {
+        if let WeightsSource::Dir(dir) = &pid.checkpoint {
+            companions.push(dir.as_path());
+        }
+        if let WeightsSource::Dir(dir) = &pid.gemma {
+            companions.push(dir.as_path());
+        }
+    }
+    companions
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn prepare_sdxl_imported_candle_floor(
+    model: &str,
+    settings: &Settings,
+    spec: &LoadSpec,
+    hires_workspace_bytes: u64,
+) -> WorkerResult<super::base_admission::CachedCandleBaseFloorAdmission> {
+    let companions = sdxl_imported_candle_floor_companion_dirs(spec);
+    Ok(super::base_admission::prepare_cached_candle_base_floor(
+        model,
+        "SDXL imported",
+        settings,
+        spec,
+        &companions,
+    )?
+    .with_hires_workspace_bytes(hires_workspace_bytes))
+}
+
 pub(super) async fn generate_sdxl_imported_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -784,7 +1444,6 @@ pub(super) async fn generate_sdxl_imported_stream(
     } = sources;
     let checkpoint =
         super::stream::ImportedCheckpointPublisher::new(&request.model_manifest_entry, &file_pin);
-    let file = file_pin.loader_path().to_path_buf();
     let adapter_count = prepared_adapters.specs.len();
     let steps =
         resolved_option_or_manifest_u32(request, "steps", SDXL_IMPORTED_DEFAULT_STEPS, 1..=100);
@@ -843,11 +1502,8 @@ pub(super) async fn generate_sdxl_imported_stream(
     let (conditioning, mode_tag, strength) =
         resolve_imported_sdxl_conditioning(request, settings, project_path)?;
     let hires_fix = resolve_hires_fix_plan(request, steps, Some(guidance), None);
-    if !conditioning.is_empty() && hires_fix.is_some() {
-        return Err(WorkerError::InvalidPayload(
-            "Imported SDXL img2img/edit conditioning cannot be combined with Hires.fix".to_owned(),
-        ));
-    }
+    validate_sdxl_imported_hires_conditioning(&conditioning, hires_fix)?;
+    validate_sdxl_imported_hires_scheduler(descriptor.id, scheduler.as_deref(), hires_fix)?;
     let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported SDXL")?;
     let enhance = PromptEnhance::default();
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -878,23 +1534,7 @@ pub(super) async fn generate_sdxl_imported_stream(
         );
     }
 
-    let mut spec = LoadSpec::new(WeightsSource::File(file.clone()));
-    if !prepared_adapters.specs.is_empty() {
-        spec = spec.with_adapters(prepared_adapters.specs);
-    }
-    if let Some(quant) = quant {
-        spec = spec.with_quant(quant);
-    }
-    crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        std::iter::once(file_pin).chain(prepared_adapters.pins),
-        "SDXL imported source preparation failed",
-    )?;
-    if let Some(pid) = pid_weights {
-        spec = spec.with_pid(pid.checkpoint, pid.gemma);
-    }
-    #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
+    let spec = prepare_sdxl_imported_load_spec(file_pin, prepared_adapters, quant, pid_weights)?;
     #[cfg(target_os = "macos")]
     let spec = spec.with_component(
         "ldm_tokenizer",
@@ -902,122 +1542,198 @@ pub(super) async fn generate_sdxl_imported_stream(
     );
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = attach_imported_sdxl_components(spec, &descriptor, api, settings, job).await?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    admit_candle_load_spec_floor(&request.model, "SDXL imported", settings, &spec).await?;
 
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let prototype = GenerationRequest {
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        steps: Some(steps),
+        guidance: Some(guidance),
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        ..Default::default()
+    };
+    let work: Vec<(i64, SdxlImportedItem)> = if let Some(hires) = hires_fix {
+        let shared_spec = std::sync::Arc::new(spec.clone());
+        work.into_iter()
+            .map(|(seed, prompt)| {
+                let first = sdxl_imported_pass_request(&prompt, seed, &prototype, Vec::new());
+                let render = PreparedSdxlHires::prepare(
+                    crate::inference_runtime::media(),
+                    descriptor.id,
+                    shared_spec.clone(),
+                    first,
+                    hires,
+                    enhance.clone(),
+                )?;
+                Ok((seed, SdxlImportedItem::Hires(Box::new(render))))
+            })
+            .collect::<WorkerResult<_>>()?
+    } else {
+        work.into_iter()
+            .map(|(seed, prompt)| (seed, SdxlImportedItem::Ordinary(prompt)))
+            .collect()
+    };
+    let first_hires = work.iter().find_map(|(_, item)| match item {
+        SdxlImportedItem::Hires(render) => Some(render),
+        SdxlImportedItem::Ordinary(_) => None,
+    });
+    let hires_memory = first_hires.map(|render| render.memory()).transpose()?;
+
+    #[cfg(target_os = "macos")]
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::try_for_spec_and_manifest(
+        descriptor.id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    )?
+    .with_request_workspace(
+        hires_memory
+            .as_ref()
+            .map_or(0, |hires| hires.workspace_bytes),
+    );
+    #[cfg(target_os = "macos")]
+    let memory_inputs = sdxl_imported_memory_inputs(
+        request,
+        &spec,
+        &conditioning,
+        hires_memory.as_ref(),
+        adapter_count,
+        use_pid,
+        guidance,
+        prototype.negative_prompt.as_deref(),
+    );
+    #[cfg(target_os = "macos")]
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         descriptor.id,
         adapter_count,
         spec,
         "SDXL imported checkpoint load failed".to_owned(),
-        move |model, tx, cancel| {
-            drive_gen_items(
-                tx.clone(),
+        move |model,
+              initial_cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            drive_sdxl_imported_mlx_items(
+                model,
+                &memory_plan,
+                &memory_inputs,
+                initial_cache_state,
+                loaded_policy,
+                warm_policy,
+                external_committed_bytes,
                 work,
-                move |index, (seed, prompt), preview, on_progress| {
+                prototype,
+                conditioning,
+                tx,
+                cancel,
+                Some(&checkpoint),
+                crate::mlx_fit_gate::evaluate_request,
+            )
+        },
+    );
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let hires_workspace_bytes = if let Some(hires) = &hires_memory {
+        if let Some(available) = crate::yue2_admission::host_available_bytes()
+            .await
+            .filter(|&available| available < hires.host_bytes)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "SDXL Hires.fix needs {} host bytes to resize its reference, but only {available} are available",
+                hires.host_bytes
+            )));
+        }
+        hires.workspace_bytes
+    } else {
+        0
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let cold_admission =
+        prepare_sdxl_imported_candle_floor(&request.model, settings, &spec, hires_workspace_bytes)?;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let incoming_reclaimable_weight_bytes = cold_admission.reclaimable_weight_bytes();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let workspace_runtime = tokio::runtime::Handle::current();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let gpu_id = settings.gpu_id.clone();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (cancel, rx, blocking) = start_cached_gen_stream_after_cold_admission_with_placement(
+        job.id.clone(),
+        descriptor.id,
+        adapter_count,
+        spec,
+        "SDXL imported checkpoint load failed".to_owned(),
+        ColdLoadAdmission::new(
+            incoming_reclaimable_weight_bytes,
+            move |resident_reclaimable_weight_bytes| {
+                cold_admission.admit(resident_reclaimable_weight_bytes)
+            },
+        ),
+        move |model, cache_state, loaded_policy, tx, cancel| {
+            if !cancel.is_cancelled()
+                && hires_workspace_bytes > 0
+                && cache_state == gen_core::MemoryCacheState::Warm
+            {
+                workspace_runtime.block_on(
+                    super::krea_multiphase::admit_warm_candle_krea_workspace(
+                        "SDXL Hires.fix",
+                        &gpu_id,
+                        hires_workspace_bytes,
+                    ),
+                )?;
+            }
+            let facts_tx = tx.clone();
+            drive_gen_items(
+                tx,
+                work,
+                move |index, (seed, item), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let publish_facts = |facts| {
-                        let _ =
-                            tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
-                        checkpoint.publish(&tx, model);
-                    };
-                    if let Some(hires_fix) = hires_fix {
-                        let execution_report = std::cell::RefCell::new(None);
-                        let (out_width, out_height, pixels) = generate_one_with_hires_on_surface(
+                    let generated = match item {
+                        SdxlImportedItem::Hires(render) => render.generate(
                             model,
-                            &prompt,
-                            width,
-                            height,
-                            seed,
-                            steps,
-                            Some(guidance),
-                            negative_prompt.clone(),
+                            loaded_policy,
                             None,
-                            &[],
-                            None,
-                            None,
-                            sampler.as_deref(),
-                            scheduler.as_deref(),
-                            scheduler_shift,
-                            guidance_method.as_deref(),
-                            use_pid,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            &enhance,
-                            Some(hires_fix),
+                            [None, None],
                             preview,
                             gen_core::PromptEnhancementSink::default(),
-                            &LaneRgbaSurface {
-                                execution_report: Some(&execution_report),
-                                ..Default::default()
-                            },
                             &cancel,
                             on_progress,
-                        )?;
-                        let report = execution_report.take().ok_or_else(|| {
-                            WorkerError::Engine(
-                                "SDXL imported hires-fix produced no completed execution report"
-                                    .into(),
-                            )
-                        })?;
-                        let mut facts = crate::JsonObject::new();
-                        report.insert_image_facts(&mut facts)?;
-                        publish_facts(facts);
-                        return Ok(Some((seed, out_width, out_height, pixels)));
-                    }
-                    let request = GenerationRequest {
-                        prompt,
-                        negative_prompt: negative_prompt.clone(),
-                        width,
-                        height,
-                        count: 1,
-                        seed: Some(seed as u64),
-                        steps: Some(steps),
-                        guidance: Some(guidance),
-                        sampler: sampler.clone(),
-                        scheduler: scheduler.clone(),
-                        scheduler_shift,
-                        guidance_method: guidance_method.clone(),
-                        use_pid,
-                        conditioning: conditioning.clone(),
-                        preview,
-                        cancel: cancel.clone(),
-                        ..Default::default()
+                        ),
+                        SdxlImportedItem::Ordinary(prompt) => sdxl_imported_generate_one(
+                            model,
+                            &prompt,
+                            seed,
+                            &prototype,
+                            &conditioning,
+                            None,
+                            preview,
+                            &cancel,
+                            on_progress,
+                        ),
                     };
-                    let completed = model
-                        .generate_with_execution_report(&request, &mut *on_progress)
-                        .map_err(|error| {
-                            crate::generation_error(
-                                "SDXL imported checkpoint generation failed",
-                                error,
-                            )
-                        })?;
-                    match completed.generation.output {
-                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
-                            let image = images.pop().ok_or_else(|| {
-                                WorkerError::Engine(
-                                    "SDXL imported checkpoint produced no image".to_owned(),
-                                )
-                            })?;
-                            let mut facts = crate::JsonObject::new();
-                            facts.insert(
-                                "workerExecutionReport".into(),
-                                serde_json::to_value(completed.execution)
-                                    .map_err(WorkerError::Json)?,
-                            );
-                            publish_facts(facts);
-                            Ok(Some((seed, image.width, image.height, image.pixels)))
-                        }
-                        _ => Err(WorkerError::Engine(
-                            "SDXL imported checkpoint returned non-image output".to_owned(),
-                        )),
-                    }
+                    let (out_width, out_height, pixels, report) = match generated {
+                        Ok(image) => image,
+                        // A poisoned process keeps its fatal class even when cancellation raced it.
+                        Err(error @ WorkerError::ProcessPoisoned(_)) => return Err(error),
+                        Err(_) if cancel.is_cancelled() => return Ok(None),
+                        Err(error) => return Err(error),
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    report.insert_image_facts(&mut facts)?;
+                    let _ = facts_tx.blocking_send(GenEvent::ImageFacts { index, facts });
+                    checkpoint.publish(&facts_tx, model);
+                    Ok(Some((seed, out_width, out_height, pixels)))
                 },
             )
         },

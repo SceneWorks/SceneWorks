@@ -1,7 +1,7 @@
 [
   {
     "accepted": true,
-    "artifact_id": 14912784916,
+    "artifact_id": 15041108721,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -83,29 +83,29 @@
       "mlx_decode_budget_bytes": 30064771072,
       "unified": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 29209977808,
+        "classified_peak_bytes": 29213582264,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 29209977808,
-        "review_sha256": "b23fddfd318fe7555080bf132c0f4603643c8592a405aebadc99b8d27dc682c8",
-        "uncertainty_allowance_bytes": 854793264
+        "observed_peak_bytes": 29213582264,
+        "review_sha256": "5cd2e8e651e8cb7aca9bbba370e53125c5c48796259f2909f0cbf2d5bca014d5",
+        "uncertainty_allowance_bytes": 851188808
       }
     },
     "device": "Apple M5 Max",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b93851878ec71fe85a82a4adeb8eb330e7d77b39899b059c87a087b631ae6554",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "macos",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "04d31971fc1181f072141991d7957209b74f631936b3c2192c346440025a70a0",
-    "runtime": "26B131"
+    "receipt_sha256": "3571beb895b3aec7874edb99486d0c2374b98f45dc53a5c6e2dfcf3c6dcb0622",
+    "runtime": "26A434"
   },
   {
     "accepted": true,
-    "artifact_id": 14912784916,
+    "artifact_id": 15041108721,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -187,29 +187,29 @@
       "mlx_decode_budget_bytes": 30064771072,
       "unified": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 30356514056,
+        "classified_peak_bytes": 30327465176,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 30356514056,
-        "review_sha256": "8c8b5a50e376153b152e8377cd4a26e588aaa3fdf408ded4ca22a438212a0dc0",
+        "observed_peak_bytes": 30327465176,
+        "review_sha256": "28901de03c32c6bf92585d06ec72fa3fb9699bb91c48c00d6b66df6ff9686838",
         "uncertainty_allowance_bytes": 0
       }
     },
     "device": "Apple M5 Max",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b93851878ec71fe85a82a4adeb8eb330e7d77b39899b059c87a087b631ae6554",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "macos",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "04d31971fc1181f072141991d7957209b74f631936b3c2192c346440025a70a0",
-    "runtime": "26B131"
+    "receipt_sha256": "3571beb895b3aec7874edb99486d0c2374b98f45dc53a5c6e2dfcf3c6dcb0622",
+    "runtime": "26A434"
   },
   {
     "accepted": true,
-    "artifact_id": 14884839491,
+    "artifact_id": 15045158396,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -261,24 +261,24 @@
     "bounds": {
       "capture_adapter": {
         "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
-        "luid": "luid_0x00000000_0x0001f603",
+        "luid": "luid_0x00000000_0x0001f607",
         "node_mask": 1
       },
       "device": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 55639605248,
+        "classified_peak_bytes": 56141807616,
         "co_live_extra_bytes": 0,
         "observed_peak_bytes": 54995714048,
-        "review_sha256": "70f092b8cc53b9f29369131f96aff890e2e9260270d20b8343562fcac04c2ca0",
+        "review_sha256": "bffba60015e07758d77e5bc67c3535d2c0597467d59e4b8160b13699179ec9de",
         "uncertainty_allowance_bytes": 15168815104
       },
       "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 57396076544,
+        "classified_peak_bytes": 57395253248,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 57303801856,
-        "review_sha256": "70f092b8cc53b9f29369131f96aff890e2e9260270d20b8343562fcac04c2ca0",
+        "observed_peak_bytes": 57302978560,
+        "review_sha256": "bffba60015e07758d77e5bc67c3535d2c0597467d59e4b8160b13699179ec9de",
         "uncertainty_allowance_bytes": 77594624
       },
       "measurement": "windows_job_and_wddm"
@@ -286,19 +286,19 @@
     "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "windows",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "bfc7dcf86929f54ccca172acada37265f48c1199404e0cf34c56577a2c3a14f6",
+    "receipt_sha256": "c9ff1438de4c37fcff6300a277c72c3449af5f42d5e22be208f65ac5a4b4ed47",
     "runtime": "596.36"
   },
   {
     "accepted": true,
-    "artifact_id": 14884839491,
+    "artifact_id": 15045158396,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -350,7 +350,7 @@
     "bounds": {
       "capture_adapter": {
         "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
-        "luid": "luid_0x00000000_0x0001f603",
+        "luid": "luid_0x00000000_0x0001f607",
         "node_mask": 1
       },
       "device": {
@@ -358,16 +358,17 @@
         "classified_peak_bytes": 56008708096,
         "co_live_extra_bytes": 0,
         "observed_peak_bytes": 55364812800,
-        "review_sha256": "4dc2f9740ed813fb90a36a3ba538bf688280909bcfaa9b0cf85f7c5d046e5cf1",
+        "review_sha256": "662d6cf73a9a3de5c5febb87bd34236a7e8adb42bc53c5207cb3af0408d2484b",
         "uncertainty_allowance_bytes": 15537917952
       },
+      "device_interval": "load_through_completed_rgb",
       "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 57767669760,
+        "classified_peak_bytes": 57764171776,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 57675395072,
-        "review_sha256": "4dc2f9740ed813fb90a36a3ba538bf688280909bcfaa9b0cf85f7c5d046e5cf1",
+        "observed_peak_bytes": 57671897088,
+        "review_sha256": "662d6cf73a9a3de5c5febb87bd34236a7e8adb42bc53c5207cb3af0408d2484b",
         "uncertainty_allowance_bytes": 77594624
       },
       "measurement": "windows_job_and_wddm"
@@ -375,19 +376,19 @@
     "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "windows",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "bfc7dcf86929f54ccca172acada37265f48c1199404e0cf34c56577a2c3a14f6",
+    "receipt_sha256": "c9ff1438de4c37fcff6300a277c72c3449af5f42d5e22be208f65ac5a4b4ed47",
     "runtime": "596.36"
   },
   {
     "accepted": true,
-    "artifact_id": 14884839491,
+    "artifact_id": 15045158396,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -439,25 +440,24 @@
     "bounds": {
       "capture_adapter": {
         "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
-        "luid": "luid_0x00000000_0x0001f603",
+        "luid": "luid_0x00000000_0x0001f607",
         "node_mask": 1
       },
       "device": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 56344252416,
+        "classified_peak_bytes": 63908610048,
         "co_live_extra_bytes": 0,
         "observed_peak_bytes": 55700357120,
-        "review_sha256": "569b99404a46e5ec6f2524e4145e78c876f537ccd10585e1c71f012aad0ae740",
+        "review_sha256": "908783d03e37869f0dbdca72a94a95730b25951a1427e5fb62c3d10609b9931a",
         "uncertainty_allowance_bytes": 15873462272
       },
-      "device_interval": "load_through_completed_rgb",
       "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 58102448128,
+        "classified_peak_bytes": 58104614912,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 58010173440,
-        "review_sha256": "569b99404a46e5ec6f2524e4145e78c876f537ccd10585e1c71f012aad0ae740",
+        "observed_peak_bytes": 58012340224,
+        "review_sha256": "908783d03e37869f0dbdca72a94a95730b25951a1427e5fb62c3d10609b9931a",
         "uncertainty_allowance_bytes": 77594624
       },
       "measurement": "windows_job_and_wddm"
@@ -465,19 +465,19 @@
     "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "windows",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "bfc7dcf86929f54ccca172acada37265f48c1199404e0cf34c56577a2c3a14f6",
+    "receipt_sha256": "c9ff1438de4c37fcff6300a277c72c3449af5f42d5e22be208f65ac5a4b4ed47",
     "runtime": "596.36"
   },
   {
     "accepted": true,
-    "artifact_id": 14884839491,
+    "artifact_id": 15045158396,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -529,7 +529,7 @@
     "bounds": {
       "capture_adapter": {
         "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
-        "luid": "luid_0x00000000_0x0001f603",
+        "luid": "luid_0x00000000_0x0001f607",
         "node_mask": 1
       },
       "device": {
@@ -537,16 +537,17 @@
         "classified_peak_bytes": 56679800832,
         "co_live_extra_bytes": 0,
         "observed_peak_bytes": 56035901440,
-        "review_sha256": "174d3d7cbac053f0ebb59f80534ab972368da890680984fa982e6bd6d9deacda",
+        "review_sha256": "637973a6a397ce602f42356f72bfa540717ddb1aeb46d37a7f0b18e92b38b5a0",
         "uncertainty_allowance_bytes": 16209010688
       },
+      "device_interval": "load_through_completed_rgb",
       "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 58442567680,
+        "classified_peak_bytes": 58441285632,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 58350292992,
-        "review_sha256": "174d3d7cbac053f0ebb59f80534ab972368da890680984fa982e6bd6d9deacda",
+        "observed_peak_bytes": 58349010944,
+        "review_sha256": "637973a6a397ce602f42356f72bfa540717ddb1aeb46d37a7f0b18e92b38b5a0",
         "uncertainty_allowance_bytes": 77594624
       },
       "measurement": "windows_job_and_wddm"
@@ -554,19 +555,19 @@
     "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "windows",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "bfc7dcf86929f54ccca172acada37265f48c1199404e0cf34c56577a2c3a14f6",
+    "receipt_sha256": "c9ff1438de4c37fcff6300a277c72c3449af5f42d5e22be208f65ac5a4b4ed47",
     "runtime": "596.36"
   },
   {
     "accepted": true,
-    "artifact_id": 14884839491,
+    "artifact_id": 15045158396,
     "axes": {
       "artifact_sha256": "12797ce47292a81e57034ea2c29d07fd6dd7a3eace3385baa616c3c30078c0c1",
       "artifact_tier": "q4",
@@ -618,7 +619,7 @@
     "bounds": {
       "capture_adapter": {
         "cuda_uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
-        "luid": "luid_0x00000000_0x0001f603",
+        "luid": "luid_0x00000000_0x0001f607",
         "node_mask": 1
       },
       "device": {
@@ -626,16 +627,16 @@
         "classified_peak_bytes": 57048903680,
         "co_live_extra_bytes": 0,
         "observed_peak_bytes": 56405000192,
-        "review_sha256": "d938e3636fcb2acef1a3a8a1e8e68c31f2bcc9d59b322d8452a76b626e6e6642",
+        "review_sha256": "84bc66d6db8345946f0bc0bda9aecb482ad9ca8f7191f99c0edcb2af60d36b4c",
         "uncertainty_allowance_bytes": 15904923648
       },
       "device_total_mib": 97887,
       "host": {
         "basis": "measured_aggregate",
-        "classified_peak_bytes": 58833371136,
+        "classified_peak_bytes": 58839416832,
         "co_live_extra_bytes": 0,
-        "observed_peak_bytes": 58741096448,
-        "review_sha256": "d938e3636fcb2acef1a3a8a1e8e68c31f2bcc9d59b322d8452a76b626e6e6642",
+        "observed_peak_bytes": 58747142144,
+        "review_sha256": "84bc66d6db8345946f0bc0bda9aecb482ad9ca8f7191f99c0edcb2af60d36b4c",
         "uncertainty_allowance_bytes": 77594624
       },
       "measurement": "windows_job_and_wddm"
@@ -643,14 +644,14 @@
     "device": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
     "guard_exit_code": 0,
     "guard_policy_sha256": "b926e29b33d3feced10c5a2a6484aca81f82e0d8a82bb2312baf1243afd1c3ba",
-    "inference_revision": "db90739be5e5279cbcd3c64b560428f9d0d3910e",
+    "inference_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
     "platform": "windows",
     "post_execution_verified": true,
     "prompt_tokens": [
       512,
       512
     ],
-    "receipt_sha256": "bfc7dcf86929f54ccca172acada37265f48c1199404e0cf34c56577a2c3a14f6",
+    "receipt_sha256": "c9ff1438de4c37fcff6300a277c72c3449af5f42d5e22be208f65ac5a4b4ed47",
     "runtime": "596.36"
   }
 ]

@@ -362,10 +362,11 @@ pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
 /// to know which web builder feeds a Rust seam — so what it guarantees is that the statement had
 /// to be written at all, and that the honest version of it fails the build. Review is what catches
 /// the dishonest one.
-pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[DeferredAdvancedBuilder {
-    path: "apps/web/src/training/trainingConfig.js",
-    function: "trainingConfigSnapshot",
-    reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
+pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/training/trainingConfig.js",
+        function: "trainingConfigSnapshot",
+        reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
                  from the image payload's — trainer hyperparameters (networkType, lrScheduler, \
                  sampleSteps, decomposeFactor) on a training job, not generation intent for an \
                  image. No training write seam EMBEDS a workflow, nothing sanitizes these keys \
@@ -374,7 +375,19 @@ pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[DeferredAdv
                  would have to change is a training write seam that embeds. Then, and only then, \
                  this entry moves into `ADVANCED_BUILDERS` and every key it emits needs an \
                  allow/deny decision.",
-}];
+    },
+    DeferredAdvancedBuilder {
+        path: "apps/web/src/pageJobState.js",
+        function: "shellPayload",
+        reason: "PERMANENT EXEMPTION: read-only in-memory UI shell summary that trims an \
+                 already-received job snapshot down to `{ advanced: { timelineAction } }` for \
+                 the shell's Editor activity indicator while inactive pages are released. It \
+                 never submits a job request and feeds no embedding write seam (`timelineAction` \
+                 is already classified under the timeline builders). What would have to change is \
+                 this helper feeding a job submission that reaches an embedding write seam; then, \
+                 and only then, this entry moves into `ADVANCED_BUILDERS`.",
+    },
+];
 
 /// A (file, function) reference to one entry in [`ADVANCED_BUILDERS`] or
 /// [`DEFERRED_ADVANCED_BUILDERS`] (sc-16113).

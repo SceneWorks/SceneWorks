@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 const INDEX: &[u8] = include_bytes!("../../../../../config/scail2-plural-memory.json");
 const APPROVED_INDEX_SHA256: &str =
-    "31f82fe81675f38120b057b714982df8238b87fedbcd74c8cb3d01a131c875fa";
+    "692d8095d2470c983fc10f558796855aa65a78d478d9e87da63608e28082451b";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

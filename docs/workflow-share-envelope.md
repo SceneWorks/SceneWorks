@@ -854,6 +854,7 @@ of scope" different states:
 | File | Function | Why it is deferred |
 | --- | --- | --- |
 | `apps/web/src/training/trainingConfig.js` | `trainingConfigSnapshot` | Permanently exempt: trainer hyperparameters are a different namespace, and no training write seam embeds. |
+| `apps/web/src/pageJobState.js` | `shellPayload` | Permanently exempt: read-only in-memory UI shell summary trimming a received job snapshot to `{ advanced: { timelineAction } }`; never submits a job or feeds an embedding write seam. |
 
 <!-- END PINNED: deferred-builders -->
 

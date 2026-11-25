@@ -49,7 +49,7 @@ REGISTERED_CUDA_CARDS = {GPU0: 0, "GPU-e4b79931-7be6-f216-460a-f5405cfafffe": 1}
 # Inference's card-free campaign records its most-free-card choice under this rule.
 CARD_SELECTION_RULE = "most-free-card-covering-estimate-plus-reserve-v1"
 CARD_SELECTION_ESTIMATE_SOURCE = "scail2-plural-reviewed-device-peak-v1"
-CARD_SELECTION_ESTIMATE_BYTES = 60 << 30
+CARD_SELECTION_ESTIMATE_BYTES = 62 << 30
 # The most an idle card may hold before admission and still count as quiet at release. Recorded
 # idle GPU0 admission samples hold 19 MiB (and 498 MiB in run 45265278792), so driver contexts
 # get 512 MiB. GPU1 also drives the desktop: its recorded baseline is 908 MiB
