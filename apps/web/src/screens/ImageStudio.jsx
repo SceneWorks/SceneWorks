@@ -664,7 +664,7 @@ export function ImageStudio() {
   // Experimental alternate terminal decoder. Native is intentionally represented as an omitted
   // request key so the established provider path stays byte-for-byte identical.
   const [decoder, setDecoder] = useState(saved.decoder ?? "native");
-  const [faceRestore, setFaceRestore] = useState(false);
+  const [faceRestore, setFaceRestore] = useState(saved.faceRestore ?? false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
   const loadUserPoses = useUserPoseLoader();
@@ -698,7 +698,7 @@ export function ImageStudio() {
   // null | "describe" (reference-image caption) | "refine" (rewrite my prompt).
   // Replaces the always-rendered ReferenceCaptionPicker + RefinePromptControl pair
   // with two toggle tiles; only one panel opens at a time.
-  const [promptTool, setPromptTool] = useState(null);
+  const [promptTool, setPromptTool] = useState(saved.promptTool ?? null);
   const togglePromptTool = useCallback(
     (tool) => setPromptTool((current) => (current === tool ? null : tool)),
     [],
@@ -2095,7 +2095,7 @@ export function ImageStudio() {
   // generation keeps the review-and-apply control. The batch runs the saved expander model; a
   // saved model that cannot run blocks Run batch with the same message the single control shows.
   const h3BatchExpandOn = batchMode && h3ExpandAvailable && promptTool === "h3Expand";
-  const [h3BatchUseSizes, setH3BatchUseSizes] = useState(false);
+  const [h3BatchUseSizes, setH3BatchUseSizes] = useState(saved.h3BatchUseSizes ?? false);
   const h3BatchExpandTooMany = !h3BatchExpandOn
     ? ""
     : typeof h3Expander.prompt !== "function"
@@ -2425,6 +2425,7 @@ export function ImageStudio() {
     appearance: appearance.selection,
     structuredCaption: caption,
     promptMode,
+    promptTool,
     magicPromptBackend,
     count,
     advancedOpen,
@@ -2440,6 +2441,8 @@ export function ImageStudio() {
     editSecondAssetId,
     img2imgReferenceAssetId,
     img2imgStrength,
+    faceRestore,
+    h3BatchUseSizes,
     selectedPoseIds,
     workflowPoses,
     controlMode,

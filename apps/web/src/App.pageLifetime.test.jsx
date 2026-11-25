@@ -200,8 +200,9 @@ describe("foreground page lifetime", () => {
     }
     await clickButton("Queue");
     await clickButton("Image");
-    expect(imageStudio().textContent).toContain("First");
-    expect(imageStudio().textContent).toContain("Second");
+    const sourceFields = [...imageStudio().querySelectorAll(".asset-picker-field")];
+    expect(sourceFields.find((node) => node.querySelector(".asset-picker-label")?.textContent === "Image 1").textContent).toContain("First");
+    expect(sourceFields.find((node) => node.querySelector(".asset-picker-label")?.textContent === "Image 2 (optional)").textContent).toContain("Second");
     const snapshot = JSON.parse(localStorage.getItem("sceneworks-studio-image-project-1"));
     expect(snapshot).toMatchObject({
       sourceAssetId: "first", editSecondAssetId: "second",

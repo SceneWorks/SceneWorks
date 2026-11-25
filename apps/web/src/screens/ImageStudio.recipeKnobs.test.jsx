@@ -1361,6 +1361,10 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     );
 
     expect(checkbox("Restore face").checked).toBe(true);
+    await act(async () => root.render(null));
+    await render(baseContext({ assets: [reference], characters: [character],
+      imageModels: [poseModel, OTHER_MODEL], models: [poseModel, OTHER_MODEL, PID_CHECKPOINT] }));
+    expect(checkbox("Restore face").checked).toBe(true);
   });
 
   it("replays shared pose records through the visible strict-pose picker and exact submit path", async () => {
