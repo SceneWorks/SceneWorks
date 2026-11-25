@@ -1,7 +1,8 @@
+import { useResidentState } from "./useResidentState.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { charactersApi } from "../api/charactersResources.js";
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 
 // Owns the project's character roster plus every character CRUD/reference/look/LoRA
 // mutation. Extracted from App.jsx (sc-1651) to shrink the god module; behavior is
@@ -12,11 +13,11 @@ import { useCallback, useState } from "react";
 // sc-4194: every returned action is wrapped in useCallback so its identity is stable
 // across App's SSE-driven re-renders, which lets appContextValue memoize instead of
 // rebuilding (and changing identity) on every job.updated tick.
-export function useCharacters({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView }) {
-  const [characters, setCharacters] = useState([]);
+export function useCharacters({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView, resident = true }) {
+  const [characters, setCharacters] = useResidentState([], resident);
 
   const refreshCharacters = useProjectScopedList({
-    token, activeProject, activeProjectRef,
+    token, activeProject, activeProjectRef, resident,
     load: charactersApi.list,
     setItems: setCharacters,
     setError: setError,
@@ -50,7 +51,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => [created, ...items.filter((item) => item.id !== created.id)]);
         return created;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const updateCharacter = useCallback(
@@ -63,7 +64,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const archiveCharacter = useCallback(
@@ -73,7 +74,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.filter((item) => item.id !== characterId));
         return { id: characterId, status: "archived" };
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   // Restore an archived character (sc-6066). Archive is a soft flag, so the existing
@@ -90,7 +91,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => [updated, ...items.filter((item) => item.id !== updated.id)]);
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   // Fetch the project's archived characters for the dedicated "Archived" view
@@ -116,7 +117,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const updateCharacterReference = useCallback(
@@ -129,7 +130,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const removeCharacterReference = useCallback(
@@ -141,7 +142,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const createCharacterLook = useCallback(
@@ -154,7 +155,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const updateCharacterLook = useCallback(
@@ -167,7 +168,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const deleteCharacterLook = useCallback(
@@ -179,7 +180,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const attachCharacterLora = useCallback(
@@ -192,7 +193,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const updateCharacterLora = useCallback(
@@ -205,7 +206,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const detachCharacterLora = useCallback(
@@ -217,7 +218,7 @@ export function useCharacters({ token, activeProject, activeProjectRef, setError
         setCharacters((items) => items.map((item) => (item.id === updated.id ? updated : item)));
         return updated;
       }),
-    [withCharacterApi, token],
+    [withCharacterApi, token, setCharacters],
   );
 
   const createCharacterTestJob = useCallback(

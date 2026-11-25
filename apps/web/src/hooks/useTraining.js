@@ -1,7 +1,8 @@
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { trainingApi } from "../api/trainingResources.js";
-import { useCallback, useState } from "react";
+import { useResidentState } from "./useResidentState.js";
+import { useCallback } from "react";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { rethrowUnlessPrompted } from "../modelLibrary.js";
 import { upsertJobNewest } from "../sorters.js";
@@ -14,11 +15,11 @@ import { upsertJobNewest } from "../sorters.js";
 //
 // sc-4194: actions are wrapped in useCallback so their identity is stable across App's
 // SSE-driven re-renders, letting appContextValue memoize.
-export function useTraining({ token, activeProject, activeProjectRef, setError, setJobs }) {
-  const [trainingDatasets, setTrainingDatasets] = useState([]);
-  const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
-  const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
-  const [trainingDatasetsError, setTrainingDatasetsError] = useState("");
+export function useTraining({ token, activeProject, activeProjectRef, setError, setJobs, resident = true }) {
+  const [trainingDatasets, setTrainingDatasets] = useResidentState([], resident);
+  const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useResidentState(null, resident);
+  const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useResidentState(false, resident);
+  const [trainingDatasetsError, setTrainingDatasetsError] = useResidentState("", resident);
   const isCurrentTrainingRequest = useCallback(
     (projectId) =>
       isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
@@ -26,7 +27,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
   );
 
   const refreshTrainingDatasets = useProjectScopedList({
-    token, activeProject, activeProjectRef,
+    token, activeProject, activeProjectRef, resident,
     load: trainingApi.datasets,
     admitFromRef: true,
     setItems: setTrainingDatasets,

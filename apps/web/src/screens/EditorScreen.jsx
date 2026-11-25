@@ -1,3 +1,4 @@
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 import { timelineEdit, applyTimelineEdit, invertTimelineEdit } from "../timelineEdits.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { assetCanRenderAsAudio, assetCanRenderAsImage, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
@@ -91,6 +92,10 @@ export function EditorScreen() {
   ))).current;
   const previewVideoRef = useRef(null);
   const screenActive = useScreenActive();
+  usePageLeaveGuard(() => !isActiveTimelineDirty?.() || appConfirm({
+    title: "Leave Video Editor?", message: "Discard unsaved timeline edits and leave?",
+    confirmLabel: "Discard & leave", cancelLabel: "Stay", tone: "danger",
+  }));
 
   const assetsById = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
   const trackKindById = useMemo(() => {

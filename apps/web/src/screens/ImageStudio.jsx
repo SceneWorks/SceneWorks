@@ -1,3 +1,5 @@
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
+import { createPromptComposer, createImageRequestBuilder, createBatchMagicExpand, createBatchExpansion } from "./imageStudio/imageRequestPlan.js";
 import { loopUtilityModel } from "../loopUtility.js";
 import { useAppearance } from "../hooks/useAppearance.js";
 import { composeNegativePrompt } from "../data/appearanceCatalog.js";
@@ -59,7 +61,7 @@ import {
   seedsNegativeInMode,
 } from "../promptSeed.js";
 import { emptyCaption, injectStyleIntoCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
-import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences, imageRewriteReferenceIds } from "../imageJobRequest.js";
+import { composeImageJobPrompt, imageJobReferences, imageRewriteReferenceIds } from "../imageJobRequest.js";
 import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import { usePoseLibrary, useUserPoseLoader, poseRecordToPayload, WORKFLOW_POSE_CATEGORY } from "../poseLibrary.js";
 
@@ -160,8 +162,7 @@ import { pidToggleVisible } from "../pidEligibility.js";
 import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, sourcePrecisionLabel, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
-import { BATCH_EXPAND_MAX, H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
-import { isModelMissing } from "../modelMissing.js";
+import { BATCH_EXPAND_MAX, H3_IMAGE_EXPAND_COPY } from "../minimaxH3ImageExpand.js";
 import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
@@ -291,6 +292,7 @@ export function ImageStudio() {
     token = "",
     modelCatalogStatus = "ready",
     jobs = [],
+    backgroundImageBatch,
     importAsset,
     latestImageAssets,
     recentImageAssets,
@@ -407,10 +409,12 @@ export function ImageStudio() {
     batchMode, setBatchMode, batchPromptsText, setBatchPromptsText,
     batchVariableValues, setBatchVariableValues, batchName, setBatchName,
     batchScope, setBatchScope, loadedBatchId, batchError, setBatchError,
-    batchBusy, batchRun, setBatchRun, batchConfirmPending, setBatchConfirmPending,
+    batchBusy, batchRun: localBatchRun, setBatchRun: localSetBatchRun, batchConfirmPending, setBatchConfirmPending,
     batchPrompts, batchVariables, batchJobCount, handleSaveBatch,
     handleLoadBatch, handleDeleteBatch, handleImportBatch, handleNewBatch,
   } = useBatchPromptState({ saved, createPromptBatch, updatePromptBatch, deletePromptBatch });
+  const batchRun = backgroundImageBatch?.batchRun ?? localBatchRun;
+  const setBatchRun = backgroundImageBatch?.replaceBatchRun ?? localSetBatchRun;
 
   const [model, setModel] = useState(saved.model ?? imageModels[0]?.id ?? "z_image_turbo");
   const [textEncoderSelection, setTextEncoderSelection] = useState({
@@ -480,7 +484,7 @@ export function ImageStudio() {
   } = useStudioAdvancedSettings(saved, { schedulerShift: mossEdit ? 5 : null, steps: mossEdit ? 30 : "", guidanceScale: mossEdit ? 4 : "" });
 
   const [resolution, setResolution] = useState(saved.resolution ?? (mossEdit ? "512x512" : "1024x1024"));
-  const [sourceAssetId, setSourceAssetId] = useState(selectedAsset?.id ?? "");
+  const [sourceAssetId, setSourceAssetId] = useState(saved.sourceAssetId ?? selectedAsset?.id ?? "");
   // Multi-image reference set for a multi-reference edit (sc-6211, FLUX.2-dev). Drives the plural
   // `referenceAssetIds` payload when the model declares `ui.multiReference` and the user is in
   // edit_image mode (replaces the single source picker). Empty for every other model/mode.
@@ -496,7 +500,7 @@ export function ImageStudio() {
   // instruction describes how to combine them). Only surfaced when the model declares
   // `ui.editReferences`; empty otherwise. When set, submit sends an ordered
   // `referenceAssetIds: [image1, image2]` pair instead of the single `sourceAssetId`.
-  const [editSecondAssetId, setEditSecondAssetId] = useState("");
+  const [editSecondAssetId, setEditSecondAssetId] = useState(saved.editSecondAssetId ?? "");
   // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
   const [characterId, setCharacterId] = useState(saved.characterId ?? "");
@@ -511,7 +515,7 @@ export function ImageStudio() {
   // strength on an img2img-capable model (Krea 2 Turbo). Distinct from the character `referenceAssetId`
   // above — same picker, different purpose. Default 0.5 (the full-range slider midpoint; the usable
   // band is model-specific, so no clamp beyond the slider's 0–1).
-  const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
+  const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState(saved.img2imgReferenceAssetId ?? "");
   const referenceChangeState = useRef(null);
   const changeReference = useCallback((field, id, setter, explicit = true) => {
     const current = referenceChangeState.current;
@@ -564,9 +568,10 @@ export function ImageStudio() {
   // InstantID canonical head angle ("" = match the reference's own angle). Rides advanced.viewAngle.
   const [viewAngle, setViewAngle] = useState(saved.viewAngle ?? "");
   // Pose library: selected pose ids. When non-empty, the job carries advanced.poses
-  // (one image per pose) instead of the normal variations count. Transient (not saved).
-  const [selectedPoseIds, setSelectedPoseIds] = useState([]);
-  const [workflowPoses, setWorkflowPoses] = useState([]);
+  // (one image per pose) instead of the normal variations count. Save IDs and imported
+  // skeleton definitions so navigation can release the page without losing its selections.
+  const [selectedPoseIds, setSelectedPoseIds] = useState(saved.selectedPoseIds ?? []);
+  const [workflowPoses, setWorkflowPoses] = useState(saved.workflowPoses ?? []);
   const [poseLibraryReplayOpen, setPoseLibraryReplayOpen] = useState(false);
   // Strict-control panel (epic 8236, sc-8245). The selected control type (pose / canny / depth),
   // gated to the backbone's `ui.controlModes`. Pose reuses `selectedPoseIds`; canny/depth use a
@@ -659,7 +664,7 @@ export function ImageStudio() {
   // Experimental alternate terminal decoder. Native is intentionally represented as an omitted
   // request key so the established provider path stays byte-for-byte identical.
   const [decoder, setDecoder] = useState(saved.decoder ?? "native");
-  const [faceRestore, setFaceRestore] = useState(false);
+  const [faceRestore, setFaceRestore] = useState(saved.faceRestore ?? false);
   // User-created poses (reserved global project) join the built-in library in both
   // the picker and the id→keypoints resolver below, so saved poses can generate.
   const loadUserPoses = useUserPoseLoader();
@@ -693,7 +698,7 @@ export function ImageStudio() {
   // null | "describe" (reference-image caption) | "refine" (rewrite my prompt).
   // Replaces the always-rendered ReferenceCaptionPicker + RefinePromptControl pair
   // with two toggle tiles; only one panel opens at a time.
-  const [promptTool, setPromptTool] = useState(null);
+  const [promptTool, setPromptTool] = useState(saved.promptTool ?? null);
   const togglePromptTool = useCallback(
     (tool) => setPromptTool((current) => (current === tool ? null : tool)),
     [],
@@ -2090,7 +2095,7 @@ export function ImageStudio() {
   // generation keeps the review-and-apply control. The batch runs the saved expander model; a
   // saved model that cannot run blocks Run batch with the same message the single control shows.
   const h3BatchExpandOn = batchMode && h3ExpandAvailable && promptTool === "h3Expand";
-  const [h3BatchUseSizes, setH3BatchUseSizes] = useState(false);
+  const [h3BatchUseSizes, setH3BatchUseSizes] = useState(saved.h3BatchUseSizes ?? false);
   const h3BatchExpandTooMany = !h3BatchExpandOn
     ? ""
     : typeof h3Expander.prompt !== "function"
@@ -2420,6 +2425,7 @@ export function ImageStudio() {
     appearance: appearance.selection,
     structuredCaption: caption,
     promptMode,
+    promptTool,
     magicPromptBackend,
     count,
     advancedOpen,
@@ -2431,10 +2437,26 @@ export function ImageStudio() {
     widthOverride,
     heightOverride,
     fitMode,
+    sourceAssetId,
+    editSecondAssetId,
+    img2imgReferenceAssetId,
+    img2imgStrength,
+    faceRestore,
+    h3BatchUseSizes,
+    selectedPoseIds,
+    workflowPoses,
+    controlMode,
+    controlImageAssetId,
+    controlImagePassthrough,
+    controlScale,
+    controlOverlayId,
+    textStyleGain,
     referenceAssetIds,
     referenceDimensionIntent,
     orderedCharacterReferences,
-    ...(isFlux3ImageModel(selectedModel) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
+    characterId,
+    characterLookId,
+    referenceAssetId,
     flux3Layout,
     flux3ReferenceSlots,
     ipAdapterScale,
@@ -2626,58 +2648,21 @@ export function ImageStudio() {
   // hand-copied batch twin that had drifted (dropped the img2img reference + pidTarget/img2img
   // advanced knobs), silently ignoring an img2img reference and PiD "2K" tier on batch runs.
   const activeStyleText = styleTextForId(effectiveStyleId);
-  const composeJobPrompt = useCallback(
-    (overrides = {}) => {
-      const stackActive = generalStack.length > 0;
-      const isStructured = overrides.sendStructured ?? false;
-      const foldPrompt = (stackActive || (mossEdit && mossPromptBatch.length > 0)) && !isStructured;
-      const promptToSend =
-        foldPrompt && overrides.promptToSend != null
-          ? composePreset({
-              base: selectedPreset,
-              generalStack,
-              userText: overrides.promptToSend,
-              resolutionOptions,
-            }).prompt
-          : overrides.promptToSend;
-      const { prompt: composedPrompt } = composeImageJobPrompt({
-        promptToSend,
-        sendStructured: isStructured,
-        styleText: activeStyleText,
-        appearance: appearance.selection,
-        model: selectedModel,
-      });
-      return { composedPrompt, foldPrompt, isStructured, promptToSend };
-    },
-    [activeStyleText, generalStack, resolutionOptions, selectedPreset, mossEdit, mossPromptBatch.length, appearance.selection, selectedModel],
-  );
-
-  const buildJobRequest = (overrides = {}) => {
-    // Fold the general-preset stack (epic 11949) into this request. The prompt is composed per
-    // call so it wraps either the single prompt or a per-batch-item prompt; a structured JSON
-    // caption can't take flat fragments, so the prompt fold is skipped there (the stack's
-    // negative/aspect/count still apply). When the stack folds the prompt, the client is
-    // authoritative — presetPromptResolvedClientSide tells the server to skip its own fold.
-    const stackActive = generalStack.length > 0;
-    const { foldPrompt, isStructured, promptToSend } = composeJobPrompt(overrides);
-    const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
-    return buildImageJobRequest({
+  const promptComposition = useAppDomainValue({
+    generalStack, selectedPreset, resolutionOptions, mossEdit,
+    mossPromptBatchCount: mossPromptBatch.length, activeStyleText,
+    appearance: appearance.selection, selectedModel,
+  });
+  const composeJobPrompt = useMemo(() => createPromptComposer(promptComposition), [promptComposition]);
+  const promptCharLimit = imagePromptCharLimit(selectedModel);
+  const { buildJobRequest, buildBatchJobRequest } = createImageRequestBuilder({
+    settings: {
       flux3Layout,
       flux3ReferenceIds: layoutReferences.map(({ id }) => id),
-      // Overrides — the one legitimate single-vs-batch difference.
-      promptToSend,
-      appearancePromptBatch: overrides.appearancePromptBatch?.map((text) => composeJobPrompt({ ...overrides, promptToSend: text }).promptToSend),
-      submitIntent: overrides.submitIntent,
-      sendStructured: isStructured,
-      submitCaption: overrides.submitCaption,
-      submitBackend: overrides.submitBackend,
-      // A per-prompt [WxH] batch directive wins; otherwise the stack's aspect drives resolution.
-      resolutionOverride: overrides.resolutionOverride ?? stackResolution,
       // Shared studio settings (identical for both paths).
       mossImage,
       mossImageEdit,
       mossImageAdvanced,
-      mossPromptBatch: mossEdit ? mossPromptBatch.map((text) => composeJobPrompt({ ...overrides, promptToSend: text }).promptToSend) : mossPromptBatch,
       mossDmdSteps,
       mossOrdinarySettings: mossDmd ? { options: { ...mossImage, acceleration: "off" }, steps: stepsOverride, guidanceScale: guidanceOverride, negativePrompt, schedulerShift } : undefined,
       resolution,
@@ -2687,18 +2672,17 @@ export function ImageStudio() {
       // sending text the user cannot see or edit (and the worker's `resolve_negative_prompt`
       // discards anyway) would be a ghost input recorded on this job's recipe.
       negativePrompt: supportsNegativePrompt && !negativePromptCfgOff && !mossDmd
-        ? stackActive
+        ? generalStack.length > 0
           ? composedStack.negativePrompt
           : negativePrompt
         : "",
       model,
-      count: stackActive && composedStack.count != null ? composedStack.count : count,
+      count: generalStack.length > 0 && composedStack.count != null ? composedStack.count : count,
       seed,
       posePayload,
       width,
       height,
       recipePresetId: selectedPreset?.id ?? null,
-      presetPromptResolvedClientSide: foldPrompt,
       // sc-13130: the selected Style Catalog entry's prompt text (or null for None). The pure
       // builder applies composeStyledPrompt as the LAST wrap — after the preset fold above has
       // produced `promptToSend` — so the style's `Style:` block wraps the already-preset-composed
@@ -2802,34 +2786,11 @@ export function ImageStudio() {
       // single-phase Raw job (editor off, or any other model/mode) stays byte-for-byte unchanged.
       multiPhaseActive,
       phases: serializedPhases,
-    });
-  };
-
-  // One image-job request for a single resolved batch prompt. Thin adapter over the shared
-  // buildJobRequest: resolves the per-prompt override defaults (structured-caption payload and a
-  // per-prompt [WxH] directive, sc-10063) against studio state, then delegates. `count`
-  // multiplies within each job UNLESS poses are selected, in which case each job emits one image
-  // per pose (images = jobs × posePayload.length). For a structured-caption model (sc-9980) the
-  // caller passes the per-prompt auto-expanded caption via `opts`.
-  //
-  // A prose item longer than the model's prompt ceiling is shortened to fit rather than refused
-  // (`fitBatchPrompt`): the dropped tail is past what the encoder reads, and the panel lists the
-  // shortened items so the run is never stopped on length alone.
-  const promptCharLimit = imagePromptCharLimit(selectedModel);
-  const fitBatchPrompt = (text) =>
-    fitPromptToLimit(text, promptCharLimit, (candidate) => composeJobPrompt({ promptToSend: candidate }).composedPrompt);
-  const buildBatchJobRequest = (resolvedPrompt, opts = {}) => {
-    const fitted = opts.promptToSend == null ? fitBatchPrompt(resolvedPrompt).prompt : resolvedPrompt;
-    return buildJobRequest({
-      promptToSend: opts.promptToSend ?? fitted,
-      appearancePromptBatch: opts.appearancePromptBatch?.map((text) => fitBatchPrompt(text).prompt),
-      submitIntent: fitted,
-      sendStructured: opts.sendStructured ?? false,
-      submitCaption: opts.submitCaption ?? caption,
-      submitBackend: opts.submitBackend ?? magicPromptBackend,
-      resolutionOverride: opts.resolution ?? null,
-    });
-  };
+    },
+    composeJobPrompt, mossEdit, mossPromptBatch,
+    stackResolution: generalStack.length > 0 && composedStack.resolution ? parseResolution(composedStack.resolution) : null,
+    promptCharLimit, caption, magicPromptBackend,
+  });
 
   // The Iris post-processing plan covers what the next run renders: the Studio size for a single
   // Generate, every distinct per-prompt [WxH] size (or the Studio size) for a prompt batch (S2).
@@ -3065,6 +3026,7 @@ export function ImageStudio() {
     cancelBatchRun,
     batchRunProgress
   } = useImageBatchRun({
+    backgroundImageBatch,
     batchRun,
   activeProject,
   jobs,
@@ -3084,21 +3046,13 @@ export function ImageStudio() {
   selectedModel,
   token,
   buildBatchJobRequest,
-  onMagicExpand,
-  batchExpansion: h3BatchExpandOn
-    ? {
-        expandPrompt: h3Expander.prompt,
-        copy: H3_IMAGE_EXPAND_COPY,
-        modelId: model,
-        referenceAssetIds: qwenRewriteReferenceIds,
-        useSizes: h3BatchUseSizes,
-        proposedResolution: (suggestion) => h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution),
-        failureMessage: (error) =>
-          isModelMissing(h3ExpandModel, error?.message)
-            ? H3_IMAGE_EXPAND_COPY.missing(false, h3ExpandModel?.name || H3_IMAGE_EXPAND_COPY.defaultModelName)
-            : error?.message || H3_IMAGE_EXPAND_COPY.failure,
-      }
-    : null,
+  onMagicExpand: createBatchMagicExpand({ magicPrompt, width, height, model }),
+  batchExpansion: h3BatchExpandOn ? createBatchExpansion({
+    expandPrompt: h3ImageExpandPrompt,
+    expanderModel: h3ExpandModel,
+    modelId: model, referenceAssetIds: qwenRewriteReferenceIds,
+    useSizes: h3BatchUseSizes, selectedModel, resolution,
+  }) : null,
   createImageJob
   });
   const generateDisabled =

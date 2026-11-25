@@ -31,6 +31,7 @@ describe("route-owned hydration contract (sc-14783)", () => {
     ["Models", ["models", "loras"]],
     ["Editor", ["assets", "characters", "models", "loras", "presets", "timelines"]],
     ["ImageEditor", ["assets", "characters", "models", "loras"]],
+    ["VectorStudio", ["assets", "models"]],
     ["Queue", ["assets"]],
     ["Stats", []],
     ["Logs", []],

@@ -52,6 +52,7 @@ const ADVANCED_ROUTE_DOMAINS = Object.freeze({
   Presets: ["models", "loras", "presets"],
   Editor: ["assets", "characters", "models", "loras", "presets", "timelines"],
   ImageEditor: ["assets", "characters", "models", "loras"],
+  VectorStudio: ["assets", "models"],
   Setup: ["models"],
 });
 

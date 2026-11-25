@@ -1,6 +1,10 @@
+import { jobsApi } from "./api/jobsResources.js";
+import { retainPageJobs, pageNeedsJobDetails } from "./pageJobState.js";
+import { useImageBatchController } from "./hooks/useImageBatchController.js";
 import { isSettingsRefusal, SettingsRefusal } from "./components/SettingsRefusal.jsx";
+import { hydrationDomainsForRoute } from "./appHydration.js";
 import { useAppDomainValue } from "./context/useAppDomainValue.js";
-import { KEEP_ALIVE_VIEWS, navSections, viewTitles, KeepAlivePane, ProjectSwitcher, FirstRunProjectGate } from "./components/shell/ShellChrome.jsx";
+import { navSections, viewTitles, ProjectSwitcher, FirstRunProjectGate } from "./components/shell/ShellChrome.jsx";
 import { useThemeAccent } from "./hooks/useThemeAccent.js";
 import { useWebView2RepaintPump } from "./hooks/useWebView2RepaintPump.js";
 import { useShellHydration } from "./hooks/useShellHydration.js";
@@ -15,7 +19,7 @@ import { systemApi } from "./api/systemResources.js";
 import { projectsApi } from "./api/projectsResources.js";
 
 import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isAbortError } from "./api.js";
 import { recordStartupMark } from "./startupTiming.js";
 import { setServerValidatorVersion } from "./portableValidationState.js";
@@ -29,7 +33,6 @@ import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview } from "./components/assetPanels.jsx";
 import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
-import { LibraryScreen } from "./screens/LibraryScreen.jsx";
 
 import { sortNewest } from "./sorters.js";
 import { useCharacters } from "./hooks/useCharacters.js";
@@ -93,7 +96,7 @@ import {
   uiModeLockedToSimple,
   writeStoredSimpleDefault,
 } from "./simple/uiMode.js";
-import { buildLocalJobStack, canWorkerTakeWork, isActiveWorker, isAudioGenerationJob, isImageGenerationJob, isInterleaveJob, isPlaceholderOnlyGpuWorker, isSelectableGpuWorker, isVideoGenerationJob, localJobStackLimit } from "./appHelpers.js";
+import { mergeFreshJobs, buildLocalJobStack, canWorkerTakeWork, isActiveWorker, isAudioGenerationJob, isImageGenerationJob, isInterleaveJob, isPlaceholderOnlyGpuWorker, isSelectableGpuWorker, isVideoGenerationJob, localJobStackLimit } from "./appHelpers.js";
 import { hasVisibleLocalFailureForView, selectEditorMediaAssets } from "./appStateHelpers.js";
 
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
@@ -108,6 +111,11 @@ import { hasVisibleLocalFailureForView, selectEditorMediaAssets } from "./appSta
 
 // Lazy-load the canvas editor so Konva (canvas-based, heavy) stays out of the
 // initial bundle and the jsdom test path — it only loads when the view is opened.
+const LibraryScreen = lazyScreen(
+  () => import("./screens/LibraryScreen.jsx"),
+  "LibraryScreen",
+  "Assets",
+);
 const ImageStudio = lazyScreen(
   () => import("./screens/ImageStudio.jsx"),
   "ImageStudio",
@@ -231,7 +239,13 @@ const WorkflowDropPanel = lazyInteraction(
   "Workflow details",
 );
 
-export { KEEP_ALIVE_VIEWS, navSections, viewTitles } from "./components/shell/ShellChrome.jsx";
+export { navSections, viewTitles } from "./components/shell/ShellChrome.jsx";
+
+function shellQueueSummary(summary) {
+  if (!summary || !("activeJobs" in summary)) return summary;
+  const { activeJobs, ...shell } = summary;
+  return { ...shell, counts: { ...shell.counts, active: activeJobs.length } };
+}
 
 export function App() {
   const [health, setHealth] = useState(null);
@@ -244,18 +258,32 @@ export function App() {
   const [activeView, setActiveView] = useState("Library");
   const [navigationHydrated, setNavigationHydrated] = useState(false);
   // Bumped when the durable studio snapshot is seeded into the localStorage cache (sc-15425).
-  // Part of the kept-alive studios' React key, so a studio that mounted before the seed landed
+  // Part of the studios' React key, so a studio that mounted before the seed landed
   // remounts and re-reads it. See the seed call in the ui-preferences effect.
   const [studioRestoreEpoch, setStudioRestoreEpoch] = useState(0);
   const [simpleActiveScreen, setSimpleActiveScreen] = useState("image");
-  // Selective lazy keep-alive (sc-11959): the set of keep-alive views the user has
-  // visited at least once. A view mounts on first visit (activeView === view) and,
-  // once here, stays mounted (hidden) across navigation so its state survives.
-  const [visitedKeepAliveViews, setVisitedKeepAliveViews] = useState(() => new Set());
-  const [jobs, setJobs] = useState([]);
+  const [jobs, setStoredJobs] = useState([]);
+  const jobsRef = useRef([]);
+  const pageJobPolicyRef = useRef({ route: "Library", simple: false, projectId: null });
+  const setJobs = useCallback((update) => {
+    setStoredJobs((current) => {
+      const incoming = typeof update === "function" ? update(current) : update;
+      const next = retainPageJobs(incoming, pageJobPolicyRef.current);
+      jobsRef.current = next;
+      return next;
+    });
+  }, []);
   const [localGenerationJobIds, setLocalGenerationJobIds] = useState({ image: [], video: [], audio: [], document: [] });
   const [workers, setWorkers] = useState([]);
-  const [queueSummary, setQueueSummary] = useState(null);
+  const [queueSummary, setStoredQueueSummary] = useState(null);
+  const setQueueSummary = useCallback((summary) => {
+    const { route, simple } = pageJobPolicyRef.current;
+    if (!summary || route === "Queue" || (simple && route === "queue")) {
+      setStoredQueueSummary(summary);
+    } else {
+      setStoredQueueSummary(shellQueueSummary(summary));
+    }
+  }, []);
   // Mac UI gating (sc-3486): the value is inert until the capabilities endpoint reports
   // macGatingActive, but keep a separate readiness bit so consumers do not mistake that
   // temporary fallback for authoritative Candle capability facts.
@@ -271,7 +299,11 @@ export function App() {
   const [trainingPresets, setTrainingPresets] = useState({ schemaVersion: 1, presets: [] });
   const [trainingTargetsError, setTrainingTargetsError] = useState("");
   const [trainingPresetsError, setTrainingPresetsError] = useState("");
-  const [loadedAssets, setAssets] = useState([]);
+  const [loadedAssets, setStoredAssets] = useState([]);
+  const assetsResidentRef = useRef(true);
+  const setAssets = useCallback((update) => {
+    if (assetsResidentRef.current || (Array.isArray(update) && update.length === 0)) setStoredAssets(update);
+  }, []);
   const [loadedAssetsProjectId, setLoadedAssetsProjectId] = useState(null);
   const [assetLoadState, setAssetLoadState] = useState({
     projectId: null,
@@ -672,14 +704,6 @@ export function App() {
     [settlePendingWorkflowGeneration],
   );
 
-  const openWorkflowSharingSettings = useCallback(() => {
-    setWorkflowEmbedNoticeOpen(false);
-    setWorkflowEmbedDecisionError("");
-    settlePendingWorkflowGeneration(false);
-    setSettingsSharingFocusRequest((request) => request + 1);
-    setSimpleActiveScreen("settings");
-    setActiveView("Settings");
-  }, [settlePendingWorkflowGeneration]);
   // A completed choice is mirrored to other mounted tabs so they cannot ask independently.
   useEffect(
     () =>
@@ -732,12 +756,10 @@ export function App() {
   // A screen (the Image Editor, sc-2434) can register a guard that runs before a
   // user-initiated navigation leaves it — e.g. to confirm discarding unsaved edits.
   // Programmatic setActiveView calls (post-generation hops) deliberately bypass it.
-  const leaveGuardRef = useRef(null);
+  const leaveGuardsRef = useRef(new Set());
   const registerLeaveGuard = useCallback((guard) => {
-    leaveGuardRef.current = guard;
-    return () => {
-      if (leaveGuardRef.current === guard) leaveGuardRef.current = null;
-    };
+    leaveGuardsRef.current.add(guard);
+    return () => { leaveGuardsRef.current.delete(guard); };
   }, []);
   // In-flight Image-Editor AI-op scratch registry (sc-8850). The editor stages an
   // ephemeral scratch asset per AI op and normally loads the result back + purges
@@ -754,7 +776,6 @@ export function App() {
   }
   const editorScratchRegistry = editorScratchRegistryRef.current;
   // Latest jobs list, so the claim-release sweep can read it without re-subscribing.
-  const jobsRef = useRef([]);
   const trackEditorScratchOp = useCallback(
     (jobId, assets, options) => editorScratchRegistry.track(jobId, assets, options),
     [editorScratchRegistry],
@@ -767,32 +788,41 @@ export function App() {
     (getClaimedIds) => editorScratchRegistry.registerClaim(getClaimedIds, () => jobsRef.current),
     [editorScratchRegistry],
   );
-  const navTo = useCallback((viewId) => {
-    if (viewId === activeViewRef.current) return;
-    const guard = leaveGuardRef.current;
-    if (!guard) {
-      setActiveView(viewId);
-      return;
+  const requestPageExit = useCallback((onAccepted) => {
+    const guards = [...leaveGuardsRef.current];
+    function proceed(index) {
+      if (index === guards.length) { onAccepted(); return true; }
+      const decision = guards[index]();
+      if (decision && typeof decision.then === "function") {
+        return decision.then((ok) => ok !== false && proceed(index + 1));
+      }
+      return decision !== false && proceed(index + 1);
     }
-    // The guard may answer synchronously (a bare boolean, legacy) or asynchronously
-    // (a Promise<boolean> — the Image Editor's desktop-safe appConfirm dialog, sc-11968).
-    // Only a strict `false` / a promise resolving falsy cancels the leave; anything else
-    // proceeds. A promise defers the view switch until the user answers the dialog.
-    const decision = guard();
-    if (decision && typeof decision.then === "function") {
-      decision.then((ok) => {
-        if (ok) setActiveView(viewId);
-      });
-      return;
-    }
-    if (decision === false) return; // guard returned false → user cancelled the leave
-    setActiveView(viewId);
+    return proceed(0);
   }, []);
+  const navTo = useCallback((viewId) => {
+    if (viewId === activeViewRef.current) return true;
+    return requestPageExit(() => setActiveView(viewId));
+  }, [requestPageExit]);
+  const changeUiMode = useCallback((next) => {
+    if (next === uiMode) return true;
+    return requestPageExit(() => setUiModeOverride(next));
+  }, [requestPageExit, uiMode]);
+  const openWorkflowSharingSettings = useCallback(() => {
+    requestPageExit(() => {
+      setWorkflowEmbedNoticeOpen(false);
+      setWorkflowEmbedDecisionError("");
+      settlePendingWorkflowGeneration(false);
+      setSettingsSharingFocusRequest((request) => request + 1);
+      setSimpleActiveScreen("settings");
+      setActiveView("Settings");
+    });
+  }, [requestPageExit, settlePendingWorkflowGeneration]);
 
   // A screen holding an unsaved draft (Training Studio / Data Sets, sc-11970) can register
   // a guard consulted before the active PROJECT is switched — which would otherwise silently
   // reset the screen and discard the draft. Distinct from the nav leave-guard above: project
-  // switch bypasses navTo entirely, and keep-alive screens must NOT prompt on plain nav, only
+  // switch bypasses navTo entirely, and page leave guards protect ordinary navigation as well as
   // on a project change. Like the nav guard, a promise defers the switch until the user
   // answers; only a falsy answer cancels it. The guard receives the target project.
   const projectSwitchGuardRef = useRef(null);
@@ -818,9 +848,9 @@ export function App() {
         decision && typeof decision.then === "function" ? await decision : decision !== false;
       if (!proceed) return false; // guard cancelled → user kept editing, nothing discarded
     }
-    setActiveProject(project);
-    return true;
-  }, []);
+    if (guard) { setActiveProject(project); return true; }
+    return requestPageExit(() => setActiveProject(project));
+  }, [requestPageExit]);
   // The ProjectSwitcher's onSelect fires the guarded switch and forgets the result.
   const selectProject = useCallback(
     (project) => {
@@ -829,11 +859,56 @@ export function App() {
     [requestProjectSwitch],
   );
 
+  // Only the foreground route owns catalogs. The shell keeps job lifecycle state
+  // separately so switching pages never interrupts work or its live progress.
+  const hydrationRoute = isDesktopShell && setupCompleted === false && authenticated
+    ? "Setup" : uiMode === SIMPLE_MODE ? simpleActiveScreen : activeView;
+  const simpleHydrationRoute = hydrationRoute !== "Setup" && uiMode === SIMPLE_MODE;
+  const residentDomains = useMemo(() => new Set(ready ? [
+    ...hydrationDomainsForRoute(hydrationRoute, { simple: simpleHydrationRoute }),
+    ...hydrationDomainsForRoute(hydrationRoute, { simple: simpleHydrationRoute, deferred: true }),
+  ] : []), [hydrationRoute, simpleHydrationRoute, ready]);
+
+  useInsertionEffect(() => {
+    assetsResidentRef.current = residentDomains.has("assets");
+    pageJobPolicyRef.current = {
+      route: hydrationRoute, simple: simpleHydrationRoute, projectId: activeProject?.id,
+      ownsScratch: (id) => editorScratchRegistry.owns(id),
+    };
+  }, [hydrationRoute, simpleHydrationRoute, activeProject?.id, editorScratchRegistry, residentDomains]);
+  useLayoutEffect(() => {
+    setJobs((current) => current);
+    setStoredQueueSummary((current) => {
+      if (!current || hydrationRoute === "Queue" || (simpleHydrationRoute && hydrationRoute === "queue")) return current;
+      return shellQueueSummary(current);
+    });
+    closePreview();
+    setStudioLaunch((current) => current?.view === hydrationRoute ? current : null);
+    if (hydrationRoute !== "ImageEditor") setEditorLaunch(null);
+  }, [hydrationRoute, simpleHydrationRoute, closePreview, setJobs]);
+
+  // Detailed history is page data. Reacquire it on entry without reconnecting
+  // or reducing the live job stream used for progress and background batches.
+  useEffect(() => {
+    if (!ready || !projectsLoaded || !pageNeedsJobDetails(hydrationRoute, simpleHydrationRoute)) return;
+    const controller = new AbortController();
+    jobsApi.list(token, { signal: controller.signal }).then((items) => {
+      if (!controller.signal.aborted) setJobs((current) => mergeFreshJobs(current, items));
+    }).catch((error) => {
+      if (!isAbortError(error) && !controller.signal.aborted) setDomainError("jobs", error.message);
+    });
+    return () => controller.abort();
+  }, [hydrationRoute, simpleHydrationRoute, activeProject?.id, projectsLoaded, ready, token, setJobs, setDomainError]);
+
+  const { jobAction, context: jobActionsContext } = useJobActions({ token, setJobs, setError });
+  const backgroundImageBatch = useImageBatchController({ activeProject, jobs, jobAction });
+
   const { createVideoJob, context: jobCreatorsContext } = useJobCreators({
     token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration
   });
 
   const { setCharacters, refreshCharacters, context: charactersContext } = useCharacters({
+    resident: residentDomains.has("characters"),
     token,
     activeProject,
     activeProjectRef,
@@ -842,9 +917,10 @@ export function App() {
     setActiveView,
   });
 
-  const { setPresets, refreshPresets, context: presetsContext } = usePresets({ token, activeProject, activeProjectRef, setError: domainErrors.presets });
+  const { setPresets, refreshPresets, context: presetsContext } = usePresets({ resident: residentDomains.has("presets"), token, activeProject, activeProjectRef, setError: domainErrors.presets });
 
   const { setSavedVoices, refreshSavedVoices, context: savedVoicesContext } = useSavedVoices({
+    resident: residentDomains.has("savedVoices"),
     token,
     activeProject,
     activeProjectRef,
@@ -852,6 +928,7 @@ export function App() {
   });
 
   const { setPromptBatches, refreshPromptBatches, context: promptBatchesContext } = usePromptBatches({
+    resident: residentDomains.has("promptBatches"),
     token,
     activeProject,
     activeProjectRef,
@@ -859,6 +936,7 @@ export function App() {
   });
 
   const { setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, refreshTrainingDatasets, context: trainingContext } = useTraining({
+    resident: residentDomains.has("trainingDatasets"),
     token,
     activeProject,
     activeProjectRef,
@@ -867,6 +945,8 @@ export function App() {
   });
 
   const { refreshModels, refreshModelAndLoras, models, loras, setLoras, refreshLoras, createModelDownloadJob, createLoraDownloadJob, context: modelsAndLorasContext } = useModelsAndLoras({
+    resident: residentDomains.has("models"),
+    lorasResident: residentDomains.has("loras"),
     token,
     activeProject,
     activeProjectRef,
@@ -880,6 +960,7 @@ export function App() {
   }, [refreshModels]);
 
   const { setPersonTracks, refreshPersonTracks, context: personTracksContext } = usePersonTracks({
+    resident: residentDomains.has("personTracks"),
     token,
     activeProject,
     activeProjectRef,
@@ -889,6 +970,7 @@ export function App() {
   });
 
   const { setTimelines, setTimelinesProjectId, setSelectedTimelineId, setActiveTimeline, refreshTimelines, enqueueTimelineGenerationApply, context: timelinesContext } = useTimelines({
+    resident: residentDomains.has("timelines"),
     token,
     activeProject,
     activeProjectRef,
@@ -1017,7 +1099,7 @@ export function App() {
     if (queueSummary?.counts) {
       return {
         ...queueSummary.counts,
-        active: queueSummary.activeJobs?.length ?? jobs.filter((job) => !terminalStatuses.has(job.status)).length,
+        active: queueSummary.activeJobs?.length ?? queueSummary.counts.active ?? jobs.filter((job) => !terminalStatuses.has(job.status)).length,
       };
     }
     return jobs.reduce(
@@ -1088,15 +1170,6 @@ export function App() {
     if (!navigationHydrated) return;
     persistNavigationPreferences({ activeView });
   }, [activeView, navigationHydrated]);
-
-  // Record a keep-alive view the first time it becomes active so it stays mounted
-  // thereafter (sc-11959). Never-visited keep-alive views are absent from the DOM.
-  useEffect(() => {
-    if (!KEEP_ALIVE_VIEWS.has(activeView)) {
-      return;
-    }
-    setVisitedKeepAliveViews((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
-  }, [activeView]);
 
   // Passive effects run after React commits the state batch from refreshData.
   // Keep this before the active-project effect so the marks reflect the commit
@@ -1174,12 +1247,12 @@ export function App() {
           seedSimpleStudiosFromServer(prefs.simpleStudio);
         }
         // The advanced studios' equivalent (sc-15425). Seeded BEFORE `setActiveView` below, on
-        // purpose: restoring the view can mount a keep-alive studio in the same commit, and that
+        // purpose: restoring the view can mount a studio in the same commit, and that
         // studio reads `loadStudioSettings` synchronously at mount — so the cache has to already
         // hold the durable copy or it would come up on defaults and never re-read.
         if (prefs?.advancedStudio && seedStudioSettingsFromServer(prefs.advancedStudio) > 0) {
           // Remount the kept-alive studios so a studio the user opened BEFORE this landed
-          // re-reads the now-seeded cache — being keep-alive, it never would on its own. Only
+          // re-reads the now-seeded cache — an already-mounted page cannot re-read initial state on its own. Only
           // when something was actually restored, so the common case (nothing stored yet)
           // doesn't throw away what they typed while the GET was in flight.
           setStudioRestoreEpoch((epoch) => epoch + 1);
@@ -1277,7 +1350,7 @@ export function App() {
   useWebView2RepaintPump();
 
   const { refreshAssets, hydrateLaunchDomains, context: shellHydrationContext } = useShellHydration({
-    ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
+    residentDomains, jobsRef, loadedAssets, ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
   });
   // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
   // (its SSE effect deps are only [access.authRequired, ready, token]), so this MUST have a
@@ -1327,6 +1400,10 @@ export function App() {
   useEffect(() => {
     jobsRef.current = jobs;
     editorScratchRegistry.sweep(jobs);
+    const retainedIds = new Set(jobs.map((job) => job.id));
+    for (const id of generatedAssetRefreshesRef.current.keys()) {
+      if (!retainedIds.has(id)) generatedAssetRefreshesRef.current.delete(id);
+    }
   }, [jobs, editorScratchRegistry]);
 
   // saveToken / lockRemote (the remote-browser login + lock affordances, epic 4484
@@ -1353,7 +1430,7 @@ export function App() {
         body: JSON.stringify({ name: trimmed }),
       });
       setProjects((items) => [created, ...items.filter((item) => item.id !== created.id)]);
-      // Switching to the new workspace resets keep-alive screens — including a Data Sets draft.
+      // Switching to the new workspace resets project-owned screens — including a Data Sets draft.
       // Route through the guard so a dirty draft prompts (consistent with picking an EXISTING
       // project) instead of silently wiping it (sc-11970). On cancel: stay on the current
       // project + view, draft intact; the created workspace remains in the list to open later.
@@ -1386,6 +1463,7 @@ export function App() {
   }, []);
 
   const { sendAssetToImageEdit, sendAssetToImageEditor, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, context: sendToStudioContext } = useSendToStudio({
+    requestPageExit,
     setSelectedAssetId, setStudioLaunch, setActiveView, imageModels, setEditorLaunch, uiMode, uiModeLocked, setUiModeOverride, activeProjectRef, stableHydrateLaunchDomains: hydrateLaunchDomains, closePreview, token, requestedGpu, models, assets, confirmWorkflowEmbeddingBeforeGeneration, setJobs
   });
 
@@ -1551,14 +1629,8 @@ export function App() {
 
   const appUpdate = useAppUpdate(token, authenticated);
 
-  const { context: jobActionsContext } = useJobActions({
-    token, setJobs, setError
-  });
 
   const titleInfo = viewTitles[activeView] ?? { title: activeView, blurb: "" };
-  // A keep-alive view is rendered once it is active OR has been visited before
-  // (sc-11959): it mounts on first visit and then stays mounted (hidden) thereafter.
-  const keepAliveMounted = (view) => activeView === view || visitedKeepAliveViews.has(view);
   // Activity dots only — counts live in the topbar so nav button textContent stays clean.
   // The Editor dot means editor work is IN FLIGHT (export / frame extract / timeline-
   // initiated generation). It used to be `timelines.length > 0`, which lit permanently
@@ -1613,6 +1685,7 @@ export function App() {
   //     cold-only consumers reading via useAppStatic() no longer re-render on job ticks.
   // Owner-memoized domain values are composed without mirrored dependency lists.
   const appLiveValue = useAppDomainValue({
+    backgroundImageBatch,
     // Jobs / queue (high-churn — new identity per SSE tick)
     jobs,
     filteredJobs,
@@ -1669,7 +1742,7 @@ export function App() {
     trainingPresetsError,
     trainingTargets,
     trainingTargetsError,
-    setActiveView,
+    setActiveView: navTo,
     registerLeaveGuard,
     registerProjectSwitchGuard,
     trackEditorScratchOp,
@@ -1747,7 +1820,7 @@ export function App() {
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}
             onEmbedWorkflowChange={changeEmbedWorkflow}
-            onModeChange={setUiModeOverride}
+            onModeChange={changeUiMode}
             onScreenChange={setSimpleActiveScreen}
             onSimpleDefaultChange={changeSimpleUiDefault}
             requestedScreen={simpleActiveScreen}
@@ -1847,7 +1920,7 @@ export function App() {
             <button
               aria-label="Switch to Simple UI"
               className="icon-btn"
-              onClick={() => setUiModeOverride(SIMPLE_MODE)}
+              onClick={() => changeUiMode(SIMPLE_MODE)}
               title="Switch to Simple UI"
               type="button"
             >
@@ -1857,7 +1930,7 @@ export function App() {
             <SimpleModeSwitch
               locked={uiModeLocked}
               mode={ADVANCED_MODE}
-              onChange={setUiModeOverride}
+              onChange={changeUiMode}
             />
           )}
         </div>
@@ -1875,7 +1948,7 @@ export function App() {
                 Clicking through opens the Queue, where the per-worker/job detail lives. */}
             <button
               className={health?.status === "ok" ? "status-pill status-summary" : "status-pill status-summary warning"}
-              onClick={() => setActiveView("Queue")}
+              onClick={() => navTo("Queue")}
               title="Workers and GPU activity — open the Queue for detail"
               type="button"
             >
@@ -1887,7 +1960,7 @@ export function App() {
               {gpuOptions.length > 1 ? `${gpuOptions.length - 1} GPU` : "GPU auto"}
               <Icon.ChevDown className="status-summary-caret" size={13} />
             </button>
-            <button className="queue-chip" onClick={() => setActiveView("Queue")} type="button">
+            <button className="queue-chip" onClick={() => navTo("Queue")} type="button">
               Queue {queueCounts.active}
             </button>
           </div>
@@ -1953,15 +2026,13 @@ export function App() {
             onComplete={completeSetupWizard}
             onCreateProject={createProject}
             onDownloadModel={createModelDownloadJob}
-            onOpenQueue={() => setActiveView("Queue")}
+            onOpenQueue={() => navTo("Queue")}
           />
         ) : setupGateLoading ? null : needsFirstProject ? (
           <FirstRunProjectGate disabled={!authenticated} onCreate={createProject} />
         ) : (
           <>
-        {/* OUT screens (Library/Assets, Queue, Models, Settings, Stats, Logs,
-            Licenses): keep the conditional-unmount behavior — mounted only while
-            active, unmounted on navigation (sc-11959). */}
+        {/* Only the foreground top-level page is mounted. */}
         {activeView === "Library" ? <LibraryScreen /> : null}
         {activeView === "Queue" ? <QueueScreen /> : null}
         {activeView === "Models" ? <ModelManagerScreen /> : null}
@@ -1987,102 +2058,57 @@ export function App() {
         {activeView === "Logs" ? <LogsScreen /> : null}
         {activeView === "Licenses" ? <LicensesScreen /> : null}
 
-        {/* Keep-alive screens (sc-11959): mounted on first visit via keepAliveMounted,
-            then kept mounted and toggled visible/hidden by KeepAlivePane so their
-            state survives navigation. The key={activeProject?.id} on the studios +
-            Image Editor is preserved so a PROJECT switch still remounts (resets) them
-            even while kept alive. The studioLaunch apply effects inside each studio are
-            keyed on the launch token id, not on mount, so a fresh "Use this Recipe" /
-            "Use in Studio" injection still fires on an already-mounted studio. */}
-        {keepAliveMounted("Image") ? (
-          <KeepAlivePane active={activeView === "Image"}>
+        {/* Creative pages unmount on navigation. Persisted controls restore on return;
+            DOM, media, and page-owned requests are released. */}
+        {activeView === "Image" ? (
             <ImageStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Video") ? (
-          <KeepAlivePane active={activeView === "Video"}>
+        {activeView === "Video" ? (
             <VideoStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Audio") ? (
-          <KeepAlivePane active={activeView === "Audio"}>
+        {activeView === "Audio" ? (
             <AudioStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Characters") ? (
-          <KeepAlivePane active={activeView === "Characters"}>
+        {activeView === "Characters" ? (
             <CharacterStudio key={`${activeProject?.id ?? "default"}:${studioRestoreEpoch}`} />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Document") ? (
-          <KeepAlivePane active={activeView === "Document"}>
+        {activeView === "Document" ? (
             <DocumentStudio key={activeProject?.id ?? "default"} />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Train") ? (
-          <KeepAlivePane active={activeView === "Train"}>
+        {activeView === "Train" ? (
             <TrainingStudio />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("LibraryDataSets") ? (
-          <KeepAlivePane active={activeView === "LibraryDataSets"}>
+        {activeView === "LibraryDataSets" ? (
             <TrainingDataSetsLibrary />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Presets") ? (
-          <KeepAlivePane active={activeView === "Presets"}>
+        {activeView === "Presets" ? (
             <PresetManagerScreen />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Poses") ? (
-          <KeepAlivePane active={activeView === "Poses"}>
-            {/* Keyed on the project id (sc-11971): the Create tab's staged sources / phase
-                are PROJECT-SCOPED, so a project switch must remount (reset) the screen —
-                exactly like the studios — while keep-alive preserves in-progress review
-                across a plain nav round trip. Otherwise project-A source picks could submit
-                a pose_detect job under project B. */}
+        {activeView === "Poses" ? (
             <PoseLibraryScreen key={activeProject?.id ?? "default"} />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Keypoints") ? (
-          <KeepAlivePane active={activeView === "Keypoints"}>
-            {/* NOT keyed on the project id (sc-11971): the Key Point Library is GLOBAL
-                (GLOBAL_KEYPOINTS_PROJECT_ID), so its capture / collection work must survive
-                a project switch as well as a plain nav — keep-alive alone, no remount. */}
+        {activeView === "Keypoints" ? (
             <KeyPointLibraryScreen />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("Editor") ? (
-          <KeepAlivePane active={activeView === "Editor"}>
-            {/* Deliberately NOT keyed on the studio restore epoch (sc-15425), unlike the four
-                studios. The Editor holds timeline edit state and live scratch-op claims
-                (registerEditorScratchClaim), so remounting it to recover its `editor-video`
-                generation settings would risk discarding real editing work and leaking a claim —
-                a far worse trade than the settings it would recover. It picks up a restored
-                snapshot on its next mount instead. */}
+        {activeView === "Editor" ? (
             <EditorScreen />
-          </KeepAlivePane>
         ) : null}
 
-        {keepAliveMounted("ImageEditor") ? (
-          <KeepAlivePane active={activeView === "ImageEditor"}>
+        {activeView === "ImageEditor" ? (
             <ImageEditor key={activeProject?.id ?? "default"} />
-          </KeepAlivePane>
         ) : null}
-        {keepAliveMounted("VectorStudio") ? (
-          <KeepAlivePane active={activeView === "VectorStudio"}>
+        {activeView === "VectorStudio" ? (
             <VectorStudio key={activeProject?.id ?? "default"} />
-          </KeepAlivePane>
         ) : null}
           </>
         )}

@@ -2,7 +2,7 @@
 // These run locally with Node/jsdom-less environment and start NO server and NO browser.
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -344,7 +344,7 @@ describe("private Playwright tools resolution", () => {
       expect(tools.version).toBe(PLAYWRIGHT_VERSION);
       expect(tools.manifest).toBe(resolve(realRoot, "node_modules", "playwright", "package.json"));
       expect(tools.entry).toBe(resolve(realRoot, "node_modules", "playwright", "index.js"));
-      expect(tools.entry.startsWith(resolve(realRoot, "node_modules") + "/")).toBe(true);
+      expect(relative(resolve(realRoot, "node_modules"), tools.entry)).toBe(join("playwright", "index.js"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

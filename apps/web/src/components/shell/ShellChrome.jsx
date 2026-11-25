@@ -1,52 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "../Icons.jsx";
 import { Logo } from "../Logo.jsx";
-import { ScreenActiveContext } from "../../context/ScreenActiveContext.js";
 
-// Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
-// These view ids mount on FIRST visit and then stay mounted (hidden) so their React
-// state — in-progress prompt, settings, edits — survives leaving and returning, and
-// the studios stop re-hydrating (and clobbering) from localStorage on every visit.
-// Everything NOT listed here (Queue, Settings, Stats, Logs, Licenses, Models, and
-// Library/Assets) keeps today's conditional unmount-on-navigation behavior. Training
-// contributes two view ids — the default "Train" workspace and the "LibraryDataSets"
-// Data Sets mode — both part of the Training Studio family.
-export const KEEP_ALIVE_VIEWS = Object.freeze(
-  new Set([
-    "Image",
-    "Video",
-    "Audio",
-    "Characters",
-    "Document",
-    "Train",
-    "LibraryDataSets",
-    "Presets",
-    "Poses",
-    "Keypoints",
-    "Editor",
-    "ImageEditor",
-    "VectorStudio",
-  ]),
-);
-
-// Wrapper for a kept-alive screen (sc-11959). The screen mounts once and then stays
-// mounted; navigating away toggles `active` false, which hides the pane instead of
-// unmounting it. `display: contents` (see .keep-alive-pane in styles.css) keeps the
-// wrapper transparent to the .workspace flex column while visible — the child screen
-// lays out exactly as a direct .workspace child would — and the `hidden` attribute
-// drops it from layout and the accessibility tree while backgrounded. The pane also
-// publishes `active` on ScreenActiveContext so the screen can pause expensive work
-// when hidden (S2) or drop a leave-guard when it isn't the foreground view.
-export function KeepAlivePane({ active, children }) {
-  return (
-    <div className="keep-alive-pane" hidden={!active}>
-      <ScreenActiveContext.Provider value={active}>{children}</ScreenActiveContext.Provider>
-    </div>
-  );
-}
-
-// Exported so the nav registration (Workspace / Library / System sections) is assertable in
-// unit tests without rendering the whole App (epic 13400 C0 mirrors the KEEP_ALIVE_VIEWS export).
+// Top-level navigation mounts only the selected page.
 export const navSections = [
   {
     label: "Workspace",

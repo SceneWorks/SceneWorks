@@ -1,4 +1,5 @@
-import { useEffect, useInsertionEffect, useRef } from "react";
+import { useImageBatchController } from "../../hooks/useImageBatchController.js";
+export { useImageBatchController };
 import { iterateBatch, parsePromptResolution } from "../../promptBatch.js";
 import { batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summarizeBatchRun } from "../../batchOps.js";
 import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
@@ -6,77 +7,23 @@ import { promptBatchSize } from "./samplingControls.js";
 import { PROMPT_REFINE_MODEL_ID, terminalStatuses } from "../../constants.js";
 import { validatePortableRequest } from "../../portableValidation.js";
 
-// Extracted from ImageStudio along its existing concern boundary.
-export function useImageBatchRun({
-  batchRun,
-  activeProject,
-  jobs,
-  jobAction,
-  setBatchRun,
-  BATCH_ACTIVE_JOB_LIMIT,
-  preflightError,
-  setBatchError,
-  batchTotal,
-  BATCH_RENDER_CAP,
-  setBatchConfirmPending,
-  batchPrompts,
-  batchVariables,
-  resolutionOptions,
-  structuredPromptModel,
-  batchJobCount,
-  selectedModel,
-  token = "",
-  buildBatchJobRequest,
-  onMagicExpand,
-  // MiniMax-H3-Image batch expansion (the Expand prompt tool, on in batch mode), or null:
-  // { expandPrompt, copy, modelId, referenceAssetIds, useSizes, proposedResolution, failureMessage }.
-  batchExpansion = null,
-  createImageJob
-}) {
-  const batchObservedJobsRef = useRef(new Map());
+// This factory receives only the publisher, so an asynchronous run cannot pin
+// a retired React render's jobs, catalogs, previews, or component callbacks.
+export function createImageBatchRuntime(setBatchRun) {
+  const ref = (current) => ({ current });
+  const batchObservedJobsRef = ref(new Map());
 
-  const batchRunRef = useRef(batchRun);
+  const batchRunRef = ref(null);
 
-  const batchSlotWaitersRef = useRef([]);
+  const batchSlotWaitersRef = ref([]);
 
-  const batchOwnerRef = useRef(null);
+  const batchOwnerRef = ref(null);
 
-  const batchProjectRef = useRef(activeProject?.id);
+  const batchProjectRef = ref(null);
 
-  const batchJobsRef = useRef(jobs);
+  const batchJobsRef = ref([]);
 
-  const batchJobActionRef = useRef(jobAction);
-
-  // Async batch continuations and cleanup see only committed ownership. A
-  // suspended project render must not stop or cancel the still-visible batch.
-  useInsertionEffect(() => {
-    batchProjectRef.current = activeProject?.id;
-    batchJobsRef.current = jobs;
-    batchJobActionRef.current = jobAction;
-  }, [activeProject?.id, jobs, jobAction]);
-
-  useEffect(() => {
-    const waiters = batchSlotWaitersRef.current;
-    if (batchOwnerRef.current && batchOwnerRef.current.projectId !== activeProject?.id) {
-      batchOwnerRef.current = null;
-      batchRunRef.current = null;
-      setBatchRun(null);
-    }
-    return () => {
-      const owner = batchOwnerRef.current;
-      if (!owner) return;
-      owner.stopped = true;
-      owner.controller.abort();
-      owner.disposed = true;
-      for (const resolve of waiters.splice(0)) resolve();
-      // Project changes and unmount use the same policy as Stop: cancel jobs
-      // already enqueued, including a post that resolves after cleanup.
-      for (const [id, submittedJob] of owner.jobs) {
-        const job = batchJobsRef.current.find((entry) => entry.id === id) ?? submittedJob;
-        if (job && !terminalStatuses.has(job.status)) batchJobActionRef.current(job, "cancel");
-      }
-    };
-  }, [activeProject?.id, setBatchRun]);
+  const batchJobActionRef = ref(null);
 
   function replaceBatchRun(next) {
     batchRunRef.current = next;
@@ -88,10 +35,10 @@ export function useImageBatchRun({
     for (const resolve of waiters) resolve();
   }
 
-  async function waitForBatchSlot(owner) {
+  async function waitForBatchSlot(owner, activeJobLimit) {
     while (!owner.stopped && batchProjectRef.current === owner.projectId) {
       const activeJobIds = batchRunRef.current?.activeJobIds ?? [];
-      if (activeJobIds.length < BATCH_ACTIVE_JOB_LIMIT) return;
+      if (activeJobIds.length < activeJobLimit) return;
       await new Promise((resolve) => batchSlotWaitersRef.current.push(resolve));
     }
   }
@@ -99,7 +46,7 @@ export function useImageBatchRun({
   // Expand every resolved prompt with MiniMax-H3-Image's expander, one job after another. A
   // prompt whose expansion fails is recorded as a failed batch item (with the reason) and not
   // rendered; Stop ends the phase and queues nothing. Returns the items to render.
-  async function expandBatchItems(entries, owner, stopped) {
+  async function expandBatchItems(entries, owner, stopped, batchExpansion) {
     const { expandPrompt, copy, modelId, referenceAssetIds, useSizes, proposedResolution, failureMessage } = batchExpansion;
     const ready = [];
     const progress = (done) => {
@@ -148,23 +95,13 @@ export function useImageBatchRun({
   // Fan out one image job per resolved prompt (mirrors the asset batch, sc-6112): each
   // posts independently so the worker runs them serially with its between-image cache
   // release, and progress/cancel read the live jobs feed.
-  async function runBatch(confirmed = false) {
-    if (batchRunRef.current?.submitting || !activeProject) return;
-    const error = preflightError("batch");
-    if (error) {
-      setBatchError(error);
-      return;
-    }
-    // Admission precedes expansion; confirmation preserves the exact image count.
-    if (!confirmed && batchTotal > BATCH_RENDER_CAP) {
-      setBatchConfirmPending(true);
-      return;
-    }
-    // No length gate: `buildBatchJobRequest` shortens an item past the model's prompt ceiling,
-    // and the panel lists those items before the run.
-    setBatchError("");
-    setBatchConfirmPending(false);
-    const owner = { stopped: false, projectId: activeProject.id, jobs: new Map(), controller: new AbortController() };
+  async function runBatch({
+    BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions,
+    structuredPromptModel, batchJobCount, selectedModel, token = "",
+    buildBatchJobRequest, onMagicExpand, batchExpansion = null, createImageJob,
+  }) {
+    if (batchRunRef.current?.submitting || !batchProjectRef.current) return;
+    const owner = { stopped: false, projectId: batchProjectRef.current, jobs: new Map(), controller: new AbortController() };
     batchOwnerRef.current = owner;
     const stopped = () => owner.stopped || batchProjectRef.current !== owner.projectId || batchOwnerRef.current !== owner;
     batchObservedJobsRef.current.clear();
@@ -191,7 +128,7 @@ export function useImageBatchRun({
     }
     // Prompt expansion runs to the end BEFORE the first image job is queued, so the expander and
     // the image model each load once rather than alternating per prompt.
-    const items = batchExpansion ? await expandBatchItems([...resolvedItems()], owner, stopped) : resolvedItems();
+    const items = batchExpansion ? await expandBatchItems([...resolvedItems()], owner, stopped, batchExpansion) : resolvedItems();
     function* chunks() {
       let chunk = [];
       for (const item of items) {
@@ -204,7 +141,7 @@ export function useImageBatchRun({
       if (chunk.length) yield chunk;
     }
     for (const chunk of chunks()) {
-      await waitForBatchSlot(owner);
+      await waitForBatchSlot(owner, BATCH_ACTIVE_JOB_LIMIT);
       if (stopped()) {
         break;
       }
@@ -257,7 +194,7 @@ export function useImageBatchRun({
         const { job } = result;
         const failure = result.error || "Job creation returned no job ID.";
         if (stopped()) {
-          if (job?.id) jobAction(job, "cancel");
+          if (job?.id) batchJobActionRef.current(job, "cancel");
           if (!owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) {
             const current = batchRunRef.current;
             if (current) {
@@ -312,22 +249,18 @@ export function useImageBatchRun({
       return;
     }
     for (const jobId of current.activeJobIds) {
-      const status = batchItemStatus(jobId, jobs, batchObservedJobsRef.current);
+      const status = batchItemStatus(jobId, batchJobsRef.current, batchObservedJobsRef.current);
       if (status !== "queued" && status !== "running") {
         continue;
       }
-      const job = jobs.find((entry) => entry.id === jobId) ?? batchOwnerRef.current?.jobs.get(jobId);
+      const job = batchJobsRef.current.find((entry) => entry.id === jobId) ?? batchOwnerRef.current?.jobs.get(jobId);
       if (job) {
-        jobAction(job, "cancel");
+        batchJobActionRef.current(job, "cancel");
       }
     }
   }
 
-  const batchRunProgress = batchRun
-    ? summarizeBatchRun(batchRun, jobs, batchObservedJobsRef.current)
-    : null;
-
-  useEffect(() => {
+  function observeJobs(jobs) {
     const current = batchRunRef.current;
     if (!current) return;
     const batchJobIds = new Set(current.activeJobIds);
@@ -351,6 +284,68 @@ export function useImageBatchRun({
       setBatchRun(settled);
       releaseBatchSlotWaiters();
     }
-  }, [batchRun, jobs, setBatchRun]);
-  return { replaceBatchRun, runBatch, cancelBatchRun, batchRunProgress };
+  }
+  return {
+    runBatch, replaceBatchRun, cancelBatchRun, observeJobs,
+    progress: (jobs) => batchRunRef.current
+      ? summarizeBatchRun(batchRunRef.current, jobs, batchObservedJobsRef.current) : null,
+    commit(projectId, jobs, jobAction) {
+      batchProjectRef.current = projectId;
+      batchJobsRef.current = jobs;
+      batchJobActionRef.current = jobAction;
+    },
+    attachProject() {
+      if (batchOwnerRef.current && batchOwnerRef.current.projectId !== batchProjectRef.current) {
+        batchOwnerRef.current = null;
+        batchObservedJobsRef.current.clear();
+        replaceBatchRun(null);
+      }
+    },
+    dispose() {
+      const owner = batchOwnerRef.current;
+      if (!owner) return;
+      owner.stopped = true;
+      owner.controller.abort();
+      owner.disposed = true;
+      releaseBatchSlotWaiters();
+      for (const [id, submittedJob] of owner.jobs) {
+        const job = batchJobsRef.current.find((entry) => entry.id === id) ?? submittedJob;
+        if (job && !terminalStatuses.has(job.status)) batchJobActionRef.current(job, "cancel");
+      }
+    },
+  };
+}
+
+// UI admission stays with the page; a running submission retains none of its
+// setters, validation drafts, media, or component state.
+export function useImageBatchRun(options) {
+  const local = useImageBatchController({
+    activeProject: options.activeProject, jobs: options.jobs, jobAction: options.jobAction,
+    batchRun: options.backgroundImageBatch ? undefined : options.batchRun,
+    setBatchRun: options.backgroundImageBatch ? undefined : options.setBatchRun,
+  });
+  const controller = options.backgroundImageBatch ?? local;
+  function runBatch(confirmed = false) {
+    if (controller.batchRun?.submitting || !options.activeProject) return;
+    const error = options.preflightError("batch");
+    if (error) { options.setBatchError(error); return; }
+    if (!confirmed && options.batchTotal > options.BATCH_RENDER_CAP) {
+      options.setBatchConfirmPending(true);
+      return;
+    }
+    options.setBatchError("");
+    options.setBatchConfirmPending(false);
+    return controller.runBatch(batchRequestPlan(options));
+  }
+  return { ...controller, runBatch };
+}
+
+function batchRequestPlan({
+  BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions,
+  structuredPromptModel, batchJobCount, selectedModel, token,
+  buildBatchJobRequest, onMagicExpand, batchExpansion, createImageJob,
+}) {
+  return { BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions,
+    structuredPromptModel, batchJobCount, selectedModel, token,
+    buildBatchJobRequest, onMagicExpand, batchExpansion, createImageJob };
 }

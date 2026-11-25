@@ -88,7 +88,7 @@ describe("route-owned App hydration (sc-14783)", () => {
     await settle();
   }
 
-  it("hydrates late global/project domains once, on first consumer navigation", async () => {
+  it("hydrates active domains, reusing shared dependencies and reloading evicted catalogs", async () => {
     installFetch();
     await renderApp();
 
@@ -122,11 +122,11 @@ describe("route-owned App hydration (sc-14783)", () => {
     await navigate("Image");
     await navigate("Video");
     counts = requestCounts();
-    expect(counts["/api/v1/loras"]).toBe(1);
+    expect(counts["/api/v1/loras"]).toBe(2);
     expect(counts["/api/v1/projects/project-a/timelines"]).toBe(1);
-    expect(counts["/api/v1/recipe-presets"]).toBe(1);
+    expect(counts["/api/v1/recipe-presets"]).toBe(2);
     expect(counts["/api/v1/projects/project-a/voices"]).toBe(1);
-    expect(counts["/api/v1/projects/project-a/characters"]).toBe(1);
+    expect(counts["/api/v1/projects/project-a/characters"]).toBe(2);
     expect(counts["/api/v1/prompt-batches"]).toBe(1);
     expect(counts["/api/v1/projects/project-a/person-tracks"]).toBe(1);
 
@@ -135,7 +135,7 @@ describe("route-owned App hydration (sc-14783)", () => {
     counts = requestCounts();
     expect(counts["/api/v1/projects/project-a/assets"]).toBe(1);
     expect(counts["/api/v1/models"]).toBe(1);
-    expect(counts["/api/v1/training/targets"]).toBe(1);
+    expect(counts["/api/v1/training/targets"]).toBe(2);
     expect(FakeEventSource.instances).toHaveLength(1);
   });
 
@@ -236,10 +236,15 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(container.querySelector('textarea[aria-label="Ask about this image"]')).toBeTruthy();
   });
 
-  it("retains Library's pending asset hydration when Queue becomes the active consumer", async () => {
+  it("cancels Library hydration and loads only job outputs on Queue entry", async () => {
     const assetsRequest = deferred();
     let assetSignal;
+    const historicalAsset = {
+      id: "historical-asset", projectId: "project-a", type: "image", displayName: "Historical thumbnail",
+      file: { path: "historical.png", mimeType: "image/png" }, status: {},
+    };
     installFetch({
+      "/api/v1/projects/project-a/assets/historical-asset": () => Promise.resolve(response(historicalAsset)),
       "/api/v1/projects/project-a/assets": (_url, options) => {
         assetSignal = options.signal;
         return assetsRequest.promise;
@@ -262,7 +267,7 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(assetSignal?.aborted).toBe(false);
 
     await navigate("Queue");
-    expect(assetSignal?.aborted).toBe(false);
+    expect(assetSignal?.aborted).toBe(true);
     expect(requestCounts()["/api/v1/projects/project-a/assets"]).toBe(1);
 
     await act(async () => {
@@ -393,7 +398,7 @@ describe("route-owned App hydration (sc-14783)", () => {
     await settle();
     counts = requestCounts();
     expect(counts["/api/v1/models"]).toBe((before["/api/v1/models"] ?? 0) + 2);
-    expect(counts["/api/v1/loras"]).toBe((before["/api/v1/loras"] ?? 0) + 1);
+    expect(counts["/api/v1/loras"]).toBeUndefined();
 
     [
       "/api/v1/projects",

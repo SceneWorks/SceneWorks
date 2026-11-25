@@ -91,6 +91,7 @@ export function createEditorScratchRegistry({ purgeAsset, isTerminal = (status) 
   }
 
   return {
+    owns: (jobId) => ops.has(jobId),
     // Editor starts an AI op: remember its scratch/mask assets so they can be purged even
     // if the editor unmounts before its own watcher runs.
     track(jobId, assets) {

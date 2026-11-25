@@ -134,6 +134,30 @@ function mossAsset(output = "images") {
 }
 
 describe("background MOSS edit regeneration", () => {
+  it.each(["catalog", "input"])("abandons replay if the project changes while loading its %s", async (stage) => {
+    apiFetch.mockReset();
+    let current = true;
+    const opts = options({ asset: mossAsset(), models: [], assets: [], isCurrentProject: () => current,
+      loadModels: async () => { if (stage === "catalog") current = false; return [mossModel]; },
+      loadAsset: async (id) => { current = false; return mossAssets.find((item) => item.id === id); } });
+    expect(await regenerateImage(opts)).toBeNull();
+    expect(opts.beforeCreate).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("loads evicted models and missing reference/tensor records only for replay (original: %s)", async (originalAvailable) => {
+    const source = mossAsset();
+    if (originalAvailable) source.lineage.jobId = "original";
+    apiFetch.mockReset();
+    if (originalAvailable) apiFetch.mockResolvedValueOnce({ id: "original", type: "image_generate", projectId: "project-1", payload: imageRecipeRequest(source) });
+    apiFetch.mockResolvedValueOnce({ id: "replayed" });
+    const loadModels = vi.fn(async () => [mossModel]);
+    const loadAsset = vi.fn(async (id) => mossAssets.find((item) => item.id === id));
+    const outputs = [source];
+    expect(await regenerateImage(options({ asset: source, models: [], assets: outputs, loadModels, loadAsset }))).toEqual({ id: "replayed" });
+    expect(loadModels).toHaveBeenCalledOnce();
+    expect(loadAsset.mock.calls.map(([id]) => id)).toEqual(["ref-0", "ref-1", "ref-3", "positive", "mask", "noise"]);
+    expect(outputs).toEqual([source]);
+  });
   it("checks a finetune's bound MOSS component requirements before enqueue", async () => {
     const source = { ...mossAsset(), recipe: { ...mossAsset().recipe, model: "serenity", mode: "text_to_image", prompt: "a pine forest", rawAdapterSettings: { mossImage: { acceleration: "unmerged_bf16" } } } };
     apiFetch.mockReset();

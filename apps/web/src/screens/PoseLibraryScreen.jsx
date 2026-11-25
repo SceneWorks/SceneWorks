@@ -1,3 +1,4 @@
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { isImageUpload } from "../uploadFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -261,19 +262,22 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
   // Explicit, desktop-safe discard of the whole review (sc-11971). Confirms via appConfirm
   // (NOT window.confirm — a no-op in the Tauri WebView) before dropping detected poses +
   // edits, so a completed detection isn't lost on a stray click.
-  const discardSession = useCallback(async () => {
-    if (hasUnsavedWork) {
-      const ok = await appConfirm({
+  const discardSessionConfirm = useCallback(() => !hasUnsavedWork || appConfirm({
         title: "Discard detected poses?",
         message: "Discard the detected poses and your category / tag edits? This can't be undone.",
         confirmLabel: "Discard",
         cancelLabel: "Keep editing",
         tone: "danger",
-      });
+      }), [hasUnsavedWork]);
+  usePageLeaveGuard(discardSessionConfirm);
+
+  const discardSession = useCallback(async () => {
+    if (hasUnsavedWork) {
+      const ok = await discardSessionConfirm();
       if (!ok) return;
     }
     resetSession();
-  }, [hasUnsavedWork, resetSession]);
+  }, [discardSessionConfirm, hasUnsavedWork, resetSession]);
 
   const save = useCallback(async () => {
     const keep = candidates.filter((candidate) => candidate.keep);

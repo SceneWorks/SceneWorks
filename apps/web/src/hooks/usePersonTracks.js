@@ -1,20 +1,21 @@
+import { useResidentState } from "./useResidentState.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { personTracksApi } from "../api/personTracksResources.js";
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 
 // Owns the project's person-track state plus detection/track job creation and manual
 // track corrections. Extracted from App.jsx (sc-1651). personTracks is project-scoped
 // (loaded by the project-load effect, not the bulk refreshData), so the hook just
 // takes the shared concerns it needs; detection/track jobs surface live via the SSE
 // job stream (the create endpoints publish job.updated), so no post-create refetch.
-export function usePersonTracks({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView }) {
-  const [personTracks, setPersonTracks] = useState([]);
+export function usePersonTracks({ token, activeProject, activeProjectRef, setError, requestedGpu, setActiveView, resident = true }) {
+  const [personTracks, setPersonTracks] = useResidentState([], resident);
 
   // sc-4194: every action is wrapped in useCallback so its identity is stable
   // across the SSE-driven re-renders of App, letting appContextValue memoize.
   const refreshPersonTracks = useProjectScopedList({
-    token, activeProject, activeProjectRef,
+    token, activeProject, activeProjectRef, resident,
     load: personTracksApi.list,
     setItems: setPersonTracks,
     setError: setError,
@@ -89,7 +90,7 @@ export function usePersonTracks({ token, activeProject, activeProjectRef, setErr
         return null;
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, setError, setPersonTracks],
   );
 
   const context = useAppDomainValue({
