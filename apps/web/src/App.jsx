@@ -848,9 +848,9 @@ export function App() {
         decision && typeof decision.then === "function" ? await decision : decision !== false;
       if (!proceed) return false; // guard cancelled → user kept editing, nothing discarded
     }
-    setActiveProject(project);
-    return true;
-  }, []);
+    if (guard) { setActiveProject(project); return true; }
+    return requestPageExit(() => setActiveProject(project));
+  }, [requestPageExit]);
   // The ProjectSwitcher's onSelect fires the guarded switch and forgets the result.
   const selectProject = useCallback(
     (project) => {
@@ -1463,6 +1463,7 @@ export function App() {
   }, []);
 
   const { sendAssetToImageEdit, sendAssetToImageEditor, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, context: sendToStudioContext } = useSendToStudio({
+    requestPageExit,
     setSelectedAssetId, setStudioLaunch, setActiveView, imageModels, setEditorLaunch, uiMode, uiModeLocked, setUiModeOverride, activeProjectRef, stableHydrateLaunchDomains: hydrateLaunchDomains, closePreview, token, requestedGpu, models, assets, confirmWorkflowEmbeddingBeforeGeneration, setJobs
   });
 

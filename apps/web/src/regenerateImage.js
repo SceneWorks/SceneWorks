@@ -68,7 +68,7 @@ export function imageRecipeRequest(asset, models = []) {
 }
 
 // Background replay uses the same MOSS pre-enqueue checks as the visible Studio.
-async function validateMossReplay(request, { models = [], assets = [], projectId }) {
+async function validateMossReplay(request, { models = [], assets = [], projectId, loadAsset, isCurrentProject }) {
   const advanced = request?.advanced ?? {}, model = models.find((item) => item.id === request?.model);
   if (!isMossImage(model ?? request?.model)) return;
   if (!model) throw new Error("The recorded MOSS model is unavailable. Refresh Models before regenerating.");
@@ -76,6 +76,20 @@ async function validateMossReplay(request, { models = [], assets = [], projectId
   if (!isMossEdit(model, request.mode)) return;
   if (advanced.mossImage?.acceleration && advanced.mossImage.acceleration !== "off") throw new Error("Disable 8-step acceleration before regenerating a MOSS edit.");
   const references = mossEditReferenceIds(request);
+  if (loadAsset) {
+    const { mossTensorReferences } = await import("./mossImageAdvanced.js");
+    const ids = [...new Set([...references, ...mossTensorReferences(advanced.mossImageAdvanced).map(([, ref]) => ref.assetId)])];
+    const known = new Map(assets.map((item) => [item.id, item]));
+    // Replay owns these records only for this enqueue. Queue keeps its output-only
+    // catalog, and large input libraries never become resident as a side effect.
+    for (const id of ids) {
+      if (!isCurrentProject()) return;
+      if (known.has(id)) continue;
+      try { const item = await loadAsset(id); if (item?.id) known.set(item.id, item); }
+      catch (error) { if (error.status !== 404) throw error; }
+    }
+    assets = [...known.values()];
+  }
   if (references.some((id) => !assets.some((item) => item.id === id && item.type === "image" && item.projectId === projectId))) throw new Error("A MOSS reference is missing from this project. Reacquire that exact slot before regenerating.");
   mossEditWireOptions(advanced.mossImageEdit);
   const issue = mossEditControlsError({ ...advanced, ...advanced.mossImage });
@@ -86,7 +100,7 @@ async function validateMossReplay(request, { models = [], assets = [], projectId
   if (advancedIssue) throw new Error(advancedIssue);
 }
 
-export async function regenerateImage({ asset, projectId, projectName, token, requestedGpu, models, assets, beforeCreate, onCreated, isCurrentProject }) {
+export async function regenerateImage({ asset, projectId, projectName, token, requestedGpu, models, assets, loadModels, loadAsset, beforeCreate, onCreated, isCurrentProject }) {
   if (asset?.type !== "image") return null;
   if (!projectId || asset.projectId !== projectId) throw new Error("Open this image's project before regenerating it.");
   const jobId = asset.generationSet?.jobId ?? asset.lineage?.jobId;
@@ -99,9 +113,12 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
     }
   }
   if (!isCurrentProject()) return null;
+  if (!models?.length && loadModels) models = await loadModels();
+  if (!isCurrentProject()) return null;
   if (!original) {
     const request = imageRecipeRequest(asset, models);
-    await validateMossReplay(request, { models, assets, projectId });
+    await validateMossReplay(request, { models, assets, projectId, loadAsset, isCurrentProject });
+    if (!isCurrentProject()) return null;
     if ((await beforeCreate()) === false || !isCurrentProject()) return null;
     const job = await imageApi.imageJobs(token, {
       method: "POST",
@@ -113,7 +130,8 @@ export async function regenerateImage({ asset, projectId, projectName, token, re
   if (original.projectId !== projectId || !["image_generate", "image_edit"].includes(original.type)) {
     throw new Error("This image's original job is not an image-generation job in this project.");
   }
-  await validateMossReplay(original.payload, { models, assets, projectId });
+  await validateMossReplay(original.payload, { models, assets, projectId, loadAsset, isCurrentProject });
+  if (!isCurrentProject()) return null;
   if ((await beforeCreate()) === false || !isCurrentProject()) return null;
   // Duplicate bypasses the typed image route's random-seed generation. A null seed would reuse
   // the old seeds array (or the worker's deterministic fallback), so supply fresh randomness.

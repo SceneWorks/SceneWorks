@@ -1204,13 +1204,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
     });
   }
 
-  // Register a project-switch guard with App (sc-11970). Switching the active project
-  // resets this screen (the reset effect above), silently discarding the dataset draft.
-  // The guard is consulted BEFORE the switch and defers it until the user answers. Scoped
-  // to Data Sets mode — that's where a dataset draft is authored — so the single App-level
-  // registration slot isn't contended by the Train-mode twin. Keep-alive keeps this mounted
-  // across plain nav, so the guard stays live even when Data Sets isn't the foreground view.
-  usePageLeaveGuard(() => !datasetLibraryMode || confirmDiscardUnsavedDraft());
+  // Both dataset edits and customized run settings need an explicit discard before
+  // the foreground page is released. Data Sets also owns its project-switch guard.
+  usePageLeaveGuard(() => {
+    if (datasetLibraryMode) return confirmDiscardUnsavedDraft();
+    const defaultPreset = defaultPresetForTarget(trainingPresets, selectedTarget?.id);
+    if (!customizedConfigFields.size && (!selectedTargetId || selectedTargetId === firstTarget?.id) &&
+        (!selectedPresetId || selectedPresetId === defaultPreset?.id)) return true;
+    return appConfirm({ title: "Leave Training Studio?",
+      message: "Your customized training configuration will be discarded.",
+      confirmLabel: "Discard", cancelLabel: "Keep editing", tone: "danger" });
+  });
 
   useEffect(() => {
     if (!datasetLibraryMode || typeof registerProjectSwitchGuard !== "function") {

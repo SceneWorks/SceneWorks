@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
-import { FakeEventSource, response, settle, changeField, field } from "./main.testSupport.jsx";
+import { FakeEventSource, response, settle, changeField, field, zImageTrainingTarget, zImageTrainingPresets } from "./main.testSupport.jsx";
 
 describe("foreground page lifetime", () => {
   let container;
@@ -15,6 +15,7 @@ describe("foreground page lifetime", () => {
       assets = [],
       loras = [],
       presets = [],
+      characters = [],
     } = overrides;
     global.fetch = vi.fn((url) => {
       const path = new URL(url).pathname;
@@ -33,6 +34,9 @@ describe("foreground page lifetime", () => {
       if (path.endsWith("/models")) {
         return Promise.resolve(response(models));
       }
+      if (path.endsWith("/characters")) return Promise.resolve(response(characters));
+      if (path.endsWith("/training/targets")) return Promise.resolve(response({ targets: [zImageTrainingTarget] }));
+      if (path.endsWith("/training/presets")) return Promise.resolve(response({ presets: zImageTrainingPresets }));
       if (path.endsWith("/assets")) {
         return Promise.resolve(response(assets));
       }
@@ -98,6 +102,42 @@ describe("foreground page lifetime", () => {
     expect(imageStudio()).not.toBeNull();
 
     expect(videoStudio()).toBeNull();
+  });
+
+  it("keeps unsaved character edits when cancelling navigation and send-to-studio shortcuts", async () => {
+    mockFetch({ characters: [{ id: "character", name: "Mira", type: "person", description: "", looks: [], loras: [], approvedReferences: [] }] });
+    await renderApp();
+    await clickButton("Characters");
+    const editorBefore = document.querySelector(".character-editor");
+    await changeField(field(editorBefore, "Name"), "Mira revised");
+    for (const target of [() => [...document.querySelectorAll(".nav-item")].find((button) => button.textContent === "Queue"),
+      () => [...editorBefore.querySelectorAll("button")].find((button) => button.textContent === "Image")]) {
+      await act(async () => target().click());
+      await settle();
+      expect(document.querySelector(".app-confirm-modal").textContent).toContain("Leave Character Studio?");
+      await clickButton("Keep editing");
+      expect(document.querySelector(".character-editor")).toBe(editorBefore);
+      expect(field(editorBefore, "Name").value).toBe("Mira revised");
+    }
+    await clickButton("Queue");
+    await clickButton("Discard");
+    expect(document.querySelector(".character-editor")).toBeNull();
+  });
+
+  it("confirms before discarding a customized training configuration on page exit", async () => {
+    await renderApp();
+    await clickButton("Train");
+    const steps = field(container, "Steps");
+    expect(steps).toBeTruthy();
+    await changeField(steps, "4321");
+    await clickButton("Queue");
+    expect(document.querySelector(".app-confirm-modal").textContent).toContain("customized training configuration");
+    await clickButton("Keep editing");
+    expect(field(container, "Steps")).toBe(steps);
+    expect(steps.value).toBe("4321");
+    await clickButton("Queue");
+    await clickButton("Discard");
+    expect(container.contains(steps)).toBe(false);
   });
 
   it("unmounts Image Studio and restores its saved prompt on return", async () => {
