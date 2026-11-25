@@ -39,3 +39,10 @@ it("keeps orphaned editor-op results only until their cleanup owner releases the
   expect(retained[1]).toBe(source[1]);
   expect(retainPageJobs(retained, { ...policy, ownsScratch: () => false })[1].result).toEqual({});
 });
+
+it("keeps global keypoint extraction results for capture while a workspace is selected", () => {
+  const extraction = { id: "capture", projectId: "project_global_keypoints", type: "kps_extract",
+    status: "completed", payload: { sourcePath: "staged-face.png" }, result: { detected: true, kps: [[10, 20]] } };
+  expect(retainPageJobs([extraction], { route: "Keypoints", projectId: "workspace" })[0]).toBe(extraction);
+  expect(retainPageJobs([extraction], { route: "Library", projectId: "workspace" })[0].result).toEqual({});
+});

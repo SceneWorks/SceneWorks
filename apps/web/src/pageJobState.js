@@ -17,7 +17,8 @@ function pageUsesJob(job, route, simple) {
   if (route === "ImageEditor") return job.type?.startsWith("image_") || job.type?.startsWith("mask_");
   if (route === "Characters") return isImageGenerationJob(job) || job.type === "lora_train" || DOWNLOAD_TYPES.has(job.type);
   if (route === "Train" || route === "LibraryDataSets") return ["lora_train", "control_training"].includes(job.type) || job.type?.startsWith("training_") || job.type?.startsWith("dataset_") || DOWNLOAD_TYPES.has(job.type);
-  if (route === "Poses" || route === "Keypoints") return job.type === "pose_detect";
+  if (route === "Poses") return job.type === "pose_detect";
+  if (route === "Keypoints") return job.type === "kps_extract";
   if (route === "VectorStudio") return job.type?.startsWith("vector_") || DOWNLOAD_TYPES.has(job.type);
   return false;
 }
@@ -30,7 +31,10 @@ export function retainPageJobs(jobs, { route, simple = false, projectId, ownsScr
   const history = new Map();
   let changed = false;
   const next = jobs.map((job) => {
-    const relevant = queue || ((!job.projectId || job.projectId === projectId) && pageUsesJob(job, route, simple));
+    // Keypoint capture belongs to its global library project, independently of
+    // the workspace currently selected in the shell.
+    const projectMatches = route === "Keypoints" || !job.projectId || job.projectId === projectId;
+    const relevant = queue || (projectMatches && pageUsesJob(job, route, simple));
     const bucket = isImageGenerationJob(job) ? "image" : isVideoGenerationJob(job) ? "video" : job.type;
     const count = history.get(bucket) ?? 0;
     if (relevant && terminalStatuses.has(job.status)) history.set(bucket, count + 1);

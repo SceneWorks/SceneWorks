@@ -115,6 +115,7 @@ describe("Create from Prompt disclosure", () => {
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.sessionStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -127,6 +128,9 @@ describe("Create from Prompt disclosure", () => {
   });
 
   async function render(models, createVectorPromptWorkflow = vi.fn(async () => ({})), overrides = {}) {
+    // Explicit fixture keys start independent scenarios; navigation remounts
+    // within one scenario restore the saved controls instead.
+    if (overrides.renderKey) window.sessionStorage.removeItem(`sceneworks-page-draft:VectorStudio:${overrides.activeProject?.id ?? "p1"}`);
     await act(async () => {
       root.render(
         <AppContext.Provider value={{
@@ -157,6 +161,25 @@ describe("Create from Prompt disclosure", () => {
   async function submit() {
     await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   }
+
+  it("restores controls after unmount without retaining the page", async () => {
+    await render([rasterModel(), vectorModel()]);
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Create from Prompt").click());
+    await act(async () => {
+      const input = container.querySelector('[aria-label="Vector prompt"]');
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(input, "a saved vector prompt");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      const detail = container.querySelector('[aria-label="Vector detail"]');
+      detail.value = "standard";
+      detail.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => root.render(null));
+    expect(container.querySelector("textarea")).toBeNull();
+    await render([rasterModel(), vectorModel()]);
+    expect(container.querySelector('[aria-label="Vector prompt"]').value).toBe("a saved vector prompt");
+    expect(container.querySelector('[aria-label="Vector detail"]').value).toBe("standard");
+    expect(container.querySelector('[aria-label="Raster model"]').value).toBe("flux_schnell");
+  });
 
   it("submits every preset in both modes within the real catalog and wire DTO", async () => {
     const catalog = JSON5.parse(fs.readFileSync("../../config/manifests/builtin.models.jsonc", "utf8"));
