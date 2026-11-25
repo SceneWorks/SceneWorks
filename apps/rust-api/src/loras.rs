@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) mod prompt_directives;
+
 pub(crate) async fn list_loras(
     State(state): State<AppState>,
     Query(query): Query<LorasQuery>,
@@ -1487,29 +1489,40 @@ pub(crate) async fn validate_job_lora_compatibility(
     job_payload: &mut JsonObject,
     allow_inline_loras: bool,
 ) -> Result<(), ApiError> {
-    validate_job_lora_compatibility_with(state, project_id, job_payload, allow_inline_loras, None)
-        .await
+    validate_job_lora_compatibility_with(
+        state,
+        project_id,
+        job_payload,
+        allow_inline_loras,
+        None,
+        None,
+    )
+    .await
 }
 
 /// `validate_job_lora_compatibility` with an optional caller-supplied catalog snapshot
 /// (sc-8819). When `snapshot` is `Some`, the model and LoRA catalogs it exposes are reused
 /// instead of re-running the per-model/per-LoRA filesystem install-state probes; the
 /// validation result is identical to the `None` path.
+/// `directives` carries tags stripped before prompt validation/caption expansion by typed routes.
 pub(crate) async fn validate_job_lora_compatibility_with(
     state: &AppState,
     project_id: Option<&str>,
     job_payload: &mut JsonObject,
     allow_inline_loras: bool,
     snapshot: Option<&JobCatalogSnapshot>,
+    directives: Option<Vec<prompt_directives::Directive>>,
 ) -> Result<(), ApiError> {
-    let Some(loras) = job_payload
+    let directives =
+        directives.unwrap_or_else(|| prompt_directives::take_from_payload(job_payload));
+    let loras = job_payload
         .get("loras")
         .and_then(Value::as_array)
-        .filter(|loras| !loras.is_empty())
         .cloned()
-    else {
+        .unwrap_or_default();
+    if loras.is_empty() && directives.is_empty() {
         return Ok(());
-    };
+    }
     let model_id = job_payload
         .get("model")
         .and_then(Value::as_str)
@@ -1527,14 +1540,22 @@ pub(crate) async fn validate_job_lora_compatibility_with(
     // disk (validate_lora_safetensors_header) inline. Run it on the blocking pool so a
     // slow/network volume can't stall a tokio worker thread on the job-creation path.
     let normalized = tokio::task::spawn_blocking(move || {
-        validate_lora_specs_for_model(
+        let mut normalized = validate_lora_specs_for_model(
             models.as_slice(),
             catalog_loras.as_slice(),
             &model_id,
             &loras,
             allow_inline_loras,
             "LoRA",
-        )
+        )?;
+        prompt_directives::append_resolved(
+            models.as_slice(),
+            catalog_loras.as_slice(),
+            &model_id,
+            &directives,
+            &mut normalized,
+        );
+        Ok::<_, ApiError>(normalized)
     })
     .await
     .map_err(|err| {
