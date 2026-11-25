@@ -80,6 +80,22 @@ function verifyProductWindow(axes, mlx) {
   }], "capture has a different native SCAIL window");
 }
 
+// The oldest supported macOS, matching MACOS_MINIMUM_PRODUCT_VERSION in the worker's
+// video_admission/scail2/evidence.rs. It is the only OS condition on a Mac: a capture's exact
+// OS build (`runtime`) is provenance and never selects a host.
+export const MACOS_MINIMUM_PRODUCT_VERSION = "26.2";
+const macosProductVersion = (text) => {
+  const parts = String(text ?? "").trim().split(".");
+  if (parts.length > 3 || !parts.every((part) => /^\d{1,9}$/.test(part))) return null;
+  return [0, 1, 2].map((i) => Number(parts[i] ?? 0));
+};
+export function meetsMacosMinimum(productVersion) {
+  const version = macosProductVersion(productVersion), minimum = macosProductVersion(MACOS_MINIMUM_PRODUCT_VERSION);
+  if (!version) return false;
+  const i = version.findIndex((part, j) => part !== minimum[j]);
+  return i < 0 || version[i] > minimum[i];
+}
+
 // Use the same two immutable approvals compiled by the candidate worker before deriving a
 // standalone ceiling from its package. The worker independently checks these when it quotes.
 export function scailPackageDigests(index, coverage, source) {
@@ -136,6 +152,8 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
   assert.match(compiledPin, /^[a-f0-9]{40}$/);
   assert.ok(Array.isArray(pool) && Array.isArray(coverage), "invalid packaged SCAIL fit rows");
   const closure = closures?.providers?.[(mlx ? "mlx" : "candle") + ":scail2_14b"];
+  if (host && mlx) assert.ok(meetsMacosMinimum(host.runtime),
+    `SCAIL requires macOS ${MACOS_MINIMUM_PRODUCT_VERSION} or later; this Mac reports macOS ${host.runtime}`);
   const rows = [];
   for (const row of pool) {
     if (row.platform !== platform) continue;
@@ -162,7 +180,8 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
     // UUID, LUID and node are provenance: an identical second card prices the same.
     const deviceTotalMib = mlx ? null : row.bounds?.device_total_mib;
     if (!mlx) assert.ok(Number.isSafeInteger(deviceTotalMib) && deviceTotalMib > 0, "CUDA capture lacks its card capacity");
-    if (host && (row.device !== host.device || row.runtime !== host.runtime
+    // A Mac matches on its chip alone (its OS was checked against the minimum above).
+    if (host && (row.device !== host.device || (!mlx && row.runtime !== host.runtime)
       || (!mlx && deviceTotalMib !== host.deviceTotalMib)
       || !a.execution_policy.every(({ name, value }) => (host.env[name] ?? null) === value))) continue;
     const b = row.bounds;
@@ -230,8 +249,8 @@ export function scailRefusalCapBytes(events, evidence) {
   const alternatives = evidence.filter((row) => row.nativePolicy === bound.nativePolicy && row.references === 6);
   return Math.min(cold.requiredAcceleratorBytes, ...alternatives.map((row) => row.acceleratorBytes)) - 1;
 }
-// The caller restricted these authenticated rows to the actual device, runtime and worker
-// policy. Count six can only use a six-reference donor on either backend.
+// The caller restricted these authenticated rows to the actual device and worker policy, plus
+// the driver and card memory on CUDA (a Mac only had to meet the macOS minimum). Count six can only use a six-reference donor on either backend.
 export function scailPackagedRefusalCapBytes(evidence) {
   const prices = evidence.filter((r) => r.references === 6).map((r) => byteCount(r.acceleratorBytes));
   assert.ok(prices.length && Math.min(...prices) > 1, "no usable six-reference accelerator price on this host");

@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { inflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
-import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapBytes, scailRefusalBudget, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal } from "./lib/tier2-scail.mjs";
+import { scailRoutes, scailBinding, scailMedia, uploadScailMedia, verifyScailOutput, scailFitEvents, SAM3, SCAIL_REVISION, verifySam3, verifyScailClaim, scailMembers, scailFitEvidence, scailRefusalCapBytes, scailRefusalBudget, scailPackagedRefusalCapBytes, scailPackageDigests, verifyScailRefusal, meetsMacosMinimum, MACOS_MINIMUM_PRODUCT_VERSION } from "./lib/tier2-scail.mjs";
 import { fileSha256, sha256 } from "./lib/file-sha256.mjs";
 import { captureKreaCompanionLedger, replayKreaCompanionLedger } from "./krea-tier2-ledger.mjs";
 import { assertTerminalPhysicalContainment } from "./lib/starvector-terminal-pin-paths.mjs";
@@ -1107,14 +1107,17 @@ async function freeBytes(dir) { try { const fs = await statfs(dir, { bigint: tru
 // Match the worker's hardware identity in video_admission/scail2.rs on the leased device.
 export async function scailHostIdentity(backend, env, run = execFile) {
   const mlx = backend === "mlx";
-  const [command, args] = mlx ? ["/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string", "kern.osversion"]]
+  const [command, args] = mlx ? ["/usr/sbin/sysctl", ["-n", "machdep.cpu.brand_string", "kern.osproductversion"]]
     : [nvidiaSmiPath(env, "win32"), [`--id=${env.TIER2_AB_PHYSICAL_GPU ?? CUDA_PHYSICAL_GPU}`, "--query-gpu=name,driver_version,memory.total,uuid", "--format=csv,noheader,nounits"]];
   const { stdout } = await run(command, args, { timeout: 3_000, windowsHide: true });
   const fields = stdout.trim().split(mlx ? /\r?\n/ : ",").map((s) => s.trim());
   fact(fields.length === (mlx ? 2 : 4) && fields.every((s) => s && !/[,\r\n]/.test(s))
     && (mlx || (/^[1-9]\d*$/.test(fields[2]) && Number.isSafeInteger(Number(fields[2])))), "SCAIL device and runtime identity unavailable");
   const identity = { device: fields[0], runtime: fields[1] };
-  if (mlx) return identity;
+  if (mlx) {
+    fact(meetsMacosMinimum(identity.runtime), `SCAIL requires macOS ${MACOS_MINIMUM_PRODUCT_VERSION} or later; this Mac reports macOS ${identity.runtime}`);
+    return identity;
+  }
   // The worker matches the CUDA class (model, total memory, driver); the adapter is provenance.
   identity.deviceTotalMib = Number(fields[2]);
   const script = fileURLToPath(new URL("./ci/windows_cuda_metadata.py", import.meta.url));

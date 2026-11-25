@@ -675,11 +675,7 @@ async fn scail_plural_product_arm_refuses_missing_capture_before_media_or_tier_a
     let api = ApiClient::new(&settings);
     let result = crate::video_admission::SCAIL2_TEST_MACHINE
         .scope(
-            (
-                "unqualified fixture".into(),
-                "unqualified runtime".into(),
-                None,
-            ),
+            ("unqualified fixture".into(), "27.0.1".into(), None),
             super::run_video_generate_job(&api, &settings, &job, &Default::default()),
         )
         .await;
@@ -687,6 +683,29 @@ async fn scail_plural_product_arm_refuses_missing_capture_before_media_or_tier_a
         matches!(result, Err(WorkerError::InvalidPayload(ref reason)) if reason.contains("no verified accelerator and host memory fit for 2 ordered character references")),
         "{result:?}"
     );
+}
+
+/// SW-7271: macOS gates SCAIL-2 plural evidence on the chip and the 26.2 minimum only. A Mac on
+/// a different build or release than the capture qualifies; one below the minimum is told why.
+#[cfg(all(native_lane, target_os = "macos"))]
+#[tokio::test]
+async fn scail_plural_mac_admission_requires_only_the_minimum_macos_version() {
+    let check = |runtime: &str| {
+        crate::video_admission::SCAIL2_TEST_MACHINE.scope(
+            ("Apple M5 Max".into(), runtime.into(), None),
+            crate::video_admission::check_scail2_plural_package("0", 2),
+        )
+    };
+    for supported in ["26.2", "26.10", "27.0.1"] {
+        check(supported).await.unwrap();
+    }
+    for old in ["26.1", "25.6.1"] {
+        let result = check(old).await;
+        assert!(
+            matches!(result, Err(WorkerError::InvalidPayload(ref reason)) if reason.contains("requires macOS 26.2 or later") && reason.contains(old)),
+            "{result:?}"
+        );
+    }
 }
 
 #[cfg(native_lane)]

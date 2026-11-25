@@ -48,7 +48,9 @@ pub(crate) fn scail2_verified_test_quotes(
 
 #[cfg(native_lane)]
 mod plural {
-    use super::evidence::{packaged, HostClass};
+    use super::evidence::{
+        meets_macos_minimum, packaged, HostClass, MACOS_MINIMUM_PRODUCT_VERSION,
+    };
     use super::*;
     use gen_core::generator::scail2_fit::{Scail2FitPrice, Scail2FitProfile, Scail2FitWitness};
     use gen_core::{LoadSpec, MemoryBudgetDomain, MemoryCacheState};
@@ -105,7 +107,7 @@ mod plural {
         let command = {
             let _ = gpu_id;
             let mut command = Command::new("/usr/sbin/sysctl");
-            command.args(["-n", "machdep.cpu.brand_string", "kern.osversion"]);
+            command.args(["-n", "machdep.cpu.brand_string", "kern.osproductversion"]);
             command
         };
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -209,6 +211,12 @@ mod plural {
                 "SCAIL-2 device and runtime identity unavailable".into(),
             )
         })?;
+        if std::env::consts::OS == "macos" && !meets_macos_minimum(&host.runtime) {
+            return Err(crate::WorkerError::InvalidPayload(format!(
+                "SCAIL-2 with {count} ordered character references requires macOS {MACOS_MINIMUM_PRODUCT_VERSION} or later; this Mac reports macOS {}",
+                host.runtime
+            )));
+        }
         Ok(rows
             .iter()
             .filter(|r| eligible(r) && r.matches_host(&host))
