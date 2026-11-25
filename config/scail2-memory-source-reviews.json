@@ -1,0 +1,68 @@
+[
+  {
+    "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
+    "target_revision": "a27f10cd969f7fa04cbd115d6865336b054da310",
+    "tree_diff_sha256": "5bc6bce27866d5c08c35869588730e40adab7d13326178284d2e3d6cba8c7f7e",
+    "changed_files": [
+      "Cargo.lock",
+      "crates/contracts/gen-core/src/quantization_cache.rs",
+      "crates/layers/candle-checkpoint/src/var_builder.rs",
+      "crates/layers/candle-layers/Cargo.toml",
+      "crates/layers/candle-layers/src/quant.rs",
+      "crates/layers/candle-layers/src/quantization_cache.rs",
+      "crates/media/candle-gen/candle-gen/Cargo.toml",
+      "crates/media/candle-gen/candle-gen/src/lib.rs",
+      "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/quantized/mod.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/quantized/runtime_cache.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/safetensors.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/safetensors_progress.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/tensor.rs"
+    ],
+    "provider": "candle:scail2_14b",
+    "capture_provider_digest": "71f069b938c3d3ca34874c913d385edfcf5404736a642e261a002ba9e353d003",
+    "target_provider_digest": "570f9ac59173013f2664c6cd2874c56ef8068fd32fdcbd6c64eae133f9811782",
+    "capture_shared_contract_digest": "1aede7ea3ea5912ff63139c6042829bb798a2491520269d7efe0eb7e001b889e",
+    "target_shared_contract_digest": "4f17b88d59ab67112f02a3e27a55c6cbb5b48c095242b671e83ce7a07486fb88",
+    "review": [
+      "Reviewed the complete 14-file delta from the physical capture revision. No SCAIL/WAN provider, forward, kernel, scheduler, tier-selection, tensor shape, dtype policy, or memory-strategy implementation changes. Cargo.lock only adds the existing serde dependency to candle-gen and tempfile to candle-layers dev dependencies.",
+      "The shared affine repacker retains its output formats: Q4 remains lossless and Q8 retains the existing CPU-upload recipe. The shared quantizer compacts logical views only when required; full contiguous operands retain their allocation and original algorithm. The fixed SCAIL capture uses valid contiguous/affine checkpoint operands, unchanged native formats, resident load policy, and physical axes. Regressions cover byte equality, mixed widths, strided/broadcast views, mutation and repair.",
+      "Checkpoint changes attach path/name/layout identities and the request cache to operands. They retain no additional checkpoint tensor storage or device tensors. Value-changing arithmetic clears immutable identity, and aliases share mutation invalidation. Runtime cache publication stages at most one projection of packed GGML bytes on the host; it does not introduce a full-component float copy or alter device residency/activation policy. Cache geometry checks read only already-mapped headers, never weight bytes.",
+      "The MLX implementation is unchanged. Its shared-contract digest changes because gen-core adds optional artifact invalidation and incremental borrowed identity hashing. The existing single-slice constructor retains exactly its previous key encoding, covered by a regression. No MLX native memory, model, scheduling, or execution policy changes.",
+      "This is explicit source-compatibility review of this exact immutable pair, not a new physical measurement or a claim about startup duration. Original capture revisions, receipts, host/device bounds, axes and uncertainty remain unchanged. Later inference changes need their own exact review or physical evidence."
+    ]
+  },
+  {
+    "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
+    "target_revision": "a27f10cd969f7fa04cbd115d6865336b054da310",
+    "tree_diff_sha256": "5bc6bce27866d5c08c35869588730e40adab7d13326178284d2e3d6cba8c7f7e",
+    "changed_files": [
+      "Cargo.lock",
+      "crates/contracts/gen-core/src/quantization_cache.rs",
+      "crates/layers/candle-checkpoint/src/var_builder.rs",
+      "crates/layers/candle-layers/Cargo.toml",
+      "crates/layers/candle-layers/src/quant.rs",
+      "crates/layers/candle-layers/src/quantization_cache.rs",
+      "crates/media/candle-gen/candle-gen/Cargo.toml",
+      "crates/media/candle-gen/candle-gen/src/lib.rs",
+      "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/quantized/mod.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/quantized/runtime_cache.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/safetensors.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/safetensors_progress.rs",
+      "crates/media/candle-gen/vendor/candle-core/src/tensor.rs"
+    ],
+    "provider": "mlx:scail2_14b",
+    "capture_provider_digest": "f5f17bf1eb3b28856ad5ba60fc7a996f0f66a54b7e99648feed2aef877bc2d57",
+    "target_provider_digest": "f5f17bf1eb3b28856ad5ba60fc7a996f0f66a54b7e99648feed2aef877bc2d57",
+    "capture_shared_contract_digest": "1aede7ea3ea5912ff63139c6042829bb798a2491520269d7efe0eb7e001b889e",
+    "target_shared_contract_digest": "4f17b88d59ab67112f02a3e27a55c6cbb5b48c095242b671e83ce7a07486fb88",
+    "review": [
+      "Reviewed the complete 14-file delta from the physical capture revision. No SCAIL/WAN provider, forward, kernel, scheduler, tier-selection, tensor shape, dtype policy, or memory-strategy implementation changes. Cargo.lock only adds the existing serde dependency to candle-gen and tempfile to candle-layers dev dependencies.",
+      "The shared affine repacker retains its output formats: Q4 remains lossless and Q8 retains the existing CPU-upload recipe. The shared quantizer compacts logical views only when required; full contiguous operands retain their allocation and original algorithm. The fixed SCAIL capture uses valid contiguous/affine checkpoint operands, unchanged native formats, resident load policy, and physical axes. Regressions cover byte equality, mixed widths, strided/broadcast views, mutation and repair.",
+      "Checkpoint changes attach path/name/layout identities and the request cache to operands. They retain no additional checkpoint tensor storage or device tensors. Value-changing arithmetic clears immutable identity, and aliases share mutation invalidation. Runtime cache publication stages at most one projection of packed GGML bytes on the host; it does not introduce a full-component float copy or alter device residency/activation policy. Cache geometry checks read only already-mapped headers, never weight bytes.",
+      "The MLX implementation is unchanged. Its shared-contract digest changes because gen-core adds optional artifact invalidation and incremental borrowed identity hashing. The existing single-slice constructor retains exactly its previous key encoding, covered by a regression. No MLX native memory, model, scheduling, or execution policy changes.",
+      "This is explicit source-compatibility review of this exact immutable pair, not a new physical measurement or a claim about startup duration. Original capture revisions, receipts, host/device bounds, axes and uncertainty remain unchanged. Later inference changes need their own exact review or physical evidence."
+    ]
+  }
+]

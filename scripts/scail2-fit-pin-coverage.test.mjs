@@ -23,3 +23,23 @@ test("scripts and separate image modules require review of the whole Git delta",
   const linked = { ...source, crates: [...source.crates, "crates/media/mlx-gen/mlx-gen-qwen-image"] };
   assert.throws(() => verifyCoverage(linked, linked, files, "d", "d"), /Unclassified physical or build input/);
 });
+
+
+test("native cache changes require exact source-equivalence review of both closures and the entire delta", () => {
+  const source = { provider: "candle:scail2_14b", digest: "old", sharedContractDigest: "contract-old", crates: [] };
+  const target = { ...source, digest: "new", sharedContractDigest: "contract-new" };
+  const files = ["crates/media/candle-gen/vendor/candle-core/src/tensor.rs"];
+  const review = { provider: source.provider, tree_diff_sha256: "reviewed", changed_files: files,
+    capture_provider_digest: source.digest, target_provider_digest: target.digest,
+    capture_shared_contract_digest: source.sharedContractDigest, target_shared_contract_digest: target.sharedContractDigest,
+    review: ["Exact cache implementation reviewed; native representation and execution policies preserved."] };
+  assert.doesNotThrow(() => verifyCoverage(source, target, files, "reviewed", "reviewed", review));
+  for (const changed of [{ target_provider_digest: "other" }, { capture_provider_digest: "other" },
+    { target_shared_contract_digest: "other" }, { capture_shared_contract_digest: "other" },
+    { tree_diff_sha256: "other" }, { changed_files: [] }, { provider: "mlx:scail2_14b" }, { review: [] }]) {
+    assert.throws(() => verifyCoverage(source, target, files, "reviewed", "reviewed", { ...review, ...changed }), /does not match/);
+  }
+  assert.throws(() => verifyCoverage(source, target, [...files, "Cargo.lock"], "reviewed", "reviewed", review), /does not match/);
+  assert.throws(() => verifyCoverage(source, target, files, "reviewed", "other", review), /independent review/);
+  assert.throws(() => verifyCoverage(source, target, files, "reviewed", "reviewed"), /native contract changed/);
+});

@@ -1865,13 +1865,12 @@ fn prepare_portable_snapshot(
             Ok(())
         })?;
         // Freeze before other writers or readers can observe the bundle as published by this
-        // writer; later readers only re-verify it.
+        // writer; later readers trust the published cache under its lease.
         freeze_private_snapshot(&published)?;
     }
     drop(materializing);
     let mut verified_plan_layers = None;
     if let Some((_, lease)) = &bundle {
-        private_tree_bytes(&published)?;
         // Copy-then-verify closes the race where the original changes after the first source
         // check. The loader receives only these verified, private paths, never the original locator.
         let mut layers = VerifiedPlanLayers::new(lease.clone());
@@ -1892,17 +1891,8 @@ fn prepare_portable_snapshot(
         for (slot, member, selected_relative, is_selected_aux, relative_root, plan_layer) in
             &rewrites
         {
-            if !needs_copy {
-                verify_private_snapshot_member(
-                    &source_cache,
-                    &published,
-                    member,
-                    selected_relative,
-                    relative_root,
-                    plan_layer.is_some(),
-                    &allowed_roots,
-                )?;
-            }
+            // The complete, frozen private bundle was verified before publication. Reuse it
+            // under the shared lease without walking files or repeating source/SHA validation.
             let target_root = published.join(relative_root);
             let selected = target_root.join(selected_relative);
             route_loader_locator(job_type, dispatch_payload, slot, member, &selected)?;
@@ -1921,7 +1911,6 @@ fn prepare_portable_snapshot(
                 )?;
             }
         }
-        freeze_private_snapshot(&published)?;
         verified_plan_layers = Some(layers);
     }
     for (slot, member, selected, is_selected_aux) in &in_place {
@@ -6588,7 +6577,7 @@ mod tests {
     /// and every job after the first re-hashed both in full with no cache: about 24 GB read before
     /// each KreaMania V8 render.
     #[test]
-    fn an_imported_checkpoint_bundle_holds_one_copy_and_reuses_its_verdict() {
+    fn an_imported_checkpoint_bundle_holds_one_copy_and_fast_loads_without_revalidation() {
         use sceneworks_core::checkpoint_import::{
             CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
         };
@@ -6713,20 +6702,10 @@ mod tests {
         assert_eq!(std::fs::read(&copy).unwrap(), bytes);
         drop(first);
 
-        // Later attempts reuse the published bundle. Space them past the stamp's racy window
-        // (`SOURCE_STAMP_GRANULARITY_NANOS`, 20 ms), as real jobs are, so the verdict settles.
-        for _ in 0..2 {
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            drop(attempt());
-        }
-        let store = VerifiedSourceCache::for_data_dir(&data);
-        assert!(
-            store.recorded(&copy).is_some(),
-            "the bundle copy must carry a verdict in the host's verdict store"
-        );
+        // Publication already verified the staging copy. Cache hits must not hash it again
+        // merely because it now has a published pathname or lacks a separate verification receipt.
         let reads = read_counts::of(&copy);
         for _ in 0..3 {
-            std::thread::sleep(std::time::Duration::from_millis(60));
             drop(attempt());
         }
         assert_eq!(
@@ -7820,7 +7799,7 @@ mod tests {
                 json!({"model": absent_api_path});
             remote_hint.get_mut("modelManifestEntry").unwrap()["importSourceShape"] =
                 json!("transformer_directory");
-            remote_hint.get_mut("modelManifestEntry").unwrap()["importQuantFormat"] = json!("bf16");
+            remote_hint.get_mut("modelManifestEntry").unwrap()["importQuantFormat"] = json!("q4");
             let guard = RuntimeSourceGuard::begin_with_binding(
                 &JobType::ImageGenerate,
                 &remote_hint,
@@ -7837,14 +7816,13 @@ mod tests {
                     .starts_with(std::fs::canonicalize(&library).unwrap())
             );
             assert_ne!(Path::new(selected), absent_api_path);
-            // A cold saved quantization must use the guard's worker path, never the absent API hint.
+            // Packed sources use the same default cache as dense imports. It must use the
+            // guard's worker path, never the absent API hint.
             use gen_core::QuantizationArtifactCache;
             let cache = crate::utility_dispatch::saved_quantizations(
-                &JobType::ImageGenerate,
                 &guard,
                 &settings(temp.path().join("data")),
-            )
-            .unwrap();
+            );
             let key =
                 gen_core::QuantizationArtifactKey::new("portable-q4-v1", &[1], b"weights", "ggml");
             let saved = cache

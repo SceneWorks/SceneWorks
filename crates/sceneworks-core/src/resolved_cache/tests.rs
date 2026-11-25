@@ -147,20 +147,10 @@ fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
     std::fs::remove_file(staging).unwrap();
 }
 
-/// The local-tier scan validates on paths and sizes; the LEASE still re-hashes (sc-19712 F-3).
-///
-/// The scan is read work on two hot surfaces — the API's per-submission preflight and its catalog
-/// build, and the worker's pre-loader guard. Re-hashing there made the cost of *asking* what the
-/// cache holds proportional to the whole cache, so populating the cache made every job submission
-/// slower than the load the cache exists to save (measured: 929.6 s for one 5.57 GB bundle).
-///
-/// A same-length byte alteration is the one thing only a content hash can see, so it separates the
-/// two modes exactly: the scan must still offer the entry, and `acquire_complete` must still refuse
-/// it. Both halves are load-bearing — the first pins the scan onto the cheap mode, the second pins
-/// the boundary that makes the cheap mode safe.
+/// Published cache entries are trusted by both lookup and runtime acquisition. Acquisition
+/// must retain the runtime lease without reading/checksumming the saved model again.
 #[test]
-fn the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes()
-{
+fn cached_models_are_leased_without_rechecking_published_weight_bytes() {
     let scratch = TempDir::new().unwrap();
     let source = scratch.path().join("source");
     let data = scratch.path().join("data");
@@ -206,48 +196,24 @@ fn the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refu
     );
     assert!(scanned.rejections.is_empty());
 
-    // The LEASE does notice. This is what makes the cheap scan safe: the altered bundle is refused
-    // before any bytes reach a runtime, and the caller falls back to the source tier.
     let registry = ActiveArtifactLeaseRegistry::default();
     let resolver = resolver(&source, registry.clone());
-    assert!(
-        store
-            .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
-            .is_err(),
-        "the load boundary must re-hash and refuse altered bytes"
-    );
+    let (lease, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+    });
+    let lease = lease
+        .unwrap()
+        .expect("published cached weights must fast-load");
+    assert_eq!(hashes, 0, "a cache hit must not run a model SHA pass");
+    assert_eq!(registry.active_lease_count(&candidate.cache_key), 1);
+    drop(lease);
     assert_eq!(registry.active_lease_count(&candidate.cache_key), 0);
-    // The refusal has to come from the check BEFORE the lease is issued, not from the usage stamp
-    // that follows it. The stamp also validates at full strength, so it would mask a downgraded
-    // boundary while leaking the session record the lease had already written — this asserts the
-    // side-effect-free refusal that isolates the boundary check itself.
-    let session_records = std::fs::read_dir(store.root().join("sessions").join(store.session_id()))
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-                .count()
-        })
-        .unwrap_or(0);
-    assert_eq!(
-        session_records, 0,
-        "the lease boundary must refuse altered bytes before it writes a session record"
-    );
 }
 
-/// sc-21534 — one `acquire_complete` call re-reads each closure file exactly ONCE.
-///
-/// The load boundary is the single full-strength check that keeps every cheap paths-and-sizes
-/// read safe, but before this pin it hashed the closure FOUR times per load: twice inside
-/// `validate_complete_metadata` (the shape check duplicated the content check), once more in
-/// `acquire_runtime_lease`, and once more in the usage-stamp journal write — all under the same
-/// locks in the same call, so the extras closed no window. On a 33 GB bundle that multiple turned
-/// one ~70 s verify into the ~4.5-minute pass that outlasted the API's 90 s stale-worker sweep.
-/// Stated as an operation count, like
-/// `the_availability_decision_never_re_reads_the_artifact_it_admits`: a duration cannot see this
-/// on a small fixture.
+/// Publication already validated this immutable closure. Even its first runtime acquisition
+/// must consume the completed cache directly rather than repeat that work.
 #[test]
-fn the_load_boundary_hashes_the_closure_exactly_once() {
+fn completed_cache_acquisition_never_hashes_model_files() {
     let scratch = TempDir::new().unwrap();
     let source = scratch.path().join("source");
     let data = scratch.path().join("data");
@@ -287,29 +253,18 @@ fn the_load_boundary_hashes_the_closure_exactly_once() {
     });
     assert!(
         lease.unwrap().is_some(),
-        "the boundary must still issue the lease it is charging one hash pass for"
+        "the cache hit must still issue a runtime lease"
     );
     assert_eq!(
-        hashes, hashed_files,
-        "acquiring a complete entry must hash each closure file exactly once — the shape check, \
-         the runtime lease, and the usage stamp must all reuse the one full-strength verdict"
+        hashes, 0,
+        "runtime acquisition must not scan/checksum completed model files"
     );
 }
 
-/// The load boundary hashes once per CHANGE, not once per load — and still refuses a bundle that
-/// changed.
-///
-/// Hashing exactly once per acquisition (pinned above) still charged every job the full read: a
-/// 19 GB bundle measured ~61 s of SHA-256 between the claim and "Preparing N image(s)", re-proving
-/// bytes that had not moved since the previous job proved them. The verdict is now recorded
-/// alongside the closure's stat identity and reused while that identity holds.
-///
-/// All three properties are asserted together on purpose. "Reuses the verdict" and "still refuses
-/// altered bytes" are the two halves of the same tradeoff, and a test that pinned only the first
-/// would stay green if the receipt were reused unconditionally — which is precisely the defect
-/// worth guarding against.
+/// Explicit verification remains available for maintenance; runtime cache acquisition does
+/// not invoke it. These assertions preserve receipt integrity for that separate operation.
 #[test]
-fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_it_changes() {
+fn explicit_verification_reuses_its_receipt_and_detects_source_changes() {
     let scratch = TempDir::new().unwrap();
     let source = scratch.path().join("source");
     let data = scratch.path().join("data");
@@ -345,13 +300,14 @@ fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_
     let registry = ActiveArtifactLeaseRegistry::default();
     let resolver = resolver(&source, registry.clone());
 
-    // A freshly published entry carries no verdict, so the first acquisition pays the full read.
+    // Explicit verification establishes a separate maintenance receipt on its first pass.
     let (lease, first) = crate::model_artifacts::observe_content_hashes(|| {
+        validate_complete_metadata(&store, &published)?;
         store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
     });
     assert_eq!(
         first, hashed_files,
-        "the first acquisition of a bundle with no recorded verdict must read every file"
+        "explicit verification with no recorded verdict must read every file"
     );
     drop(
         lease
@@ -361,6 +317,7 @@ fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_
 
     // Nothing has touched the bundle, so the recorded verdict still describes it.
     let (lease, second) = crate::model_artifacts::observe_content_hashes(|| {
+        validate_complete_metadata(&store, &published)?;
         store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
     });
     assert!(
@@ -393,11 +350,12 @@ fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_
         .unwrap();
 
     let (refused, third) = crate::model_artifacts::observe_content_hashes(|| {
+        validate_complete_metadata(&store, &published)?;
         store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
     });
     assert!(
         refused.is_err(),
-        "a bundle altered after its verdict was recorded must still be refused at the load boundary"
+        "explicit verification must refuse altered bytes"
     );
     assert_eq!(
         third, hashed_files,
@@ -406,19 +364,10 @@ fn a_recorded_verdict_is_reused_while_the_closure_is_untouched_and_dropped_when_
     );
 }
 
-/// A standing verdict expires, so decay with no filesystem write behind it cannot hide forever.
-///
-/// Stat identity detects a WRITE. Bit rot, a failing enclosure, a drive rewriting a sector — none
-/// of those move size or mtime, so the receipt would keep matching and the bytes would never be
-/// read again. Before receipts every job re-read the bundle, which caught that class by accident;
-/// the max-age is what keeps catching it on purpose. This matters because the cache fronts a model
-/// library that can live on external USB media, where silent decay is the plausible failure and a
-/// timestamp-restoring writer is not.
-///
-/// The receipt is aged by rewriting `verifiedAt` rather than by waiting, so this asserts the
-/// contract rather than sleeping through it.
+/// Explicit verification remains available for maintenance; runtime cache acquisition does
+/// not invoke it. These assertions preserve receipt integrity for that separate operation.
 #[test]
-fn a_standing_verdict_expires_and_sends_the_closure_back_through_the_full_read() {
+fn explicit_verification_receipts_expire_without_affecting_fast_loads() {
     let scratch = TempDir::new().unwrap();
     let source = scratch.path().join("source");
     let data = scratch.path().join("data");
@@ -448,6 +397,7 @@ fn a_standing_verdict_expires_and_sends_the_closure_back_through_the_full_read()
         .count() as u64;
 
     let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
+    validate_complete_metadata(&store, &published).unwrap();
     drop(
         store
             .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
@@ -469,6 +419,7 @@ fn a_standing_verdict_expires_and_sends_the_closure_back_through_the_full_read()
     std::fs::write(&sidecar, serde_json::to_vec(&receipt).unwrap()).unwrap();
 
     let (lease, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        validate_complete_metadata(&store, &published)?;
         store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
     });
     assert!(
@@ -482,6 +433,7 @@ fn a_standing_verdict_expires_and_sends_the_closure_back_through_the_full_read()
 
     // And the re-proof stands on its own: the refreshed verdict is redeemable immediately.
     let (lease, after_refresh) = crate::model_artifacts::observe_content_hashes(|| {
+        validate_complete_metadata(&store, &published)?;
         store.acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
     });
     assert!(lease.unwrap().is_some());
@@ -523,6 +475,12 @@ fn the_recorded_verdict_lives_outside_the_metadata_journal() {
         other => panic!("fixture bundle was not published: {other:?}"),
     }
 
+    // Explicit maintenance verification owns this receipt; fast runtime acquisition does not
+    // create one or require it. Its storage must still remain outside the metadata journal.
+    let metadata = store
+        .read_metadata_locked(&cache_key_digest(&candidate.cache_key).unwrap())
+        .unwrap();
+    validate_complete_metadata(&store, &metadata).unwrap();
     let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
     // Twice: one acquisition could leave the older slot innocent, which is exactly the shape that
     // would let this regression ship looking harmless.
@@ -538,7 +496,7 @@ fn the_recorded_verdict_lives_outside_the_metadata_journal() {
     let entry = store.entry_path(&candidate.cache_key).unwrap();
     let sidecar = entry.join("content.verification.json");
     let recorded = std::fs::read_to_string(&sidecar)
-        .expect("a successful acquisition must record its verdict somewhere");
+        .expect("explicit verification must record its verdict somewhere");
     assert!(
         recorded.contains("verifiedAt"),
         "the sidecar must be where the verdict actually lands"
@@ -2928,7 +2886,7 @@ fn a_produced_file_rewritten_after_its_stream_closed_is_re_hashed_and_refused() 
 /// closure's stat identity, so a same-length rewrite of a published file sends the first load
 /// back through the full read, which refuses the bundle.
 #[test]
-fn a_published_produced_bundle_altered_before_its_first_load_is_re_hashed_and_refused() {
+fn completed_produced_bundles_are_trusted_on_first_runtime_load() {
     let scratch = TempDir::new().unwrap();
     let input = scratch.path().join("library");
     std::fs::create_dir(&input).unwrap();
@@ -2957,15 +2915,15 @@ fn a_published_produced_bundle_altered_before_its_first_load_is_re_hashed_and_re
         store.acquire_complete(&key, &resolver, "runtime:video:model")
     });
     assert!(
-        refused.is_err(),
-        "a produced bundle altered after publication must be refused at the load boundary"
+        refused.unwrap().is_some(),
+        "a completed runtime artifact is trusted without revalidation"
     );
     assert!(
-        rereads >= 1,
-        "a moved stat identity must invalidate the receipt and re-read the closure, not reuse it"
+        rereads == 0,
+        "runtime acquisition must not check source/file generations or rehash a completed artifact"
     );
     assert!(
-        store.read_content_receipt(&digest, &key).is_none(),
-        "the stale verdict is retracted by the pass that refused the bundle"
+        store.read_content_receipt(&digest, &key).is_some(),
+        "runtime acquisition does not rewrite verification receipts"
     );
 }
