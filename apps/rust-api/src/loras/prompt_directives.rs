@@ -135,8 +135,8 @@ pub(crate) async fn resolve_for_inline_replay(
     state: &AppState,
     project_id: Option<&str>,
     payload: &mut JsonObject,
+    directives: Vec<Directive>,
 ) -> Result<(), ApiError> {
-    let directives = take_from_payload(payload);
     if directives.is_empty() {
         return Ok(());
     }

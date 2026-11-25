@@ -16264,6 +16264,76 @@ async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
+#[tokio::test]
+async fn prompt_lora_directives_are_stripped_before_native_batch_replay_validation() {
+    let _hf_cache = isolate_hf_cache();
+    let (temp_dir, app, project_id) = iris_and_plain_app().await;
+    let adapter = temp_dir.path().join("data/loras/batch.safetensors");
+    std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+    let header = serde_json::to_vec(&json!({"__metadata__":{
+        "family":"iris", "irisTask":"generation", "baseModel":"iris_3b",
+    }}))
+    .unwrap();
+    std::fs::write(
+        &adapter,
+        [(header.len() as u64).to_le_bytes().as_slice(), &header].concat(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp_dir.path().join("config/manifests/user.loras.jsonc"),
+        json!({"schemaVersion":1,"loras":[{
+            "id":"batch_style", "name":"Batch Style", "family":"iris",
+            "irisTask":"generation", "baseModel":"iris_3b",
+            "source":{"provider":"local","path":"loras/batch.safetensors"},
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    advertise_fixture_lora_source(&app, "batch_style", &adapter, "image_generate").await;
+
+    let mut body = json!({
+        "projectId":project_id,"model":"iris_3b","prompt":"cat",
+        "prompts":["cat","dog"],"width":768,"height":768,"count":1,"seed":11,
+        "loras":[{"id":"batch_style","weight":0.25}],
+    });
+    let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    body["prompt"] = json!("cat<lora:Batch Style:2>");
+    body["loras"] = json!([]);
+    let (status, fresh) = request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
+    assert_eq!(status, StatusCode::CREATED, "{fresh}");
+    assert_eq!(fresh["payload"]["loras"][0]["weight"], 2.0);
+
+    for operation in ["retry", "duplicate"] {
+        // A retry retains its frozen source selection and UI strength. Clearing the explicit
+        // selection on a duplicate resolves the directive again against that same adapter.
+        let changes = if operation == "retry" {
+            json!({"prompt":"cat<lora:Batch Style:2>"})
+        } else {
+            json!({"prompt":"cat<lora:Batch Style:2>","loras":[]})
+        };
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/jobs/{}/{operation}",
+                original["id"].as_str().unwrap()
+            ),
+            json!({"payloadChanges":changes}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(replay["payload"]["prompt"], "cat");
+        assert_eq!(replay["payload"]["prompts"], json!(["cat", "dog"]));
+        assert_eq!(replay["payload"]["loras"].as_array().unwrap().len(), 1);
+        assert_eq!(replay["payload"]["loras"][0]["id"], "batch_style");
+        assert_eq!(
+            replay["payload"]["loras"][0]["weight"],
+            if operation == "retry" { 0.25 } else { 2.0 }
+        );
+    }
+}
+
 /// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —
 /// the ORDERED reference ceiling and the FREE-SIZE envelope.
 ///
