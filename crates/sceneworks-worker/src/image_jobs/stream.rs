@@ -812,6 +812,49 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_after_cold_admission_with_placement_using(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        cold_admission,
+        crate::inference_runtime::load,
+        drive,
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+// Keep the ordinary stream arguments together; this seam adds only its loader factory.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start_cached_gen_stream_after_cold_admission_with_placement_using<A, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    cold_admission: ColdLoadAdmission<A>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    A: FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let ColdLoadAdmission {
         incoming_reclaimable_weight_bytes,
         admit: cold_admission,
@@ -832,6 +875,7 @@ where
             load_error_context,
             incoming_reclaimable_weight_bytes,
             cold_admission,
+            load_generator,
             move |generator,
                   cache_state,
                   loaded_policy,

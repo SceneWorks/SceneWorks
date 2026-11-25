@@ -22,6 +22,50 @@ mod h3_cuda_memory;
 const GIB: u64 = 1024 * 1024 * 1024;
 
 #[test]
+fn planned_video_buffers_survive_full_or_partial_warm_weight_credit() {
+    let required = |credit| {
+        let absolute = planned_phase_before_credit(16 * GIB, GIB, 10 * GIB, credit).unwrap();
+        (12 * GIB).max(absolute) - credit
+    };
+    assert_eq!(required(10 * GIB), 16 * GIB);
+    assert_eq!(required(9 * GIB), 17 * GIB);
+    assert_eq!(required(0), 17 * GIB);
+    let bytes = required(10 * GIB);
+    assert!(admit_video_host_bytes(bytes, Some(bytes)).is_ok());
+    assert!(admit_video_host_bytes(bytes, Some(bytes - 1)).is_err());
+    assert!(admit_video_host_bytes(bytes, None).is_err());
+    assert!(admit_video_host_bytes(0, None).is_ok());
+}
+
+#[test]
+fn cold_scail_candle_keeps_the_complete_model_through_output_conversion() {
+    let mut contract = fixture_contract(10, 2, &[]);
+    contract.provider_id = "scail2_14b".into();
+    contract.asset_facts.transformer_bytes = 7 * GIB;
+    contract.asset_facts.decoder_bytes = GIB;
+    let weights = |lane| {
+        planned_stage_weights(
+            &contract,
+            lane,
+            MemoryStrategy::Resident,
+            OffloadPolicy::Resident,
+        )
+    };
+    let (denoise, decode) = weights(VideoLane::Candle);
+    assert_eq!((denoise, decode), (10 * GIB, 10 * GIB));
+    assert_eq!(weights(VideoLane::Mlx), (7 * GIB, GIB));
+    let required = |credit| {
+        let peak =
+            planned_phase_before_credit(16 * GIB, decode, contract.total_resident_bytes(), credit)
+                .unwrap();
+        peak.max(12 * GIB) - credit
+    };
+    assert_eq!(required(0), 26 * GIB);
+    assert_eq!(required(4 * GIB), 22 * GIB);
+    assert_eq!(required(10 * GIB), 16 * GIB);
+}
+
+#[test]
 fn candle_post_load_snapshot_preserves_committed_pressure_under_a_cap() {
     let budget = candle_budget_from_total_free(24 * GIB, 10 * GIB, Some(16 * GIB), None, 0)
         .expect("valid CUDA snapshot");
@@ -872,6 +916,7 @@ fn inputs<'a>(
     headroom_bytes: u64,
 ) -> VideoAdmissionInputs<'a> {
     VideoAdmissionInputs {
+        planned: None,
         native_quant_request: None,
         model_id: "ltx_2_3",
         model_family: "ltx-video",

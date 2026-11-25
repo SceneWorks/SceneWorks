@@ -1260,7 +1260,26 @@ pub fn video_admission_geometries(
     frames: u32,
     decode_chunk_size: Option<u32>,
 ) -> Vec<VideoAdmissionGeometry> {
-    let decode_pass_frames = largest_decode_pass_frames(frames, decode_chunk_size);
+    video_admission_for_decode_pass(
+        model,
+        lane,
+        width,
+        height,
+        frames,
+        largest_decode_pass_frames(frames, decode_chunk_size),
+    )
+}
+
+/// Grade the actual denoise trajectory and the largest physical decoder invocation. A
+/// noncausal codec can decode more frames than the trajectory requests before trimming.
+pub fn video_admission_for_decode_pass(
+    model: &str,
+    lane: VideoLane,
+    width: u32,
+    height: u32,
+    frames: u32,
+    decode_pass_frames: u32,
+) -> Vec<VideoAdmissionGeometry> {
     let cap = single_pass_decode_frame_cap(model, lane, width, height);
     let requested = VideoAdmissionGeometry {
         width,

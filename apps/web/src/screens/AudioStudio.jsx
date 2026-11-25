@@ -45,6 +45,7 @@ export function AudioStudio() {
     recentAudioAssets = [],
     jobAction,
     createAudioJob,
+    importAsset,
     refinePrompt,
     createModelDownloadJob,
     rememberLocalGenerationJob,
@@ -639,6 +640,8 @@ export function AudioStudio() {
                 neighbours and the field overflowed them. Mode-dependent extra fields keep their
                 capability gating and simply become cells in the same grid. */}
             <AudioGenerationSettings
+            importAsset={importAsset}
+            projectId={activeProject?.id}
             setModel={setModel}
             selectedModel={selectedModel}
             pickerModels={pickerModels}
@@ -694,6 +697,8 @@ export function AudioStudio() {
                 capability is discoverable, but ENABLED only for an `_icl` checkpoint. */}
             {songModel ? (
               <YueReferenceBand
+                importAsset={importAsset}
+                projectId={activeProject?.id}
                 audioAssets={audioAssets}
                 enabled={songIcl}
                 endSecs={iclEndSecs}
@@ -715,6 +720,8 @@ export function AudioStudio() {
 
             {showVoiceClone ? (
               <AudioVoiceReferencePanel
+            importAsset={importAsset}
+            projectId={activeProject?.id}
             audioAssets={audioAssets}
             setReferenceAudioAssetId={setReferenceAudioAssetId}
             referenceAudioAssetId={referenceAudioAssetId}

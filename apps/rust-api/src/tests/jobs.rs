@@ -12771,31 +12771,6 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-/// The registered SCAIL-2 row as the server resolves it, with `ui.scail2MultiReference` set the way
-/// the release that ships the paired inference descriptor will set it. The compiled registry owns a
-/// registered builtin's row (APPREG-1), so a config-dir copy can no longer flip the flag for the
-/// running server; the enabled half of the gate is exercised at the validator seam every
-/// create/retry/duplicate boundary calls (`validate_video_reference_asset_ids_payload`).
-fn scail2_entry_with_paired_descriptor() -> Value {
-    let mut model = Value::Object(
-        sceneworks_core::builtin_manifests::builtin_model_entry("scail2_14b")
-            .expect("shipped SCAIL-2 row")
-            .clone(),
-    );
-    assert_ne!(
-        model["ui"]["scail2MultiReference"], true,
-        "the shipped row has not enabled the paired descriptor yet"
-    );
-    model["ui"]["scail2MultiReference"] = json!(true);
-    model
-}
-
-/// The paired SCAIL-2 provider has six source-position slots: the first character plus five
-/// ordered extras. The API owns the public boundary, while the worker keeps the same backstop for
-/// retry/legacy payloads; neither is permitted to silently retain only the first six. The source
-/// implementation must also stay behind the resolved descriptor gate until the final inference
-/// pin carries the paired layout. This pins that gate and the canonical empty-array payload shape
-/// used by recipes, replay, retry, and duplicate.
 #[tokio::test]
 async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -12813,9 +12788,7 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         })
     };
 
-    // 0 references without the legacy source fallback remains incomplete. The one-reference
-    // path remains available while the current engine descriptor has not yet proven the paired
-    // layout.
+    // Zero references require the legacy source fallback.
     let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", base()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let mut padded_model = base();
@@ -12859,25 +12832,17 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(job["payload"]["referenceAssetIds"], json!(single_reference));
 
-    // A direct API caller is held to the same honest gate as the Studio. This prevents the
-    // source-ready worker path from making today's older inference pin claim multi-reference
-    // support before the descriptor flag is shipped with the final paired pin.
-    for count in [2usize, 6] {
-        let references: Vec<String> = (0..count)
-            .map(|index| format!("character-{index}"))
-            .collect();
+    for count in 2..=6 {
+        let references: Vec<String> = (0..count).rev().map(|i| format!("character-{i}")).collect();
         let mut body = base();
-        body.as_object_mut()
-            .unwrap()
-            .insert("referenceAssetIds".to_owned(), json!(references));
-        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(
-            error
-                .to_string()
-                .contains("multi-reference is unavailable until the paired inference descriptor"),
-            "{count} references must stay behind the current descriptor gate, got: {error}"
+        body["referenceAssetIds"] = json!(references);
+        let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(
+            job["payload"]["modelManifestEntry"]["ui"]["scail2MultiReference"],
+            true
         );
+        assert_eq!(job["payload"]["referenceAssetIds"], json!(references));
     }
 
     // A sourceAssetId remains the old single-reference fallback. Whether referenceAssetIds was
@@ -12914,39 +12879,8 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         error.to_string().contains("at most 6 reference characters"),
         "seven references must be rejected explicitly, got: {error}"
     );
-
-    // The exact same gate becomes source-ready when the resolved, server-owned entry carries the
-    // paired-descriptor flag (see `scail2_entry_with_paired_descriptor`).
-    let enabled_entry = scail2_entry_with_paired_descriptor();
-    for count in [2usize, 6] {
-        let references: Vec<String> = (0..count)
-            .map(|index| format!("character-{index}"))
-            .collect();
-        let mut body = base();
-        body.as_object_mut()
-            .unwrap()
-            .insert("referenceAssetIds".to_owned(), json!(references.clone()));
-        let result = crate::validators::validate_video_reference_asset_ids_payload(
-            body.as_object().unwrap(),
-            &enabled_entry,
-        );
-        assert!(
-            result.is_ok(),
-            "{count} references must be accepted: {:?}",
-            result.err()
-        );
-        assert_eq!(
-            body["referenceAssetIds"],
-            json!(references),
-            "{count} references must stay ordered for the paired worker contract"
-        );
-    }
 }
 
-/// Retry and duplicate rebuild `modelManifestEntry` from current server state, so the exact merged
-/// reference array must be re-authorized against that rebuilt entry before either operation creates
-/// work. This protects both directions of the descriptor transition: a current-pin replay cannot
-/// bypass the missing flag, while an enabled pin keeps every accepted id in caller order.
 #[tokio::test]
 async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
@@ -12973,6 +12907,15 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{current_original}");
     let current_job_id = current_original["id"].as_str().expect("current job id");
+
+    let (status, canceled) = request(
+        current_app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{current_job_id}/cancel"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
 
     for operation in ["retry", "duplicate"] {
         let (status, error) = request(
@@ -13046,11 +12989,10 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
-        assert!(
-            error["detail"].as_str().is_some_and(|detail| detail
-                .contains("multi-reference is unavailable until the paired inference descriptor")),
-            "{operation} must enforce the current-pin refusal: {error}"
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {error}");
+        assert_eq!(
+            error["payload"]["referenceAssetIds"],
+            json!(["character-primary", "character-secondary"])
         );
 
         let (status, error) = request(
@@ -13098,38 +13040,6 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
                 "{operation} must reject malformed referenceAssetIds ({expected}): {error}"
             );
         }
-    }
-
-    // An enabled descriptor keeps every accepted id in caller order: the replay boundary re-runs
-    // the same validator against the rebuilt entry, which accepts the exact six-reference order
-    // once the shipped row carries the paired-descriptor flag.
-    let enabled_entry = scail2_entry_with_paired_descriptor();
-    let ordered = json!([
-        "character-4",
-        "character-1",
-        "character-5",
-        "character-0",
-        "character-3",
-        "character-2"
-    ]);
-    let merged = json!({
-        "projectId": "project-1",
-        "model": "scail2_14b",
-        "mode": "animate_character",
-        "prompt": "the character dances",
-        "sourceClipAssetId": "clip-driving",
-        "referenceAssetIds": ordered.clone()
-    });
-    for operation in ["retry", "duplicate"] {
-        let result = crate::validators::validate_video_reference_asset_ids_payload(
-            merged.as_object().unwrap(),
-            &enabled_entry,
-        );
-        assert!(result.is_ok(), "{operation}: {:?}", result.err());
-        assert_eq!(
-            merged["referenceAssetIds"], ordered,
-            "{operation} must preserve the exact six-reference order"
-        );
     }
 }
 

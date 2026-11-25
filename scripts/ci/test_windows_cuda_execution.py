@@ -65,6 +65,20 @@ class CudaExecutionTests(unittest.TestCase):
         self.assertEqual(driver.cuInit.call_args.args, (0,))
         self.assertEqual(driver.cuDeviceGetUuid.restype, ctypes.c_uint32)
 
+    def test_optional_wddm_adapter_comes_from_each_actual_ordinal(self):
+        driver = FakeDriver(count=2)
+        def get_luid(luid, mask, device):
+            ctypes.memmove(luid, device.to_bytes(8, "little"), 8)
+            ctypes.cast(mask, ctypes.POINTER(ctypes.c_uint)).contents.value = 1
+            return 0
+        driver.cuDeviceGetLuid = Mock(side_effect=get_luid)
+        rows = metadata.visible_devices(driver, include_adapter=True)["devices"]
+        self.assertEqual([(r["ordinal"], r["luid"], r["node_mask"]) for r in rows], [
+            (0, "luid_0x00000000_0x0000000a", 1), (1, "luid_0x00000000_0x0000000b", 1)])
+        driver.cuDeviceGetLuid.side_effect = lambda *_: 0
+        with self.assertRaisesRegex(RuntimeError, "unique WDDM adapter"):
+            metadata.visible_devices(driver, include_adapter=True)
+
     def test_no_visible_device_and_driver_failure_are_explicit_failures(self):
         with self.assertRaisesRegex(RuntimeError, "no CUDA-visible"):
             metadata.visible_devices(FakeDriver(count=0))

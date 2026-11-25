@@ -375,6 +375,17 @@ pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Genera
     media().load(id, spec)
 }
 
+#[cfg(native_lane)]
+pub(crate) fn load_imported(
+    family: &str,
+    source: gen_core::ImportedModelSource,
+    operation: gen_core::ImportedModelOperation,
+    spec: &LoadSpec,
+) -> gen_core::Result<Box<dyn Generator>> {
+    refuse_unverified_portable_sources(spec)?;
+    media().load_imported(family, source, operation, spec)
+}
+
 /// Load a non-prompt image→image [`gen_core::Transform`] (restoration / upscaling) by id from the
 /// media registry — the Iris-3B restorer `iris_3b_restore` (sc-25683). A build that links no native
 /// bundle has an empty registry, so this is a typed "no transform registered" error there.

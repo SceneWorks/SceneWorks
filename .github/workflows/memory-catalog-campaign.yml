@@ -198,7 +198,8 @@ on:
           Fetch the pinned snapshots of anchors that would otherwise plan as weights_missing
           (--download-missing). They land in the FIRST hub root above through the Hugging Face CLI
           at the manifest's pinned revision, one at a time; a gated repo needs $HF_TOKEN on the
-          runner. Off by default: leave it off when the box already holds its weights.
+          runner. Tier 2 A/B accepts this only for explicit Wan A14B or SCAIL-2 routes, staging into
+          the first moss_options_json.hubs entry (or the default hub) before the comparison.
         required: false
         type: boolean
         default: false
@@ -553,13 +554,16 @@ jobs:
       contents: read
     # SW-7033: base/head A/B over the production API/worker path. options come from
     # moss_options_json ({"base_sha","head_sha","routes","hubs","preflight_only"}; preflight_only
-    # defaults to true). No catalog walk, measurement publication, branch, push or PR.
+    # defaults to true). Optional cuda_physical_index "0" targets the registered GPU0 for explicit
+    # SCAIL and Wan A14B CUDA routes. All other runs keep their default physical device.
     # Passes no credentials: the compared builds come from operator-chosen commits and need none.
     uses: ./.github/workflows/tier2-ab.yml
     with:
+      download_missing: ${{ inputs.download_missing }}
       base_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).base_sha }}
       head_sha: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).head_sha }}
       backend: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).backend }}
+      cuda_physical_index: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).cuda_physical_index }}
       suite: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).suite || '' }}
       krea_performance: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).krea_performance == true }}
       krea_allocation: ${{ fromJSON(needs.tier2-ab-selector.outputs.options).krea_allocation == true }}

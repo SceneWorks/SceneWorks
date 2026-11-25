@@ -1807,6 +1807,16 @@ test("SC-20430 q8 and bf16 synthetic adapter paths yield distinct schema-valid b
     bundles.q8.records[0].repositories.sceneWorks.revision);
   assert.deepEqual(report.anchors.map((anchor) => anchor.tier), ["q4", "q8", "bf16"]);
   assert.throws(() => validateBundle(report));
+  // SW-7271: the macOS version is provenance; an OS update between tier captures still compares.
+  const updated = structuredClone(bundles);
+  updated.q8.records[0].hardware.osVersion = "27.0.1";
+  updated.q8.records[0].id = recordId(updated.q8.records[0]);
+  const updatedReport = boundedSelectorAnchorReport(updated);
+  assert.deepEqual(updatedReport.matchBasis, report.matchBasis);
+  assert.equal(report.matchBasis.hardware.osVersion, undefined);
+  assert.deepEqual(updatedReport.anchors.map((anchor) => anchor.osVersion),
+    ["q4", "q8", "bf16"].map((tier) => updated[tier].records[0].hardware.osVersion));
+  assert.equal(updatedReport.anchors[1].osVersion, "27.0.1");
   for (const mutate of [
     (value) => { value.q8.records[0].target.tier = "q4"; },
     (value) => { value.bf16.records[0].diagnostics.measurements.find((item) =>

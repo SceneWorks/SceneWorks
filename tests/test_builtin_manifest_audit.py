@@ -3357,7 +3357,7 @@ def test_every_minimax_h3_lora_declares_its_partition_in_the_real_catalog():
     membership cannot express which of `minimax_h3` / `minimax_h3_ref` an adapter is
     distilled for; cross-selecting used to fold cleanly at the wrong quality.
 
-    The final inequality is the load-bearing half: a catalog that gave all four the
+    The final inequality is the load-bearing half: a catalog that gave every adapter the
     same `modelIds` would pass a presence check and enforce nothing."""
     manifest = _load_jsonc(LORA_MANIFEST_PATH)
     declared = {
@@ -3369,8 +3369,9 @@ def test_every_minimax_h3_lora_declares_its_partition_in_the_real_catalog():
     for lora_id, model_ids in declared.items():
         assert model_ids, f"{lora_id} declares no modelIds (sc-19563)"
     assert declared["minimax_h3_ref2v_turbo_4step"] == ["minimax_h3_ref"]
+    assert declared["minimax_h3_ref2v_turbo_8step_768p"] == ["minimax_h3_ref"]
     fl2v = [
-        ids for lora_id, ids in declared.items() if lora_id != "minimax_h3_ref2v_turbo_4step"
+        ids for lora_id, ids in declared.items() if not lora_id.startswith("minimax_h3_ref2v_")
     ]
     assert all(
         ids == ["minimax_h3"] for ids in fl2v

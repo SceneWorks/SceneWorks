@@ -1,7 +1,7 @@
 import { isMossImage, isMossEdit } from "./mossImageIdentity.js";
 
-export function mossSeededRecipeReplay(asset, recipe, replaySeed) {
-  if (isMossEdit(recipe?.model, recipe?.mode) && recipe?.rawAdapterSettings?.mossImageAdvanced) {
+export function mossSeededRecipeReplay(asset, recipe, replaySeed, selectedModel = recipe?.model) {
+  if (isMossEdit(selectedModel, recipe?.mode) && recipe?.rawAdapterSettings?.mossImageAdvanced) {
     const raw = recipe.rawAdapterSettings;
     // Every output reopens the whole conditioning batch, including outputs from later rows.
     if (Array.isArray(raw.promptBatch) && raw.promptBatch.length) {
@@ -12,7 +12,7 @@ export function mossSeededRecipeReplay(asset, recipe, replaySeed) {
     return { recipe, replaySeed: replaySeed == null ? null : baseSeed ?? replaySeed };
   }
   const batch = recipe?.rawAdapterSettings?.promptBatch;
-  if (replaySeed == null || !isMossImage(recipe?.model) || !Array.isArray(batch) || batch.length < 2) {
+  if (replaySeed == null || !isMossImage(selectedModel) || !Array.isArray(batch) || batch.length < 2) {
     return { recipe, replaySeed };
   }
   // A batch expands its base seed by output index; a sibling's own seed cannot

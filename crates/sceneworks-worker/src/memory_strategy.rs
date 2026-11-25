@@ -331,6 +331,31 @@ pub fn generate_with_scope_execution_report(
     )
 }
 
+/// Bind the loaded policy and the memory controls applied by the provider's single request
+/// scope to the plan that supplied the admission geometry. Keep finish and poison handling
+/// under the same owner as ordinary generation.
+#[cfg(native_lane)]
+pub(crate) fn generate_video_with_scope_execution_report(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    context: Option<&gen_core::MemoryRunContext>,
+    plan: &gen_core::VideoRenderPlan,
+    spec: &gen_core::LoadSpec,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+    run_with_scope(
+        generator,
+        request,
+        context,
+        None,
+        on_progress,
+        |generator, request, scope, progress| {
+            let bound = plan.bind_admission(spec, context, request)?;
+            generator.generate_video_planned_with_execution_report(request, &bound, scope, progress)
+        },
+    )
+}
+
 fn run_with_scope<T>(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,

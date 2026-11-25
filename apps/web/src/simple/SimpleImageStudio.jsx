@@ -165,7 +165,7 @@ export function SimpleImageStudio() {
   const [mossTrainingShift, setMossTrainingShift] = useStudioState("image", "mossTrainingShift", 1);
   const [mossImageAdvanced, setMossImageAdvanced] = useStudioState("image", "mossImageAdvanced", mossAdvancedDefaults());
   const [mossPromptBatch, setMossPromptBatch] = useStudioState("image", "mossPromptBatch", []);
-  const mossEdit = isMossEdit(model, mode);
+  const mossEdit = isMossEdit(imageModels.find((entry) => entry.id === model) ?? model, mode);
   const [submitting, setSubmitting] = useState(false);
 
   // Models that serve the active tab, under the same capability + Mac-gating predicate

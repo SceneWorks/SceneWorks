@@ -206,15 +206,9 @@ export const KNOWN_ZERO_MATCHES = [];
 // redirected catalog sources hard-fail unless a new live owner and explicit rationale are added
 // here. Whole-repo downloads (files: []) make no selective pattern claim: FLUX 3 keeps its real
 // gated/credential declaration, but needs no pattern-evidence row or orphan selective waiver.
-export const KNOWN_REPO_CONDITIONS = [
-  {
-    kind: "evidence-gated",
-    repo: "sensenova/SenseNova-Loop-9B",
-    revision: "3e1ba6e8ac98090f9f7c03a55f26269eb3850fb6",
-    story: "SW-7187",
-    reason: "The official optional BF16 checkpoint requires a Hugging Face account with repository access. The model picker links to the access page and explains how to save the token. Quantized downloads use separate public artifacts.",
-  },
-];
+// The November 2026 listing refresh also confirmed SenseNova-Loop-9B is now ungated,
+// so its former SW-7187 exception has expired.
+export const KNOWN_REPO_CONDITIONS = [];
 
 const REPO_CONDITION_KINDS = new Set(["evidence-gated", "evidence-repo-id-mismatch"]);
 

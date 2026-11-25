@@ -334,6 +334,28 @@
         "file": "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
         "revision": "5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1"
       }
+    },
+    {
+      // Ref2VA 8-step v1.0 at 768p. This is a reference-checkpoint adapter, distinct from
+      // the fl2v 8-step file above. Upstream's LightX2V
+      // configs/minimax_h3_roll/minimax_h3_ref2av_bf16_8step.json at
+      // 211495fe504bfa0238c832fa1a501487486fb334 declares 8 NFE, shifts 12/3,
+      // and strength 1. Alpha is resolved from the file by the shared native LoRA loader.
+      "id": "minimax_h3_ref2v_turbo_8step_768p",
+      "name": "MiniMax-H3 Ref2VA Turbo (8-step, 768p)",
+      "family": "minimax-h3",
+      "modelIds": ["minimax_h3_ref"],
+      "triggerWords": [],
+      "compatibility": { "families": ["minimax-h3"] },
+      "role": "accelerator",
+      "defaultWeight": 1.0,
+      "sampling": { "steps": 8, "schedulerShift": 12.0, "audioSchedulerShift": 3.0, "trainingShortEdge": 768 },
+      "source": {
+        "provider": "huggingface",
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "file": "minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors",
+        "revision": "ff0edf44b7a96e1b1b4a0c84287dfe9f6a7d133e"
+      }
     }
   ]
 }

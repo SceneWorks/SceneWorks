@@ -6,14 +6,15 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { deflateSync } from "node:zlib";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  cudaLeaseMinFreeMiB, scailCudaMemoryViolation, scailCudaSampler, childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
-  summarize, verdictFor,
+  summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe, wanExecutionFacts,
 } from "./tier2-ab.mjs";
 
 const BASE = "d3f7b05bf22826e44fd43da19cff0985fb17d68b", HEAD = "d2b0c76c9b9b9e00b5174aceec61c11a186dac68";
@@ -35,6 +36,88 @@ test("inputs: exact 40-hex SHAs, distinct sides, absolute paths, known backend-m
   assert.deepEqual(selectRoutes("cuda", "").map((route) => route.id), DEFAULT_ROUTE_IDS.cuda);
 });
 
+test("physical GPU0 requires explicit SCAIL or CUDA Wan A14B routes at dispatch and on the runner", () => {
+  const select = (backend, routes, cuda_physical_index) => dispatchOptions({ profile: "tier2-ab", backend, ref: BASE,
+    moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes, cuda_physical_index }) }, BASE);
+  const worker = (routes, index) => resolveConfig(env({ TIER2_AB_BACKEND: "cuda", TIER2_AB_HUBS: "/hub",
+    TIER2_AB_ROUTES: JSON.stringify(routes), TIER2_AB_PHYSICAL_GPU: index }), { platform: "darwin" });
+  for (const id of Object.keys(ROUTES).filter((id) => id.startsWith("cuda-"))) {
+    if (ROUTES[id].scailCandidate || ROUTES[id].wanA14b) {
+      assert.equal(select("candle", [id], "0").cuda_physical_index, "0");
+      assert.equal(worker([id], "0").physicalGpu, "0");
+    } else {
+      assert.throws(() => select("candle", [id], "0"), /physical GPU0/);
+      assert.throws(() => worker([id], "0"), /physical GPU0/);
+    }
+    assert.equal(select("candle", [id]).cuda_physical_index, "1");
+  }
+  for (const value of [0, "all", [0], "2", null]) assert.throws(() => select("candle", ["cuda-scail2-q4-animate-2"], value));
+  assert.throws(() => select("mlx", ["mlx-scail2-q4-animate-2"], "0"));
+  assert.throws(() => select("candle", undefined, "0"));
+  const envs = childEnvironments({CUDA_VISIBLE_DEVICES:"0", NVIDIA_VISIBLE_DEVICES:"0"}, {
+    backend: "cuda", physicalGpu:"0", state:"/s", hub:"/h", xet:"/x", workerId:"w" });
+  for (const child of [envs.api, envs.worker("http://127.0.0.1")])
+    for (const key of ["SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"]) assert.equal(child[key], "0");
+});
+
+test("CUDA SCAIL leases and requests preserve the child cap and physical free reserve", () => {
+  const gib = 1024 ** 3;
+  assert.equal(cudaLeaseMinFreeMiB(""), 75776);
+  for (const route of Object.values(ROUTES).filter((r) => r.backend === "cuda")) {
+    assert.equal(cudaLeaseMinFreeMiB(JSON.stringify([route.id])), route.scailCandidate ? 92160 : 75776);
+  }
+  assert.equal(cudaLeaseMinFreeMiB("cuda-wan22-a14b-t2v-uni_pc,cuda-scail2-q4-animate-2"), 92160);
+  assert.equal(scailCudaMemoryViolation({ usedBytes: 5 * gib, freeBytes: 90 * gib }, true), null);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 5 * gib, freeBytes: 90 * gib - 1 }, true), /90 GiB/);
+  assert.equal(scailCudaMemoryViolation({ usedBytes: 84 * gib, freeBytes: 6 * gib }), null);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 84 * gib + 1, freeBytes: 7 * gib }), /84 GiB/);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 50 * gib, freeBytes: 6 * gib - 1 }), /6 GiB/);
+  assert.match(scailCudaMemoryViolation({ usedBytes: 50 * gib, freeBytes: null }), /measure free/);
+});
+
+test("a final SCAIL CUDA guard breach stops the owned worker before cooperative cleanup", { timeout: 5000 }, async (t) => {
+  const child = spawn(process.execPath, ["-e", 'process.on("SIGTERM", () => {}); process.stdin.resume(); process.send("ready"); setInterval(() => {}, 60000);'],
+    { stdio: ["pipe", "ignore", "ignore", "ipc"] });
+  t.after(() => { if (processState(child).alive) child.kill("SIGKILL"); });
+  const exit = once(child, "exit");
+  await once(child, "message");
+  const finalRead = Promise.withResolvers();
+  const controller = new AbortController(), record = { status: "running", watchdog: {} };
+  const read = scailCudaSampler(() => finalRead.promise, child, record, controller, "0");
+  const pending = read();
+  record.status = "refused"; // The typed job result returned while nvidia-smi was still running.
+  finalRead.resolve({ usedBytes: 50 * 1024 ** 3, freeBytes: 5 * 1024 ** 3 });
+  await assert.rejects(pending, /6 GiB/);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(record.status, "error");
+  assert.equal(record.watchdog.gpuStop.pid, child.pid);
+  assert.equal(record.watchdog.gpuStop.killIssued, true);
+  await exit; // No cancellation POST, sentinel exit or normal 60-second teardown grace.
+  assert.equal(processState(child).alive, false);
+});
+
+test("SCAIL GPU telemetry failure and insufficient final baseline stop before submission", async () => {
+  let kills = 0;
+  const worker = { label: "worker", pid: 42, exitCode: null, signalCode: null,
+    kill(signal) { assert.equal(signal, "SIGKILL"); kills++; return true; } };
+  const gib = 1024 ** 3;
+  const baseline = { usedBytes: 5 * gib, freeBytes: 90 * gib };
+  for (const [read, expected] of [
+    [() => Promise.reject(new Error("device query failed")), /telemetry unavailable/],
+    [() => ({ ...baseline, freeBytes: baseline.freeBytes - 1 }), /90 GiB/],
+    [() => ({ ...baseline, usedBytes: 84 * gib + 1 }), /84 GiB/],
+  ]) {
+    const record = { watchdog: {}, status: "running" }, controller = new AbortController();
+    assert.deepEqual(await scailCudaSampler(() => baseline, worker, record, controller, "0")(true), baseline);
+    const before = kills, fault = scailCudaSampler(read, worker, record, controller, "0");
+    await assert.rejects(fault(true), expected);
+    await assert.rejects(fault(true), expected);
+    assert.equal(kills, before + 1);
+    assert.equal(record.status, "error");
+    assert.equal(controller.signal.aborted, true);
+  }
+});
+
 test("default routes send one fixed request per route and the same JSON to both sides", () => {
   for (const ids of Object.values(DEFAULT_ROUTE_IDS)) for (const id of ids) {
     const route = ROUTES[id], template = requestTemplate(route);
@@ -49,12 +132,215 @@ test("default routes send one fixed request per route and the same JSON to both 
 
 test("dispatch selector maps catalog inputs, defaults to preflight, refuses mismatches", () => {
   const inputs = { profile: "tier2-ab", ref: "a".repeat(40), backend: "candle", inference_sha: "", moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD }) };
-  assert.deepEqual(dispatchOptions(inputs, inputs.ref), { base_sha: BASE, head_sha: HEAD, backend: "cuda", routes: "", hubs: "", preflight_only: true, inference_sha: "" });
+  assert.deepEqual(dispatchOptions(inputs, inputs.ref), { base_sha: BASE, head_sha: HEAD, backend: "cuda", cuda_physical_index: "1", routes: "", hubs: "", preflight_only: true, inference_sha: "" });
   const custom = dispatchOptions({ ...inputs, backend: "mlx", moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes: ["mlx-moss-image-t2i"], hubs: ["/Volumes/X/hub"], preflight_only: false }) }, inputs.ref);
   assert.equal(custom.preflight_only, false); assert.equal(custom.routes, '["mlx-moss-image-t2i"]'); assert.equal(custom.hubs, '["/Volumes/X/hub"]');
   for (const bad of [{ ref: "b".repeat(40) }, { backend: "cpu" }, { download_missing: true }, { moss_options_json: "[]" }, { moss_options_json: "{" }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, case: "x" }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: BASE }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes: ["mlx-moss-image-t2i"] }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, hubs: ["/posix/hub"] }) }, { moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, preflight_only: "no" }) }, { inference_sha: "x" }]) {
     assert.throws(() => dispatchOptions({ ...inputs, ...bad }, inputs.ref), undefined, JSON.stringify(bad));
   }
+});
+
+test("Wan A14B routes freeze the supported product matrix and the I2V input through multipart", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-wan-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const models = await readCatalog(root);
+  const routes = Object.values(ROUTES).filter((route) => route.wanA14b);
+  assert.equal(routes.length, 6);
+  for (const route of routes) {
+    const { body } = route;
+    assert.equal(DEFAULT_ROUTE_IDS[route.backend].includes(route.id), false);
+    const mode = route.referenceImage ? "i2v" : "t2v";
+    assert.equal(body.model, `wan_2_2_${mode}_14b`);
+    assert.deepEqual([body.width, body.height, body.duration, body.fps, body.seed], [832, 480, 1, 16, 33401]);
+    assert.deepEqual(body.advanced, { mlxQuantize: 4, steps: 6, guidanceScale: 3.5,
+      sampler: route.id.endsWith("heun") ? "heun" : "uni_pc", lightning: false });
+    assert.deepEqual(body.loras, []);
+    const platform = route.backend === "mlx" ? "darwin" : "win32";
+    const fs = { stat: async () => ({ isFile: () => true, size: 1 }) };
+    const [plan] = await planRoutes({ routes: [route], hubs: [dir], baseCatalog: models, headCatalog: models,
+      evidence: await readPatternEvidence(root), platform, fs });
+    assert.equal(plan.status, "ready", plan.skipReason);
+    assert.match(plan.rows.required.find((r) => r.variant)?.repo, new RegExp(`wan2.2-${mode}-a14b-${platform === "darwin" ? "mlx" : "candle"}$`));
+    if (!route.referenceImage) { assert.equal(Object.hasOwn(plan.request.body, "sourceAssetId"), false); continue; }
+    const endpoint = { async exchange(method, url, form, options) {
+      assert.equal(method, "POST"); assert.equal(url, "/api/v1/projects/proj1/assets");
+      assert.deepEqual(options, { multipart: true });
+      const upload = await new Response(form).formData();
+      assert.deepEqual([...upload.keys()], ["file"]);
+      const file = upload.get("file");
+      assert.equal(file.type, "image/png"); assert.equal(file.name, "source.png");
+      const bytes = Buffer.from(await file.arrayBuffer());
+      assert.deepEqual(bytes, await readFile(path.join(dir, "source.png")));
+      const { width, height } = decodePng(bytes);
+      assert.deepEqual([width, height], [832, 480]);
+      assert.equal(sha256(bytes), plan.request.sourceImageSha256);
+      return { status: 201, body: { id: "the-uploaded-asset", projectId: "proj1", type: "image", file: { path: "assets/images/source image.png" } } };
+    }, async served(url) {
+      assert.equal(url, "/api/v1/projects/proj1/files/assets/images/source%20image.png");
+      return { bytes: await readFile(path.join(dir, "source.png")) };
+    } };
+    const ref = await uploadReference(route, endpoint, "proj1", dir);
+    const bound = requestBody(route, "proj1", ref.id);
+    assert.equal(bound.sourceAssetId, "the-uploaded-asset");
+    const normalized = { ...bound, projectId: "<project>", sourceAssetId: "<source-image>" };
+    assert.equal(sha256(JSON.stringify({ body: normalized, sourceImageSha256: ref.sha256 })), plan.request.sha256);
+  }
+  assert.throws(() => selectRoutes("cuda", "cuda-wan22-a14b-t2v-heun"), /unknown route/);
+});
+
+test("Wan compares the accepted q4 source and worker settings, including a valid decoded stream", async (t) => {
+  const route = ROUTES["mlx-wan22-a14b-i2v-heun"];
+  const [row] = routeDownloadRows((await readCatalog(root)).find((m) => m.id === route.model),
+    { platform: "darwin", tier: "q4" }).required.filter((r) => r.variant);
+  const plan = { rows: { required: [row] } };
+  const file = { relativePath: "q4/transformer.safetensors", sizeBytes: 123, sha256: `sha256:${"a".repeat(64)}` };
+  const selected = { backend: "mlx", platform: "macos", models: [{ modelId: route.model, backend: "mlx", slot: "modelManifestEntry",
+    tier: "q4", variant: "q4", members: [{ role: "primary", tier: "q4", files: [file], source: {
+      kind: "revision", identity: { repository: row.repo, revision: row.revision, variant: "q4" } } }] }] };
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-claim-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, "jobs.db");
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("CREATE TABLE jobs (id TEXT, status TEXT, worker_id TEXT, execution_claim_source_route_json TEXT)");
+    db.prepare("INSERT INTO jobs VALUES (?, ?, ?, ?)").run("job", "completed", "owned", JSON.stringify(selected));
+  } finally { db.close(); }
+  assert.deepEqual(await readWanClaim(dbPath, "job", "owned"), selected);
+  await assert.rejects(readWanClaim(dbPath, "job", "other"), /owned completed job/);
+  const source = wanClaimSource(route, plan, selected);
+  assert.equal(source.revision, row.revision);
+  assert.throws(() => wanClaimSource(route, plan, { ...selected, backend: "candle" }), /backend/);
+  const member = selected.models[0].members[0];
+  member.source.identity.revision = "b".repeat(40);
+  assert.throws(() => wanClaimSource(route, plan, selected), /snapshot/);
+  member.source.identity.revision = row.revision;
+  file.relativePath = "q8/transformer.safetensors";
+  assert.throws(() => wanClaimSource(route, plan, selected), /file closure/);
+  file.relativePath = "q4/transformer.safetensors";
+  file.sha256 = `sha256:${"b".repeat(64)}`;
+  assert.notEqual(wanClaimSource(route, plan, selected).boundMembersSha256, source.boundMembersSha256);
+  const recipe = { mode: route.mode, model: route.model, adapter: "mlx_wan", prompt: route.body.prompt, seed: route.body.seed, rawAdapterSettings: { realModelInference: true, lightning: false },
+    normalizedSettings: { sourceAssetId: "uploaded" }, loras: [] };
+  verifyWanRecipe(route, recipe, "uploaded", row.repo);
+  for (const changed of [{ adapter: "procedural_video" }, { loras: [{ id: "extra" }] }, { normalizedSettings: {} }])
+    assert.throws(() => verifyWanRecipe(route, { ...recipe, ...changed }, "uploaded", row.repo));
+  const metrics = { model: route.model, backend: "mlx", sampler: "heun", steps: 6, guidanceScale: 3.5, seed: 33401,
+    width: 832, height: 480, quantLabel: "bf16", sampleMs: 999, totalMs: 5999, peakMemoryBytes: 10999 };
+  const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video: { width: 832, height: 480, decodedFrames: 16, avgFrameRate: "16/1" } } };
+  assert.equal(wanObservations(route, metrics, content).progressSampleIntervalMs, 999);
+  for (const bad of [{ backend: "cuda" }, { sampler: "default" }, { steps: 4 }, { sampleMs: null }])
+    assert.throws(() => wanObservations(route, { ...metrics, ...bad }, content), /Wan worker/);
+  assert.throws(() => wanObservations(route, metrics, { ...content, method: "file_bytes_no_probe" }), /decode/);
+});
+
+test("Wan validates each provider's decoded frame count and actual solver from its execution receipt", () => {
+  for (const route of Object.values(ROUTES).filter((r) => r.wanA14b)) {
+    const mlx = route.backend === "mlx";
+    const backend = mlx ? "mlx" : "candle";
+    const frames = mlx ? 16 : 13;
+    const { model, width, height, fps, advanced, seed } = route.body;
+    const metrics = { model, width, height, seed, backend: route.backend, steps: advanced.steps, sampler: advanced.sampler,
+      guidanceScale: advanced.guidanceScale, quantLabel: mlx ? "bf16" : "q4", totalMs: 99, sampleMs: 33 };
+    const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video: {
+      width, height, avgFrameRate: `${fps}/1`, decodedFrames: frames } } };
+    const obs = wanObservations(route, metrics, content);
+    assert.equal(obs.engineRequestFrames, 13); assert.equal(obs.decodedFrames, frames);
+    content.shape.video.decodedFrames = mlx ? 13 : 16;
+    assert.throws(() => wanObservations(route, metrics, content), /output must decode/);
+
+    const solver = mlx ? (advanced.sampler === "heun" ? "Heun" : "UniPC") : "wan_flow_unipc_bh2_order2_v1";
+    const stage = advanced.sampler === "heun" ? "wan_curated" : "wan";
+    const digest = { element: mlx ? "f32_le_bits" : "f64_le_bits", count: 7, sha256: "2".repeat(64) };
+    const provider = route.referenceImage ? "wan2_2_i2v_14b" : "wan2_2_t2v_14b";
+    const identity = { provider_id: provider, backend, sampling: { state: "resolved", value: [mlx
+      ? { stage, solver, estimator: "flow_velocity" } : solver] },
+      schedule: { state: "resolved", value: [mlx ? { stage, digest } : { sampler: solver, schedule: digest, estimator: "flow_velocity" }] } };
+    const receipt = { jobId: "job", version: 1, acceptedBackend: backend, outputs: [
+      { artifactIds: ["video"], execution: { state: "resolved", identity } }] };
+    assert.deepEqual(wanExecutionFacts(route, receipt, "job", "video"), { provider, backend, solver, schedule: digest });
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "different-asset"), /bind the saved video/);
+    identity.provider_id = "wan2_2_ti2v_5b";
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /provider substitution/);
+    identity.provider_id = provider;
+    digest.count = 6;
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /schedule digest/);
+    digest.count = 7;
+    identity.sampling.value = [mlx ? { stage, solver: "Euler", estimator: "flow_velocity" } : "wan_flow_euler_v1"];
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /executed solver/);
+    receipt.outputs[0].execution = { state: "unavailable", reason: { detail: "missing runtime schedule" } };
+    assert.throws(() => wanExecutionFacts(route, receipt, "job", "video"), /missing runtime schedule/);
+  }
+});
+
+test("explicit MLX Wan stages pinned rows before comparison and refuses mismatched sources", async () => {
+  const route = ROUTES["mlx-wan22-a14b-t2v-uni_pc"];
+  const cfg = { backend: "mlx", routes: [route], hubs: ["/owned/hub"] };
+  const input = { profile: "tier2-ab", backend: "mlx", ref: BASE, download_missing: true };
+  const options = { base_sha: BASE, head_sha: HEAD, routes: [route.id], preflight_only: false };
+  assert.equal(dispatchOptions({ ...input, moss_options_json: JSON.stringify(options) }, BASE).backend, "mlx");
+  for (const bad of [{ preflight_only: true }, { routes: DEFAULT_ROUTE_IDS.mlx }])
+    assert.throws(() => dispatchOptions({ ...input, moss_options_json: JSON.stringify({ ...options, ...bad }) }, BASE));
+  const models = await readCatalog(root);
+  const paths = { routes: [route], hubs: cfg.hubs, baseCatalog: models, headCatalog: models, platform: "darwin" };
+  const fs = { stat: async () => { throw Error("missing"); }, readdir: async () => [] };
+  const missing = await planRoutes({ ...paths, fs }); const calls = [];
+  await stageWanSnapshots({}, cfg, { routes: [...missing, ...missing] }, null, (args) => calls.push(args));
+  assert.equal(calls.length, 3); // q4 and the two required macOS catalog co-requisite files
+  for (const args of calls) {
+    assert.equal(args[0], "download"); assert.match(args[3], /^[a-f0-9]{40}$/);
+    assert.equal(args[4], "--include"); assert.equal(args.at(-1), cfg.hubs[0]);
+  }
+  const model = models.find((m) => m.id === route.model);
+  const drifted = { ...model, downloads: model.downloads.map((d) => ({ ...d, revision: "b".repeat(40) })) };
+  const incompatible = await planRoutes({ ...paths, baseCatalog: [drifted], fs });
+  await assert.rejects(stageWanSnapshots({}, cfg, { routes: incompatible }, null, () => assert.fail()), /differ between base and head/);
+});
+
+test("CUDA Wan staging fills only absent literal q4 members from the selected Windows hub and rechecks both routes", async () => {
+  const routes = Object.values(ROUTES).filter((route) => route.wanA14b && route.backend === "cuda");
+  const hubs = [String.raw`E:\local models\hub`];
+  const input = { profile: "tier2-ab", backend: "candle", ref: BASE, download_missing: true };
+  const options = { base_sha: BASE, head_sha: HEAD, routes: routes.map((r) => r.id), hubs, preflight_only: false };
+  const select = (changes = {}) => dispatchOptions({ ...input, moss_options_json: JSON.stringify({ ...options, ...changes }) }, BASE);
+  assert.equal(select().hubs, JSON.stringify(hubs));
+  assert.equal(select().backend, "cuda");
+  for (const bad of [{ preflight_only: true }, { routes: undefined }, { routes: DEFAULT_ROUTE_IDS.cuda },
+    { routes: ["cuda-wan22-a14b-i2v-heun"] }, { hubs: ["/posix/hub"] }]) assert.throws(() => select(bad));
+
+  const cfg = { backend: "cuda", routes, hubs, baseDir: root, headDir: root };
+  const catalog = await readCatalog(root), evidence = await readPatternEvidence(root);
+  const absent = new Set(["q4/.gitattributes", "q4/transformer_2/model.safetensors"]);
+  const present = new Set();
+  const fileKey = (repo, file) => `${repo}/${file}`;
+  const fs = { stat: async (file) => {
+    const normalized = file.replaceAll("\\", "/");
+    const [, repo, member] = normalized.match(/models--SceneWorks--([^/]+)\/snapshots\/[a-f0-9]{40}\/(q4\/.+)$/) ?? [];
+    assert.ok(member, file);
+    if (absent.has(member) && !present.has(fileKey(repo, member))) throw Object.assign(Error("missing"), { code: "ENOENT" });
+    return { isFile: () => true, size: 42 };
+  } };
+  fs.lstat = fs.stat;
+  const plan = () => planRoutes({ routes, hubs, baseCatalog: catalog, headCatalog: catalog, platform: "win32", fs, evidence });
+  const before = await plan();
+  assert.ok(before.every((row) => row.status === "skipped"));
+  const calls = [];
+  await stageWanSnapshots({}, cfg, { routes: before }, null, (args) => {
+    const [command, repo, ...rest] = args;
+    const row = before.find((route) => route.rows.required[0].repo === repo).rows.required[0];
+    assert.deepEqual([command, ...rest], ["download", ...absent, "--revision", row.revision, "--cache-dir", hubs[0]]);
+    for (const file of absent) present.add(fileKey(repo.split("/")[1], file));
+    calls.push(repo);
+  }, fs);
+  assert.equal(new Set(calls).size, 2);
+  const after = await plan();
+  assert.ok(after.every((row) => row.status === "ready" && row.hub === hubs[0]));
+  await stageWanSnapshots({}, cfg, { routes: after }, null, () => assert.fail("already complete"), fs);
+  present.clear();
+  await assert.rejects(stageWanSnapshots({}, cfg, { routes: before }, null, () => assert.fail(),
+    { ...fs, lstat: async () => ({ isSymbolicLink: () => true }) }), /refusing to overwrite/);
+  await assert.rejects(stageWanSnapshots({}, { ...cfg, baseDir: path.join(root, "absent") }, { routes: before }, null,
+    () => assert.fail(), fs), /missing or divergent pinned q4 file listings/);
 });
 
 const run = (sha, status = "completed") => ({ status, output: { content: { sha256: sha } }, error: status === "completed" ? undefined : "boom" });
@@ -75,6 +361,15 @@ test("exit policy: head_differs, error, hub mutation and zero ran fail; nondeter
   const report = (routes, mode = "run") => ({ mode, routes, summary: summarize(routes) });
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal" }, { status: "skipped", skipReason: "absent" }])), 0);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "nondeterministic_on_runner" }])), 0);
+  const required = { id: "mlx-wan22-a14b-i2v-heun", status: "ran" };
+  const ordinary = { id: "mlx-moss-image-t2i", status: "ran", verdict: "equal" };
+  const firstDifference = verdictFor({ base1: run("a"), head: run("b") });
+  assert.equal(firstDifference.needBase2, true);
+  const diagnosed = verdictFor({ base1: run("a"), head: run("b"), base2: run("c") });
+  assert.equal(diagnosed.needBase2, false); assert.equal(diagnosed.verdict, "nondeterministic_on_runner");
+  assert.equal(exitCodeFor(report([ordinary, { ...required, verdict: diagnosed.verdict }])), 1);
+  assert.equal(exitCodeFor(report([ordinary, { ...required, status: "not_run" }])), 1);
+  assert.equal(exitCodeFor(report([ordinary, { ...required, verdict: "equal" }])), 0);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "head_differs" }])), 1);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "error" }])), 1);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true } }])), 1, "unattributed mutation fails");
@@ -758,7 +1053,7 @@ test("tier2-ab is reachable only as a dispatched campaign profile and keeps the 
   assert.match(reusable, /permissions:\n  contents: read/);
 });
 
-test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal lock and cleanup", async () => {
+test("tier2-ab jobs bind the selected physical index through lease and worker masks", async () => {
   const reusable = await workflowText("tier2-ab.yml");
   const mlx = job(reusable, "mlx"), cuda = job(reusable, "cuda");
   assert.match(mlx, /runs-on: \[self-hosted, macOS, ARM64, rw-mage\]/);
@@ -776,17 +1071,584 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.match(mlx, /metal_execution_entry [0-9]+ node tier2-ab-driver\/scripts\/tier2-ab\.mjs --run/);
   assert.match(mlx, /node tier2-ab-driver\/scripts\/tier2-ab\.mjs --cleanup/); assert.match(cuda, /node tier2-ab-driver\\scripts\\tier2-ab\.mjs --cleanup/);
   assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
-  assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu1_lease/);
-  for (const [key, value] of [["CUDA_VISIBLE_DEVICES", '"1"'], ["NVIDIA_VISIBLE_DEVICES", '"1"'], ["SCENEWORKS_GPU_ID", '"1"'], ["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
-  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index 1 -- node scripts\/tier2-ab\.mjs --run/);
-  assert.match(cuda, /\n      TIER2_AB_GPU_POLICY: shared-display\n/);
+  assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu_lease/);
+  for (const [key, value] of [["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
+  for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID", "TIER2_AB_PHYSICAL_GPU"]) assert.ok(cuda.includes(`${key}: \${{ inputs.cuda_physical_index }}`));
+  assert.match(cuda, /\$minFreeMiB = node .*cudaLeaseMinFreeMiB\(process\.env\.TIER2_AB_ROUTES\)/);
+  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --min-free-mib \$minFreeMiB --budget-minutes [0-9]+ --cuda-ordinals 0 --require-physical-index \$env:TIER2_AB_PHYSICAL_GPU -- node scripts\/tier2-ab\.mjs --run/);
+  assert.match(cuda, /TIER2_AB_GPU_POLICY: .*inputs\.cuda_physical_index == '0' && 'shared-compute' \|\| 'shared-display'/);
   // The TIER2_AB_GPU_POLICY label is this profile's alone (its report wording); admission itself is the
   // wrapper's one rule for every actor.
   for (const name of ["windows-candle.yml", "memory-catalog-campaign.yml", "load-progress-acceptance.yml"]) assert.doesNotMatch(await workflowText(name), /shared-display/);
   assert.match(cuda, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   assert.match(cuda, /vcvars64\.bat/);
-  assert.doesNotMatch(reusable, /download_missing|--download-missing|hf download|huggingface-cli/);
+  assert.match(mlx, /if: \$\{\{ inputs\.download_missing && !inputs\.preflight_only && inputs\.suite != 'krea-scoped-acceptance' \}\}/);
+  assert.match(mlx, /--stage-wan/);
+  assert.match(cuda, /if: \$\{\{ inputs\.download_missing && !inputs\.preflight_only && inputs\.suite != 'krea-scoped-acceptance' \}\}/);
+  assert.match(cuda, /Join-Path \$env:TIER2_AB_WORK 'hf-cli'/);
+  assert.match(cuda, /-r \.github\/requirements-hf\.txt/);
+  assert.match(cuda, /--stage-wan[\s\S]+--preflight-only[\s\S]+--build-only[\s\S]+--run\b/);
   assert.doesNotMatch(reusable, /secrets[.:]|HF_TOKEN:/, "no step, build or run, receives a secret");
+});
+
+function scailCatalog(catalog, enabled) {
+  return catalog.map((model) => {
+    if (model.id !== "scail2_14b") return model;
+    const ui = { ...model.ui };
+    if (enabled === undefined) delete ui.scail2MultiReference;
+    else ui.scail2MultiReference = enabled;
+    return { ...model, ui };
+  });
+}
+
+test("SCAIL requires an enabled candidate catalog and both pinned product components", async () => {
+  const catalog = await readCatalog(root);
+  const evidence = await readPatternEvidence(root);
+  const head = scailCatalog(catalog, true), closed = scailCatalog(catalog, false);
+  const fs = { stat: async () => ({ isFile: () => true, size: 99 }) };
+  for (const backend of ["mlx", "cuda"]) {
+    const routes = Object.values(ROUTES).filter((r) => r.scailCandidate && r.backend === backend);
+    assert.deepEqual(routes.map((r) => r.references), [2, 3, 4, 5, 6, 6]); assert.ok(routes.at(-1).refuse);
+    const options = { routes, platform: backend === "mlx" ? "darwin" : "win32", hubs: [backend === "mlx" ? "/hub" : "E:\\hub"], baseCatalog: closed, headCatalog: head, evidence, fs };
+    await assert.rejects(planRoutes({ ...options, headCatalog: closed }), /plural character descriptor/);
+    await assert.rejects(planRoutes({ ...options, baseCatalog: head }), /requires a base without/);
+    const absentFlag = await planRoutes({ ...options, baseCatalog: scailCatalog(catalog, undefined) });
+    const plans = await planRoutes(options);
+    assert.deepEqual(absentFlag, plans);
+    for (const [i, plan] of plans.entries()) {
+      assert.deepEqual(plan.pluralCharacterSupport, { base: false, head: true });
+      assert.equal(plan.status, "ready");
+      assert.equal(plan.request.body.referenceAssetIds.length, routes[i].references);
+      assert.deepEqual(plan.rows.required.map((r) => r.repo), ["SceneWorks/scail2-mlx", "SceneWorks/sam3-mlx"]);
+      assert.deepEqual(plan.rows.required[1].files, ["model.safetensors", "tokenizer.json"]);
+      const report = { mode: "run", routes: [{ ...plan, status: "ran", verdict: "verified" }], summary: { ran: 1 } };
+      assert.equal(exitCodeFor(report), 0);
+      report.routes[0].verdict = "skipped"; assert.equal(exitCodeFor(report), 1);
+    }
+    assert.deepEqual(selectRoutes(backend, routes[5].id), [routes[5]]);
+    assert.throws(() => selectRoutes(backend, [routes[0].id, routes[5].id].join(",")), /preceding accepted/);
+    assert.throws(() => selectRoutes(backend, [routes[5].id, routes[4].id].join(",")), /preceding accepted/);
+    assert.equal(selectRoutes(backend, [routes[4].id, routes[5].id].join(",")).length, 2);
+    assert.ok(!DEFAULT_ROUTE_IDS[backend].some((id) => ROUTES[id].scailCandidate));
+  }
+});
+
+test("CUDA grouped and standalone SCAIL refusals preserve the worker reserve above the effective cap", async () => {
+  const { scailPackagedRefusalCapBytes, scailRefusalCapBytes, scailRefusalBudget, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
+  const config = async (name) => JSON.parse(await readFile(path.join(root, "config", name), "utf8"));
+  const [registry, anchor] = await Promise.all([
+    config("manifests/registry/evidence.json"), readFile(path.join(root, "crates/sceneworks-core/src/memory_anchor.rs"), "utf8"),
+  ]);
+  const gib = 1024 ** 3;
+  const reserveBytes = Number(anchor.match(/pub const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = (\d+(?:\.\d+)?);/)[1]) * gib;
+  // Freeze the measured donor that reproduced the emulation bug. Its coverage is
+  // specific to that capture's provider closure; future pins can have different prices.
+  const price = {grossDeviceBytes:57_048_903_680 + 9_294_577_664, grossHostBytes:58_836_885_504 + 77_594_624, grossUnifiedBytes:0};
+  const six = {artifactId:14_719_969_057, sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f",
+    references:6, nativePolicy:"cuda-q4-resident", price, acceleratorBytes:price.grossDeviceBytes};
+  const evidence = [six];
+  const cold = {...six.price, stage:"cold_load", admitted:true, backend:"candle", referenceCount:6, providerCreditBytes:0,
+    requiredAcceleratorBytes:six.acceleratorBytes, acceleratorReserveBytes:reserveBytes,
+    evidenceArtifactId:six.artifactId, evidenceSha256:six.sha256, evidenceReferences:6};
+  const grouped = scailRefusalBudget("cuda", scailRefusalCapBytes([cold], evidence));
+  const standalone = scailRefusalBudget("cuda", scailPackagedRefusalCapBytes(evidence));
+  assert.deepEqual(grouped, standalone);
+  assert.deepEqual(grouped, {effectiveCapBytes:66_343_481_343, rawCapBytes:68_490_964_991});
+  const fromEnv = Number(String(grouped.rawCapBytes / gib)) * gib;
+  const legacyQ4Bytes = registry.scail2_14b.candle.vramGbByTier.q4 * gib + reserveBytes;
+  assert.ok(grouped.effectiveCapBytes < legacyQ4Bytes && fromEnv > legacyQ4Bytes);
+  assert.equal(fromEnv - reserveBytes, six.acceleratorBytes - 1);
+  const denied = {...cold, admitted:false, availableAcceleratorBytes:grouped.effectiveCapBytes};
+  const message = (e) => `video load failed: unsupported: SCAIL-2 plural fit requires ${e.requiredAcceleratorBytes} accelerator bytes, only ${e.availableAcceleratorBytes} are available`;
+  verifyScailRefusal([denied], grouped.effectiveCapBytes, message(denied));
+  assert.throws(() => verifyScailRefusal([{...denied, acceleratorReserveBytes:0}], grouped.effectiveCapBytes, message(denied)), /reserve/);
+  const over = {...denied, availableAcceleratorBytes:grouped.effectiveCapBytes + 1};
+  assert.throws(() => verifyScailRefusal([over], grouped.effectiveCapBytes, message(over)), /ceiling/);
+  assert.deepEqual(scailRefusalBudget("mlx", grouped.effectiveCapBytes), {effectiveCapBytes:grouped.effectiveCapBytes, rawCapBytes:grouped.effectiveCapBytes});
+});
+
+test("SCAIL workers must observe the exact file seal, ordered RGB inputs and live cold and execution budgets", async () => {
+  const { scailFitEvents, scailArtifactSha256, scailRefusalCapBytes, verifyScailRefusal } = await import("./lib/tier2-scail.mjs");
+  for (const backend of ["mlx", "cuda"]) {
+    for (const n of [2, 3, 4, 5, 6]) {
+      const route = ROUTES[`${backend}-scail2-q4-animate-${n}`];
+      const sources = { references: Array.from({ length: n }, (_, i) => ({ rgbSha256: sha256(String(i)) })) };
+      const lane = backend === "mlx" ? backend : "candle";
+      const pairs = sources.references.map((_, i) => `reference-${i}-1:0:832x480:reference-mask-${i}-1:0:832x480`).join(":");
+      const frames = Array.from({ length: 45 }, (_, i) => `${i}:832x480`).join(",");
+      const carrier = `provider_video_mode:animation+scail2-carrier-v2:backend-${lane}:task-animation:composite-832x480:characters-${n}:${pairs}:driving-frames-45:${frames}:driving-mask-45:${frames}:strength-3f800000:mode-FaceOnly:frame-0+scail2-carrier-request-seal-v2-${sha256("carrier")}`;
+      const price = { grossHostBytes: backend === "mlx" ? 0 : 100, grossDeviceBytes: backend === "mlx" ? 0 : 100,
+        grossUnifiedBytes: backend === "mlx" ? 100 : 0 };
+      const cold = { ...price, event: "scail2_plural_fit", evidenceSha256: sha256("shared-receipt"), evidenceArtifactId: 781, evidenceReferences: n, jobId: "owned", stage: "cold_load", backend: lane, tier: "q4", artifactTier: "q4",
+        width: 832, height: 480, frames: 45, referenceCount: n, artifactSha256: scailArtifactSha256, carrierReceipt: carrier,
+        referenceRgbSha256: sources.references.map((r) => r.rgbSha256).join(","), requiredAcceleratorBytes: 100,
+        availableAcceleratorBytes: 100, acceleratorReserveBytes: 2 * 1024 ** 3, requiredPhysicalHostBytes: 100, availablePhysicalHostBytes: 100, providerCreditBytes: 0, admitted: true };
+      const execution = { ...cold, stage: "execution" };
+      const pool = [...new Set([2, n, 6])].map((references) => ({ sha256: cold.evidenceSha256, artifactId: 781,
+        device: "board", runtime: "runtime", nativePolicy:"native-policy", references, price, acceleratorBytes: 100 }));
+      const verify = (entries, admitted = true) => scailFitEvents(entries.map((e) => JSON.stringify(e)).join("\n"), route, "owned", admitted, sources, pool);
+      assert.equal(verify([cold, execution]).length, 2);
+      const usingCapture = (references) => [cold, execution].map((event) => ({ ...event, evidenceReferences: references }));
+      if (n === 6) {
+        assert.throws(() => verify(usingCapture(2)), /covering the requested reference count/);
+        assert.equal(scailRefusalCapBytes([cold], pool), 99);
+        const six = pool.find((row) => row.references === 6);
+        assert.equal(scailRefusalCapBytes([cold], [...pool, { ...six, artifactId:782, acceleratorBytes:75 },
+          { ...six, artifactId:783, nativePolicy:"other", acceleratorBytes:5 }]), 74);
+        assert.throws(() => scailRefusalCapBytes([cold], [...pool, six]), /one physical capture/);
+        assert.throws(() => scailRefusalCapBytes(usingCapture(2), pool), /covering the requested reference count/);
+        assert.throws(() => scailRefusalCapBytes([{ ...cold, evidenceArtifactId: 780 }], pool));
+      }
+      if (backend === "mlx" && n < 6) {
+        assert.equal(verify(usingCapture(6)).length, 2);
+        assert.throws(() => verify([cold, { ...execution, evidenceReferences: 6 }]), /changed its admitted physical evidence/);
+      } else if (backend === "cuda" && n < 6) {
+        assert.throws(() => verify(usingCapture(6)), /covering the requested reference count/);
+      }
+      for (const change of [{ referenceRgbSha256: cold.referenceRgbSha256.split(",").reverse().join(",") },
+        { stage: "cold_load" }, { artifactSha256: sha256("wrong") }, { evidenceSha256: sha256("other") }, { evidenceArtifactId: 17 }, { grossHostBytes: 95 }, { requiredAcceleratorBytes: 99 }, { carrierReceipt: carrier.replace("reference-mask-1", "reference-mask-0") },
+        { jobId: "another" }, { carrierReceipt: carrier.replace(sha256("carrier"), sha256("another")) },
+        { availablePhysicalHostBytes: null }, { availableAcceleratorBytes: 99 }, { tier: "bf16" }]) {
+        assert.throws(() => verify([cold, { ...execution, ...change }]));
+      }
+      for (const malformed of [carrier.replace("provider_video_mode:animation+", ""),
+        carrier.replace("provider_video_mode:animation", "provider_video_mode:replacement"),
+        carrier.replace("animation+", "animation++"), carrier + "+extra", carrier.replace(":strength-", ":extra:strength-")]) {
+        assert.throws(() => verify([cold, execution].map((e) => ({ ...e, carrierReceipt: malformed }))));
+      }
+      const denied = { ...cold, admitted: false, availableAcceleratorBytes: 99 };
+      const refused = verify([denied], false);
+      const detail = "SCAIL-2 plural fit requires 100 accelerator bytes, only 99 are available";
+      const wrapped = "video load failed: unsupported: " + detail;
+      const message = backend === "mlx" ? detail : wrapped;
+      verifyScailRefusal(refused, 99, message);
+      assert.throws(() => verifyScailRefusal([...refused, { ...denied, requiredAcceleratorBytes: 102 }], 99, message), /observed byte counts/);
+      assert.throws(() => verifyScailRefusal(refused, 98, message), /ceiling/);
+      for (const wrong of [undefined, backend === "mlx" ? wrapped : detail, "video load failed: " + detail,
+        "unsupported: " + detail, message + ".", message.replace("100", "101"), message.replace("99", "98"),
+        "video load failed: prepared source or placement changed"]) {
+        assert.throws(() => verifyScailRefusal(refused, 99, wrong), /observed byte counts/);
+      }
+      assert.throws(() => verify([denied, execution], false));
+      assert.throws(() => verify([{ ...denied, availableAcceleratorBytes: 150, availablePhysicalHostBytes: 99 }], false));
+    }
+  }
+});
+
+test("SCAIL rendered outputs require the backend decoder length, changing pixels, actual seed and exported source IDs", async () => {
+  const { verifyScailOutput } = await import("./lib/tier2-scail.mjs");
+  const sources = { references: [{ id: "first" }, { id: "second" }], clip: { id: "drive" } };
+  for (const backend of ["mlx", "cuda"]) {
+    const route = ROUTES[`${backend}-scail2-q4-animate-2`], lane = backend === "mlx" ? "mlx" : "candle";
+    const buffer = Buffer.alloc(832 * 480 * 4 * route.savedFrames);
+    buffer[4] = 7;
+    const video = { width: 832, height: 480, avgFrameRate: "16/1", decodedFrames: route.savedFrames };
+    const content = { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape: { video, audio: null }, buffer };
+    const metrics = { model: route.model, backend, steps: 4, guidanceScale: 5, width: 832, height: 480, seed: 33402, totalMs: 75 };
+    const recipe = { adapter: lane + "_scail2", loras: [], prompt: route.body.prompt, model: route.model, mode: route.mode, seed: 33402,
+      rawAdapterSettings: { realModelInference: true, frameCount: route.savedFrames }, normalizedSettings: { sourceClipAssetId: "drive", referenceAssetIds: ["first", "second"] } };
+    const identity = { provider_id: route.model, backend: lane, randomness: { kind: "draws", draws: [{ seed: 33402 }] },
+      schedule: { state: "resolved", value: [{ digest: { count: 5, sha256: sha256("schedule") } }] },
+      sampling: { state: "resolved", value: [backend === "mlx" ? { solver: "UniPC" } : "wan_flow_unipc_bh2_order2_v1"] } };
+    const receipt = { version: 1, acceptedBackend: lane, jobId: "owned", outputs: [{ artifactIds: ["export"], execution: { state: "resolved", identity } }] };
+    const verify = () => verifyScailOutput(route, content, receipt, "owned", "export", recipe, sources, metrics);
+    assert.equal(verify().decodedFrameSha256.length, route.savedFrames);
+    video.decodedFrames = backend === "mlx" ? 45 : 48; assert.throws(verify); video.decodedFrames = route.savedFrames;
+    recipe.normalizedSettings.referenceAssetIds.reverse(); assert.throws(verify); recipe.normalizedSettings.referenceAssetIds.reverse();
+    identity.randomness.draws[0].seed++; assert.throws(verify); identity.randomness.draws[0].seed--;
+    buffer.fill(0); assert.throws(verify, /single color/);
+  }
+});
+
+test("SCAIL imports ordered files through project multipart and verifies the served bytes", async (t) => {
+  const { uploadScailMedia } = await import("./lib/tier2-scail.mjs");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "scail-import-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const refs = ["A.png", "B.png"].map((name) => path.join(dir, name));
+  const rgb = refs.map((_, i) => Buffer.alloc(832 * 480 * 3, i + 17));
+  for (const [i, ref] of refs.entries()) await writeFile(ref, png(rgb[i], 832, 480, 3));
+  const clip = path.join(dir, "driving.mp4");
+  await writeFile(clip, Buffer.from("video fixture"));
+  const uploads = new Map();
+  const endpoint = {
+    async exchange(method, route, form, options) {
+      assert.deepEqual([method, route, options], ["POST", "/api/v1/projects/p/assets", { multipart: true }]);
+      assert.deepEqual([...form.keys()], ["file"]);
+      const file = form.get("file"), rel = "assets/" + file.name;
+      uploads.set(rel, Buffer.from(await file.arrayBuffer()));
+      return { status: 201, body: { id: file.name, projectId: "p", type: file.type.split("/")[0], file: { path: rel } } };
+    },
+    async served(url) { return { bytes: uploads.get(url.replace("/api/v1/projects/p/files/", "")) }; },
+  };
+  const route = ROUTES["mlx-scail2-q4-animate-2"];
+  const uploaded = await uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng);
+  assert.deepEqual(uploaded.references.map((r) => r.rgbSha256), rgb.map(sha256));
+  const request = requestBody(route, "p", uploaded);
+  assert.deepEqual(request.referenceAssetIds, ["A.png", "B.png"]);
+  assert.equal(request.sourceClipAssetId, "driving.mp4");
+  endpoint.served = async () => ({ bytes: Buffer.from("altered") });
+  await assert.rejects(uploadScailMedia(route, endpoint, "p", { refs, clip }, decodePng), /served input differs/);
+});
+
+test("SCAIL proof tooling and the worker share the 26.2 macOS minimum and compare it numerically", async () => {
+  const { MACOS_MINIMUM_PRODUCT_VERSION, meetsMacosMinimum } = await import("./lib/tier2-scail.mjs");
+  const [evidence, tauri] = await Promise.all([
+    readFile(path.join(root, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8"),
+    readFile(path.join(root, "apps/desktop/tauri.conf.json"), "utf8")]);
+  assert.equal(/const MACOS_MINIMUM_PRODUCT_VERSION: &str = "([^"]+)";/.exec(evidence)?.[1], MACOS_MINIMUM_PRODUCT_VERSION);
+  assert.equal(JSON.parse(tauri).bundle.macOS.minimumSystemVersion, MACOS_MINIMUM_PRODUCT_VERSION);
+  for (const supported of ["26.2", "26.2.1", "26.10", "27", "27.0.1", "30.0"]) assert.ok(meetsMacosMinimum(supported), supported);
+  for (const refused of ["26.1", "26.1.9", "25.10", "26", "", undefined, "26B131", "26.2.x", "26..2", "26.2.1.1", "27.9999999999"]) {
+    assert.ok(!meetsMacosMinimum(refused), String(refused));
+  }
+});
+
+test("standalone SCAIL refusal authenticates both compiled candidate digests and identifies the leased device", async () => {
+  const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
+  const { scailHostIdentity } = await import("./tier2-ab.mjs");
+  const [index, coverage, approvals] = await Promise.all([readFile(path.join(root, "config/scail2-plural-memory.json")),
+    readFile(path.join(root, "config/scail2-memory-pin-coverage.json")),
+    readFile(path.join(root, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8")]);
+  assert.deepEqual(scailPackageDigests(index, coverage, approvals), { indexSha256: sha256(index), coverageSha256: sha256(coverage) });
+  assert.throws(() => scailPackageDigests(index + " ", coverage, approvals), /APPROVED_INDEX_SHA256/);
+  assert.throws(() => scailPackageDigests(index, coverage + " ", approvals), /APPROVED/);
+  assert.throws(() => scailPackageDigests(index, coverage, ""), /missing or ambiguous/);
+  for (const backend of ["mlx", "cuda"]) {
+    const mlx = backend === "mlx";
+    const uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid = "luid_0x00000000_0x00000002";
+    const identity = await scailHostIdentity(backend, { TIER2_AB_PHYSICAL_GPU: "0" }, async (cmd, args) => {
+      if (mlx) {
+        assert.equal(cmd, "/usr/sbin/sysctl");
+        assert.deepEqual(args, ["-n", "machdep.cpu.brand_string", "kern.osproductversion"]);
+        return { stdout: "board\n27.0.1\n" };
+      }
+      if (cmd === "python") {
+        assert.equal(args.at(-1), "--wddm-adapter");
+        return { stdout: JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid, luid, node_mask: 1 }] }) };
+      }
+      assert.equal(cmd, "C:\\Windows\\System32\\nvidia-smi.exe");
+      assert.deepEqual(args, ["--id=0", "--query-gpu=name,driver_version,memory.total,uuid", "--format=csv,noheader,nounits"]);
+      return { stdout: `board, runtime, 97887, ${uuid}` };
+    });
+    assert.deepEqual(identity, { device: "board", runtime: mlx ? "27.0.1" : "runtime",
+      ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: { cuda_uuid: uuid, luid, node_mask: 1 } } : {}) });
+    // SW-7271: a Mac below the supported minimum is refused by name; any build at or above it is read.
+    if (mlx) for (const version of ["26.1", "25.6.1", "26B131"]) {
+      await assert.rejects(scailHostIdentity(backend, {}, async () => ({ stdout: `board\n${version}\n` })),
+        new RegExp(`requires macOS 26\\.2 or later; this Mac reports macOS ${version}`));
+    }
+    if (!mlx) await assert.rejects(scailHostIdentity(backend, {}, async (cmd) => ({ stdout: cmd === "python"
+      ? JSON.stringify({ context_created: false, devices: [{ ordinal: 0, uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", luid, node_mask: 1 }] })
+      : `board, runtime, 97887, ${uuid}` })), /logical CUDA 0 and selected physical adapter differ/);
+    for (const stdout of ["", "board", "board,runtime\nother,driver", ...(!mlx ? [`board, runtime, ${uuid}`,
+      `board, runtime, 0, ${uuid}`, `board, runtime, [N/A], ${uuid}`] : [])]) {
+      await assert.rejects(scailHostIdentity(backend, {}, async () => ({ stdout })), /identity unavailable/);
+    }
+  }
+});
+
+test("SCAIL product reads the actual projector output, including shared receipt IDs and reviewed prices", async (t) => {
+  const { scailFitEvidence, scailArtifactSha256, scailPackagedRefusalCapBytes } = await import("./lib/tier2-scail.mjs");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "scail-project-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const put = async (name, data) => {
+    const bytes = JSON.stringify(data); await writeFile(path.join(dir, name), bytes); return sha256(bytes);
+  };
+  for (const backend of ["mlx", "cuda"]) {
+    const mlx = backend === "mlx", counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
+    const revision = "1".repeat(40);
+    const contract = { compiledPin: revision, coverage: [], closures: {} };
+    const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
+      hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
+    if (!mlx) Object.assign(receipt.hardware, { uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", "memory.total": "97887" });
+    if (!mlx) receipt.adapter = { cuda_uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", counter: String.raw`\GPU Process Memory(*)\Dedicated Usage`,
+      luid: "luid_0x00000000_0x0001e266", physical_node: 0, node_mask: 1 };
+    for (const n of counts) {
+      // Pinned SCAIL window values by count: packed tokens, final FFN rows, CUDA query rows and scores.
+      const [tokens, tail, rows, scores] = [
+        [26520, 1944, 942, 999273600], [28080, 3504, 890, 999648000], [29640, 5064, 843, 999460800],
+        [31200, 6624, 801, 999648000], [32760, 8184, 763, 999835200],
+      ][n - 2];
+      const window = { latent_frames: 12, history_frames: 0, decoded_frames: mlx ? 48 : 45, tokens,
+        mlx_unsplit_ffn: mlx, mlx_ffn_chunks: 4, mlx_ffn_tail: tail,
+        self_attention_query_rows: mlx ? 0 : rows, self_attention_score_elements: mlx ? 0 : scores };
+      const axes = { backend, artifact_sha256: scailArtifactSha256, artifact_tier:"q4", effective_tier:"q4", width:832, height:480,
+        references:n, history_order:4, classifier_free_guidance:true, mlx_dpmpp:false, windows:[window],
+        source_bytes:(2*n+90)*832*480*3, driving_stack_bytes:45*832*480*24, schedule_bytes:320, source_resize_bytes:0,
+        source_shape_sha256:sha256("fixture shape "+n), load_policy:(mlx?"None":"Some(Q4)")+"/Bf16/Resident/EagerMaterialization",
+        execution_policy:[{name:mlx?"SCAIL2_COMPUTE_BF16":"CANDLE_DEQUANTIZE_ALL",value:null}], floor_host_bytes:0, floor_device_bytes:0, floor_unified_bytes:0 };
+      const name = `count-${n}.supervisor.json`;
+      const guard = { returncode: 0, pid: n + 100, lifetime_peak_host_bytes: 90, peak_host_bytes: 95,
+        admission: { childFootprintCapBytes: 200, childGpuCapBytes: 160, policySha256: sha256("policy") } };
+      if (!mlx) {
+        // Whole-card growth is 120 - 20 bytes; PID, native pool and WDDM samples already describe the child.
+        const wddmProcess = { adapter: receipt.adapter, pid: guard.pid, created_filetime: 900 + n, error: null, missing_active_polls: 0 };
+        Object.assign(guard.admission, { cudaDeviceUuid: receipt.adapter.cuda_uuid, gpuGlobalUsedBaselineBytes: 20 });
+        guard.peak_gpu_bytes = 80;
+        guard.samples = [{ phase: "cuda-global-used-upper-bound-sample", cudaDeviceUuid: receipt.adapter.cuda_uuid,
+          globalUsedUpperBoundBytes: 120, childGlobalUsedGrowthBytes: 100, gpuFreeBytes: 95, at_ns: 105 }];
+        guard.cuda_attribution = { wddm_dedicated: { ...wddmProcess, samples: [[901, 60], [902, 93]] },
+          pid_peak_bytes: 77, unknown_pid_polls: 1, global_upper_bytes: 120, pool_fallback_peak_bytes: 80 };
+        guard.fit_observation = { wddm_shared: { ...wddmProcess, samples: [[901, 0], [902, 2]] },
+          wddm_shared_counter: "GPU Process Memory/Shared Usage",
+          card_samples_monotonic_ns_free_owned_or_fallback_bytes: [[1, 190, 0], [2, 95, 80], [3, 140, 40]] };
+      }
+      receipt.logs[name] = { sha256: await put(name, guard) };
+      receipt.counts[n] = { accepted:true, claim:{post_execution_verified:true}, native: {axes, pid:n+100, prompt_tokens:[512,512], allocator_peak:80},
+        candidate_row_pending_physical_review:{ platform:mlx?"macos":"windows", device:"board", runtime:"runtime", inference_revision:revision,
+          witness:{ axes, text_tokens:512, gross_host_bytes:145, gross_unified_bytes:140, gross_device_bytes:120, mlx_decode_budget_bytes:16 } } };
+    }
+    const digest = await put("receipt.json", receipt), projected = [];
+    const aggregate = { basis:"measured_aggregate", co_live_extra_bytes:5, uncertainty_allowance_bytes:8 };
+    for (const n of counts) {
+      await put("review.json", { artifact_id:781, run_id:4321, run_attempt:1, receipt_sha256:digest, references:n, rationale:"metadata fixture",
+        domains:mlx ? {unified:aggregate} : {host:aggregate, device:{basis:"guarded_ceiling", unsampled_overshoot_upper_bytes:15}} });
+      const produced = spawnSync(process.platform === "win32" ? "python" : "python3", [path.join(root, "scripts/project-scail2-memory.py"),
+        path.join(dir, "receipt.json"), path.join(dir, "review.json")], { encoding:"utf8" });
+      assert.equal(produced.status, 0, produced.stderr); projected.push(JSON.parse(produced.stdout));
+    }
+    const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
+    const rows = read(projected);
+    assert.deepEqual(rows.map((r) => r.references), counts);
+    // A Mac host reports its product version; the capture recorded a different OS build ("runtime").
+    const host = { device: "board", runtime: mlx ? "27.0.1" : "runtime", env: {},
+      ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: projected[0].bounds.capture_adapter } : {}) };
+    const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
+    if (mlx) {
+      // SW-7271: any macOS at or above 26.2 matches the chip's evidence whatever build it ran on;
+      // below the minimum the refusal names it.
+      for (const runtime of ["26.2", "26.10", "26.2.1", "28.0"]) assert.deepEqual(scoped(projected, { ...host, runtime }), scoped(projected));
+      // The chip still selects the evidence on a supported release.
+      assert.throws(() => scoped(projected, { ...host, device: "other" }), /no packaged native/);
+      for (const runtime of ["26.1", "26.1.9", "runtime"]) {
+        assert.throws(() => scoped(projected, { ...host, runtime }), /requires macOS 26\.2 or later/);
+      }
+    }
+    if (!mlx) {
+      assert.ok(projected.every((r) => r.bounds.device_total_mib === 97887));
+      const quoted = (evidence) => evidence.map((r) => [r.references, r.nativePolicy, r.artifactId, r.sha256, r.price]);
+      // A worker on a second identical card (another UUID, LUID and node) gets the same proof and prices,
+      // and so does a capture that ran on that card: the adapter is provenance, not the hardware class.
+      const gpu1 = { cuda_uuid: "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid: "luid_0x00000000_0x000000fe", node_mask: 2 };
+      assert.deepEqual(scoped(projected, { ...host, captureAdapter: gpu1 }), scoped(projected));
+      const moved = structuredClone(projected);
+      for (const r of moved) r.bounds.capture_adapter = gpu1;
+      assert.deepEqual(quoted(scoped(moved)), quoted(scoped(projected)));
+      // The device model, the card's total memory and the driver still refuse.
+      for (const change of [{ device: "other" }, { runtime: "other" }, { deviceTotalMib: 48943 }, { deviceTotalMib: undefined }]) {
+        assert.throws(() => scoped(projected, { ...host, ...change }), /no packaged native/);
+      }
+      for (const total of [undefined, 0, "97887"]) {
+        const blank = structuredClone(projected);
+        blank[0].bounds.device_total_mib = total;
+        assert.throws(() => read(blank), /card capacity/);
+        assert.throws(() => scoped(blank), /card capacity/);
+      }
+      // A complete second campaign on the other card runs under its own guard (the executed
+      // policy names its card). The worker prices either, so both campaigns stay available,
+      // each priced from its own rows; one card still keeps a single guard.
+      const second = structuredClone(moved);
+      for (const r of second) {
+        Object.assign(r, { artifact_id: 900, guard_policy_sha256: sha256("gpu1 guard") });
+        r.bounds.device.unsampled_overshoot_upper_bytes -= 1;
+      }
+      const both = scoped([...projected, ...second]);
+      assert.deepEqual(both.map((r) => [r.artifactId, r.references]),
+        [...projected.map((r) => [r.artifact_id, r.axes.references]), ...second.map((r) => [900, r.axes.references])]);
+      const own = scoped(projected);
+      for (const [i, r] of both.entries()) {
+        if (r.artifactId === 900) {
+          assert.equal(r.captureAdapter.cuda_uuid, gpu1.cuda_uuid);
+          assert.equal(r.price.grossDeviceBytes, own[i % counts.length].price.grossDeviceBytes - 1);
+        } else assert.deepEqual(r, own[i]);
+      }
+      assert.notEqual(both[0].campaign, both[counts.length].campaign);
+      const sameCard = structuredClone(projected);
+      for (const r of sameCard) Object.assign(r, { artifact_id: 901, guard_policy_sha256: sha256("second gpu0 guard") });
+      assert.throws(() => scoped([...projected, ...sameCard]), /different capture guards/);
+      // Partial campaigns on two cards never combine into one complete campaign, even under one guard.
+      const halves = [...projected.filter((r) => r.axes.references <= 4), ...moved.filter((r) => r.axes.references > 4)];
+      assert.throws(() => scoped(halves), /no packaged native/);
+      assert.throws(() => read(halves), /no packaged native/);
+      assert.throws(() => scoped([...projected, ...moved.filter((r) => r.axes.references > 4)]), /different capture guards/);
+    }
+    const competing = structuredClone(projected.at(-1));
+    competing.artifact_id = 782;
+    const envelope = mlx ? competing.bounds.unified : competing.bounds.device;
+    if (mlx) envelope.uncertainty_allowance_bytes -= 1;
+    else envelope.unsampled_overshoot_upper_bytes -= 1;
+    const price = rows.at(-1).acceleratorBytes;
+    assert.equal(scailPackagedRefusalCapBytes(scoped([...projected, competing])), price - 2);
+    for (const change of [r => { r.device = "other"; }, r => { r.runtime = "other"; },
+      r => { if (mlx) r.runtime = "another"; else r.bounds.device_total_mib = 48943; },
+      r => { r.axes.execution_policy[0].value = "1"; }]) {
+      const other = structuredClone(competing); change(other);
+      assert.deepEqual(scoped([...projected, other]), rows);
+      assert.equal(scailPackagedRefusalCapBytes(scoped([...projected, other])), price - 1);
+    }
+    assert.throws(() => scoped(projected, { ...host, runtime: "wrong" }), mlx ? /requires macOS 26\.2/ : /no packaged native/);
+    assert.throws(() => scoped(projected, { ...host, env: { [projected[0].axes.execution_policy[0].name]: "" } }), /no packaged native/);
+    assert.throws(() => scailPackagedRefusalCapBytes(rows.filter((r) => r.references !== 6)));
+    assert.throws(() => scailPackagedRefusalCapBytes([{ references: 6, acceleratorBytes: 1 }]));
+    assert.ok(rows.every((r) => r.artifactId === 781 && r.sha256 === digest));
+    assert.deepEqual(rows[0].price, mlx ? {grossHostBytes:0,grossDeviceBytes:0,grossUnifiedBytes:153}
+      : {grossHostBytes:158,grossDeviceBytes:175,grossUnifiedBytes:0});
+    assert.throws(() => read(projected.slice(1)), /no packaged native/);
+    const wrong = (mutate) => { const copy = structuredClone(projected); mutate(copy[0]); assert.throws(() => read(copy)); };
+    const short = structuredClone(projected);
+    for (const r of short.filter((r) => r.axes.references < 6)) {
+      Object.assign(r.axes.windows[0], { latent_frames: 1, decoded_frames: 1 });
+    }
+    assert.throws(() => read(short), /different native SCAIL window/);
+    for (const key of Object.keys(projected[0].axes.windows[0])) {
+      wrong((r) => {
+        const window = r.axes.windows[0];
+        if (typeof window[key] === "boolean") window[key] = !window[key];
+        else window[key]++;
+      });
+    }
+    wrong((r) => { r.guard_policy_sha256 = sha256("different policy"); });
+    wrong((r) => { r.post_execution_verified = false; });
+    wrong((r) => { if (mlx) r.bounds.mlx_decode_budget_bytes=154; else r.axes.load_policy="unpriced policy"; });
+    wrong((r) => { (mlx ? r.bounds.unified : r.bounds.host).classified_peak_bytes = 2; });
+    wrong((r) => { if (mlx) r.axes.floor_unified_bytes=154; else r.axes.floor_device_bytes=176; });
+    wrong((r) => { (mlx ? r.bounds.unified : r.bounds.host).co_live_extra_bytes = Number.MAX_SAFE_INTEGER; });
+    const target = "2".repeat(40), closure = {digest:sha256("provider"),sharedContractDigest:sha256("shared")};
+    const coverage = {capture_revision:revision,target_revision:target,backend, provider_digest:closure.digest,
+      shared_contract_digest:closure.sharedContractDigest, tree_diff_sha256:sha256("diff")};
+    const changed = { compiledPin:target, coverage:[coverage], closures:{inferenceRevision:target,providers:{[(mlx?"mlx":"candle")+":scail2_14b"]:closure}} };
+    assert.deepEqual(read(projected, changed), rows);
+    const split = structuredClone(projected), six = split.at(-1);
+    six.inference_revision = "3".repeat(40);
+    six.artifact_id = 1562;
+    six.receipt_sha256 = sha256("separate quiet six run");
+    const both = { ...changed, coverage: [...changed.coverage, { ...coverage, capture_revision: six.inference_revision,
+      tree_diff_sha256: sha256("six to compiled target") }] };
+    assert.throws(() => read(split, changed), /no packaged native/);
+    if (mlx) assert.throws(() => read(split, both), /no packaged native/);
+    else {
+      const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
+      const exactSix = structuredClone(split); exactSix[4].inference_revision = target;
+      const indexBytes = JSON.stringify(exactSix), staleApproval = JSON.stringify([]);
+      const approvals = `const APPROVED_INDEX_SHA256: &str = "${sha256(indexBytes)}"; const APPROVED: &str = "${sha256(staleApproval)}";`;
+      assert.deepEqual(read(exactSix, changed).map((r) => r.references), counts);
+      assert.throws(() => scailPackageDigests(indexBytes, JSON.stringify(changed.coverage), approvals), /APPROVED/);
+      const archived = structuredClone(split);
+      Object.assign(archived[4], {accepted:false, artifact_id:14719969057,
+        inference_revision:"7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
+        receipt_sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f", recovery_certificate_sha256:"dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f"});
+      archived[4].bounds.device_interval = "load_through_completed_rgb";
+      archived[4].bounds.device = {...archived[4].bounds.host};
+      const archiveCoverage = {...both, coverage:[coverage, {...both.coverage[1], capture_revision:archived[4].inference_revision}]};
+      assert.equal(read(archived, archiveCoverage).at(-1).recoveryCertificateSha256, archived[4].recovery_certificate_sha256);
+      for (const mutate of [r => {r.accepted=true;}, r => {r.receipt_sha256=sha256("other");},
+        r => {r.artifact_id+=1;}, r => {delete r.recovery_certificate_sha256;},
+        r => {r.recovery_certificate_sha256=sha256("other certification");},
+        r => {r.accepted=true; delete r.recovery_certificate_sha256; delete r.bounds.device_interval;},
+        r => {r.bounds.device_interval="full_job";}]) {
+        const wrong = structuredClone(archived); mutate(wrong[4]); assert.throws(() => read(wrong, archiveCoverage));
+      }
+      const partial = structuredClone(archived);
+      const partialPin = "f5c9ff80acd00334fd668e4ecc8d56be3347affd";
+      const certificates = {3:"c18632894d2d40c7d2b0eea519657714d873a611ca9e6f0845b0809dab4a024d",
+        5:"bd8567c64d120f24e9821747d94b63faec3e5919930ce65dccb5a79f7df86fe7"};
+      for (const r of partial) {
+        r.bounds.capture_adapter = {cuda_uuid:"GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid:"luid_0x00000000_0x0001f603", node_mask:1};
+        if (r.axes.references === 6) continue;
+        const cert = certificates[r.axes.references];
+        Object.assign(r, {accepted:false, count_accepted:!cert, artifact_id:14725116132, inference_revision:partialPin,
+          receipt_sha256:"d423f72d816ac6145c7553623a26e99f67fd59db8e83ab228a89ede8698ce8af"});
+        r.bounds.device = {...r.bounds.host};
+        if (cert) {
+          r.recovery_certificate_sha256 = cert;
+          r.bounds.device_interval = "load_through_completed_rgb";
+        }
+      }
+      const partialCoverage = {...archiveCoverage, coverage:[...archiveCoverage.coverage, {...coverage, capture_revision:partialPin}]};
+      assert.deepEqual(read(partial, partialCoverage).map(r => r.references), counts);
+      for (const [count, change] of [
+        [3, r => {delete r.recovery_certificate_sha256;}],
+        [3, r => {r.recovery_certificate_sha256=certificates[5];}],
+        [5, r => {r.accepted=true; delete r.count_accepted; delete r.recovery_certificate_sha256; delete r.bounds.device_interval;}],
+        [5, r => {delete r.bounds.device_interval;}],
+        [2, r => {r.recovery_certificate_sha256=certificates[3];}],
+        [4, r => {r.count_accepted=false;}],
+        [2, r => {r.inference_revision=target;}],
+        [2, r => {r.artifact_id+=1;}],
+        [4, r => {r.receipt_sha256=sha256("another receipt");}],
+        [3, r => {r.bounds.capture_adapter.node_mask=2;}],
+      ]) {
+        const wrong = structuredClone(partial);
+        change(wrong.find(r => r.axes.references === count));
+        assert.throws(() => read(wrong, partialCoverage));
+      }
+      const latestPin = "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54";
+      const latestCoverage = {...both, coverage:[...both.coverage, {...coverage, capture_revision:latestPin}]};
+      const latest = structuredClone(partial);
+      for (const r of latest) {
+        Object.assign(r, {artifact_id:14735122440, receipt_sha256:"d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
+          inference_revision:latestPin, count_accepted:r.axes.references !== 3, accepted:false});
+        if (r.axes.references === 3) r.recovery_certificate_sha256 = "ca4696364a2a4c951b76f58879e0d25b7e48fdd4d6df5d9e7b605c313cbfd02d";
+        else delete r.recovery_certificate_sha256;
+        if (![3,6].includes(r.axes.references)) delete r.bounds.device_interval;
+      }
+      assert.deepEqual(read(latest, latestCoverage).map(r => r.references), counts);
+      for (const [count, mutate] of [
+        [3, r => {delete r.recovery_certificate_sha256;}], [3, r => {r.recovery_certificate_sha256 = certificates[3];}],
+        [3, r => {r.count_accepted = true;}], [6, r => {delete r.bounds.device_interval;}],
+        [5, r => {r.bounds.device_interval = "load_through_completed_rgb";}], [2, r => {r.accepted = true; delete r.count_accepted;}],
+        [4, r => {r.artifact_id = 14725116132;}],
+      ]) {
+        const wrong = structuredClone(latest);
+        mutate(wrong.find(r => r.axes.references === count));
+        assert.throws(() => read(wrong, latestCoverage));
+      }
+      const joined = read(split, both);
+      assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
+        split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));
+      for (const key of ["provider_digest", "shared_contract_digest", "target_revision"]) {
+        assert.throws(() => read(split, { ...both, coverage:[coverage, {...both.coverage[1], [key]:sha256("crossed")}] }));
+      }
+      const altered = structuredClone(split);
+      altered[4].guard_policy_sha256 = sha256("different capture guard");
+      assert.throws(() => read(altered, both), /no packaged native/);
+      altered[4].bounds.device.unsampled_overshoot_upper_bytes -= 1;
+      assert.throws(() => read([...split, altered[4]], both), /different capture guards/);
+      for (const row of altered) row.guard_policy_sha256 = sha256("different capture guard");
+      assert.throws(() => read([...split, ...altered], both), /different capture guards/);
+    }
+    assert.throws(() => read(projected, { ...changed, coverage:[] }), /no packaged native/);
+    assert.throws(() => read(projected, { ...changed, coverage:[{ ...coverage, provider_digest:sha256("wrong") }] }), /no packaged native/);
+  }
+});
+
+test("SCAIL staging downloads only exact absent q4 and SAM3 filenames on both hosts", async () => {
+  const { SAM3, SCAIL_REVISION } = await import("./lib/tier2-scail.mjs");
+  const catalog = await readCatalog(root), evidence = await readPatternEvidence(root);
+  const baseCatalog = scailCatalog(catalog, false), headCatalog = scailCatalog(catalog, true);
+  for (const backend of ["mlx", "cuda"]) {
+    const routes = [ROUTES[`${backend}-scail2-q4-animate-6`]], hubs = [backend === "mlx" ? "/local models/hub" : "E:\\local models\\hub"];
+    const cfg = { routes, hubs, backend, baseDir: root, headDir: root };
+    const absent = new Set(["q4/dit.safetensors", "model.safetensors"]);
+    const fs = { stat: async (file) => {
+      const member = file.replaceAll("\\", "/").split(/\/snapshots\/[a-f0-9]{40}\//)[1];
+      if (absent.has(member)) throw Object.assign(Error("missing"), { code: "ENOENT" });
+      return { isFile: () => true, size: 29 };
+    } };
+    fs.lstat = fs.stat;
+    const plan = () => planRoutes({ routes, hubs, baseCatalog, headCatalog, platform: backend === "mlx" ? "darwin" : "win32", fs, evidence });
+    const before = await plan(); assert.equal(before[0].status, "skipped");
+    const calls = [];
+    await stageWanSnapshots({}, cfg, { routes: before }, null, (args) => {
+      calls.push(args); absent.delete(args[2]);
+    }, fs);
+    assert.deepEqual(calls, [
+      ["download", "SceneWorks/scail2-mlx", "q4/dit.safetensors", "--revision", SCAIL_REVISION, "--cache-dir", hubs[0]],
+      ["download", SAM3.repo, "model.safetensors", "--revision", SAM3.revision, "--cache-dir", hubs[0]],
+    ]);
+    const after = await plan(); assert.equal(after[0].status, "ready");
+    await stageWanSnapshots({}, cfg, { routes: after }, null, () => assert.fail("complete rows"), fs);
+  }
 });
 
 test("Windows Krea keeps runtime until the registered post action verifies published evidence", async () => {

@@ -8,7 +8,7 @@
 //
 // The LoRA fixtures are the SHIPPED `builtin.loras.jsonc` entries, read at test time, for the same
 // reason the model fixtures in the sibling file are: the whole point of the `sampling` block is
-// that the four published variants disagree, and a retyped fixture would let the control and the
+// that the published variants disagree, and a retyped fixture would let the control and the
 // catalog drift into agreeing about numbers neither of them holds.
 
 import { readFileSync } from "node:fs";
@@ -78,7 +78,8 @@ const TURBO_768P = shippedLora("minimax_h3_turbo_4step_768p");
 const TURBO_8STEP = shippedLora("minimax_h3_turbo_8step");
 const TURBO_4STEP_V01 = shippedLora("minimax_h3_turbo_4step_v01");
 const TURBO_REF2V = shippedLora("minimax_h3_ref2v_turbo_4step");
-const ALL_TURBO = [TURBO_768P, TURBO_8STEP, TURBO_4STEP_V01, TURBO_REF2V];
+const TURBO_REF2V_8STEP = shippedLora("minimax_h3_ref2v_turbo_8step_768p");
+const ALL_TURBO = [TURBO_768P, TURBO_8STEP, TURBO_4STEP_V01, TURBO_REF2V, TURBO_REF2V_8STEP];
 // A plain style LoRA on the same family — the "turbo is not just any LoRA" control.
 const PLAIN_LORA = {
   id: "user_minimax_style",
@@ -173,6 +174,29 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
   const lastJob = (context) => context.createVideoJob.mock.calls.at(-1)[0];
   const jobLoraIds = (context) => (lastJob(context).loras ?? []).map((lora) => lora.id);
   const tierPicker = () => container.querySelector("label.quant-tier-picker select");
+  const openReferenceVideo = async (context) => {
+    await render({
+      ...context,
+      assets: [{
+        id: "reference-image", type: "image", projectId: "project_1", displayName: "Portrait reference",
+        file: { path: "portrait.png", width: 768, height: 768 },
+      }],
+    });
+    await click([...container.querySelectorAll("button")].find((node) =>
+      node.textContent.trim() === "Reference → Video",
+    ));
+    const references = [...container.querySelectorAll(".asset-picker-field")].find((field) =>
+      field.querySelector(".asset-picker-label")?.textContent.trim() === "Reference images",
+    );
+    await click(references.querySelector("button"));
+    await click([...document.querySelectorAll(".asset-picker-card")].find((node) =>
+      node.textContent.includes("Portrait reference"),
+    ));
+    await click([...document.querySelectorAll(".asset-picker-footer button")].find((node) =>
+      node.textContent.trim() === "Use Selection",
+    ));
+    await openAdvanced();
+  };
 
   it.each([MINIMAX, MINIMAX_REF])("shows the CUDA tier selector for $id even when bf16 needs repair", async (model) => {
     await render(baseContext({
@@ -261,6 +285,38 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     await openAdvanced();
     expect(turboSelect().value).toBe(TURBO_REF2V.id);
     expect(turboSelect().value).not.toBe(TURBO_768P.id);
+  });
+
+  it("switches Reference → Video between 4-step and 8-step Turbo without stacking adapters", async () => {
+    const context = baseContext({ videoModels: [MINIMAX_REF], loras: [...ALL_TURBO, PLAIN_LORA] });
+    await openReferenceVideo(context);
+    await addFromPicker(PLAIN_LORA.name);
+
+    for (const variant of [TURBO_REF2V_8STEP, TURBO_REF2V]) {
+      await act(async () => setSelect(turboSelect(), variant.id));
+      expect(labelStartingWith("Turbo").parentElement.textContent).toContain(
+        `${variant.sampling.steps} steps, video shift 12, audio shift 3`,
+      );
+      await generate();
+      expect(lastJob(context).mode).toBe("reference_to_video");
+      expect(lastJob(context).model).toBe(MINIMAX_REF.id);
+      expect(lastJob(context).referenceAssetIds).toEqual(["reference-image"]);
+      expect(jobLoraIds(context)).toEqual(expect.arrayContaining([variant.id, PLAIN_LORA.id]));
+      expect(jobLoraIds(context).filter((id) => ALL_TURBO.some((turbo) => turbo.id === id)))
+        .toEqual([variant.id]);
+      expect(lastJob(context).advanced).not.toHaveProperty("steps");
+    }
+  });
+
+  it("uses the 8-step reference adapter when it is the only installed Turbo variant", async () => {
+    const context = baseContext({
+      videoModels: [MINIMAX_REF],
+      loras: [TURBO_REF2V_8STEP, { ...TURBO_REF2V, installState: "missing", installedPath: null }],
+    });
+    await openReferenceVideo(context);
+    expect(turboSelect().value).toBe(TURBO_REF2V_8STEP.id);
+    await generate();
+    expect(jobLoraIds(context)).toEqual([TURBO_REF2V_8STEP.id]);
   });
 
   // ------------------------------------------------------- one selection, two views
@@ -418,11 +474,13 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     expect([...turboSelect().querySelectorAll("option")].map((option) => option.value)).toEqual([
       "",
       TURBO_REF2V.id,
+      TURBO_REF2V_8STEP.id,
     ]);
     // The declarations these two lists are derived from — retyped here so a manifest edit that
-    // erased `modelIds` (and re-collapsed both lists to all four) can't leave this test green.
+    // erased `modelIds` (and re-collapsed both lists to every adapter) can't leave this test green.
     expect(TURBO_768P.modelIds).toEqual([MINIMAX.id]);
     expect(TURBO_REF2V.modelIds).toEqual([MINIMAX_REF.id]);
+    expect(TURBO_REF2V_8STEP.modelIds).toEqual([MINIMAX_REF.id]);
   });
 
   it("reports the recipe's step count while leaving Steps editable", async () => {

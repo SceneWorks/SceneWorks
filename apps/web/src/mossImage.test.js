@@ -51,4 +51,12 @@ describe("MOSS product transport", () => {
   expect(recipe.rawAdapterSettings.promptBatch).toEqual(["cat","dog"]);
   expect(mossSeededRecipeReplay({recipe},recipe,null)).toEqual({recipe,replaySeed:null});
  });
+ it("keeps the batch base seed for a finetune using its selected base policy", () => {
+  const recipe={model:"serenity",prompt:"second row",seed:10,normalizedSettings:{count:2},rawAdapterSettings:{promptBatch:["first row","second row"]}};
+  const asset={recipe:{prompt:"second row",seed:12},generationSet:{recipe}};
+  const replay=mossSeededRecipeReplay(asset,recipe,12,{id:"serenity",policyModel:"moss_image_base"});
+  expect(replay.replaySeed).toBe(10);
+  expect(replay.recipe.model).toBe("serenity");
+  expect(replay.recipe.rawAdapterSettings.promptBatch).toEqual(["first row","second row"]);
+ });
 });

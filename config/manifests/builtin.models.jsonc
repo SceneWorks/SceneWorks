@@ -12557,6 +12557,7 @@
 
       },
       "ui": {
+        "scail2MultiReference": true,
         "label": "SCAIL-2",
         "description": "zai-org SCAIL-2 character animation: give ordered reference character images and a driving video, and SCAIL-2 animates the supplied characters with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux admit the same installable q4, q8, and bf16 package variants when installed. Measured Candle floors are 64 GB for q4, 67 GB for q8, and 105 GB for bf16. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],

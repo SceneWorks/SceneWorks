@@ -582,6 +582,33 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// The bound base owns sampling policy; the imported id remains the selected model identity.
+    pub fn policy_model(&self) -> &str {
+        self.model_manifest_entry
+            .get("policyModel")
+            .and_then(Value::as_str)
+            .unwrap_or(&self.model)
+    }
+
+    /// Reuse the selected base model's request policy while retaining this checkpoint's identity.
+    /// Ordinary provider requests return `None` and keep the caller's shared sampling builder.
+    pub fn native_generation_request(&self) -> Result<Option<gen_core::GenerationRequest>, String> {
+        let payload = serde_json::json!({
+            "model": self.model, "mode": self.mode, "prompt": self.prompt,
+            "prompts": self.prompts, "negativePrompt": self.negative_prompt,
+            "width": self.width, "height": self.height, "count": self.count,
+            "advanced": self.effective_advanced_wire(),
+            "referenceAssetIds": self.reference_asset_ids,
+            "referenceAssetId": self.reference_asset_id, "sourceAssetId": self.source_asset_id,
+            "maskAssetId": self.mask_asset_id, "characterId": self.character_id,
+            "characterLookId": self.character_look_id,
+        });
+        crate::moss_image::native_request(
+            payload.as_object().expect("request object"),
+            &self.model_manifest_entry,
+        )
+    }
+
     pub fn resolved_flux3_tier(&self) -> Result<Flux3Tier, String> {
         flux3_requested_tier_resolved(
             self.resolved_advanced
@@ -1191,7 +1218,7 @@ impl ImageRequest {
         } else {
             // MOSS repeats each prompt's images together (prompt-major); other providers use
             // the historical prompt-minor convention.
-            let prompt_index = if crate::moss_image::is_moss(&self.model) {
+            let prompt_index = if crate::moss_image::is_moss(self.policy_model()) {
                 index / self.count.max(1) as usize
             } else {
                 index % self.prompts.len()
@@ -1203,7 +1230,7 @@ impl ImageRequest {
     /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
     pub fn image_count(&self) -> u32 {
         let embedding_batch =
-            if crate::moss_image::is_moss(&self.model) && self.mode == "edit_image" {
+            if crate::moss_image::is_moss(self.policy_model()) && self.mode == "edit_image" {
                 self.resolved_advanced
                     .as_ref()
                     .and_then(|options| options.moss_image_advanced.as_ref())

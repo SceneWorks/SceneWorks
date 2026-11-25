@@ -26,9 +26,10 @@ export function useMossImageState({
 
   const [mossDownload, setMossDownload] = useState({ busy: false, error: "", jobs: [] });
 
-  const moss = isMossImage(model);
+  const selectedModel = imageModels.find((item) => item.id === model) ?? model;
+  const moss = isMossImage(selectedModel);
 
-  const mossEdit = isMossEdit(model, mode);
+  const mossEdit = isMossEdit(selectedModel, mode);
 
   const mossDmd = moss && !mossEdit && mossAccelerated(mossImage);
 

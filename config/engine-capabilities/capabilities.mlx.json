@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "38dab65f5d9640396cf2946cd4ee866ce46630c6",
+    "inferenceRevision": "d4e9ee0b8756e94c18030f712656cde7435c82a0",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -1667,6 +1667,19 @@
         "q4",
         "q8"
       ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": false,
+      "registryCached": true
+    },
+    {
+      "family": "moss-image",
+      "source": "transformer_file",
+      "operation": "generate",
+      "providerId": "moss_image_base",
+      "conditioning": [],
+      "supportsLora": false,
+      "supportsLokr": false,
+      "supportedQuants": [],
       "supportsKvCache": false,
       "supportsSequentialOffload": false,
       "registryCached": true

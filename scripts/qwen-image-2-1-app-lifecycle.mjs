@@ -108,10 +108,10 @@ export function assertResume(before, canceled, resumed, observation, checkpoint)
 }
 
 // Deterministic, public synthetic inputs: no operator photographs or private datasets.
-export function syntheticPng(edit = false) {
-  const width = 768, height = 768, rows = Buffer.alloc((width * 3 + 1) * height);
+export function syntheticPng(edit = false, width = 768, height = 768) {
+  const rows = Buffer.alloc((width * 3 + 1) * height);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-    const circle = (x - 384) ** 2 + (y - 384) ** 2 < 180 ** 2;
+    const circle = (x - width / 2) ** 2 + (y - height / 2) ** 2 < (Math.min(width, height) * 180 / 768) ** 2;
     const rgb = circle ? (edit ? [240, 120, 40] : [30, 170, 175]) : [245, 235, 180];
     rows.set(rgb, y * (width * 3 + 1) + 1 + x * 3);
   }

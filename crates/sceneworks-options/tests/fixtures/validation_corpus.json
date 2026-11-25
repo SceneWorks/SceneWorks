@@ -4381,7 +4381,8 @@
         },
         "recommendedFor": [
           "animate_character"
-        ]
+        ],
+        "scail2MultiReference": true
       },
       "optionRouteFacts": {
         "videoMlxRouted": true,
@@ -8001,17 +8002,31 @@
         ]
       },
       "expected": {
-        "ok": false,
-        "refusal": {
-          "code": "invalid_generation_option",
-          "field": "script",
-          "detail": "SCAIL-2 Animate Character multi-reference is unavailable until the paired inference descriptor is installed.",
-          "context": {
-            "kind": "video",
-            "model": "scail2_14b",
-            "mode": "animate_character",
-            "field": "script"
-          }
+        "ok": true,
+        "resolved": {
+          "advanced": {
+            "conditioningScale": 1,
+            "maskingStrength": 1,
+            "mlxQuantizeExplicit": false,
+            "motion": "slow push-in",
+            "quantization": "auto",
+            "resolution": "832x480",
+            "sampler": "default",
+            "scheduler": "default"
+          },
+          "duration": 5.0,
+          "fps": 16,
+          "height": 480,
+          "mode": "animate_character",
+          "model": "scail2_14b",
+          "projectId": "p",
+          "prompt": "tree",
+          "referenceAssetIds": [
+            "person1",
+            "person2"
+          ],
+          "sourceClipAssetId": "clip",
+          "width": 832
         }
       }
     },

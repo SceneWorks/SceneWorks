@@ -49,7 +49,7 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   values.flux3ReferenceSlots = reconcileLayoutReferences([], restoredReferenceAssets,
     rawSettings.flux3_reference_ids ?? recordedReferences?.referenceIds);
   const dimensionIntent = recipeImageDimensionIntent(recipe, recipeModel);
-  const replayMossEdit = isMossEdit(recipe.model ?? model, nextMode);
+  const replayMossEdit = isMossEdit(recipeModel ?? recipe.model ?? model, nextMode);
   flags.mossEditReplay = replayMossEdit !== mossEditActive;
   const resolutionFromRecipe = recipeResolution(recipe);
   // While the model is unresolved the intent stays out of Studio state: ImageStudio clears an
@@ -204,7 +204,7 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   // FLUX.3 layout recipes restore their recorded layout references (main, sc-26233).
   if (flux3Recipe) {
     values.referenceAssetIds = restoredReferenceAssets.filter(Boolean);
-  } else if (isMossEdit(recipe.model ?? model, nextMode)) {
+  } else if (replayMossEdit) {
     // Missing identities stay visible and block submission; never drop a slot or use the output.
     values.referenceAssetIds = recordedReferenceIds ?? [];
   } else if (recordedReferenceIds) {

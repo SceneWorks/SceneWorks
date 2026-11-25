@@ -222,7 +222,11 @@ pub fn native_request(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let Some(variant) = variant_for_model(model) else {
+    let policy_model = entry
+        .get("policyModel")
+        .and_then(Value::as_str)
+        .unwrap_or(model);
+    let Some(variant) = variant_for_model(policy_model) else {
         return if advanced.contains_key(OPTIONS_KEY) || advanced.contains_key(EDIT_OPTIONS_KEY) {
             Err("advanced.mossImage is only supported by MOSS-Image Base/SFT".into())
         } else {
@@ -423,13 +427,15 @@ pub fn materialize(
     let Some(request) = native_request(authored, entry)? else {
         return Ok(());
     };
-    let variant = variant_for_model(
-        authored
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    )
-    .expect("MOSS request");
+    let model = authored
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let policy_model = entry
+        .get("policyModel")
+        .and_then(Value::as_str)
+        .unwrap_or(model);
+    let variant = variant_for_model(policy_model).expect("MOSS request");
     let resolved =
         MossImageResolved::resolve(variant, &request.policy).map_err(|error| error.to_string())?;
     for (key, value) in [
@@ -463,4 +469,34 @@ pub fn materialize(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod imported_policy_tests {
+    use super::*;
+    #[test]
+    fn imported_id_reuses_base_validation_and_materialization() {
+        let authored = json!({"model":"serenity","prompt":"a pine forest","mode":"text_to_image",
+            "width":512,"height":512,"count":1,"advanced":{"mossImage":{"acceleration":"off","max_sequence_length":2048}}})
+            .as_object().unwrap().clone();
+        let entry = json!({"id":"serenity","policyModel":"moss_image_base","defaults":{"steps":50,"guidanceScale":3,"schedulerShift":5}})
+            .as_object().unwrap().clone();
+        let native = native_request(&authored, &entry).unwrap().unwrap();
+        assert_eq!(
+            native
+                .policy
+                .moss_image
+                .as_ref()
+                .unwrap()
+                .max_sequence_length,
+            2048
+        );
+        let mut effective = authored.clone();
+        materialize(&authored, &entry, &mut effective).unwrap();
+        assert_eq!(effective["model"], "serenity");
+        assert_eq!(effective["advanced"]["steps"], 50);
+        let mut invalid = authored;
+        invalid["advanced"]["mossImage"]["max_sequence_length"] = json!(0);
+        assert!(native_request(&invalid, &entry).is_err());
+    }
 }

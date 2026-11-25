@@ -7,12 +7,17 @@
 # scripts/tier2-ab.mjs: base#1, head, and (only when head differs) base#2 per route, against the
 # same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
 # The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
-# comparison live in the driver. The original suite uses read-only hubs. The opt-in Krea suite
-# stages its fixed public assets into a separate attempt-owned hub before building. Windows Krea
-# lets the dev-host post action remove build and runtime storage after evidence publication.
+# comparison live in the driver. The original suite uses read-only hubs; optional product staging
+# (download_missing with explicit Wan A14B or SCAIL-2 routes) fetches pinned files before the
+# read-only comparison. The opt-in Krea suite stages its fixed public assets into a separate
+# attempt-owned hub before building. Windows Krea lets the dev-host post action remove build and
+# runtime storage after evidence publication. All other scratch (checkouts, cargo target, API data
+# dirs) is removed at the end of the job.
 #
 # No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
-# selector's trusted-ref rule), and their builds and processes receive no credential.
+# selector's trusted-ref rule), and their builds and processes receive no credential. Both fresh
+# API data directories need HTTPS access to Hugging Face's public file metadata at their selected
+# immutable revisions. Admission uses these ledgers to verify cached files despite HF_HUB_OFFLINE.
 #
 # CI_IMPACT: manual only. Ordinary CI runs only scripts/tier2-ab.test.mjs (pure functions and
 # static workflow contracts) through `npm run check`.
@@ -28,9 +33,14 @@ on:
         required: true
         type: string
       backend:
-        description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, physical GPU1)"
+        description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, GPU1 by default)"
         required: true
         type: string
+      cuda_physical_index:
+        description: "Physical Windows GPU index, 0 only for explicit SCAIL and Wan A14B routes"
+        required: false
+        type: string
+        default: "1"
       suite:
         description: "Empty for the original Tier 2 A/B, or krea-scoped-acceptance for SW-F336"
         required: false
@@ -56,6 +66,11 @@ on:
         required: false
         type: string
         default: ""
+      download_missing:
+        description: "Stage missing public, manifest-pinned files only for explicitly selected Wan A14B or SCAIL-2 routes"
+        required: false
+        type: boolean
+        default: false
       inference_sha:
         description: "Optional common pin cross-check for A/B, or required exact candidate pin for Krea"
         required: false
@@ -142,6 +157,15 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Stage selected product snapshots from their manifest pins
+        if: ${{ inputs.download_missing && !inputs.preflight_only && inputs.suite != 'krea-scoped-acceptance' }}
+        run: |
+          if ! command -v hf >/dev/null && ! command -v huggingface-cli >/dev/null; then
+            python3.12 -m venv "$TIER2_AB_WORK/hf-cli"
+            "$TIER2_AB_WORK/hf-cli/bin/python" -m pip install --disable-pip-version-check --no-input -r tier2-ab-driver/.github/requirements-hf.txt
+            export PATH="$TIER2_AB_WORK/hf-cli/bin:$PATH"
+          fi
+          node tier2-ab-driver/scripts/tier2-ab.mjs --stage-wan
       - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
         run: node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
       - name: Stage and verify the allowlisted Krea assets into attempt-owned scratch
@@ -218,13 +242,13 @@ jobs:
       TIER2_AB_ROUTES: ${{ inputs.routes }}
       TIER2_AB_HUBS: ${{ inputs.hubs }}
       TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
-      # Native sm_120 and the physical GPU1 binding every real-weight CUDA acceptance lane uses.
+      TIER2_AB_PHYSICAL_GPU: ${{ inputs.cuda_physical_index }}
       CUDA_COMPUTE_CAP: "120"
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "1"
-      NVIDIA_VISIBLE_DEVICES: "1"
-      SCENEWORKS_GPU_ID: "1"
-      TIER2_AB_GPU_POLICY: shared-display
+      CUDA_VISIBLE_DEVICES: ${{ inputs.cuda_physical_index }}
+      NVIDIA_VISIBLE_DEVICES: ${{ inputs.cuda_physical_index }}
+      SCENEWORKS_GPU_ID: ${{ inputs.cuda_physical_index }}
+      TIER2_AB_GPU_POLICY: ${{ inputs.cuda_physical_index == '0' && 'shared-compute' || 'shared-display' }}
       DEV_HOST_WORK_UPLOADS_COMPLETE: "false"
       # Heavy candle lane: no sccache wrapper (windows-candle.yml / catalog walk, os error 10054).
       RUSTC_WRAPPER: ""
@@ -283,6 +307,26 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+      - name: Stage selected product snapshots from their manifest pins
+        if: ${{ inputs.download_missing && !inputs.preflight_only && inputs.suite != 'krea-scoped-acceptance' }}
+        working-directory: tier2-ab-driver
+        run: |
+          if (!(Get-Command hf,huggingface-cli -CommandType Application -ErrorAction SilentlyContinue)) {
+            $version = python --version
+            if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.' -or [int]$Matches.minor -lt 12) {
+              throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+            }
+            $venv = Join-Path $env:TIER2_AB_WORK 'hf-cli'
+            python -m venv $venv
+            if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local provisioning venv' }
+            $scripts = Join-Path $venv 'Scripts'
+            $python = Join-Path $scripts 'python.exe'
+            & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
+            if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned Hugging Face client' }
+            $env:Path = "$scripts;$env:Path"
+          }
+          node scripts/tier2-ab.mjs --stage-wan
+          if ($LASTEXITCODE -ne 0) { throw 'tier2-ab model staging failed' }
       - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
         run: |
           node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
@@ -317,26 +361,25 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           node tier2-ab-driver\scripts\tier2-ab.mjs --build-only
           if errorlevel 1 exit /b 1
-      - name: Run base#1, head and (if needed) base#2 per route under the physical GPU1 lease
+      - name: Run base#1, head and (if needed) base#2 per route under the selected physical GPU lease
         if: ${{ !inputs.preflight_only }}
         working-directory: tier2-ab-driver
         run: |
-          # Physical GPU1 (nvidia-smi index 1, PCI C1:00.0) is the host's display GPU, so it is never
-          # strictly idle. The wrapper's one admission rule (every actor): after the exact-UUID lock,
-          # a 10 s window must show free memory >= 75776 MiB (largest route 66 GiB, the MLX LTX-2.5 q4
-          # peak of run 43287955401 rounded up, + 8 GiB margin) and stable memory.used and
-          # utilization. The wrapper logs each refusal reason while it waits; the driver prints
-          # "phase=driver_started" once admitted.
+          # The wrapper checks the exact card under its UUID lock. SCAIL needs
+          # 84 GiB plus its 6 GiB reserve. Other route sets use the established 74 GiB.
+          $minFreeMiB = node --input-type=module -e "import { cudaLeaseMinFreeMiB } from './scripts/tier2-ab.mjs'; console.log(cudaLeaseMinFreeMiB(process.env.TIER2_AB_ROUTES))"
+          if ($LASTEXITCODE -ne 0) { throw 'failed to resolve CUDA route headroom' }
           if ($env:TIER2_AB_SUITE -eq 'krea-scoped-acceptance') {
             # The wrapper and its child keep the same lease and write their receipts together.
             $env:RUNNER_TEMP = Join-Path $env:TIER2_AB_WORK 'evidence'
           }
+          # The separate Krea allocation witness has its own 85-minute budget.
           if ($env:TIER2_AB_KREA_ALLOCATION -eq 'true') {
-            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=85"
-            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 85 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
+            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu_lease physical_index=$env:TIER2_AB_PHYSICAL_GPU policy=$env:TIER2_AB_GPU_POLICY min_free_mib=$minFreeMiB budget_min=85"
+            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib $minFreeMiB --budget-minutes 85 --cuda-ordinals 0 --require-physical-index $env:TIER2_AB_PHYSICAL_GPU -- node scripts/tier2-ab.mjs --run
           } else {
-            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=540"
-            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 --require-physical-index 1 -- node scripts/tier2-ab.mjs --run
+            Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu_lease physical_index=$env:TIER2_AB_PHYSICAL_GPU policy=$env:TIER2_AB_GPU_POLICY min_free_mib=$minFreeMiB budget_min=540"
+            python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --min-free-mib $minFreeMiB --budget-minutes 540 --cuda-ordinals 0 --require-physical-index $env:TIER2_AB_PHYSICAL_GPU -- node scripts/tier2-ab.mjs --run
           }
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
