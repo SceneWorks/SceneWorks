@@ -25,6 +25,53 @@ fn request<'a>(
 }
 
 #[test]
+fn reference_video_with_three_images_selects_a_native_cuda_strategy() {
+    let generator = fixture_generator(Some(native_quant_contract(VideoLane::Candle, 2)));
+    let conditioning: Vec<_> = (0..3)
+        .map(|_| gen_core::Conditioning::Reference {
+            image: native_image(768, 1024),
+            strength: None,
+        })
+        .collect();
+    let make_input = |total| {
+        let mut input = request(192, None, total);
+        input.model_id = "minimax_h3_ref";
+        input.mode = "reference_to_video";
+        input.width = 768;
+        input.height = 1024;
+        input.reference_count = 3;
+        input.reference_shape = "multi_image";
+        input.tier.quant = None;
+        let mut native = native_quant_request(&conditioning);
+        native.shape.width = input.width;
+        native.shape.height = input.height;
+        native.shape.frames = input.frames;
+        native.shape.reference_image_short_edge = None;
+        native.shape.reference_image_resize_mode = Some(gen_core::ReferenceImageResizeMode::Match);
+        input.native_quant_request = Some(native);
+        input
+    };
+    let input = make_input(96 * GIB);
+    assert!(packaged_video_evidence_covers_request(&generator, &input));
+    let outcome = admit_video_generation_with_veda(&generator, input, None, GIB).unwrap();
+    assert!(outcome.refusal.is_none(), "{:?}", outcome.refusal);
+    let context = outcome
+        .context
+        .expect("three references must reach strategy selection");
+    assert!(context.has_reference);
+    assert_eq!(
+        (context.geometry.width, context.geometry.height),
+        (768, 1024)
+    );
+    assert_eq!(context.geometry.frames, 192);
+    let refused = admit_video_generation_with_veda(&generator, make_input(GIB), None, GIB).unwrap();
+    assert!(
+        refused.refusal.is_some(),
+        "reference requests still obey the device budget"
+    );
+}
+
+#[test]
 fn native_phase_floor_keeps_conditioning_and_decode_out_of_veda_denoise() {
     let mut contract = native_quant_contract(VideoLane::Candle, 2);
     // Deliberately make the conditioner dominate every DiT phase. Charging Veda there

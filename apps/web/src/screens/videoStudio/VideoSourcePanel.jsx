@@ -210,6 +210,7 @@ export function VideoSourcePanel({
                 buttonLabel="Select images"
                 characters={characters}
                 changeLabel="Edit references"
+                clearable
                 emptyLabel="No reference images selected"
                 eyebrow="Video Studio"
                 importAsset={importAsset}
@@ -231,6 +232,7 @@ export function VideoSourcePanel({
                 buttonLabel="Select clips"
                 characters={characters}
                 changeLabel="Edit clips"
+                clearable
                 emptyLabel={`No reference clips selected (up to ${refCaps.clips})`}
                 importAsset={importAsset}
                 label="Reference clips"

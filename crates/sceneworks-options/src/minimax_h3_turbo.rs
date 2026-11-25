@@ -14,7 +14,7 @@
 //!
 //! # Why the recipe is per FILE and lives in the catalog
 //!
-//! The four published files disagree with each other:
+//! The catalog files declare their own recipes:
 //!
 //! | adapter | NFE | video shift | audio shift |
 //! | --- | --- | --- | --- |
@@ -22,6 +22,7 @@
 //! | `minimax_h3_turbo_8step` | **8** | 12.0 | 3.0 |
 //! | `minimax_h3_turbo_4step_v01` | 4 | 12.0 | 3.0 |
 //! | `minimax_h3_ref2v_turbo_4step` | 4 | 12.0 | 3.0 |
+//! | `minimax_h3_ref2v_turbo_8step_768p` | 8 | 12.0 | 3.0 |
 //!
 //! No pair of axes separates them, so no family-wide constant is right for more than one, and — the
 //! part that rules out the SCAIL-2 approach — the files are **format-identical**, so a

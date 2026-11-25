@@ -631,7 +631,7 @@ export function MediaSourcePickerModal({
           <button onClick={onCancel} type="button">
             Cancel
           </button>
-          <button disabled={!selectedIds.length} onClick={() => onConfirm(selectedIds)} type="button">
+          <button disabled={!multiple && !selectedIds.length} onClick={() => onConfirm(selectedIds)} type="button">
             Use Selection
           </button>
         </div>
@@ -877,7 +877,7 @@ export function AssetPickerModal({
             <button onClick={onCancel} type="button">
               Cancel
             </button>
-            <button disabled={!selectedIds.length} onClick={() => onConfirm(selectedIds)} type="button">
+            <button disabled={!multiple && !selectedIds.length} onClick={() => onConfirm(selectedIds)} type="button">
               Use Selection
             </button>
           </div>

@@ -2291,6 +2291,32 @@ pub(super) fn video_admission_reference_shape(
         }
         return "none";
     }
+    // H3 (including imported checkpoints) carries ordered Reference/ReferenceVideo/ReferenceAudio
+    // entries directly. Classify those shared carrier types rather than treating R2V as "none":
+    // a nonzero reference count paired with "none" makes admission abstain before selecting a
+    // memory strategy, which native CUDA correctly refuses before loading tensors.
+    if mode == "reference_to_video" {
+        let mut kinds = 0;
+        for entry in conditioning {
+            kinds |= match entry {
+                Conditioning::Reference { .. } => 1,
+                Conditioning::ReferenceVideo { .. } => 2,
+                Conditioning::ReferenceAudio { .. } => 4,
+                _ => return "none",
+            };
+        }
+        return match kinds {
+            1 if conditioning.len() == 1 => "image",
+            1 => "multi_image",
+            2 => "reference_video",
+            3 => "image+reference_video",
+            4 => "audio",
+            5 => "image+audio",
+            6 => "reference_video+audio",
+            7 => "image+reference_video+audio",
+            _ => "none",
+        };
+    }
     match mode {
         "image_to_video" => "image",
         "first_last_frame" | "extend_clip" | "video_bridge" => "keyframe",

@@ -217,9 +217,12 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // and H3 prompt-expander tiers (SceneWorks/qwen3.8-27b-abliterated-mlx @310a42a6…,
 // SceneWorks/qwen3.8-27b-abliterated-candle @f76e0088…, SceneWorks/minimax-h3-image-pe @b0efd86d…),
 // replacing their three earlier keys: 164 keys; every other row is unchanged.
+// Reference-video Turbo adds lightx2v/Minimax-h3-Turbo @ff0edf44…: 165 keys.
+// The live refresh also records SenseNova-Loop-9B as ungated. Frozen campaign authorities and
+// their selected file lists are unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "f118dec4dd40af01df8e6a1d7659b14b64e8c04acd3a3c2ccde8fff0a1af906a";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "16ca87ab35d57ceab8382095b99ee409305b4e5a66fa822f9b5c5f3272e02fe3";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
