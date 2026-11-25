@@ -1685,7 +1685,9 @@ export function boundedSelectorAnchorReport(bundlesByTier) {
     const diagnostics = diagnosticMeasurements(record);
     const recordMatchBasis = {
       hardware: Object.fromEntries([
-        "memoryBytes", "model", "chip", "osVersion", "metalDevice",
+        // macOS version is provenance on each record, not part of the basis (SW-7271): an
+        // OS update between tier captures on the same machine does not change the comparison.
+        "memoryBytes", "model", "chip", "metalDevice",
         "mlxMemoryLimitBytes", "wiredLimitBytes",
       ].map((name) => [name, record.hardware[name]])),
       inference: {
@@ -1731,6 +1733,8 @@ export function boundedSelectorAnchorReport(bundlesByTier) {
       logicalCaseId: record.logicalCaseId,
       recordId: record.id,
       fixture: record.fixture,
+      // Provenance only: the macOS version this tier was captured on (outside the match basis).
+      osVersion: record.hardware.osVersion,
       source: {
         sceneWorksRevision: record.repositories.sceneWorks.revision,
         inferenceRevision: record.repositories.inference.revision,

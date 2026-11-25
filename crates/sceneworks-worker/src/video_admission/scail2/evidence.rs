@@ -134,6 +134,46 @@ impl Envelope {
     }
 }
 
+/// The oldest macOS product version SceneWorks supports. It is the only OS condition on a
+/// Mac: a capture's exact OS build (`runtime`) is provenance and never selects a host.
+pub(super) const MACOS_MINIMUM_PRODUCT_VERSION: &str = "26.2";
+
+/// Numeric components of a macOS product version (`kern.osproductversion`, e.g. `27.0.1`).
+fn macos_product_version(text: &str) -> Option<[u32; 3]> {
+    let parts: Vec<_> = text.trim().split('.').collect();
+    if !(1..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut version = [0; 3];
+    for (slot, part) in version.iter_mut().zip(parts) {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *slot = part.parse().ok()?;
+    }
+    Some(version)
+}
+
+/// Whether a Mac's product version is at or above [`MACOS_MINIMUM_PRODUCT_VERSION`].
+pub(super) fn meets_macos_minimum(product_version: &str) -> bool {
+    macos_product_version(product_version)
+        .zip(macos_product_version(MACOS_MINIMUM_PRODUCT_VERSION))
+        .is_some_and(|(version, minimum)| version >= minimum)
+}
+
+#[cfg(test)]
+#[test]
+fn macos_minimum_compares_product_versions_numerically() {
+    for supported in ["26.2", "26.2.1", "26.10", "27", "27.0.1", "30.0"] {
+        assert!(meets_macos_minimum(supported), "{supported}");
+    }
+    for refused in [
+        "26.1", "26.1.9", "25.10", "26", "", "26B131", "26.2.x", "26..2", "26.2.1.1",
+    ] {
+        assert!(!meets_macos_minimum(refused), "{refused}");
+    }
+}
+
 /// The hardware class a capture was measured on. Two physical cards of one class run the
 /// same native allocations, so a measurement on either prices both.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,8 +219,15 @@ impl QualifiedWitness {
             && (2..=self.witness.axes.references as usize).contains(&count)
     }
 
-    /// The capture's physical card identity is provenance and never selects a host.
+    /// The capture's physical card identity is provenance and never selects a host. On a Mac
+    /// the host's `runtime` is its product version: the chip selects the evidence, and the
+    /// only OS condition is the supported minimum, whatever build the capture ran on.
     pub(super) fn matches_host(&self, host: &HostClass) -> bool {
+        if self.platform == "macos" {
+            return self.class.device == host.device
+                && host.device_total_mib.is_none()
+                && meets_macos_minimum(&host.runtime);
+        }
         self.class == *host
     }
 }
@@ -484,6 +531,38 @@ fn packaged_evidence_covers_every_plural_count_at_the_pinned_inference_revision(
             );
         }
     }
+}
+
+#[test]
+fn packaged_mlx_evidence_matches_the_chip_on_any_supported_macos_not_the_capture_build() {
+    let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
+    let rows = packaged().unwrap();
+    let quotes = |device: &str, version: &str| {
+        let host = HostClass::new(device, version, None).unwrap();
+        (2..=6)
+            .filter(|count| {
+                rows.iter()
+                    .any(|r| r.covers("macos", pin, *count) && r.matches_host(&host))
+            })
+            .count()
+    };
+    let capture = rows
+        .iter()
+        .find(|r| r.platform == "macos")
+        .expect("packaged MLX evidence");
+    // The capture build is recorded, but a Mac on another build or release still qualifies.
+    assert!(macos_product_version(&capture.class.runtime).is_none());
+    for version in ["26.2", "26.10", "27.0.1", "27.1"] {
+        assert_eq!(quotes(&capture.class.device, version), 5, "{version}");
+    }
+    for version in ["26.1", "26.0.1", capture.class.runtime.as_str()] {
+        assert_eq!(quotes(&capture.class.device, version), 0, "{version}");
+    }
+    assert_eq!(quotes("Apple M4 Max", "27.0.1"), 0);
+    let discrete = HostClass::new(&capture.class.device, "27.0.1", Some(97_887)).unwrap();
+    assert!(!rows
+        .iter()
+        .any(|r| r.platform == "macos" && r.matches_host(&discrete)));
 }
 
 #[test]
