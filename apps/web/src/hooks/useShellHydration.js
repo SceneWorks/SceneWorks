@@ -1,3 +1,4 @@
+import { loadQueueAssets, queueAssetRequestKey } from "../queueAssets.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "../hooks/useProjectScopedList.js";
 import { systemApi } from "../api/systemResources.js";
@@ -18,7 +19,7 @@ import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // F-189: extracted from App along its existing concern boundary.
 export function useShellHydration({
-  ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
+  residentDomains, jobsRef, loadedAssets, ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
 }) {
 
   // A retry or token transition supersedes any older capabilities request. Fetch aborts normally
@@ -27,6 +28,13 @@ export function useShellHydration({
   const macCapabilitiesRequestRef = useRef(0);
 
   const hydrationLedgerRef = useRef(new Map());
+  const launchHydrationsRef = useRef(new Set());
+  const residentDomainsRef = useRef(residentDomains);
+  const queueAssetsRoute = uiMode !== SIMPLE_MODE && activeView === "Queue";
+  const assetScope = queueAssetsRoute ? "queue" : "catalog";
+  const previousAssetScopeRef = useRef(assetScope);
+  const loadedAssetsRef = useRef(loadedAssets);
+  useLayoutEffect(() => { loadedAssetsRef.current = loadedAssets; }, [loadedAssets]);
 
   const committedHydrationRouteRef = useRef(null);
 
@@ -163,8 +171,10 @@ export function useShellHydration({
   }, [refreshMacCapabilities, setActiveProject, setDomainError, setJobs, setProjects, setProjectsLoaded, setQueueSummary, setWorkers, token]);
 
   const refreshTrainingTargets = useCallback(async ({ signal } = {}) => {
+    if (!residentDomainsRef.current.has("trainingTargets")) return refreshFailure("inactive");
     try {
       const catalog = await trainingApi.targets(token, { signal });
+      if (signal?.aborted || !residentDomainsRef.current.has("trainingTargets")) return refreshFailure("aborted");
       setTrainingTargets(catalog);
       setTrainingTargetsError("");
       domainErrors.trainingTargets("");
@@ -178,8 +188,10 @@ export function useShellHydration({
   }, [domainErrors, setTrainingTargets, setTrainingTargetsError, token]);
 
   const refreshTrainingPresets = useCallback(async ({ signal } = {}) => {
+    if (!residentDomainsRef.current.has("trainingPresets")) return refreshFailure("inactive");
     try {
       const catalog = await trainingApi.presets(token, { signal });
+      if (signal?.aborted || !residentDomainsRef.current.has("trainingPresets")) return refreshFailure("aborted");
       setTrainingPresets(catalog);
       setTrainingPresetsError("");
       domainErrors.trainingPresets("");
@@ -193,8 +205,10 @@ export function useShellHydration({
   }, [domainErrors, setTrainingPresets, setTrainingPresetsError, token]);
 
   const refreshAssets = useProjectScopedList({
-    token, activeProject, activeProjectRef,
-    load: assetsApi.listIncludingHidden,
+    token, activeProject, activeProjectRef, resident: residentDomains.has("assets"), scopeKey: assetScope,
+    load: (projectId, token, options) => queueAssetsRoute
+      ? loadQueueAssets(projectId, token, options, jobsRef.current, loadedAssetsRef.current)
+      : assetsApi.listIncludingHidden(projectId, token, options),
     setItems: setAssets,
     setError: domainErrors.assets,
     onStart: (projectId) => {
@@ -244,6 +258,43 @@ export function useShellHydration({
       }
     };
   });
+
+  // Eviction accompanies a committed route change. Requests from the previous
+  // page cannot repopulate catalogs after their ownership has ended.
+  useLayoutEffect(() => {
+    residentDomainsRef.current = residentDomains;
+    const ledger = hydrationLedgerRef.current;
+    if (previousAssetScopeRef.current !== assetScope) {
+      previousAssetScopeRef.current = assetScope;
+      const key = hydrationLedgerKey("assets", activeProject?.id);
+      ledger.get(key)?.abort?.();
+      ledger.delete(key);
+      loadedAssetsRef.current = [];
+      setAssets([]);
+      setLoadedAssetsProjectId(null);
+      setAssetLoadState({ projectId: activeProject?.id ?? null, status: "loading", error: "" });
+    }
+    for (const [key, entry] of ledger) {
+      if (!residentDomains.has(key.split(":")[0])) {
+        entry.abort?.();
+        ledger.delete(key);
+      }
+    }
+    if (!residentDomains.has("assets")) {
+      setAssets([]);
+      setLoadedAssetsProjectId(null);
+      setSelectedAssetId(null);
+      setAssetLoadState({ projectId: null, status: "idle", error: "" });
+    }
+    if (!residentDomains.has("trainingTargets")) {
+      setTrainingTargets({ schemaVersion: 1, targets: [] });
+      setTrainingTargetsError("");
+    }
+    if (!residentDomains.has("trainingPresets")) {
+      setTrainingPresets({ schemaVersion: 1, presets: [] });
+      setTrainingPresetsError("");
+    }
+  }, [residentDomains, assetScope, activeProject?.id, setAssetLoadState, setAssets, setLoadedAssetsProjectId, setSelectedAssetId, setTrainingPresets, setTrainingPresetsError, setTrainingTargets, setTrainingTargetsError]);
 
   const hydrationRefreshers = useMemo(() => ({
     assets: refreshAssets, characters: refreshCharacters, savedVoices: refreshSavedVoices,
@@ -303,9 +354,8 @@ export function useShellHydration({
     return entry.promise;
   }, [hydrationRefresher]);
 
-  // Hydrate only the active screen's domains. Each ledger entry is global or
-  // project-keyed, so keep-alive navigation reuses settled catalogs while a
-  // project switch loads fresh overlays without discarding global state.
+  // Hydrate only catalogs used by the visible page. Shared dependencies can
+  // survive a route change; an evicted catalog always reloads on its next visit.
   useEffect(() => {
     if (!ready || !projectsLoaded) {
       return;
@@ -320,7 +370,6 @@ export function useShellHydration({
         : activeView;
     const domains = hydrationDomainsForRoute(route, { simple: simpleRoute });
     const projectId = activeProject?.id ?? null;
-    const controller = new AbortController();
     const started = [];
     const hydrationLedger = hydrationLedgerRef.current;
 
@@ -338,6 +387,7 @@ export function useShellHydration({
         return;
       }
       started.push({ domain, key });
+      const controller = new AbortController();
       ensureHydrationDomain(domain, projectId, {
         signal: controller.signal,
         abort: () => controller.abort(),
@@ -355,19 +405,11 @@ export function useShellHydration({
             }),
           ])
         : new Set();
-      if (
-        next?.projectId === projectId &&
-        started.every(({ domain }) => nextDomains.has(domain))
-      ) {
-        return;
-      }
-      controller.abort();
-      started.forEach(({ key }) => {
+      started.forEach(({ domain, key }) => {
+        if (next?.projectId === projectId && nextDomains.has(domain)) return;
         const entry = hydrationLedger.get(key);
-        if (entry?.status === "loading") {
-          entry.abort?.();
-          hydrationLedger.delete(key);
-        }
+        if (entry?.status === "loading") entry.abort?.();
+        hydrationLedger.delete(key);
       });
     };
   }, [
@@ -400,7 +442,6 @@ export function useShellHydration({
     ) {
       return;
     }
-    const controller = new AbortController();
     const domains = hydrationDomainsForRoute("Library", { deferred: true });
     const startedKeys = [];
     const hydrationLedger = hydrationLedgerRef.current;
@@ -410,6 +451,7 @@ export function useShellHydration({
       if (current?.status !== "ready") {
         startedKeys.push(key);
       }
+      const controller = new AbortController();
       ensureHydrationDomain(domain, activeProject.id, {
         signal: controller.signal,
         abort: () => controller.abort(),
@@ -432,7 +474,6 @@ export function useShellHydration({
       ) {
         return;
       }
-      controller.abort();
       startedKeys.forEach((key) => {
         const entry = hydrationLedger.get(key);
         if (entry?.status === "loading") {
@@ -452,16 +493,42 @@ export function useShellHydration({
     uiMode,
   ]);
 
-  const hydrateLaunchDomains = useCallback(async (view, projectId = activeProjectRef.current?.id) => {
+  const queueOutputIds = queueAssetsRoute ? queueAssetRequestKey(jobsRef.current ?? []) : "";
+  useEffect(() => {
+    if (ready && projectsLoaded && queueAssetsRoute && activeProject?.id && queueOutputIds) void refreshAssets(activeProject.id);
+  }, [ready, projectsLoaded, queueAssetsRoute, activeProject?.id, queueOutputIds, refreshAssets]);
+
+  const loadLaunchDomains = useCallback(async (view, projectId) => {
     const domains = hydrationDomainsForRoute(view);
-    const results = await Promise.all(
-      domains.map((domain) => ensureHydrationDomain(domain, projectId)),
-    );
+    const results = await Promise.all(domains.map((domain) => ensureHydrationDomain(domain, projectId)));
     const failed = results.filter((result) => result?.ok !== true);
-    return failed.length
-      ? { ok: false, failures: failed }
-      : refreshSuccess();
-  }, [activeProjectRef, ensureHydrationDomain]);
+    return failed.length ? { ok: false, failures: failed } : refreshSuccess();
+  }, [ensureHydrationDomain]);
+
+  // Recipe handoffs request navigation and hydration in the same event. Wait
+  // for the destination to commit before acquiring its catalogs.
+  const hydrateLaunchDomains = useCallback((view, projectId = activeProjectRef.current?.id) => {
+    const route = committedHydrationRouteRef.current;
+    if (route?.route === view && !route.simple && route.projectId === projectId) {
+      return loadLaunchDomains(view, projectId);
+    }
+    return new Promise((resolve) => launchHydrationsRef.current.add({ view, projectId, resolve }));
+  }, [activeProjectRef, loadLaunchDomains]);
+  useEffect(() => {
+    for (const request of launchHydrationsRef.current) {
+      launchHydrationsRef.current.delete(request);
+      const route = committedHydrationRouteRef.current;
+      if (route?.route === request.view && !route.simple && route.projectId === request.projectId) {
+        void loadLaunchDomains(request.view, request.projectId).then(request.resolve);
+      } else {
+        request.resolve(refreshFailure("stale"));
+      }
+    }
+  });
+  useEffect(() => () => {
+    for (const request of launchHydrationsRef.current) request.resolve(refreshFailure("aborted"));
+    launchHydrationsRef.current.clear();
+  }, []);
   const context = useAppDomainValue({
     refreshMacCapabilities
   });

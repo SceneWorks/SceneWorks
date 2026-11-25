@@ -1,3 +1,4 @@
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 import { LOOP_CAPTIONER, LOOP_UTILITY_REPO, loopUtilityModel, loopUtilityTier } from "../loopUtility.js";
 import { portableFeedbackBlocks } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
@@ -1209,6 +1210,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // to Data Sets mode — that's where a dataset draft is authored — so the single App-level
   // registration slot isn't contended by the Train-mode twin. Keep-alive keeps this mounted
   // across plain nav, so the guard stays live even when Data Sets isn't the foreground view.
+  usePageLeaveGuard(() => !datasetLibraryMode || confirmDiscardUnsavedDraft());
+
   useEffect(() => {
     if (!datasetLibraryMode || typeof registerProjectSwitchGuard !== "function") {
       return undefined;

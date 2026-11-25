@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useResidentState } from "./useResidentState.js";
+import { useCallback } from "react";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 
@@ -6,6 +7,7 @@ import { isCurrentProjectRequest } from "../appStateHelpers.js";
 // batches intentionally expose different domain names, but their request,
 // stale-project suppression, refresh and error behavior are one contract.
 export function useScopedCrudList({
+  resident = true,
   token,
   activeProject,
   activeProjectRef,
@@ -13,7 +15,7 @@ export function useScopedCrudList({
   request,
   projectRequiredMessage,
 }) {
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useResidentState([], resident);
 
   const isCurrentRequest = useCallback(
     (projectId) =>
@@ -23,7 +25,7 @@ export function useScopedCrudList({
   );
 
   const refresh = useProjectScopedList({
-    token, activeProject, activeProjectRef, setError, optionalProject: true,
+    token, activeProject, activeProjectRef, setError, optionalProject: true, resident,
     load: (projectId, token, options) => request(null, token, options, { projectId }),
     setItems,
   });

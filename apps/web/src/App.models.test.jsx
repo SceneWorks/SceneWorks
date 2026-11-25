@@ -411,6 +411,11 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    await act(async () => {
+      [...container.querySelectorAll(".nav-item")].find((button) => button.textContent === "Models")?.click();
+    });
+    await settle();
+
     global.fetch.mockClear();
     await act(async () => {
       FakeEventSource.instances[0].listeners["job.updated"]({
@@ -452,6 +457,11 @@ describe("SceneWorks app shell", () => {
     root = createRoot(container);
     await act(async () => {
       root.render(<App />);
+    });
+    await settle();
+
+    await act(async () => {
+      [...container.querySelectorAll(".nav-item")].find((button) => button.textContent === "Models")?.click();
     });
     await settle();
 

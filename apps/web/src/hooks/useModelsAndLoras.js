@@ -1,11 +1,10 @@
+import { useResidentState } from "./useResidentState.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
-import { isAbortError } from "../api.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { useConsentRequestOwner } from "./useConsentRequestOwner.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { modelsApi } from "../api/modelsResources.js";
 import { lorasApi } from "../api/lorasResources.js";
-import { useCallback, useRef, useState } from "react";
+import { useCallback } from "react";
 import { appConfirm } from "../appConfirm.jsx";
 import {
   borrowedLicenseAcknowledgmentBlocked,
@@ -37,6 +36,8 @@ function confirmPermanentDelete() {
 // Optional refresh overrides retain the hook test/embedding contract. App uses
 // these owned callbacks directly, so it needs no cyclic forwarding refs.
 export function useModelsAndLoras({
+  resident = true,
+  lorasResident = resident,
   token,
   activeProject,
   activeProjectRef,
@@ -47,53 +48,40 @@ export function useModelsAndLoras({
   refreshData: refreshModelsOverride,
   refreshDataWithLoraOverlay: refreshWithLorasOverride,
 }) {
-  const [models, setModels] = useState([]);
-  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
-  const modelCatalogRequestRef = useRef(0);
+  const [models, setModels] = useResidentState([], resident);
+  const [modelCatalogStatus, setModelCatalogStatus] = useResidentState("idle", resident);
 
-  const [loras, setLoras] = useState([]);
+  const [loras, setLoras] = useResidentState([], lorasResident);
   const captureConsentOwner = useConsentRequestOwner(token, models, loras, activeProject?.id);
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across App's
   // SSE-driven re-renders, letting appContextValue memoize.
   const refreshLoras = useProjectScopedList({
-    token, activeProject, activeProjectRef,
+    token, activeProject, activeProjectRef, resident: lorasResident,
     load: (projectId, token, options) => lorasApi.list(projectId ? `?projectId=${encodeURIComponent(projectId)}` : "", token, options),
     setItems: setLoras,
     setError: setLoraError,
     optionalProject: true,
   });
 
-  const refreshModels = useCallback(async ({ signal } = {}) => {
-    const requestId = ++modelCatalogRequestRef.current;
-    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
-    // specifically the cold-start boundary where no availability answer exists yet.
-    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
-    try {
-      const items = await modelsApi.list(token, { signal });
-      if (requestId !== modelCatalogRequestRef.current) {
-        return refreshFailure("stale");
-      }
-      setModels(items);
+  const refreshModelCatalog = useProjectScopedList({
+    token, activeProject, activeProjectRef, resident, optionalProject: true,
+    load: (_projectId, token, options) => modelsApi.list(token, options),
+    setItems: setModels,
+    setError,
+    onStart: () => setModelCatalogStatus((current) => current === "ready" ? current : "loading"),
+    onSuccess: (items) => {
       setModelCatalogStatus("ready");
       void import("../portableModelFacts.js")
         .then(({ rememberModelCatalog }) => rememberModelCatalog(items))
         .catch(() => {});
-      setError("");
-      return refreshSuccess(items);
-    } catch (err) {
-      if (requestId !== modelCatalogRequestRef.current) {
-        return refreshFailure("stale", err);
-      }
-      if (isAbortError(err)) {
-        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
-        return refreshFailure("aborted", err);
-      }
-      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
-      setError(err.message);
-      return refreshFailure("error", err);
-    }
-  }, [token, setError]);
+    },
+    onError: () => setModelCatalogStatus((current) => current === "loading" ? "error" : current),
+    onSettled: ({ ownsRequest, aborted }) => {
+      if (ownsRequest && aborted) setModelCatalogStatus((current) => current === "loading" ? "idle" : current);
+    },
+  });
+  const refreshModels = useCallback((options) => refreshModelCatalog(null, options), [refreshModelCatalog]);
 
   const refreshModelAndLoras = useCallback(async (projectId = activeProjectRef.current?.id) => {
     await Promise.all([
@@ -123,7 +111,7 @@ export function useModelsAndLoras({
       await refreshData();
       return result;
     },
-    [token, setError, refreshData],
+    [token, setError, refreshData, setModels],
   );
 
   // Delete ONE installed quant tier of a model and reclaim its disk (sc-12024). Counterpart to
@@ -170,7 +158,7 @@ export function useModelsAndLoras({
     await refreshDataWithLoraOverlay(activeProject?.id);
     return result;
     },
-    [token, activeProject, setLoraError, refreshDataWithLoraOverlay],
+    [token, activeProject, setLoraError, refreshDataWithLoraOverlay, setLoras],
   );
 
   // Edit a catalog LoRA's trigger keywords / notes after import (epic 10328). Only

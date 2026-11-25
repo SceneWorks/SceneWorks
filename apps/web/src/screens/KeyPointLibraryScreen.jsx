@@ -1,3 +1,4 @@
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import { getMediaTicket, subscribeMediaTicket } from "../api.js";
 import { mediaResponseWithTicketRetry } from "../api/media.js";
@@ -156,27 +157,27 @@ function KeypointCapturePanel({ hidden, onSaved }) {
     setName("");
   }, [invalidate]);
 
-  // A completed extraction whose landmarks + typed name are not yet saved — the
-  // destructive-loss surface (the Key Point Library is GLOBAL, so this survives both a
-  // plain nav round trip AND a project switch under keep-alive; only an explicit discard
-  // or a successful save clears it, sc-11971).
+  // Unsaved captured landmarks need protection before the page is released.
   const hasUnsavedWork = phase === "review" && Boolean(extraction);
 
   // Explicit, desktop-safe discard (sc-11971): confirm via appConfirm before dropping a
   // captured face's landmarks + name, so a review isn't lost on a stray click.
-  const discard = useCallback(async () => {
-    if (hasUnsavedWork) {
-      const ok = await appConfirm({
+  const discardConfirm = useCallback(() => !hasUnsavedWork || appConfirm({
         title: "Discard captured landmarks?",
         message: "Discard the detected face landmarks and the preset name you entered?",
         confirmLabel: "Discard",
         cancelLabel: "Keep editing",
         tone: "danger",
-      });
+      }), [hasUnsavedWork]);
+  usePageLeaveGuard(discardConfirm);
+
+  const discard = useCallback(async () => {
+    if (hasUnsavedWork) {
+      const ok = await discardConfirm();
       if (!ok) return;
     }
     reset();
-  }, [hasUnsavedWork, reset]);
+  }, [discardConfirm, hasUnsavedWork, reset]);
 
   // Stage a source, seed the name, and fire the extraction. `previewUrl` backs the overlay
   // preview; `sourceAssetId` records provenance when the source was an existing asset.
@@ -371,27 +372,27 @@ function KeypointCollectionsPanel({ hidden, presets, collections, collectionsLoa
     setError("");
   }, []);
 
-  // An in-progress (unsaved) collection — a typed name and/or a picked, ordered set — that
-  // a plain nav round trip must preserve (keep-alive) and an explicit Cancel must confirm
-  // before dropping (sc-11971). The Key Point Library is GLOBAL, so this also survives a
-  // project switch.
+  // A collection draft also requires confirmation before leaving its page.
   const hasUnsavedWork = Boolean(name.trim()) || orderedIds.length > 0;
 
   // Explicit, desktop-safe cancel (sc-11971): confirm via appConfirm before discarding an
   // in-progress collection so a composed, ordered set isn't lost on a stray click.
-  const cancelBuilder = useCallback(async () => {
-    if (hasUnsavedWork) {
-      const ok = await appConfirm({
+  const cancelBuilderConfirm = useCallback(() => !hasUnsavedWork || appConfirm({
         title: editingId ? "Discard changes?" : "Discard collection?",
         message: "Discard this in-progress collection? Your name and ordered angle set will be cleared.",
         confirmLabel: "Discard",
         cancelLabel: "Keep editing",
         tone: "danger",
-      });
+      }), [hasUnsavedWork, editingId]);
+  usePageLeaveGuard(cancelBuilderConfirm);
+
+  const cancelBuilder = useCallback(async () => {
+    if (hasUnsavedWork) {
+      const ok = await cancelBuilderConfirm();
       if (!ok) return;
     }
     resetBuilder();
-  }, [hasUnsavedWork, editingId, resetBuilder]);
+  }, [cancelBuilderConfirm, hasUnsavedWork, resetBuilder]);
 
   const startEdit = useCallback((collection) => {
     setEditingId(collection.id);
