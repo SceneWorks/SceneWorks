@@ -528,6 +528,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
   const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
+  const queuedTrainingRequestRef = useRef(null);
   // Subject masks (sc-2126): the saved dataset's /subject-masks report (coverage + per-image status),
   // refetched on dataset version / mask-job completion, replaced by an upload's response.
   const [subjectMasks, setSubjectMasks] = useState(null);
@@ -841,6 +842,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     } catch { /* The existing draft validation and server retain the gate. */ }
   }
   const trainingFeedback = usePortableFeedback("training", trainingRequest, selectedTarget, Boolean(trainingRequest));
+  const trainingRequestKey = trainingRequest ? JSON.stringify(trainingRequest) : null;
   const trainingRefusal = trainingFeedback?.state === "invalid" ? trainingFeedback.refusal : null;
 
   // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
@@ -1208,8 +1210,11 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // the foreground page is released. Data Sets also owns its project-switch guard.
   usePageLeaveGuard(() => {
     if (datasetLibraryMode) return confirmDiscardUnsavedDraft();
+    const queued = queuedTrainingRequestRef.current;
+    const queuedRequestKey = queued?.projectId === activeProject?.id ? queued.requestKey : null;
+    if (trainingRequestKey && trainingRequestKey === queuedRequestKey) return true;
     const defaultPreset = defaultPresetForTarget(trainingPresets, selectedTarget?.id);
-    if (!customizedConfigFields.size && (!selectedTargetId || selectedTargetId === firstTarget?.id) &&
+    if (!queuedRequestKey && !customizedConfigFields.size && (!selectedTargetId || selectedTargetId === firstTarget?.id) &&
         (!selectedPresetId || selectedPresetId === defaultPreset?.id)) return true;
     return appConfirm({ title: "Leave Training Studio?",
       message: "Your customized training configuration will be discarded.",
@@ -2275,6 +2280,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         trainingLane: trainingLaneFromCapabilities(macCapabilities),
       });
       const job = await createTrainingJob(trainingRequest);
+      // Compare with the request captured by this submission, rather than clearing
+      // customization tracking: the user can keep editing while enqueue is pending.
+      if (job?.id) queuedTrainingRequestRef.current = { projectId: activeProject?.id, requestKey: trainingRequestKey };
       setConfigSnapshot(snapshot);
       setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
     } catch (err) {
