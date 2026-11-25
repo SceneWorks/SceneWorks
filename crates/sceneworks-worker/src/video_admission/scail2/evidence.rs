@@ -286,7 +286,7 @@ fn permits_revision(capture: &str, target: &str, backend: Scail2FitBackend) -> b
             // Approve this digest only after reviewing the entire Git delta and matching both
             // closure digests offline. Runtime uses the certified immutable pair.
             const APPROVED: &str =
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570";
+                "9e7a9f3b2c45067551d4a779d426f050c9c20a9c26d88e7d5660138fc6a7d72f";
             approved_pin_coverage(BYTES, APPROVED).unwrap_or_default()
         })
         .iter()
