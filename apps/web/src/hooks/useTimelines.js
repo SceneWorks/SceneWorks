@@ -1,7 +1,8 @@
+import { useResidentState } from "./useResidentState.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { appConfirm } from "../appConfirm.jsx";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { isAbortError } from "../api.js";
 import { timelineRequest } from "../api/timelines.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
@@ -40,6 +41,7 @@ function loadTimelineGeneration() {
 // then the load-on-selection effect) live here, in that order, matching App's prior
 // behavior.
 export function useTimelines({
+  resident = true,
   token,
   activeProject,
   activeProjectRef,
@@ -49,10 +51,10 @@ export function useTimelines({
   setActiveView,
   createVideoJob,
 }) {
-  const [timelines, setTimelines] = useState([]);
-  const [timelinesProjectId, setTimelinesProjectId] = useState(null);
-  const [selectedTimelineId, setSelectedTimelineId] = useState(null);
-  const [activeTimeline, setActiveTimelineState] = useState(null);
+  const [timelines, setTimelines] = useResidentState([], resident);
+  const [timelinesProjectId, setTimelinesProjectId] = useResidentState(null, resident);
+  const [selectedTimelineId, setSelectedTimelineId] = useResidentState(null, resident);
+  const [activeTimeline, setActiveTimelineState] = useResidentState(null, resident);
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
   // sc-11967 (S8): the active timeline survives soft navigation in memory, so the user can
@@ -65,14 +67,31 @@ export function useTimelines({
   // async apply queue and the exposed dirty check read the freshest working copy.
   const savedTimelineSnapshotRef = useRef(null);
   const activeTimelineRef = useRef(null);
+  const residentRef = useRef(resident);
+  const timelineLoadControllerRef = useRef(null);
+  useLayoutEffect(() => {
+    residentRef.current = resident;
+    if (!resident) {
+      selectedTimelineIdRef.current = null;
+      activeTimelineRef.current = null;
+      savedTimelineSnapshotRef.current = null;
+      timelineLoadControllerRef.current?.abort();
+    }
+    return () => {
+      residentRef.current = false;
+      timelineLoadControllerRef.current?.abort();
+    };
+  }, [resident]);
 
   const setActiveTimeline = useCallback((value) => {
+    if (!residentRef.current) return;
     const next = typeof value === "function" ? value(activeTimelineRef.current) : value;
     activeTimelineRef.current = next;
     setActiveTimelineState(next);
-  }, []);
+  }, [setActiveTimelineState]);
 
   function adoptStoredTimeline(stored) {
+    if (!residentRef.current) return false;
     const working = activeTimelineRef.current;
     const base = savedTimelineSnapshotRef.current ? JSON.parse(savedTimelineSnapshotRef.current) : null;
     if (working?.id !== stored.id || !base || base.id !== stored.id) {
@@ -161,7 +180,7 @@ export function useTimelines({
   // re-rendering consumers. The re-select guard (EditorScreen) calls this imperatively.
   const isActiveTimelineDirty = useCallback(() => timelineHasUnsavedEdits(activeTimelineRef.current), []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     selectedTimelineIdRef.current = selectedTimelineId;
   }, [selectedTimelineId]);
 
@@ -180,7 +199,7 @@ export function useTimelines({
   // not part of the context value, so they stay plain function declarations — keeping
   // loadTimeline hoisted for the load-on-selection effect above.
   const refreshTimelines = useProjectScopedList({
-    token, activeProject, activeProjectRef, setError,
+    token, activeProject, activeProjectRef, setError, resident,
     load: (projectId, token, options) => timelineRequest(projectId, null, token, options),
     setItems: setTimelines,
     onSuccess: (items, projectId) => {
@@ -195,14 +214,18 @@ export function useTimelines({
 
   async function loadTimeline(projectId, timelineId) {
     if (
+      !residentRef.current ||
       !isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId) ||
       selectedTimelineIdRef.current !== timelineId
     ) {
       return;
     }
+    timelineLoadControllerRef.current?.abort();
+    const controller = new AbortController();
+    timelineLoadControllerRef.current = controller;
     try {
-      const timeline = await timelineRequest(projectId, timelineId, token);
-      if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
+      const timeline = await timelineRequest(projectId, timelineId, token, { signal: controller.signal });
+      if (controller.signal.aborted || !residentRef.current || activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
         return;
       }
       adoptStoredTimeline(timeline);
@@ -212,6 +235,7 @@ export function useTimelines({
       setError("");
     } catch (err) {
       if (
+        isAbortError(err) || controller.signal.aborted || !residentRef.current ||
         !isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId) ||
         selectedTimelineIdRef.current !== timelineId
       ) {
@@ -232,6 +256,7 @@ export function useTimelines({
           method: "POST",
           body: JSON.stringify(payload),
         });
+        if (!residentRef.current || activeProjectRef.current?.id !== activeProject.id) return created;
         setTimelines((items) => [created, ...items.filter((item) => item.id !== created.id)]);
         setTimelinesProjectId(activeProject.id);
         setSelectedTimelineId(created.id);
@@ -245,7 +270,7 @@ export function useTimelines({
         return null;
       }
     },
-    [token, activeProject, setError, setActiveTimeline],
+    [token, activeProject, activeProjectRef, setError, setActiveTimeline, setTimelines, setTimelinesProjectId, setSelectedTimelineId],
   );
 
   const saveTimeline = useCallback(

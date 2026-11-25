@@ -20,7 +20,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { AudioStudio } from "./AudioStudio.jsx";
-import { KEEP_ALIVE_VIEWS, navSections, viewTitles } from "../App.jsx";
+import { navSections, viewTitles } from "../App.jsx";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 
 beforeEach(() => {
@@ -2034,9 +2034,6 @@ describe("AudioStudio multi-speaker reveal (sc-13676)", () => {
 });
 
 describe("Audio nav registration (sc-13407)", () => {
-  it("registers Audio in KEEP_ALIVE_VIEWS", () => {
-    expect(KEEP_ALIVE_VIEWS.has("Audio")).toBe(true);
-  });
 
   it("registers an Audio view title + blurb", () => {
     expect(viewTitles.Audio).toBeTruthy();

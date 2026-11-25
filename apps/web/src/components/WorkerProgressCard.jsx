@@ -62,13 +62,8 @@ export class PrefixKvCacheDetailBoundary extends React.Component {
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
 export function useLiveJobElapsedSeconds(job) {
   const active = !terminalStatuses.has(job.status) && Boolean(job.startedAt);
-  // sc-11961 (S2): this card renders inside kept-alive studios (Image/Video/Document/
-  // Training/Character). Under keep-alive a studio stays mounted while hidden, so its
-  // in-flight job cards would otherwise keep this 1s timer ticking in the background —
-  // and with several studios visited, several timers would run concurrently. Gate the
-  // interval on the screen being the foreground view. `useScreenActive()` defaults to
-  // true outside a KeepAlivePane, so the OUT screens that render this card (Queue, Model
-  // Manager, Setup Wizard) are unaffected.
+  // Page unmount disposes the timer. Also honor explicit visibility overrides
+  // when a card is embedded in a hidden panel within the active page.
   const screenActive = useScreenActive();
   const [nowMs, setNowMs] = useState(() => Date.now());
 

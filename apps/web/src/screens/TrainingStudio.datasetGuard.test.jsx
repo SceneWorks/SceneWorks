@@ -19,7 +19,6 @@ vi.mock("../appConfirm.jsx", () => ({
 
 import { AppContext } from "../context/AppContext.js";
 import { TrainingDataSetsLibrary } from "./TrainingStudio.jsx";
-import { KEEP_ALIVE_VIEWS } from "../App.jsx";
 
 const datasetOne = { id: "dataset-1", name: "Mira Set", version: 2, characterId: "", items: [] };
 const datasetTwo = { id: "dataset-2", name: "Other Set", version: 1, characterId: "", items: [] };
@@ -90,13 +89,6 @@ describe("TrainingStudio dataset draft guard (sc-11970)", () => {
     vi.restoreAllMocks();
   });
 
-  it("keeps the Train and Data Sets views mounted across plain nav (no prompt path)", () => {
-    // Acceptance #1: keep-alive preserves the draft across plain navigation. Both views are
-    // registered as keep-alive, so the screen is hidden — not unmounted — and no leave prompt
-    // is wired for plain nav (the guard fires only on project switch / opening another dataset).
-    expect(KEEP_ALIVE_VIEWS.has("Train")).toBe(true);
-    expect(KEEP_ALIVE_VIEWS.has("LibraryDataSets")).toBe(true);
-  });
 
   it("does NOT prompt when auto-opening a dataset with no unsaved draft", async () => {
     const context = baseContext();

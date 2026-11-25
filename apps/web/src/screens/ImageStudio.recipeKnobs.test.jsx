@@ -293,6 +293,10 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(choices).toHaveLength(10);
     for (const choice of choices) await click(choice);
     await click(buttonByText("Use Selection"));
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(buttonByText("Generate").disabled).toBe(false);
+    });
     await click(buttonByText("Generate"));
     expect(createImageJob).toHaveBeenCalledTimes(1);
     expect(createImageJob.mock.calls[0][0].referenceAssetIds).toEqual(assets.map(({ id }) => id));
@@ -1356,6 +1360,10 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       }),
     );
 
+    expect(checkbox("Restore face").checked).toBe(true);
+    await act(async () => root.render(null));
+    await render(baseContext({ assets: [reference], characters: [character],
+      imageModels: [poseModel, OTHER_MODEL], models: [poseModel, OTHER_MODEL, PID_CHECKPOINT] }));
     expect(checkbox("Restore face").checked).toBe(true);
   });
 

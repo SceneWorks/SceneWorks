@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../../testUtils/dom.js";
-import { useImageBatchRun } from "./useImageBatchRun.js";
+import { useImageBatchController, useImageBatchRun } from "./useImageBatchRun.js";
 import { validatePortableRequest } from "../../portableValidation.js";
 vi.mock("../../portableValidation.js", () => ({
   validatePortableRequest: vi.fn(async () => ({ state: "valid" })),
@@ -10,7 +10,47 @@ let root, container;
 beforeEach(() => { globalThis.IS_REACT_ACT_ENVIRONMENT = true; ({ root, container } = mountRoot()); });
 afterEach(() => unmountRoot(root, container));
 
+it("continues a bounded batch after Image Studio unmounts and restores progress on return", async () => {
+  vi.mocked(validatePortableRequest).mockResolvedValue({ state: "valid" });
+  const createImageJob = vi.fn(async (request) => ({ id: request.prompt, status: "queued" }));
+  const jobAction = vi.fn();
+  let navigate, updateJobs, start, controller, running;
+  function Page({ backgroundImageBatch }) {
+    ({ runBatch: start } = useImageBatchRun({
+      backgroundImageBatch, activeProject: { id: "project" }, jobs: [], jobAction,
+      preflightError: () => "", setBatchError: vi.fn(), setBatchConfirmPending: vi.fn(),
+      batchTotal: 2, BATCH_RENDER_CAP: 100, batchJobCount: 2, BATCH_ACTIVE_JOB_LIMIT: 1,
+      batchPrompts: ["first", "second"], batchVariables: {}, resolutionOptions: [],
+      structuredPromptModel: false, selectedModel: null,
+      buildBatchJobRequest: (prompt) => ({ prompt, count: 1 }), createImageJob,
+    }));
+    return <span data-page="image">{backgroundImageBatch.batchRunProgress?.done ?? 0}</span>;
+  }
+  function Shell() {
+    const [visible, setVisible] = React.useState(true);
+    const [jobs, setJobs] = React.useState([]);
+    navigate = setVisible;
+    updateJobs = setJobs;
+    controller = useImageBatchController({ activeProject: { id: "project" }, jobs, jobAction });
+    return visible ? <Page backgroundImageBatch={controller} /> : <span data-page="queue" />;
+  }
+  await act(async () => root.render(<Shell />));
+  await act(async () => { running = start(); });
+  expect(createImageJob).toHaveBeenCalledTimes(1);
+  await act(async () => navigate(false));
+  expect(container.querySelector('[data-page="image"]')).toBeNull();
+  await act(async () => updateJobs([{ id: "first", status: "completed" }]));
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(2));
+  await act(async () => { await running; updateJobs([{ id: "first", status: "completed" }, { id: "second", status: "completed" }]); });
+  expect(controller.batchRunProgress).toMatchObject({ total: 2, completed: 2, done: 2 });
+  expect(controller.batchRun.sizes).toEqual({});
+  expect(jobAction).not.toHaveBeenCalled();
+  await act(async () => navigate(true));
+  expect(container.querySelector('[data-page="image"]').textContent).toBe("2");
+});
+
 it("continues the committed project's batch while a different project render suspends", async () => {
+  vi.mocked(validatePortableRequest).mockClear();
   let changeProject, resolveFirst, release, running;
   let ready = false;
   const pending = new Promise((resolve) => { release = () => { ready = true; resolve(); }; });

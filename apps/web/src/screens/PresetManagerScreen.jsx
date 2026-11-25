@@ -1,3 +1,4 @@
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { PresetCard } from "./presets/PresetCard.jsx";
 import { EditorHeadSection } from "./presets/EditorHeadSection.jsx";
@@ -669,13 +670,9 @@ export function PresetManagerScreen() {
     }
   }
 
-  // Guard a DESTRUCTIVE in-screen transition (leave to the list, start a new preset, or
-  // switch to a different preset) that would silently drop an in-progress edit. A clean
-  // form proceeds synchronously — the long-standing no-op path, so nothing that isn't
-  // genuinely dirty ever prompts — while a dirty edit confirms first via the desktop-safe
-  // appConfirm. Plain app navigation is deliberately NOT guarded here: keep-alive
-  // (sc-11959) leaves this screen mounted, so an edit survives a nav round trip untouched
-  // and a nav prompt would be misleading noise (sc-11969).
+  // Navigation and destructive transitions share the same discard confirmation.
+  usePageLeaveGuard(() => !dirty || appConfirm(DISCARD_CONFIRM));
+
   function guardDiscard(proceed) {
     if (!dirty) {
       proceed();

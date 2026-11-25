@@ -1,3 +1,4 @@
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import {
   useMoveToolPanel,
@@ -1769,17 +1770,14 @@ export function ImageEditor() {
     setStatus({ loading: false, error: "" });
   }, [resetHistory, invalidateOpen]);
 
-  // Warn before a browser CLOSE/REFRESH that would drop unsaved edits OR an in-flight AI op
-  // (sc-2434 / sc-8850 / sc-11968). Under keep-alive an in-app navigation away does NOT
-  // unmount this editor (App keeps it resident), so unsaved edits, undo history, and an
-  // in-flight op all SURVIVE the nav and the op's result lands back on return — a plain nav
-  // is non-destructive and shows NO prompt. Only a real unload drops the in-memory state, so
-  // just the beforeunload guard arms here (even when backgrounded). Starting an AI op does
-  // NOT set `dirty` — its result only lands on success — so the guard must also arm while
-  // `aiOp` is non-null, else an unload mid-op silently loses the result. The intentional
-  // lose-work prompts live elsewhere: the explicit Close/Discard button (closeDoc) and the
-  // open-new / flatten confirms, all via the desktop-safe appConfirm dialog.
+  // Both browser unload and navigation release the working canvas. Resolve
+  // dirty edits/in-flight operations before the page can be unmounted.
   const aiOpPending = Boolean(aiOp);
+  usePageLeaveGuard(() => {
+    const message = closeConfirmMessage({ dirty, aiOpPending });
+    return message ? appConfirm({ title: "Leave Image Editor?", message,
+      confirmLabel: "Discard & leave", cancelLabel: "Stay", tone: "danger" }) : true;
+  });
   useEffect(() => {
     const { beforeUnload } = leaveGuardArming({ dirty, aiOpPending });
     if (!beforeUnload) return undefined;

@@ -441,24 +441,23 @@ describe("in-flight AI-op scratch survival (sc-8850)", () => {
   });
 
   it("arms ONLY the beforeunload guard on unsaved work; the in-app nav guard is never armed (sc-11968)", () => {
-    // Under keep-alive an in-app navigation away does NOT unmount the editor, so unsaved
-    // edits and an in-flight op survive the nav (the op's result lands back on return) — a
-    // plain nav is non-destructive and must show NO prompt. The in-app guard is therefore
-    // permanently disarmed (regression guard: old code returned `inApp: true` here, which
-    // surfaced a misleading "you'll lose your work" dialog for work that was NOT lost). Only
-    // a real browser close/refresh drops the in-memory state, so the beforeunload guard still
-    // arms — even when the editor is backgrounded (screenActive is no longer consulted).
 
-    // Dirty: browser-unload guard arms; in-app nav guard never does.
+
+
+
+
+
+
+
     expect(leaveGuardArming({ dirty: true, aiOpPending: false })).toMatchObject({
       beforeUnload: true,
-      inApp: false,
+      inApp: true,
     });
-    // In-flight AI op: browser-unload guard arms (the op's result would be lost on unload);
-    // in-app nav guard never does.
+
+
     expect(leaveGuardArming({ dirty: false, aiOpPending: true })).toMatchObject({
       beforeUnload: true,
-      inApp: false,
+      inApp: true,
     });
     // Clean & idle: neither guard arms.
     expect(leaveGuardArming({ dirty: false, aiOpPending: false })).toMatchObject({

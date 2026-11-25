@@ -1,3 +1,4 @@
+import { usePageDraft, usePageDraftWriter } from "../hooks/usePageDraft.js";
 import { formatResolutionLabel } from "../studioDefaults.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
@@ -180,28 +181,35 @@ export function DocumentStudio() {
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
   );
-  const [model, setModel] = useState("");
+  const saved = usePageDraft("Document", activeProject?.id);
+  const [model, setModel] = useState(saved.model ?? "");
   const selectedModel = interleaveModels.find((item) => item.id === model) ?? interleaveModels[0] ?? null;
-  const [prompt, setPrompt] = useState("");
-  const [quickStart, setQuickStart] = useState(null);
+  const [prompt, setPrompt] = useState(saved.prompt ?? "");
+  const [quickStart, setQuickStart] = useState(saved.quickStart ?? null);
   // Ordered, reorderable storyboard of reference frames. Replaces the flat multi-select:
   // order is significant and preserved on submit (sourceAssetIds = frames in order). Each
   // frame carries an optional reference image + a caption. Captions are a UI aid for
   // structuring the brief — the interleave worker has no per-frame caption field, so they
   // stay client-side (see submit()).
-  const [storyboardFrames, setStoryboardFrames] = useState([]);
-  const [referenceGuidance, setReferenceGuidance] = useState(DEFAULT_INTERLEAVE_IMAGE_GUIDANCE);
-  const [maxImages, setMaxImages] = useState(MAX_IMAGES_DEFAULT);
-  const [resolution, setResolution] = useState(DEFAULT_INTERLEAVE_RESOLUTION);
-  const [systemMessage, setSystemMessage] = useState(DEFAULT_INTERLEAVE_SYSTEM_MESSAGE);
+  const [storyboardFrames, setStoryboardFrames] = useState(saved.storyboardFrames ?? []);
+  const [referenceGuidance, setReferenceGuidance] = useState(saved.referenceGuidance ?? DEFAULT_INTERLEAVE_IMAGE_GUIDANCE);
+  const [maxImages, setMaxImages] = useState(saved.maxImages ?? MAX_IMAGES_DEFAULT);
+  const [resolution, setResolution] = useState(saved.resolution ?? DEFAULT_INTERLEAVE_RESOLUTION);
+  const [systemMessage, setSystemMessage] = useState(saved.systemMessage ?? DEFAULT_INTERLEAVE_SYSTEM_MESSAGE);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [pickerFrameId, setPickerFrameId] = useState(null);
   const [dragIndex, setDragIndex] = useState(null);
   const [dragOverIndex, setDragOverIndex] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  usePageDraftWriter("Document", activeProject?.id, {
+    model, prompt, quickStart, storyboardFrames, referenceGuidance, maxImages, resolution, systemMessage,
+  });
 
   const promptRef = useRef(null);
-  const frameSeq = useRef(0);
+  const frameSeq = useRef(Math.max(0, ...storyboardFrames.map((frame) => {
+    const index = /^frame-(\d+)$/.exec(frame.id);
+    return index ? Number(index[1]) + 1 : 0;
+  })));
   const makeFrame = (caption = "") => ({ id: `frame-${frameSeq.current++}`, assetId: null, caption });
 
   useEffect(() => {

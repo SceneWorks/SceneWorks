@@ -1,7 +1,8 @@
+import { useResidentState } from "./useResidentState.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { voicesApi } from "../api/voicesResources.js";
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 
 // Owns the project's Voice Clone "saved voices" roster + its create/delete mutations (sc-13517).
@@ -11,8 +12,8 @@ import { isCurrentProjectRequest } from "../appStateHelpers.js";
 //
 // Every returned action is useCallback-wrapped with stable deps so appStaticValue can stay memoized
 // across App's SSE-driven re-renders (mirrors the sc-4194 note in useCharacters/useModelsAndLoras).
-export function useSavedVoices({ token, activeProject, activeProjectRef, setError }) {
-  const [savedVoices, setSavedVoices] = useState([]);
+export function useSavedVoices({ token, activeProject, activeProjectRef, setError, resident = true }) {
+  const [savedVoices, setSavedVoices] = useResidentState([], resident);
 
   const isCurrentVoiceRequest = useCallback(
     (projectId) =>
@@ -21,7 +22,7 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
   );
 
   const refreshSavedVoices = useProjectScopedList({
-    token, activeProject, activeProjectRef,
+    token, activeProject, activeProjectRef, resident,
     load: voicesApi.list,
     setItems: setSavedVoices,
     setError: setError,
@@ -58,7 +59,7 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         return null;
       }
     },
-    [token, activeProject, isCurrentVoiceRequest, setError],
+    [token, activeProject, isCurrentVoiceRequest, setError, setSavedVoices],
   );
 
   const deleteSavedVoice = useCallback(
@@ -82,7 +83,7 @@ export function useSavedVoices({ token, activeProject, activeProjectRef, setErro
         return null;
       }
     },
-    [token, activeProject, isCurrentVoiceRequest, setError],
+    [token, activeProject, isCurrentVoiceRequest, setError, setSavedVoices],
   );
 
   const context = useAppDomainValue({

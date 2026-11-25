@@ -1,3 +1,4 @@
+import { usePageDraft, usePageDraftWriter } from "../hooks/usePageDraft.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
@@ -236,13 +237,14 @@ export function VectorStudio() {
     setSelectedAssetId,
     studioLaunch,
   } = useAppContext();
-  const [mode, setMode] = useState("convert_image");
-  const [sourceAssetId, setSourceAssetId] = useState("");
-  const [detail, setDetail] = useState("detailed");
+  const saved = usePageDraft("VectorStudio", activeProject?.id);
+  const [mode, setMode] = useState(saved.mode ?? "convert_image");
+  const [sourceAssetId, setSourceAssetId] = useState(saved.sourceAssetId ?? "");
+  const [detail, setDetail] = useState(saved.detail ?? "detailed");
   const [submissionError, setSubmissionError] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [negativePrompt, setNegativePrompt] = useState("");
-  const [modelIds, setModelIds] = useState({
+  const [prompt, setPrompt] = useState(saved.prompt ?? "");
+  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
+  const [modelIds, setModelIds] = useState(saved.modelIds ?? {
     raster: "",
     vector: "",
     conversion: "",
@@ -264,7 +266,8 @@ export function VectorStudio() {
     (id) => setModelIds((current) => ({ ...current, conversion: id })),
     [],
   );
-  const [replay, setReplay] = useState(null);
+  const [replay, setReplay] = useState(saved.replay ?? null);
+  usePageDraftWriter("VectorStudio", activeProject?.id, { mode, sourceAssetId, detail, prompt, negativePrompt, modelIds, replay });
   const sources = useMemo(
     () => vectorSourceAssets(assets, activeProject?.id),
     [assets, activeProject?.id],

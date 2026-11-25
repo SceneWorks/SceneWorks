@@ -22,6 +22,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { angleModelUsable, downloadOffersFor, poseModelUsable } from "../modelEligibility.js";
 import { DEFAULT_MAC_CAPABILITIES, macAvailableModels } from "../modelEligibility.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { usePageLeaveGuard } from "../hooks/usePageLeaveGuard.js";
 
 const characterTypes = [
   ["person", "Person"],
@@ -370,6 +371,16 @@ export function CharacterStudio() {
   // The last server snapshot we actually pushed into the drafts ({ id, draft,
   // loraEdits }). Lets the effect tell a clean draft from a dirty one on a bump.
   const lastSeededRef = useRef(null);
+  usePageLeaveGuard(() => {
+    const seed = lastSeededRef.current;
+    const dirty = seed
+      ? !draftsEqual(draft, seed.draft) || !loraEditsEqual(loraEdits, seed.loraEdits)
+      : Boolean(draft.name || draft.description);
+    if (!dirty && !lookDraft.name && !lookDraft.description && !referenceAssetIds.length && !loraId) return true;
+    return appConfirm({ title: "Leave Character Studio?",
+      message: "Your unsaved character, look, reference, or LoRA changes will be discarded.",
+      confirmLabel: "Discard", cancelLabel: "Keep editing", tone: "danger" });
+  });
 
   // Seed the editable draft / LoRA edits from the selected character. A genuine
   // identity change (different id) always loads fresh. An `updatedAt` bump on the

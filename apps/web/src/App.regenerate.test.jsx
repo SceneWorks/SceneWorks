@@ -23,7 +23,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-it.each([[true, false, false], [false, false, false], [true, true, false], [false, true, false], [true, true, true], [false, true, true]])("keeps background regeneration on the page (original: %s, MOSS: %s, missing reference: %s)", async (originalAvailable, moss, missingReference) => {
+it.each([[true, false, false], [false, false, false], [true, true, false], [false, true, false], [true, true, true], [false, true, true]]
+  .flatMap((args) => ["Assets", "Queue"].map((page) => [...args, page])))("keeps background regeneration on the page (original: %s, MOSS: %s, missing reference: %s, page: %s)", async (originalAvailable, moss, missingReference, pageLabel) => {
   const model = moss ? "moss_image_base" : "z_image_turbo";
   const recipe = { model, mode: moss ? "edit_image" : "text_to_image", prompt: "lighthouse", seed: 42,
     normalizedSettings: { count: 1, width: 1024, height: 1024 }, rawAdapterSettings: moss ? { steps: 30, referenceAssetIds: ["reference", "reference"], mossImage: { acceleration: "off" }, mossImageEdit: { reference_max_edge: 512, use_kv_cache: true } } : { steps: 14 } };
@@ -33,7 +34,8 @@ it.each([[true, false, false], [false, false, false], [true, true, false], [fals
   const original = { id: "original", projectId: "project-1", type: "image_generate", ...(moss ? { payload: { model, mode: "edit_image", prompt: "lighthouse", width: 1024, height: 1024, count: 1, referenceAssetIds: ["reference", "reference"], advanced: recipe.rawAdapterSettings } } : {}) };
   const reference = { ...asset, id: "reference", recipe: undefined, lineage: {} };
   const requests = [];
-  const jobs = [];
+  const jobs = [{ ...original, status: "completed", createdAt: asset.createdAt, updatedAt: asset.createdAt,
+    result: { assetIds: [asset.id], assets: [asset] } }];
   const draft = JSON.stringify({ model: "z_image_turbo", prompt: "An unfinished studio draft", seed: "999", count: 3 });
   window.localStorage.setItem("sceneworks-studio-image-project-1", draft);
   global.fetch = vi.fn(async (url, options = {}) => {
@@ -43,6 +45,9 @@ it.each([[true, false, false], [false, false, false], [true, true, false], [fals
     if (path.endsWith("/jobs/events/ticket")) return response({ ticket: "test" });
     if (path.endsWith("/projects")) return response([{ id: "project-1", name: "Noir" }]);
     if (path.endsWith("/assets")) return response(moss && !missingReference ? [asset, reference] : [asset]);
+    if (path.endsWith("/assets/image-1")) return response(asset);
+    if (path.endsWith("/assets/reference")) return missingReference
+      ? { ok: false, status: 404, json: async () => ({ error: "missing" }) } : response(reference);
     if (path.endsWith("/models")) return response([{ id: model, name: "Image model", type: "image", family: moss ? "moss-image" : "z-image", conditionalPurposes: { moss_image_edit: { installState: "installed" } } }]);
     if (path.endsWith("/jobs/original")) return response(original);
     if (options.method === "POST" && (path.endsWith("/duplicate") || path.endsWith("/image/jobs"))) {
@@ -57,9 +62,16 @@ it.each([[true, false, false], [false, false, false], [true, true, false], [fals
   });
   await act(async () => root.render(<App />));
   await settle();
-  await act(async () => [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Assets").click());
+  if (pageLabel === "Queue") {
+    await act(async () => [...document.body.querySelectorAll(".nav-item")].find((b) => b.textContent === "Image").click());
+    await settle();
+  }
+  await act(async () => [...document.body.querySelectorAll(".nav-item")].find((b) => b.textContent === pageLabel).click());
   await settle();
-  await act(async () => document.body.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  await act(async () => {
+    if (pageLabel === "Assets") document.body.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    else document.body.querySelector("button.worker-progress-card__thumb-cell").click();
+  });
   await settle();
   const viewer = document.body.querySelector('[role="dialog"]');
   const image = viewer.querySelector("img");

@@ -5,13 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { FakeEventSource, field, response, settle } from "./main.testSupport.jsx";
 
-// sc-11969 (epic 11958, S10): the Preset Manager is a keep-alive screen (sc-11959), so an
-// in-progress preset edit is held in component state and survives a plain nav round trip to
-// another screen and back — untouched, and WITHOUT a discard prompt (leaving is
-// non-destructive under keep-alive; only the editor's in-screen transitions guard). This
-// mounts the FULL <App /> to prove the real mechanism end to end. The destructive-transition
-// guards themselves are unit-tested in screens/PresetManagerScreen.test.jsx.
-describe("Preset Manager keep-alive edit survival (sc-11969)", () => {
+describe("Preset Manager page lifetime", () => {
   let container;
   let root;
 
@@ -49,8 +43,6 @@ describe("Preset Manager keep-alive edit survival (sc-11969)", () => {
     await settle();
   }
 
-  // Click a button by exact visible text. The sidebar renders before the workspace, so a
-  // nav button wins over an identically-labelled inner button.
   async function clickButton(label) {
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent.trim() === label)?.click();
@@ -60,8 +52,7 @@ describe("Preset Manager keep-alive edit survival (sc-11969)", () => {
 
   const editorForm = () => document.body.querySelector(".preset-editor-form");
   const nameInput = () => field(editorForm(), "Name");
-  // The desktop-safe discard confirm (appConfirm → ConfirmHost). A plain in-app nav under
-  // keep-alive must never surface it — leaving is non-destructive (sc-11969).
+
   const confirmDialog = () => document.body.querySelector(".app-confirm-modal");
 
   async function openPresetForEditing() {
@@ -93,14 +84,13 @@ describe("Preset Manager keep-alive edit survival (sc-11969)", () => {
     vi.restoreAllMocks();
   });
 
-  it("preserves an in-progress preset edit across a plain nav round trip, with no prompt", async () => {
+  it("keeps a dirty preset on cancelled navigation, then releases it after confirmed discard", async () => {
     await renderApp();
     await openPresetForEditing();
 
     const editorBefore = editorForm();
     expect(editorBefore).not.toBeNull();
 
-    // Make the edit dirty.
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
       setter.call(nameInput(), "Cinematic Portrait EDITED");
@@ -110,21 +100,21 @@ describe("Preset Manager keep-alive edit survival (sc-11969)", () => {
     expect(nameInput().value).toBe("Cinematic Portrait EDITED");
     expect(document.body.querySelector(".preset-status-pill").textContent).toContain("Unsaved changes");
 
-    // Navigate to an OUT screen (Models unmounts on nav away) and back. A plain nav is
-    // non-destructive under keep-alive, so it must NOT prompt a discard confirm.
     await clickButton("Models");
-    expect(confirmDialog()).toBeNull();
-    expect(document.body.querySelector(".models-surface")).not.toBeNull();
-    // The Preset Manager stays resident (hidden) while another view is active.
-    expect(editorForm()).not.toBeNull();
-
-    await clickButton("Presets");
-    // Returning is likewise silent — no confirm on either leg of the round trip.
-    expect(confirmDialog()).toBeNull();
-    // Same DOM node → never unmounted/remounted…
+    expect(confirmDialog()).not.toBeNull();
     expect(editorForm()).toBe(editorBefore);
-    // …and the in-progress edit is intact with nothing to re-hydrate it from.
+    await clickButton("Keep editing");
+    expect(confirmDialog()).toBeNull();
     expect(nameInput().value).toBe("Cinematic Portrait EDITED");
-    expect(document.body.querySelector(".preset-status-pill").textContent).toContain("Unsaved changes");
+
+    await clickButton("Models");
+    await clickButton("Discard changes");
+    expect(confirmDialog()).toBeNull();
+    expect(editorForm()).toBeNull();
+    expect(document.body.querySelector(".models-surface")).not.toBeNull();
+
+    await openPresetForEditing();
+    expect(editorForm()).not.toBe(editorBefore);
+    expect(nameInput().value).toBe("Cinematic Portrait");
   });
 });

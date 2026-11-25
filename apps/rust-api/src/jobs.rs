@@ -1462,12 +1462,25 @@ async fn validate_merged_job_loras(
     project_id: Option<&str>,
     merged: &mut JsonObject,
     permitted_inline: &[Value],
+    directives: Vec<crate::loras::prompt_directives::Directive>,
 ) -> Result<(), ApiError> {
     // No inline permit (every job but a character test job's replay): one catalog-only pass, which
     // is the create path's own posture.
     if permitted_inline.is_empty() {
-        return validate_job_lora_compatibility(state, project_id, merged, false).await;
+        return validate_job_lora_compatibility_with(
+            state,
+            project_id,
+            merged,
+            false,
+            None,
+            Some(directives),
+        )
+        .await;
     }
+    crate::loras::prompt_directives::resolve_for_inline_replay(
+        state, project_id, merged, directives,
+    )
+    .await?;
     let Some(loras) = merged
         .get("loras")
         .and_then(Value::as_array)
@@ -1638,6 +1651,22 @@ async fn validate_and_canonicalize_merged_generation_payload(
         }
     }
     merged.extend(changes.clone());
+    // Match fresh generation: prompt content (including native-batch equality) is validated
+    // after removing directives, while adapter admission stays at the normal LoRA gate.
+    let mut prompt_loras = if matches!(
+        job_type,
+        JobType::ImageGenerate
+            | JobType::ImageEdit
+            | JobType::ImageDetail
+            | JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        crate::loras::prompt_directives::take_from_payload(&mut merged)
+    } else {
+        Vec::new()
+    };
     if !retry {
         sceneworks_core::options::upgrade::strip_machine_decisions(&mut merged);
     }
@@ -1992,6 +2021,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 project_id.as_deref(),
                 &mut merged,
                 &permitted_inline_loras,
+                std::mem::take(&mut prompt_loras),
             )
             .await?;
             crate::generation::validate_imported_submission(state, &model_id, &merged)?;
@@ -2036,14 +2066,22 @@ async fn validate_and_canonicalize_merged_generation_payload(
             project_id.as_deref(),
             &mut merged,
             &permitted_inline_loras,
+            std::mem::take(&mut prompt_loras),
         )
         .await?;
     }
     if canonical_raw_image {
         crate::model_sources::ensure_runtime_model_sources(state, &job_type, &mut merged).await?;
         if matches!(job_type, JobType::ImageDetail) {
-            validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false)
-                .await?;
+            validate_job_lora_compatibility_with(
+                state,
+                project_id.as_deref(),
+                &mut merged,
+                false,
+                None,
+                Some(std::mem::take(&mut prompt_loras)),
+            )
+            .await?;
         }
         if crate::model_sources::canonical_utility_model_carrier(&job_type) {
             canonical_selection = true;

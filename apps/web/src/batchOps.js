@@ -182,7 +182,8 @@ export function settlePromptBatchRun(run, jobs, observedJobs) {
     }
   }
   if (activeJobIds.length === run.activeJobIds.length) return run;
-  return { ...run, completed, failed, activeJobIds };
+  const sizes = Object.fromEntries(activeJobIds.map((id) => [id, run.sizes?.[id] ?? 1]));
+  return { ...run, completed, failed, activeJobIds, ...(run.sizes ? { sizes } : {}) };
 }
 
 // Progress for a prompt-batch run (sc-9980). It holds scalar totals plus only the bounded

@@ -1,13 +1,25 @@
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { assetSeed } from "../components/assetPanels.jsx";
 import { editModelForAsset, workflowModelType } from "../presetUtils.js";
 import { upsertJobNewest } from "../sorters.js";
 import { ADVANCED_MODE, SIMPLE_MODE } from "../simple/uiMode.js";
+import { modelsApi } from "../api/modelsResources.js";
+import { assetsApi } from "../api/assetsResources.js";
+
+function guardAction(requestPageExit, action) {
+  if (!requestPageExit) return action;
+  return (...args) => {
+    let result;
+    const accepted = requestPageExit(() => { result = action(...args); });
+    return accepted && typeof accepted.then === "function"
+      ? accepted.then((ok) => ok ? result : null) : accepted ? result : null;
+  };
+}
 
 // F-189: extracted from App along its existing concern boundary.
 export function useSendToStudio({
-  setSelectedAssetId, setStudioLaunch, setActiveView, imageModels, setEditorLaunch, uiMode, uiModeLocked, setUiModeOverride, activeProjectRef, stableHydrateLaunchDomains, closePreview, token, requestedGpu, models, assets, confirmWorkflowEmbeddingBeforeGeneration, setJobs
+  setSelectedAssetId, setStudioLaunch, setActiveView, imageModels, setEditorLaunch, uiMode, uiModeLocked, setUiModeOverride, activeProjectRef, stableHydrateLaunchDomains, closePreview, token, requestedGpu, models, assets, confirmWorkflowEmbeddingBeforeGeneration, setJobs, requestPageExit
 }) {
   const sendAssetToImage = useCallback((asset, mode = null) => {
     if (!asset) {
@@ -194,6 +206,8 @@ export function useSendToStudio({
       requestedGpu,
       models,
       assets,
+      loadModels: () => modelsApi.list(token),
+      loadAsset: (id) => assetsApi.item(projectId, id, token),
       beforeCreate: confirmWorkflowEmbeddingBeforeGeneration,
       isCurrentProject: () => activeProjectRef.current?.id === projectId,
       onCreated: (job) => setJobs((items) => upsertJobNewest(items, job)),
@@ -303,5 +317,8 @@ export function useSendToStudio({
     sendCharacterToVideo,
     openDatasetInLibrary
   });
-  return { ...context, launchImageRecipe, sendAssetRecipeToStudio, sendAssetRecipeToQueue, context };
+  const guardedContext = useMemo(() => Object.fromEntries(Object.entries(context).map(([key, action]) =>
+    [key, key === "clearEditorLaunch" ? action : guardAction(requestPageExit, action)])), [context, requestPageExit]);
+  return { ...guardedContext, launchImageRecipe: guardAction(requestPageExit, launchImageRecipe),
+    sendAssetRecipeToStudio: guardAction(requestPageExit, sendAssetRecipeToStudio), sendAssetRecipeToQueue, context: guardedContext };
 }
