@@ -896,11 +896,9 @@ impl ResolvedCacheStore {
             // on a single job submission, against a default budget of 64 GiB — so populating the
             // cache made every submission slower than the load the cache exists to save.
             //
-            // What makes the cheap scan safe is that it is not the last word: `acquire_complete`
-            // re-verifies at full strength under the entry's locks immediately before the lease
-            // that hands bytes to a runtime, and every write validates at full strength. A scan
-            // that offers an entry whose bytes were altered after publication therefore cannot
-            // load it; the lease refuses and the caller falls back to the source tier.
+            // Publication verifies content before marking the bundle complete. Runtime
+            // acquisition trusts that completed state under a lease; explicit maintenance
+            // verification is independent of this availability scan.
             if let Err(error) = validate_complete_metadata_inner(
                 &store,
                 &metadata,
@@ -3460,31 +3458,6 @@ fn validate_metadata_shape_with(
     Ok(())
 }
 
-/// Full-strength validation of a complete entry, with the content re-read gated on a receipt.
-///
-/// sc-21534 established that this is the ONE boundary that must refuse a content-altered bundle,
-/// and it earned that by re-hashing the whole closure. The cost of asking, though, was paid on
-/// every acquisition rather than every change: a 19 GB bundle measured ~61 s of SHA-256 between
-/// "Worker claimed job" and "Preparing N image(s)", on a bundle whose bytes had not moved since the
-/// last job asked the same question and got the same answer.
-///
-/// So the answer is now recorded. A successful content pass stamps the closure's stat identity
-/// (`ClosureFileStat` — bundle-relative path, size, mtime, per file) into the entry's
-/// [`ClosureContentReceipt`] sidecar, and a later acquisition that observes the SAME identity is
-/// entitled to the recorded verdict without re-reading the bytes. Anything else — a receipt that is
-/// absent or unreadable, a file whose size or mtime moved, a closure whose membership changed —
-/// falls straight back to the full re-hash and re-stamps.
-///
-/// What is NOT weakened: the paths-and-sizes pass still runs unconditionally on both branches, so
-/// presence, sizes, confinement, closure shape, artifact identity and `verified_bytes` are proven
-/// at every acquisition exactly as before. The receipt only ever elides re-reading bytes that no
-/// filesystem operation has touched. A write to a bundle file cannot leave both size and mtime
-/// unchanged by accident, which is the drift this boundary exists to catch (see `ClosureFileStat`
-/// for what this does and does not claim).
-///
-/// Every caller holds the entry's metadata lock, which is what makes the read-decide-write below a
-/// single transition rather than three racing ones. Entries that predate receipts simply have none:
-/// their first acquisition after upgrade hashes once, as today, and stamps.
 /// Whether a recorded verdict has stood longer than [`CONTENT_RECEIPT_MAX_AGE_SECONDS`].
 ///
 /// Fails CLOSED in both odd directions. A receipt stamped in the future — a clock that moved
