@@ -462,8 +462,9 @@ pub(crate) struct AdapterIdentity {
 ///
 /// The digest comes from [`super::trusted_lora_hash`] — the same path workflow attribution uses:
 /// the install marker's cached `loraFileSha256` when it still describes this exact file (no
-/// re-hash), otherwise a SHA-256 on a blocking task with the worker heartbeat kept alive (never on
-/// the async executor thread), cached back into the marker. A hashing failure leaves `sha256`
+/// re-hash), otherwise the seal-memoized SHA-256 (`attribution_sha256`) on a blocking task with the
+/// worker heartbeat kept alive (never on the async executor thread), cached back into the marker
+/// when the marker is writable. A hashing failure leaves `sha256`
 /// `None` — attribution, not generation, fails.
 pub(crate) async fn adapter_identities(
     api: &crate::api_client::ApiClient,
@@ -1112,6 +1113,40 @@ mod tests {
         )
         .await;
         assert_eq!(identities[0].sha256.as_deref(), Some(cached.as_str()));
+    }
+
+    /// A read-only install marker (a sealed bundle) cannot take the digest back. Attribution must
+    /// still produce the real digest of the loaded bytes on every job — repeat jobs are served by
+    /// the seal digest memo instead of the marker. (Root can write a read-only file, so this does
+    /// not assert the marker stays untouched; the digest must be right either way.)
+    ///
+    /// *Mutation that reds this:* drop the digest when the marker write fails.
+    #[tokio::test]
+    async fn adapter_identities_hash_correctly_behind_a_read_only_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sealed.safetensors");
+        std::fs::write(&file, b"abc").unwrap();
+        let marker_path = dir.path().join(crate::INSTALL_MARKER);
+        let marker = json!({ "loraFileName": "stale.safetensors" }).to_string();
+        std::fs::write(&marker_path, &marker).unwrap();
+        let mut permissions = std::fs::metadata(&marker_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&marker_path, permissions).unwrap();
+
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        for _ in 0..2 {
+            let identities = identities_for(
+                vec![json!({ "id": "sealed" })],
+                &[AdapterSpec::new(file.clone(), 1.0, AdapterKind::Lora)],
+            )
+            .await;
+            assert_eq!(identities[0].sha256.as_deref(), Some(abc));
+        }
+
+        let mut permissions = std::fs::metadata(&marker_path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&marker_path, permissions).unwrap();
     }
 
     #[test]
