@@ -3852,6 +3852,53 @@ mod base_model_gating_tests {
     }
 
     #[test]
+    fn converted_comfy_h3_with_trainer_metadata_imports_and_passes_preflight() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_trainer_lora(tmp.path(), "community.comfy.safetensors", |header| {
+            header["__metadata__"]
+                .as_object_mut()
+                .unwrap()
+                .remove("ss_h3_lora_token_refiner");
+            let converted = header
+                .iter()
+                .filter(|(key, _)| *key != "__metadata__" && !key.ends_with(".alpha"))
+                .map(|(key, value)| {
+                    let key = key
+                        .replace("lora_unet_blocks_", "diffusion_model.blocks.")
+                        .replace("_attn_qkv_proj", ".attn.qkv_proj")
+                        .replace("_attn_out_proj", ".attn.out_proj")
+                        .replace("_mlp_fc1", ".mlp.fc1")
+                        .replace("_mlp_fc2", ".mlp.fc2")
+                        .replace(".lora_down.weight", ".lora_A.weight")
+                        .replace(".lora_up.weight", ".lora_B.weight");
+                    (key, value.clone())
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(converted.len(), 400);
+            header.retain(|key, _| key == "__metadata__");
+            header.extend(converted);
+        });
+        let path = tmp.path().join("community.comfy.safetensors");
+        let (family, metadata) = inspect_lora_source(path.to_str().unwrap()).unwrap();
+        assert_eq!(family.as_deref(), Some("minimax-h3"));
+        assert_eq!((metadata.rank, metadata.alpha), (Some(16), Some(16.0)));
+        validate_lora_specs_for_model(
+            &minimax_h3_model_fixture(),
+            &[],
+            "minimax_h3",
+            &[json!({
+                "id": "minimax_h3_community_comfy",
+                "installState": "installed",
+                "installedPath": path,
+                "families": ["minimax-h3"],
+            })],
+            true,
+            "LoRA",
+        )
+        .expect("converted trainer metadata must pass generation preflight");
+    }
+
+    #[test]
     fn trainer_namespace_is_classified_at_import_and_accepted_by_h3_preflight() {
         let tmp = tempfile::tempdir().unwrap();
         write_minimax_h3_trainer_lora(tmp.path(), "community.safetensors", |_| {});
