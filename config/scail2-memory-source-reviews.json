@@ -1,7 +1,7 @@
 [
   {
     "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
-    "target_revision": "a27f10cd969f7fa04cbd115d6865336b054da310",
+    "target_revision": "2ea42202b2658476441e0da7447d16ada69d43f0",
     "tree_diff_sha256": "5bc6bce27866d5c08c35869588730e40adab7d13326178284d2e3d6cba8c7f7e",
     "changed_files": [
       "Cargo.lock",
@@ -29,12 +29,13 @@
       "The shared affine repacker retains its output formats: Q4 remains lossless and Q8 retains the existing CPU-upload recipe. The shared quantizer compacts logical views only when required; full contiguous operands retain their allocation and original algorithm. The fixed SCAIL capture uses valid contiguous/affine checkpoint operands, unchanged native formats, resident load policy, and physical axes. Regressions cover byte equality, mixed widths, strided/broadcast views, mutation and repair.",
       "Checkpoint changes attach path/name/layout identities and the request cache to operands. They retain no additional checkpoint tensor storage or device tensors. Value-changing arithmetic clears immutable identity, and aliases share mutation invalidation. Runtime cache publication stages at most one projection of packed GGML bytes on the host; it does not introduce a full-component float copy or alter device residency/activation policy. Cache geometry checks read only already-mapped headers, never weight bytes.",
       "The MLX implementation is unchanged. Its shared-contract digest changes because gen-core adds optional artifact invalidation and incremental borrowed identity hashing. The existing single-slice constructor retains exactly its previous key encoding, covered by a regression. No MLX native memory, model, scheduling, or execution policy changes.",
-      "This is explicit source-compatibility review of this exact immutable pair, not a new physical measurement or a claim about startup duration. Original capture revisions, receipts, host/device bounds, axes and uncertainty remain unchanged. Later inference changes need their own exact review or physical evidence."
+      "This is explicit source-compatibility review of this exact immutable pair, not a new physical measurement or a claim about startup duration. Original capture revisions, receipts, host/device bounds, axes and uncertainty remain unchanged. Later inference changes need their own exact review or physical evidence.",
+      "The landed merge commit has the exact same Git tree as reviewed commit a27f10cd969f7fa04cbd115d6865336b054da310; provider and shared-contract digests and the complete capture-to-target delta are unchanged. This final target is reachable from inference main."
     ]
   },
   {
     "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
-    "target_revision": "a27f10cd969f7fa04cbd115d6865336b054da310",
+    "target_revision": "2ea42202b2658476441e0da7447d16ada69d43f0",
     "tree_diff_sha256": "5bc6bce27866d5c08c35869588730e40adab7d13326178284d2e3d6cba8c7f7e",
     "changed_files": [
       "Cargo.lock",
@@ -62,7 +63,8 @@
       "The shared affine repacker retains its output formats: Q4 remains lossless and Q8 retains the existing CPU-upload recipe. The shared quantizer compacts logical views only when required; full contiguous operands retain their allocation and original algorithm. The fixed SCAIL capture uses valid contiguous/affine checkpoint operands, unchanged native formats, resident load policy, and physical axes. Regressions cover byte equality, mixed widths, strided/broadcast views, mutation and repair.",
       "Checkpoint changes attach path/name/layout identities and the request cache to operands. They retain no additional checkpoint tensor storage or device tensors. Value-changing arithmetic clears immutable identity, and aliases share mutation invalidation. Runtime cache publication stages at most one projection of packed GGML bytes on the host; it does not introduce a full-component float copy or alter device residency/activation policy. Cache geometry checks read only already-mapped headers, never weight bytes.",
       "The MLX implementation is unchanged. Its shared-contract digest changes because gen-core adds optional artifact invalidation and incremental borrowed identity hashing. The existing single-slice constructor retains exactly its previous key encoding, covered by a regression. No MLX native memory, model, scheduling, or execution policy changes.",
-      "This is explicit source-compatibility review of this exact immutable pair, not a new physical measurement or a claim about startup duration. Original capture revisions, receipts, host/device bounds, axes and uncertainty remain unchanged. Later inference changes need their own exact review or physical evidence."
+      "This is explicit source-compatibility review of this exact immutable pair, not a new physical measurement or a claim about startup duration. Original capture revisions, receipts, host/device bounds, axes and uncertainty remain unchanged. Later inference changes need their own exact review or physical evidence.",
+      "The landed merge commit has the exact same Git tree as reviewed commit a27f10cd969f7fa04cbd115d6865336b054da310; provider and shared-contract digests and the complete capture-to-target delta are unchanged. This final target is reachable from inference main."
     ]
   }
 ]

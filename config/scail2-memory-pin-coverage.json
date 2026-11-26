@@ -1,7 +1,7 @@
 [
   {
     "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
-    "target_revision": "a27f10cd969f7fa04cbd115d6865336b054da310",
+    "target_revision": "2ea42202b2658476441e0da7447d16ada69d43f0",
     "backend": "cuda",
     "provider_digest": "570f9ac59173013f2664c6cd2874c56ef8068fd32fdcbd6c64eae133f9811782",
     "shared_contract_digest": "4f17b88d59ab67112f02a3e27a55c6cbb5b48c095242b671e83ce7a07486fb88",
@@ -9,7 +9,7 @@
   },
   {
     "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
-    "target_revision": "a27f10cd969f7fa04cbd115d6865336b054da310",
+    "target_revision": "2ea42202b2658476441e0da7447d16ada69d43f0",
     "backend": "mlx",
     "provider_digest": "f5f17bf1eb3b28856ad5ba60fc7a996f0f66a54b7e99648feed2aef877bc2d57",
     "shared_contract_digest": "4f17b88d59ab67112f02a3e27a55c6cbb5b48c095242b671e83ce7a07486fb88",
