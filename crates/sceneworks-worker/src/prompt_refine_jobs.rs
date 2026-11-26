@@ -1038,6 +1038,13 @@ pub(crate) async fn run_prompt_refine_job(
     // set minimal.
     let emits_json = task.emits_json();
     let is_h3_expand = h3_expand_reply.is_some();
+    let expansion_contract = h3_expand_reply.as_ref().map(|reply| {
+        (
+            reply.workflow,
+            reply.allowed_ratios.clone(),
+            reply.aspect.clone(),
+        )
+    });
     // sc-24113: the blocking closure's image invariant is "this task DECLARES it takes reference
     // images", not "this task is a vision task" — the Qwen rewrite carries images while
     // `is_vision()` is false. Copied out as a bool for the same reason `emits_json` is: so the
@@ -1260,11 +1267,18 @@ pub(crate) async fn run_prompt_refine_job(
                 };
                 let mut kv_cache = Value::Null;
                 let mut final_thinking = request.thinking;
-                let mut output = crate::prompt_content_guard::generate_checked(
+                let (output, recovery) = generate_refine_checked(
                     &mut request,
                     &prompt_exclusions,
                     &job_id,
                     task == RefineTask::ImageDescribe && image_reference_count == 1,
+                    expansion_contract
+                        .as_ref()
+                        .map(|(workflow, allowed_ratios, aspect)| ExpansionContract {
+                            workflow: *workflow,
+                            allowed_ratios,
+                            aspect,
+                        }),
                     |request| {
                         final_thinking = request.thinking;
                         let (output, kv) =
@@ -1273,42 +1287,6 @@ pub(crate) async fn run_prompt_refine_job(
                         Ok(output)
                     },
                 )?;
-                // An expansion whose reasoning used up the whole budget wrote no caption (or not
-                // one whole sentence of it). Rather than fail, ask again on the same resident model
-                // with reasoning off: the schema constraint then applies from the first token, so
-                // the full budget goes to the answer. Whatever the second reply keeps is finalized
-                // the same way (a cut caption is kept to its last whole sentence).
-                let mut recovery = crate::minimax_h3_image_prompt_expand::Recovery::None;
-                if is_h3_expand
-                    && output.finish_reason == Some(gen_core::core_llm::FinishReason::Length)
-                    && crate::minimax_h3_image_prompt_expand::needs_answer_only_retry(&output.text)
-                {
-                    if blocking_cancel.is_cancelled() {
-                        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                    }
-                    tracing::warn!(
-                        event = "minimax_h3_image_expansion_reasoning_exhausted_budget",
-                        job_id = %job_id,
-                        max_new_tokens = request.max_new_tokens,
-                        "MiniMax-H3-Image prompt expansion: the reasoning used the whole budget; \
-                         asking again with reasoning off"
-                    );
-                    let mut retry = answer_only_expansion_request(&request);
-                    output = crate::prompt_content_guard::generate_checked(
-                        &mut retry,
-                        &prompt_exclusions,
-                        &job_id,
-                        false,
-                        |request| {
-                            final_thinking = request.thinking;
-                            let (output, kv) =
-                                generate_refined(refiner, request, &mut on_event, &job_id)?;
-                            kv_cache = kv;
-                            Ok(output)
-                        },
-                    )?;
-                    recovery = crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetry;
-                }
                 // SW-7204: an expansion records what it decoded with.
                 let decode = if is_h3_expand {
                     crate::qwen38_block_draft::decode_record(
@@ -1538,6 +1516,99 @@ pub(crate) fn answer_only_expansion_request(
     retry
 }
 
+/// The existing expansion contract, borrowed only while budget recovery runs.
+#[cfg(any(test, native_lane))]
+struct ExpansionContract<'a> {
+    workflow: crate::minimax_h3_image_prompt_expand::Workflow,
+    allowed_ratios: &'a [String],
+    aspect: &'a gen_core::core_llm::minimax_h3_image_pe::AspectSelection,
+}
+
+/// Recover an expansion's budget against its original request BEFORE the shared editor can
+/// replace the messages or finish reason. Ordinary refinements use the same checked path.
+#[cfg(any(test, native_lane))]
+fn generate_refine_checked(
+    request: &mut gen_core::core_llm::TextLlmRequest,
+    exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
+    job_id: &str,
+    review_pose: bool,
+    mut expansion: Option<ExpansionContract<'_>>,
+    mut generate: impl FnMut(
+        &gen_core::core_llm::TextLlmRequest,
+    ) -> WorkerResult<gen_core::core_llm::TextLlmOutput>,
+) -> WorkerResult<(
+    gen_core::core_llm::TextLlmOutput,
+    crate::minimax_h3_image_prompt_expand::Recovery,
+)> {
+    use crate::minimax_h3_image_prompt_expand as expand;
+    use gen_core::core_llm::FinishReason;
+    debug_assert!(!review_pose || expansion.is_none());
+    let mut recovery = expand::Recovery::None;
+    let output = crate::prompt_content_guard::generate_checked(
+        request,
+        exclusions,
+        job_id,
+        review_pose,
+        |request| {
+            let mut output = generate(request)?;
+            // Only the first native call has the original expansion request and its references.
+            let Some(contract) = expansion.take() else {
+                return Ok(output);
+            };
+            if output.finish_reason == Some(FinishReason::Length)
+                && (!exclusions.is_empty() || expand::needs_answer_only_retry(&output.text))
+            {
+                if request.cancel.is_cancelled() {
+                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+                }
+                let discarded_usage = output.usage;
+                let retry = answer_only_expansion_request(request);
+                output = generate(&retry)?;
+                recovery = expand::Recovery::AnswerOnlyRetry;
+                emit_event(
+                    "minimax_h3_image_expansion_budget_recovery",
+                    json!({
+                        "jobId": job_id, "maxNewTokens": request.max_new_tokens,
+                        "discardedPromptTokens": discarded_usage.prompt_tokens,
+                        "discardedGeneratedTokens": discarded_usage.generated_tokens,
+                        "retryPromptTokens": output.usage.prompt_tokens,
+                        "retryGeneratedTokens": output.usage.generated_tokens,
+                    }),
+                );
+            }
+            if !exclusions.is_empty() && output.finish_reason == Some(FinishReason::Length) {
+                let partial = expand::salvage_truncated_reply(
+                    &output.text,
+                    contract.workflow,
+                    contract.allowed_ratios,
+                    contract.aspect,
+                )
+                .ok_or_else(|| {
+                    WorkerError::Engine(expand::truncated_reply_error(request.max_new_tokens))
+                })?;
+                // Close only the values the existing salvage path actually recovered. Do not invent
+                // a missing ratio. The finalizer retains the truncation notice even if editing stops.
+                let mut object = serde_json::Map::new();
+                object.insert(
+                    "expanded_caption".to_owned(),
+                    Value::from(partial.expanded_caption),
+                );
+                if let Some(ratio) = partial.aspect_ratio {
+                    let key = match contract.workflow {
+                        expand::Workflow::TextToImage => "aspect_ratio",
+                        expand::Workflow::Edit => "target_aspect_ratio",
+                    };
+                    object.insert(key.to_owned(), Value::from(ratio));
+                }
+                output.text = Value::Object(object).to_string();
+                recovery = expand::Recovery::AnswerOnlyRetryWithPartial;
+            }
+            Ok(output)
+        },
+    )?;
+    Ok((output, recovery))
+}
+
 /// Run the refine decode on `refiner` and record the generation's `llm_kv_cache` event whichever
 /// way it ends — completed, or refused, canceled or failed by the engine (sc-20682, sc-20688). A
 /// completed decode returns its output with the block its result carries: the event's own block.
@@ -1559,6 +1630,14 @@ fn generate_refined(
     let output = generation.map_err(|error| {
         WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
     })?;
+    emit_event(
+        "prompt_refine_generation",
+        json!({
+            "jobId": job_id, "thinkingMode": format!("{:?}", request.thinking),
+            "maxNewTokens": request.max_new_tokens, "finishReason": finish_reason_name(output.finish_reason),
+            "promptTokens": output.usage.prompt_tokens, "generatedTokens": output.usage.generated_tokens,
+        }),
+    );
     Ok((output, record.block().clone()))
 }
 

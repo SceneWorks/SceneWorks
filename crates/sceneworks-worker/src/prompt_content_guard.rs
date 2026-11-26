@@ -178,6 +178,123 @@ fn black_white_mode_claim(text: &str, normalized: &str, mode: &str) -> bool {
     false
 }
 
+/// Only hard-reject a trait visibly linked to a human reference in the same clause.
+/// Unlinked/ambiguous wording belongs to the semantic edit, not a context-free word ban.
+fn person_trait_claim(text: &str, term: &str) -> bool {
+    let plural = format!("{term}s");
+    let human = |word: &str| {
+        matches!(
+            word.trim_matches(|c: char| c.is_ascii_digit()),
+            "person"
+                | "people"
+                | "human"
+                | "humans"
+                | "woman"
+                | "women"
+                | "man"
+                | "men"
+                | "boy"
+                | "boys"
+                | "girl"
+                | "girls"
+                | "child"
+                | "children"
+        )
+    };
+    let modifier = |word: &str| {
+        word.chars().all(|c| c.is_ascii_digit())
+            || matches!(
+                word,
+                "s" | "has"
+                    | "have"
+                    | "with"
+                    | "is"
+                    | "are"
+                    | "was"
+                    | "were"
+                    | "looks"
+                    | "appears"
+                    | "a"
+                    | "an"
+                    | "the"
+                    | "of"
+                    | "and"
+                    | "very"
+                    | "her"
+                    | "his"
+                    | "their"
+                    | "short"
+                    | "long"
+                    | "dark"
+                    | "light"
+                    | "black"
+                    | "white"
+                    | "brown"
+                    | "red"
+                    | "gray"
+                    | "grey"
+                    | "blond"
+                    | "blonde"
+                    | "curly"
+                    | "wavy"
+                    | "straight"
+                    | "pale"
+                    | "smooth"
+                    | "fair"
+                    | "deep"
+                    | "tan"
+                    | "tanned"
+                    | "bare"
+                    | "exposed"
+                    | "facial"
+                    | "neck"
+                    | "arm"
+                    | "arms"
+                    | "visible"
+                    | "blue"
+                    | "green"
+            )
+    };
+    text.split(['.', ';', '!', '?', '\n']).any(|clause| {
+        let normalized = normalize_text(clause);
+        let words: Vec<_> = normalized.split_whitespace().collect();
+        words.iter().enumerate().any(|(index, word)| {
+            if *word != term && *word != plural {
+                return false;
+            }
+            let next = words.get(index + 1).copied().unwrap_or("");
+            if matches!(
+                term,
+                "hair" | "skin" | "tattoo" | "tattoos" | "makeup" | "piercing" | "piercings"
+            ) && matches!(
+                next,
+                "salon"
+                    | "salons"
+                    | "studio"
+                    | "studios"
+                    | "clinic"
+                    | "clinics"
+                    | "shop"
+                    | "shops"
+                    | "parlor"
+                    | "parlour"
+                    | "counter"
+                    | "care"
+                    | "artist"
+            ) {
+                return false;
+            }
+            let before = (index.saturating_sub(6)..index).any(|anchor| {
+                human(words[anchor]) && words[anchor + 1..index].iter().all(|w| modifier(w))
+            });
+            let after = (index + 1..words.len().min(index + 5)).any(|anchor| {
+                human(words[anchor]) && words[index + 1..anchor].iter().all(|w| modifier(w))
+            });
+            before || after
+        })
+    })
+}
+
 pub(crate) fn known_leaks(text: &str, exclusions: &[PromptExclusion]) -> Vec<String> {
     if exclusions.is_empty() {
         return Vec::new();
@@ -195,6 +312,8 @@ pub(crate) fn known_leaks(text: &str, exclusions: &[PromptExclusion]) -> Vec<Str
             for term in terms.split_whitespace() {
                 let plural = format!("{term}s");
                 if words.iter().any(|word| *word == term || *word == plural) {
+                    if category == PromptExclusion::IdentifyingCharacteristics
+                        && !parts.iter().any(|part| person_trait_claim(part, term)) { continue; }
                     // A conveyor belt is a room object, not a personal accessory.
                     if term == "belt" && normalized.contains(" conveyor belt ") && !normalized.replace(" conveyor belt ", " ").contains(" belt ") { continue; }
                     leaks.push(term.to_owned());
@@ -271,11 +390,13 @@ const CONTENT_EDIT: &str = "Edit the supplied draft as text with minimal deletio
 
 const CLOTHING_EDIT: &str = "Calling excluded clothing, accessories or worn/carried equipment an object, form, shape, material, covering or something resting on the person still describes it: remove that reference entirely. If an excluded item obscures a body part, retain only the visible body position and that the part is obscured, without describing the occluder.";
 
+const POSE_CONTENT_EDIT: &str = "For this image-derived draft, also apply this precision rule even when other facts are retained verbatim: in environmental or full-body views, remove fine guesses about palm/finger orientation and relative hand offsets. Retain broad arm direction, contact surfaces and meaningful gestures. When a hand contacts a supporting surface, omit extra claims locating that hand relative to the hip, chest or other hand; keep the contact surface itself. Preserve direct contacts such as a hand resting ON the hip and gestures such as a hand held beside the face. Do not relocate hands, invent occlusion, or change any other limb, torso or room facts. Keep fine hand geometry only for an explicitly described, clearly resolved close-up of the hands. Preserve the existing output structure and return only the minimally edited draft.";
+
 /// Reuse the original request, cache, sampling and cancel flag. Visual verification keeps its
 /// images and reasoning; the text-only content edit is answer-only, constrained for JSON drafts.
 /// No second model/load path and no image-buffer clone. Callers record each native generation;
 /// this event adds per-call total usage and the repair count without mislabelling final-pass timings.
-/// Excluded content gets one text-only edit after any visual review. Moving the messages aside
+/// Image precision and selected exclusions get one text-only edit after any visual review. Moving the messages aside
 /// avoids both cloning image buffers and repeatedly drawing an excluded item back into the answer.
 /// At most one visual review, one content edit and two repairs (five generations total).
 pub(crate) fn generate_checked(
@@ -320,10 +441,11 @@ pub(crate) fn generate_checked(
                 .saturating_add(output.usage.generated_tokens);
             let leaks = known_leaks(&output.text, exclusions);
             let pose_review = review_pose && !pose_reviewed && !content_edited;
-            let content_edit = !exclusions.is_empty() && !content_edited && !pose_review;
+            let content_edit =
+                (!exclusions.is_empty() || review_pose) && !content_edited && !pose_review;
             crate::emit_event(
                 "prompt_content_checked",
-                json!({"jobId":job_id,"attempt":attempt,"corrections":corrections,"poseReview":pose_review,"contentEdit":content_edit,"thinkingMode":format!("{:?}",request.thinking),"leaks":leaks,"totalPromptTokens":total.prompt_tokens,"totalGeneratedTokens":total.generated_tokens}),
+                json!({"jobId":job_id,"attempt":attempt,"corrections":corrections,"poseReview":pose_review,"contentEdit":content_edit,"requestThinkingMode":format!("{:?}",request.thinking),"leaks":leaks,"totalPromptTokens":total.prompt_tokens,"totalGeneratedTokens":total.generated_tokens}),
             );
             if content_edit {
                 content_edited = true;
@@ -347,13 +469,18 @@ pub(crate) fn generate_checked(
                 } else {
                     ""
                 };
+                let mut editor_system = format!(
+                    "{CONTENT_EDIT}\n{format}\n{clothing}\n{}",
+                    exclusion_instruction(exclusions)
+                );
+                if review_pose {
+                    editor_system.push('\n');
+                    editor_system.push_str(POSE_CONTENT_EDIT);
+                }
                 visual_messages = Some(std::mem::replace(
                     &mut request.messages,
                     vec![
-                        Message::system(format!(
-                            "{CONTENT_EDIT}\n{format}\n{clothing}\n{}",
-                            exclusion_instruction(exclusions)
-                        )),
+                        Message::system(editor_system),
                         Message::user(format!(
                             "Edit this draft under the selected exclusions:\n{}",
                             draft
@@ -411,7 +538,7 @@ mod tests {
     #[test]
     fn retained_leaks_are_detected_without_matching_anatomy_or_room_objects() {
         for (key, bad) in [
-            (ALL[0], "short dark hair and light skin"),
+            (ALL[0], "A woman with short dark hair and light skin"),
             (ALL[1], "boots beside a saddle with stirrups"),
             (ALL[2], "a high-quality black-and-white print"),
             (ALL[3], "a timeless vintage aesthetic"),
@@ -441,12 +568,36 @@ mod tests {
         }
         assert!(known_leaks("A light bedspread hangs by bare walls.", &[ALL[1]]).is_empty());
         for (key, tags) in [
-            (ALL[0], "black_hair"),
+            (ALL[0], "1girl, black_hair"),
             (ALL[1], "black_boots"),
             (ALL[2], "black_and_white"),
             (ALL[3], "photographic_style"),
         ] {
             assert!(!known_leaks(tags, &[key]).is_empty());
+        }
+    }
+
+    #[test]
+    fn trait_checks_keep_animals_and_businesses_but_reject_direct_human_traits() {
+        for allowed in [
+            "An adult elephant stands beside a calf.",
+            "A hair salon with a skin care counter and a tattoo studio.",
+            "A woman visits a hair salon beside a skin clinic.",
+            "A woman stands beside an adult elephant.",
+            "A woman brushes a blonde horse.",
+            "A woman has a calf with light skin.",
+        ] {
+            assert!(known_leaks(allowed, &[ALL[0]]).is_empty(), "{allowed}");
+        }
+        for excluded in [
+            "An adult woman stands beside a calf.",
+            "The woman has short dark hair.",
+            "The man's skin is pale.",
+            "A tattooed man stands in a salon.",
+            "woman_1 with light skin",
+            "1girl, black_hair",
+        ] {
+            assert!(!known_leaks(excluded, &[ALL[0]]).is_empty(), "{excluded}");
         }
     }
 
@@ -519,7 +670,7 @@ mod tests {
                     .flat_map(|m| &m.content)
                     .filter(|c| matches!(c, Content::Image(_)))
                     .count(),
-                1
+                usize::from(calls <= 2)
             );
             Ok(TextLlmOutput {
                 text: mixed.to_owned(),
@@ -527,16 +678,18 @@ mod tests {
             })
         })
         .unwrap();
-        assert_eq!(calls, 2);
+        assert_eq!(calls, 3);
         assert_eq!(output.text, mixed);
     }
 
     #[test]
     fn visual_verification_covers_a_hand_position_without_a_forearm_or_gaze_keyword() {
         let mut request = image_request();
+        request.constraint = None;
         let mut answers = VecDeque::from([
             "Hands are planted on the mattress beside the hips.",
-            "Both arms extend down; hand contact is obscured by the near edge.",
+            "Both arms extend down; hands on the bed near the hips.",
+            "Both arms extend down; hands on the bed.",
         ]);
         let output = generate_checked(&mut request, &[], "fixture", true, |_| {
             Ok(TextLlmOutput {
@@ -545,11 +698,42 @@ mod tests {
             })
         })
         .unwrap();
-        assert_eq!(
-            output.text,
-            "Both arms extend down; hand contact is obscured by the near edge."
-        );
+        assert_eq!(output.text, "Both arms extend down; hands on the bed.");
         assert!(answers.is_empty());
+    }
+
+    #[test]
+    fn image_precision_edit_keeps_direct_contacts_and_gestures_and_restores_images() {
+        for exclusions in [vec![], vec![ALL[1]]] {
+            let mut request = image_request();
+            request.constraint = None;
+            let draft =
+                "A person stands with one hand on the hip and the other held beside the face.";
+            let mut calls = 0;
+            let output = generate_checked(&mut request, &exclusions, "fixture", true, |r| {
+                calls += 1;
+                if calls == 3 {
+                    let system = format!("{:?}", r.messages[0]);
+                    assert!(system.contains("Preserve direct contacts"));
+                    assert!(system.contains("hand resting ON the hip"));
+                    assert!(system.contains("hand held beside the face"));
+                    assert!(r
+                        .messages
+                        .iter()
+                        .flat_map(|m| &m.content)
+                        .all(|c| !matches!(c, Content::Image(_))));
+                }
+                Ok(TextLlmOutput {
+                    text: draft.to_owned(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+            assert_eq!(calls, 3);
+            assert_eq!(output.text, draft);
+            assert_eq!(request.messages.len(), 1);
+            assert!(matches!(request.messages[0].content[0], Content::Image(_)));
+        }
     }
 
     #[test]
@@ -712,6 +896,7 @@ mod tests {
                 assert!(system.contains("Retain unselected categories"));
                 assert!(system.contains("Do not introduce JSON"));
                 assert!(!system.contains(CLOTHING_EDIT));
+                assert!(!system.contains(POSE_CONTENT_EDIT));
                 assert!(!system.contains("Output only the edited JSON"));
             }
             Ok(TextLlmOutput {

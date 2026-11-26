@@ -18,11 +18,27 @@ fn parsed_or_recovered_fields_cannot_bypass_selected_exclusions() {
         (Style, "style", "high contrast"),
         (ClothingAndAccessories, "pose", "boots extend backward"),
         (ColorMode, "lighting", "black-and-white print"),
-        (IdentifyingCharacteristics, "description", "short dark hair"),
+        (
+            IdentifyingCharacteristics,
+            "description",
+            "a woman with short dark hair",
+        ),
     ] {
         let fields = parse_described_fields(&reply(&[(key, json!(value))])).unwrap();
         assert!(check_described_exclusions(fields.clone(), &[]).is_ok());
         assert!(check_described_exclusions(fields, &[category]).is_err());
+    }
+    for allowed in [
+        "An adult elephant stands beside a calf.",
+        "A woman visits a hair salon.",
+    ] {
+        let raw = reply(&[("description", json!(allowed))]);
+        for fields in [
+            parse_described_fields(&raw).unwrap(),
+            parse_lenient_described_fields(&raw).unwrap(),
+        ] {
+            assert!(check_described_exclusions(fields, &[IdentifyingCharacteristics]).is_ok());
+        }
     }
 }
 

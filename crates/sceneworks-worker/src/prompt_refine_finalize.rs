@@ -45,7 +45,8 @@ pub(super) async fn finalize_refine_job(
     // again with reasoning off, `Recovery::AnswerOnlyRetry`). Only a reply with no caption at all is
     // an error.
     let truncated_expansion = match &h3_expand {
-        Some(reply) if output.finish_reason == Some(gen_core::core_llm::FinishReason::Length) => {
+        Some(reply) if output.finish_reason == Some(gen_core::core_llm::FinishReason::Length)
+            || reply.recovery == crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetryWithPartial => {
             let partial = crate::minimax_h3_image_prompt_expand::salvage_truncated_reply(
                 &output.text,
                 reply.workflow,
@@ -425,6 +426,25 @@ mod tests {
             .find(|(_, body)| body["status"] == "completed")
             .map(|(_, body)| body["result"].clone())
             .expect("a completed result"))
+    }
+
+    #[tokio::test]
+    async fn an_edited_partial_keeps_truncation_without_mislabeling_the_edit_finish() {
+        let result = finalize_expansion(
+            gen_core::core_llm::TextLlmOutput {
+                text: r#"{"expanded_caption":"A person kneels on a bed."}"#.to_owned(),
+                finish_reason: Some(gen_core::core_llm::FinishReason::Stop),
+                ..Default::default()
+            },
+            crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetryWithPartial,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["refinedPrompt"], "A person kneels on a bed.");
+        assert_eq!(result["rewriteSuggestion"]["truncated"], true);
+        assert_eq!(result["rewriteSuggestion"]["reasoningSkipped"], true);
+        assert!(result["rewriteSuggestion"].get("whRatio").is_none());
+        assert_eq!(result["generation"]["finishReason"], "stop");
     }
 
     /// A reply the budget cut off inside its caption completes with the caption up to its last
