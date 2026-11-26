@@ -61,7 +61,10 @@ test("Krea candidate fingerprints must belong to one exact reviewed source set",
 test("the current Krea linked-source checkout matches the reviewed candidate", async () => {
   const source = await Promise.all(LINKED_SOURCE_FILES.map((file) => readFile(new URL(`../${file}`, import.meta.url), "utf8")));
   const fingerprints = source.map((bytes) => sha256(bytes.replaceAll("\r\n", "\n")));
-  assert.equal(reviewedKreaLinkedSourceCandidate(fingerprints), "468000983b90f3ffe0004777d3adfeda3679ce01");
+  assert.equal(reviewedKreaLinkedSourceCandidate(fingerprints), "14025270f2d790b7980ddbb6360a6e168dc51ccf");
+  for (let i = 0; i < fingerprints.length; i++) {
+    assert.throws(() => reviewedKreaLinkedSourceCandidate(fingerprints.with(i, "0".repeat(64))), /one reviewed source set/);
+  }
 });
 
 test("paired Krea Actions fetch only the four frozen repair paths on both hosts", async () => {

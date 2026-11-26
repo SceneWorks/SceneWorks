@@ -503,6 +503,23 @@ impl ResolvedModelArtifact {
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<(), ArtifactContractError> {
         check().map_err(|error| ArtifactContractError(error.to_string()))?;
+        self.validate_metadata()?;
+        match &self.location {
+            ArtifactLocation::SourceLibrary { root } => {
+                self.closure
+                    .source_file_locations_with_check(&self.identity, root, check)?;
+                check().map_err(|error| ArtifactContractError(error.to_string()))?;
+                Ok(())
+            }
+            ArtifactLocation::ResolvedLocal { root } => {
+                self.closure.validate_at_root_with_check(root, check)
+            }
+        }
+    }
+
+    /// Check the saved contract and closure without opening or inspecting model files.
+    /// Completed cache loads use this after atomic publication has established their contents.
+    pub(crate) fn validate_metadata(&self) -> Result<(), ArtifactContractError> {
         if self.schema_version != MODEL_ARTIFACT_CONTRACT_VERSION {
             return Err(ArtifactContractError(format!(
                 "unsupported model artifact contract version {}",
@@ -526,17 +543,7 @@ impl ResolvedModelArtifact {
                 "artifact is not complete and runtime-loadable".to_owned(),
             ));
         }
-        match &self.location {
-            ArtifactLocation::SourceLibrary { root } => {
-                self.closure
-                    .source_file_locations_with_check(&self.identity, root, check)?;
-                check().map_err(|error| ArtifactContractError(error.to_string()))?;
-                Ok(())
-            }
-            ArtifactLocation::ResolvedLocal { root } => {
-                self.closure.validate_at_root_with_check(root, check)
-            }
-        }
+        self.closure.validate_canonical()
     }
 
     /// Every invariant [`Self::validate`] proves EXCEPT the content re-read: version, identity,
@@ -550,12 +557,9 @@ impl ResolvedModelArtifact {
     /// with the artifact's size. Measured on a 5.65 GB bundle, this pass alone was ~175 s per job
     /// submission (sc-19712 F-3 residue), and it scales to the 64 GiB default cache budget.
     ///
-    /// Content identity is proven where it is load-bearing, at the lease boundary:
-    /// `ResolvedCacheStore::acquire_complete`, `ModelArtifactResolver::acquire_runtime_lease`
-    /// (which calls [`Self::validate`] in full), and the full-strength journal write that stamps
-    /// usage. An artifact this function admits can still be refused there, and the caller then
-    /// falls back to the source tier — so a bundle altered after publication is never loaded.
-    /// Do not use this in place of [`Self::validate`] on any path that precedes a load.
+    /// Publication proves content before the entry becomes complete. Normal cache acquisition
+    /// trusts that completed state and leases it without repeating this file scan. This helper
+    /// remains available for discovery and maintenance.
     pub fn validate_paths_and_sizes(&self) -> Result<(), ArtifactContractError> {
         let mut paths_only = self.clone();
         for member in &mut paths_only.closure.members {
@@ -858,11 +862,8 @@ impl ModelArtifactResolver {
         self.acquire_runtime_lease_prevalidated(artifact)
     }
 
-    /// [`Self::acquire_runtime_lease`] minus the full-content `validate()`, for the ONE caller
-    /// that has just proven the artifact itself: `ResolvedCacheStore::acquire_complete` validates
-    /// at full strength under the entry's artifact+metadata locks immediately before leasing, in
-    /// the same call — so a second full hash here re-read the whole bundle without closing any
-    /// window (sc-21534). Every other caller must use [`Self::acquire_runtime_lease`].
+    /// Acquire a lease for a completed cache entry already validated at publication.
+    /// The caller holds the store's artifact and journal locks; model files are loaded directly.
     pub(crate) fn acquire_runtime_lease_prevalidated(
         &self,
         artifact: &Arc<ResolvedModelArtifact>,

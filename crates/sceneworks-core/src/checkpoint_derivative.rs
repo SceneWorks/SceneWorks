@@ -375,9 +375,8 @@ impl CheckpointDerivativeStore {
 
     /// Lease a published derivative for the life of a load.
     ///
-    /// The lease is the store's own: it re-hashes the bundle under the entry's locks before
-    /// handing it over, and it holds the shared artifact lock, which is exactly what makes the
-    /// entry unevictable while it is in use.
+    /// The shared store trusts completed publication and holds the artifact lock, keeping the
+    /// entry unevictable while it is in use. Acquisition does not re-hash the bundle.
     pub fn acquire(
         &self,
         resolved: &ResolvedCheckpointV1,

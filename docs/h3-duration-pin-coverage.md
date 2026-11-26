@@ -1,14 +1,18 @@
-# SCAIL-2 coverage across the H3 duration pin
+# SCAIL-2 coverage across the combined inference pin
 
-The application moves from `8754126942f51043f5d5b803cf69e8e32bff857f` to
-`154983e5bc0b6eff2cb82f3fbc3f6bba4eb2f217`, delivered by inference PR #1512.
-The packaged physical captures keep their original revisions, receipts, bounds and hardware axes.
-The two exact-pair entries in `config/scail2-memory-pin-coverage.json` preserve their use for
-this target on MLX and CUDA. They do not qualify any later pin.
+The application pins `6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8`, the inference merge
+containing both the shared runtime-cache fix and H3 duration support from inference PR #1512.
+The packaged physical captures retain their original
+`8754126942f51043f5d5b803cf69e8e32bff857f` revision, receipts, bounds and hardware axes.
 
-The complete source-tree delta has SHA-256
-`d6903458a0f89bd35f9d28afdec52d051a6fa508aaad4a916f765fb3b9b691ee` (the raw Git tree diff format used by
-`scripts/scail2-fit-pin-coverage.mjs`). It contains only these files:
+The canonical records in `config/scail2-memory-source-reviews.json` review the complete
+25-file capture-to-target delta for MLX and CUDA, including both old and new provider and
+shared-contract hashes. The runtime certificates in `config/scail2-memory-pin-coverage.json`
+cover only that immutable pair and backend; later pins are not implicitly qualified.
+
+The cache delta to `2ea42202b2658476441e0da7447d16ada69d43f0` was already reviewed on main
+in PR #3493. It preserves native formats, shapes, scheduling, residency and allocation policy.
+The additional delta from that revision to the combined target contains only:
 
 - `crates/contracts/gen-core-h3/src/h3_memory.rs`
 - `crates/contracts/gen-core-h3/src/veda/workspace.rs`
@@ -22,27 +26,19 @@ The complete source-tree delta has SHA-256
 - `scripts/check-workspace.py`
 - `scripts/tests/test_check_workspace.py`
 
-Review of the entire delta confirms:
+Executable changes in this additional delta are confined to H3 temporal geometry, duration
+validation and H3 memory admission. The H3 Veda workspace change is test-only. No SCAIL-2
+provider, fit contract, kernel, decoder, allocation strategy or execution policy changes.
 
-- Executable changes are confined to H3 temporal geometry, duration validation and H3 memory
-  admission. `gen-core/src/h3_memory.rs` is an H3-only module; its exports and frame limits are
-  not SCAIL-2 allocation inputs. The H3 Veda workspace change is test-only.
-- Neither SCAIL-2 provider, its fit contract, allocation policy, kernel, weight loader, decoder,
-  build input, toolchain nor dependency lock changes. No shared request structure changes.
-- The remaining changes are H3 tests, comments, and repository geometry/tooling guards.
+Broad crate-level hashes include H3 source files and therefore change. The source reviews
+record the actual target hashes and full Git tree-diff digest; they do not assert equal hashes
+or new physical measurements. The existing exact-pair and approved-index checks remain active.
 
-The broad crate-level provider and shared-contract hashes do change because they include H3
-source files. This is a source-reviewed compatibility qualification, not a claim that those
-broad hashes are equal. The generic certificate generator conservatively refuses such changes;
-its comparison-only mode supplied both source and target hashes for this review.
-The existing runtime exact-pair and approved-index checks remain unchanged.
-
-Reproduce the comparison without running model inference:
+Reproduce and authenticate each canonical source review using the existing tool:
 
 ```powershell
-node scripts/scail2-fit-pin-coverage.mjs INFERENCE_REPO 8754126942f51043f5d5b803cf69e8e32bff857f 154983e5bc0b6eff2cb82f3fbc3f6bba4eb2f217 mlx
-node scripts/scail2-fit-pin-coverage.mjs INFERENCE_REPO 8754126942f51043f5d5b803cf69e8e32bff857f 154983e5bc0b6eff2cb82f3fbc3f6bba4eb2f217 cuda
+node scripts/scail2-fit-pin-coverage.mjs INFERENCE_REPO 8754126942f51043f5d5b803cf69e8e32bff857f 6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8 mlx b1240ff79fb6e856eceed280d16ec9f23ff657fda1a7f2a2a4d352c3329bdcc5
+node scripts/scail2-fit-pin-coverage.mjs INFERENCE_REPO 8754126942f51043f5d5b803cf69e8e32bff857f 6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8 cuda b1240ff79fb6e856eceed280d16ec9f23ff657fda1a7f2a2a4d352c3329bdcc5
 ```
 
-The certificates record the target hashes returned by those commands. No physical measurement
-or historical calibration record was rewritten, and no new measurement is claimed.
+No physical measurement or historical calibration record was rewritten.
