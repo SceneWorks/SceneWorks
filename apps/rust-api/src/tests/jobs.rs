@@ -18624,9 +18624,7 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
         }
     };
 
-    // 15.0 s: the reference ADVERTISES it and the lattice cannot reach it (the next rung, 362
-    // frames, is 15.083 s). Refused rather than silently delivered as 14.375 — which is exactly
-    // what sc-17147 was doing.
+    // 21 s exceeds the extended 481-frame ceiling and must be refused rather than shortened.
     let (status, over) = submit("minimax_h3", json!({ "duration": 21.0 })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
