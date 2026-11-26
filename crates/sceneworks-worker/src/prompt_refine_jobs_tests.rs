@@ -3029,8 +3029,8 @@ fn expansion_budget_recovery_precedes_exclusion_editing_with_original_references
     use crate::minimax_h3_image_prompt_expand::{Recovery, Workflow};
     use gen_core::core_llm::minimax_h3_image_pe::AspectSelection;
     use gen_core::core_llm::{
-        Constraint, Content, FinishReason, ImageRef, Message, Role, TextLlmOutput, TextLlmRequest,
-        ThinkingMode,
+        Constraint, Content, FinishReason, ImageRef, JsonSchema, Message, Role, TextLlmOutput,
+        TextLlmRequest, ThinkingMode,
     };
     use sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories;
     for (retry_text, retry_finish, expected_recovery) in [
@@ -3061,7 +3061,17 @@ fn expansion_budget_recovery_precedes_exclusion_editing_with_original_references
             4096,
         );
         request.thinking = ThinkingMode::Enabled;
-        request.constraint = Some(Constraint::Json);
+        let original_schema = JsonSchema::compile(&json!({
+            "type": "object",
+            "properties": {
+                "expanded_caption": {"type": "string"},
+                "aspect_ratio": {"type": "string", "enum": ["9:16"]}
+            },
+            "required": ["expanded_caption", "aspect_ratio"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        request.constraint = Some(Constraint::JsonSchema(original_schema.clone()));
         let ratios = vec!["9:16".to_owned()];
         let aspect = AspectSelection::Adaptive;
         let mut calls = 0;
@@ -3119,6 +3129,23 @@ fn expansion_budget_recovery_precedes_exclusion_editing_with_original_references
                 } else {
                     r#"{"expanded_caption":"A person kneels.","aspect_ratio":"9:16"}"#
                 };
+                let Some(Constraint::JsonSchema(schema)) = &r.constraint else {
+                    panic!("the editor must keep a schema for the recovered fields");
+                };
+                assert!(schema.accepts(text));
+                if retry_finish == FinishReason::Length {
+                    assert!(!schema.accepts(
+                        r#"{"expanded_caption":"A person kneels.","aspect_ratio":"9:16"}"#
+                    ));
+                    assert!(!schema.source()["properties"]
+                        .as_object()
+                        .unwrap()
+                        .contains_key("aspect_ratio"));
+                } else {
+                    assert!(!schema.accepts(
+                        r#"{"expanded_caption":"A person kneels.","aspect_ratio":"1:1"}"#
+                    ));
+                }
                 Ok(TextLlmOutput {
                     text: text.to_owned(),
                     finish_reason: Some(FinishReason::Stop),
@@ -3133,6 +3160,10 @@ fn expansion_budget_recovery_precedes_exclusion_editing_with_original_references
         assert!(!output.text.contains("boots"));
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.thinking, ThinkingMode::Enabled);
+        assert_eq!(
+            request.constraint,
+            Some(Constraint::JsonSchema(original_schema))
+        );
     }
 }
 

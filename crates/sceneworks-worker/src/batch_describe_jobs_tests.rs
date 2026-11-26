@@ -70,6 +70,18 @@ fn parsed_or_recovered_fields_cannot_bypass_selected_exclusions() {
             assert!(check_described_exclusions(fields, &[IdentifyingCharacteristics]).is_ok());
         }
     }
+    for allowed in [
+        "A coat of peeling paint covers the wall.",
+        "A belt of trees borders the field beside a conveyor belt.",
+    ] {
+        let raw = reply(&[("environment", json!(allowed))]);
+        for fields in [
+            parse_described_fields(&raw).unwrap(),
+            parse_lenient_described_fields(&raw).unwrap(),
+        ] {
+            assert!(check_described_exclusions(fields, &[ClothingAndAccessories]).is_ok());
+        }
+    }
 }
 
 // ── The describing prompt ─────────────────────────────────────────────────────────────────────

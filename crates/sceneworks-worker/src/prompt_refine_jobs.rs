@@ -43,7 +43,7 @@ use finalize::{finalize_refine_job, RefineCompletion};
 // Llama seam with no conversion (stock bf16, ~16GB). Overridable per-job via `payload.model`.
 #[cfg(native_lane)]
 const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
-#[cfg(native_lane)]
+#[cfg(any(test, native_lane))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
 // Output-length cap. The two caption tasks (magic-prompt + image_caption) emit a full Ideogram JSON
 // caption — multi-element, with bboxes, #RRGGBB palettes and (since sc-8199) optional per-element

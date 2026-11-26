@@ -295,6 +295,87 @@ fn person_trait_claim(text: &str, term: &str) -> bool {
     })
 }
 
+/// Resolve common environmental senses per occurrence, so a permitted phrase cannot mask a
+/// separate garment/accessory mention in the same answer. Ambiguous prose still gets the edit.
+fn clothing_term_claim(text: &str, term: &str) -> bool {
+    let plural = format!("{term}s");
+    text.split(['.', ';', '!', '?', '\n']).any(|clause| {
+        let normalized = normalize_text(clause);
+        let words: Vec<_> = normalized.split_whitespace().collect();
+        words.iter().enumerate().any(|(index, word)| {
+            if *word != term && *word != plural {
+                return false;
+            }
+            let following = &words[index + 1..];
+            let of_object = || {
+                (following.first() == Some(&"of"))
+                    .then(|| {
+                        following.iter().skip(1).take(4).find(|word| {
+                            ![
+                                "a",
+                                "the",
+                                "peeling",
+                                "weathered",
+                                "chipped",
+                                "flaking",
+                                "fresh",
+                                "old",
+                                "dense",
+                                "thick",
+                                "tall",
+                                "green",
+                                "blue",
+                                "white",
+                                "red",
+                                "black",
+                                "brown",
+                                "gray",
+                                "grey",
+                            ]
+                            .contains(word)
+                        })
+                    })
+                    .flatten()
+            };
+            let environmental = match term {
+                "coat" => of_object().is_some_and(|word| {
+                    [
+                        "paint", "plaster", "varnish", "wax", "dust", "snow", "frost", "ice",
+                        "rust",
+                    ]
+                    .contains(word)
+                }),
+                "belt" => {
+                    index.checked_sub(1).is_some_and(|before| {
+                        [
+                            "conveyor",
+                            "drive",
+                            "timing",
+                            "fan",
+                            "asteroid",
+                            "radiation",
+                        ]
+                        .contains(&words[before])
+                    }) || of_object().is_some_and(|word| {
+                        [
+                            "trees",
+                            "forest",
+                            "woodland",
+                            "vegetation",
+                            "greenery",
+                            "mountains",
+                            "asteroids",
+                        ]
+                        .contains(word)
+                    })
+                }
+                _ => false,
+            };
+            !environmental
+        })
+    })
+}
+
 pub(crate) fn known_leaks(text: &str, exclusions: &[PromptExclusion]) -> Vec<String> {
     if exclusions.is_empty() {
         return Vec::new();
@@ -314,8 +395,8 @@ pub(crate) fn known_leaks(text: &str, exclusions: &[PromptExclusion]) -> Vec<Str
                 if words.iter().any(|word| *word == term || *word == plural) {
                     if category == PromptExclusion::IdentifyingCharacteristics
                         && !parts.iter().any(|part| person_trait_claim(part, term)) { continue; }
-                    // A conveyor belt is a room object, not a personal accessory.
-                    if term == "belt" && normalized.contains(" conveyor belt ") && !normalized.replace(" conveyor belt ", " ").contains(" belt ") { continue; }
+                    if category == PromptExclusion::ClothingAndAccessories
+                        && !parts.iter().any(|part| clothing_term_claim(part, term)) { continue; }
                     leaks.push(term.to_owned());
                 }
             }
@@ -392,6 +473,27 @@ const CLOTHING_EDIT: &str = "Calling excluded clothing, accessories or worn/carr
 
 const POSE_CONTENT_EDIT: &str = "For this image-derived draft, also apply this precision rule even when other facts are retained verbatim: in environmental or full-body views, remove fine guesses about palm/finger orientation and relative hand offsets. Retain broad arm direction, contact surfaces and meaningful gestures. When a hand contacts a supporting surface, omit extra claims locating that hand relative to the hip, chest or other hand; keep the contact surface itself. Preserve direct contacts such as a hand resting ON the hip and gestures such as a hand held beside the face. Do not relocate hands, invent occlusion, or change any other limb, torso or room facts. Keep fine hand geometry only for an explicitly described, clearly resolved close-up of the hands. Preserve the existing output structure and return only the minimally edited draft.";
 
+/// A recovered JSON draft can omit fields whose tokens were never reached. Keep the original
+/// constraints on present values, but never force the editor to invent a missing field.
+fn retain_present_schema_fields(schema: &mut serde_json::Value, draft: &serde_json::Value) {
+    let Some(fields) = draft.as_object() else {
+        return;
+    };
+    let Some(properties) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    properties.retain(|key, value| {
+        if let Some(field) = fields.get(key) {
+            retain_present_schema_fields(value, field);
+            true
+        } else {
+            false
+        }
+    });
+    let required: Vec<_> = properties.keys().cloned().collect();
+    schema["required"] = json!(required);
+}
+
 /// Reuse the original request, cache, sampling and cancel flag. Visual verification keeps its
 /// images and reasoning; the text-only content edit is answer-only, constrained for JSON drafts.
 /// No second model/load path and no image-buffer clone. Callers record each native generation;
@@ -461,6 +563,17 @@ pub(crate) fn generate_checked(
                     "Preserve the text's existing prose, paragraph or tag structure. Do not introduce JSON, headings, labels or lists."
                 };
                 request.thinking = ThinkingMode::Disabled;
+                if let (Some(Constraint::JsonSchema(schema)), Ok(value)) = (
+                    &request.constraint,
+                    serde_json::from_str::<serde_json::Value>(&draft),
+                ) {
+                    let mut source = schema.source().clone();
+                    retain_present_schema_fields(&mut source, &value);
+                    request.constraint = Some(Constraint::JsonSchema(
+                        gen_core::core_llm::JsonSchema::compile(&source)
+                            .map_err(WorkerError::Engine)?,
+                    ));
+                }
                 if is_json && request.constraint.is_none() {
                     request.constraint = Some(Constraint::Json);
                 }
@@ -598,6 +711,27 @@ mod tests {
             "1girl, black_hair",
         ] {
             assert!(!known_leaks(excluded, &[ALL[0]]).is_empty(), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn clothing_checks_keep_environmental_senses_without_masking_garments() {
+        for allowed in [
+            "A coat of peeling paint covers the wall.",
+            "Two coats of weathered varnish cover the door.",
+            "A belt of dense trees borders the field.",
+            "An asteroid belt is visible beyond a conveyor belt.",
+        ] {
+            assert!(known_leaks(allowed, &[ALL[1]]).is_empty(), "{allowed}");
+        }
+        for excluded in [
+            "A coat hangs beside a wall with a coat of peeling paint.",
+            "A belt of trees surrounds a person wearing a leather belt.",
+            "A coat of blue wool hangs above paint on the wall.",
+            "A belt of leather lies near trees.",
+            "coat, belt, trees",
+        ] {
+            assert!(!known_leaks(excluded, &[ALL[1]]).is_empty(), "{excluded}");
         }
     }
 
