@@ -700,25 +700,13 @@ async fn generate_candle_registry_stream_using(
         use_pid,
     )?;
 
-    // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
-    // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
-    // it at load) — race-free because the worker runs image jobs sequentially. The providers expose
-    // the runtime knob under different names (SDXL `set_flash_attn`, Z-Image `set_accel_attn`); the
-    // diffusion-transformer families (flux/flux2/qwen) bake it via the build feature with no runtime
-    // toggle. No effect unless the crate was built with its flash/accel feature.
+    // Flash attention (sc-3674, SW-7276): the UI Advanced toggle sends `advanced.flashAttn` (default
+    // on). The shared candle FlashAttention-2 toggle is process-wide and is set ONCE per job, for
+    // every candle image/video lane and model family, by `attention_path::apply_image_request` /
+    // `apply_video_request` before the route runs (candle-gen routes every model's SDPA through it,
+    // so there is no per-family runtime knob and no model that "bakes it in"). Only the value is
+    // read here, to decide the SDXL endpoint-measurement path below.
     let flash_attn = request.advanced_bool("flashAttn").unwrap_or(true);
-    match request.model.as_str() {
-        // realvisxl_lightning shares the candle `sdxl` engine (sc-7176), so the SDXL flash toggle applies.
-        // So do the Illustrious-XL finetunes (epic 10609).
-        "sdxl"
-        | "realvisxl"
-        | "realvisxl_lightning"
-        | "illustrious_xl_v1"
-        | "illustrious_xl_v2" => runtime_cuda::providers::sdxl::set_flash_attn(flash_attn),
-        // Base z_image (sc-8679) shares the candle z-image accel-attention toggle with Turbo.
-        "z_image_turbo" | "z_image" => runtime_cuda::providers::z_image::set_accel_attn(flash_attn),
-        _ => {}
-    }
 
     // Adapters do not participate in tier identity. Quant is resolved only after every possible
     // weights-directory rewrite below, so the final LoadSpec and memory receipt share one tier.

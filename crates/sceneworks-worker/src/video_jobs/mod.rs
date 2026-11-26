@@ -755,6 +755,10 @@ pub(crate) async fn run_video_generate_job(
     // candle lane doesn't serve stubs exactly as before. Gated on `backend_candle_enabled` (default
     // off → routing unchanged until parity). Conditioning shapes never reach here — the router's
     // `video_job_is_candle_eligible` confines the candle worker to txt2video.
+    // SW-7276: the shared candle FlashAttention-2 toggle, set once per job from `advanced.flashAttn`
+    // (default on) for EVERY candle video lane and model family, before the route loads.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    crate::attention_path::apply_video_request(&request);
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let outcome = dispatch::execute_candle_video_route(
         resolve_candle_video_route(&request, settings)?,

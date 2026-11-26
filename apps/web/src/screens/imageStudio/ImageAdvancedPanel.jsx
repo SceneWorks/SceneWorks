@@ -3,6 +3,7 @@ import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from ".
 import { MossOrdinaryControls } from "./MossOrdinaryControls.jsx";
 import React from "react";
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
+import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx";
 import { minStepsForModel } from "../../videoModelLimits.js";
 import { showTransparencyToggle, transparencyPromptSuggestion, TRANSPARENCY_PROMPT_HINT } from "../../qwenAlpha.js";
 import {
@@ -91,6 +92,7 @@ export function ImageAdvancedPanel({
   setGuidanceMethod,
   guidanceMethod,
   guidanceMethodOptions,
+  activeBackend,
   flashAttn,
   setFlashAttn,
   promptEnhance,
@@ -562,19 +564,9 @@ export function ImageAdvancedPanel({
                   ) : null}
                 </label>
               ) : null}
-              {!moss ? <>
-              <label
-                className="checkline flash-attn-toggle"
-                title="Fused flash-attention on the candle (Windows/CUDA) SDXL backend — faster and lower VRAM. Ignored on other backends."
-              >
-                <input
-                  checked={flashAttn}
-                  onChange={(event) => setFlashAttn(event.target.checked)}
-                  type="checkbox"
-                />
-                Flash attention
-              </label>
-              </> : null}
+              {!moss ? (
+                <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
+              ) : null}
               {promptEnhance ? (
                 <label
                   className="checkline prompt-enhance-toggle"

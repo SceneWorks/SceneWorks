@@ -119,6 +119,8 @@ export function VideoStudio() {
   // by workspace in App.jsx, so this reads the right snapshot per workspace.
   const saved = useMemo(() => loadStudioSettings("video", activeProject?.id ?? null), [activeProject?.id]);
   const [motion, setMotion] = useState(saved.motion ?? DEFAULT_MOTION);
+  // SW-7276: shared candle FlashAttention-2 toggle (default on); only meaningful on the candle backend.
+  const [flashAttn, setFlashAttn] = useState(true);
   // Memoize the per-type catalog splits (sc-8939): both feed a dozen pickers/trays and
   // re-filtering the full catalog on every render (including unrelated state churn) is
   // needless. Recompute only when the catalog changes; stable identities also keep the
@@ -1056,6 +1058,7 @@ export function VideoStudio() {
     draft: portableDraft,
   } = useVideoSubmission({
     submitting,
+    flashAttn,
   executionTierBlockMessage,
   setSubmitting,
   stackActive,
@@ -1334,6 +1337,9 @@ export function VideoStudio() {
             open={advancedOpen}
           >
             <VideoAdvancedPanel
+            activeBackend={activeBackend}
+            flashAttn={flashAttn}
+            setFlashAttn={setFlashAttn}
             showTurbo={showTurbo}
             veda={veda}
             setVeda={setVeda}

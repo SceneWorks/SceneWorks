@@ -3743,6 +3743,7 @@ export function ImageStudio() {
             setGuidanceMethod={setGuidanceMethod}
             guidanceMethod={guidanceMethod}
             guidanceMethodOptions={guidanceMethodOptions}
+            activeBackend={activeBackend}
             flashAttn={flashAttn}
             setFlashAttn={setFlashAttn}
             promptEnhance={promptEnhance}

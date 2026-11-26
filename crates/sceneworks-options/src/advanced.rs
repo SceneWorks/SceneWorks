@@ -258,7 +258,12 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .limits(&["image_request phase plan"])
         .effects(&[effect("enabled", "override with phase step sum", "advanced.steps"), effect("enabled", "override with per-phase guidance", "advanced.guidanceScale"), effect("enabled", "exclude", "advanced.usePid"), effect("enabled", "exclude", "image.hiresFix"), effect("enabled", "exclude", "image.sourceAssetId"), effect("enabled", "exclude", "image.referenceAssetIds"), effect("enabled", "exclude", "advanced.poses")])
         .ui("Multi-phase denoise", "phaseEditor"),
-    opt!("flashAttn", Bool, Literal("true"), Family("sdxl"), MachineBudget, "Candle SDXL flash attention kernel"),
+    // SW-7276 (SW-F379): candle-gen routes EVERY candle model's attention through one shared
+    // FlashAttention-2 dispatch behind a single per-job toggle, so the option is no longer an SDXL
+    // fact. The catalog does not carry a per-family candle/MLX flag (the backend is chosen at job
+    // routing), so it applies to every image and video model; MLX ignores it and the studios hide the
+    // control there. MOSS-Image refuses it (`moss_validation`) and never receives a default.
+    opt!("flashAttn", Bool, Literal("true"), All(&[VISUAL, Not(&MOSS)]), MachineBudget, "Shared candle FlashAttention-2 attention toggle (image and video)"),
     opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]).compat("JSON integer or numeric string. Explicit null blocks portable bound-tier fallback; absent selection is resolved after verified source binding."),
     opt!("mlxQuantizeExplicit", Bool, Literal("false"), VISUAL, MachineBudget, "user tier selection provenance"),
     opt!("convRot", Bool, Literal("false"), IMAGE, MachineBudget, "ConvRot load recipe").limits(&["declared memory routes"]),
