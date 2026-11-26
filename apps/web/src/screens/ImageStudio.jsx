@@ -2020,6 +2020,7 @@ export function ImageStudio() {
   trueCfgScale,
   setViewAngle,
   setEnhancePrompt,
+  setFlashAttn,
   setTextEncoderModel,
   setUsePid,
   setPidTarget,

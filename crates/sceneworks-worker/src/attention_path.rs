@@ -213,6 +213,79 @@ mod tests {
         );
     }
 
+    /// The typed handlers that bypass `run_image_generate_job` still honour an explicit
+    /// `flashAttn: false`: resolve each exactly as its handler does, then apply.
+    #[test]
+    fn explicit_false_reaches_the_toggle_through_every_typed_image_handler() {
+        let _guard = TOGGLE.lock().unwrap_or_else(|e| e.into_inner());
+        for (kind, model, extra) in [
+            (
+                "vqa",
+                "sensenova_u1_8b",
+                json!({"sourceAssetId":"s","question":"What?"}),
+            ),
+            ("interleave", "sensenova_u1_8b", json!({"prompt":"tree"})),
+            (
+                "imageDetail",
+                "realvisxl",
+                json!({"sourceAssetId":"s","prompt":"tree"}),
+            ),
+            ("image", "flux_dev", json!({"prompt":"tree"})),
+        ] {
+            let entry = sceneworks_core::registry::builtin_model_spec(model)
+                .unwrap()
+                .project(None);
+            let mut payload = json!({"projectId":"p","model":model,"advanced":{"flashAttn":false}});
+            for (key, value) in extra.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            let resolved = sceneworks_core::request_validation::resolve(
+                kind,
+                payload.as_object().unwrap(),
+                entry.as_object().unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("{kind}: {error:?}"));
+            let request =
+                ImageRequest::from_resolved(payload.as_object().unwrap(), &resolved).unwrap();
+            attention::set_flash_attention_enabled(true);
+            assert!(!apply_image_request(&request), "{kind}");
+            assert!(!attention::flash_attention_enabled(), "{kind}");
+        }
+    }
+
+    /// Every covered handler with a typed request calls the shared helper. (Upscale jobs carry no
+    /// `advanced` options at all, so they run at the scope's default.)
+    #[test]
+    fn every_typed_candle_handler_calls_the_shared_helper() {
+        for (source, handler, call) in [
+            (
+                include_str!("image_jobs.rs"),
+                "image_jobs.rs",
+                "apply_image_request(&execution)",
+            ),
+            (
+                include_str!("video_jobs/mod.rs"),
+                "video_jobs/mod.rs",
+                "apply_video_request(&request)",
+            ),
+            (
+                include_str!("image_jobs/detail.rs"),
+                "detail.rs",
+                "apply_image_request(&request)",
+            ),
+        ] {
+            assert!(source.contains(call), "{handler}");
+        }
+        let sensenova = include_str!("sensenova_jobs.rs");
+        assert_eq!(
+            sensenova
+                .matches("attention_path::apply_image_request(&request)")
+                .count(),
+            2,
+            "vqa and interleave"
+        );
+    }
+
     #[test]
     fn only_candle_generation_job_types_open_a_scope() {
         for covered in [

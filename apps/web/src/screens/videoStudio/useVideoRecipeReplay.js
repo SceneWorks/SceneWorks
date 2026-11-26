@@ -47,6 +47,7 @@ export function useVideoRecipeReplay({
   setTemporalUpsampleRounds,
   setPrecision,
   setEnhancePrompt,
+  setFlashAttn,
   setTextEncoderModel,
   model,
   setQuantization,
@@ -189,6 +190,8 @@ export function useVideoRecipeReplay({
     );
     setPrecision(rawSettings.precision ?? "fp8");
     setEnhancePrompt(rawSettings.enhancePrompt === true);
+    // SW-7276: only an explicit opt-out is recorded; absent means the default, on.
+    setFlashAttn?.(rawSettings.flashAttn !== false);
     setTextEncoderModel(
       rawSettings.textEncoderModel ??
         (rawSettings.useUncensoredEnhancer === true ? amoralTextEncoderId : null),

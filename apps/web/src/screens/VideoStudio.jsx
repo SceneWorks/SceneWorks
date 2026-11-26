@@ -637,6 +637,7 @@ export function VideoStudio() {
   setTemporalUpsampleRounds,
   setPrecision,
   setEnhancePrompt,
+  setFlashAttn,
   setTextEncoderModel,
   model,
   setQuantization,
