@@ -29,13 +29,13 @@ Two entries ship from the same family:
 >   take a finished clip past 2K; it is a different operation with different trade-offs, and *Past
 >   the canvas — the upscale route* below is where they are set out.
 > - **Sparse-attention inference.** The open weights run *dense* attention, which is why renders are
->   measured in hours at the large canvas. It is not what caps the clip at 14.38 s — that ceiling is
->   the checkpoint's own — but it is why the long end of the range is expensive.
+>   measured in hours at the large canvas. The duration range is a separate policy;
+>   dense attention makes the longer options expensive.
 > - **The `<d>` dialogue markers**, and the six other special tokens the model card's examples use.
 >   They are declared in the tokenizer and **do nothing** against these weights — see *Markers from
 >   the upstream examples that do nothing*, below.
 
-## Cost Comes From The Canvas, Not The Length
+## Canvas And Clip Length Both Affect Cost
 
 This is the single most important thing to internalise before your first render. Measured 50-step
 timings on real weights:
@@ -47,8 +47,8 @@ timings on real weights:
 | 1344x768 | 5.17 s | **~2 hours** |
 | 1344x768 | 14.38 s | many hours |
 
-The *shortest* clip at the default 1344x768 canvas already costs about two hours. The *entire*
-duration range is comfortable at 576x320. **Choose the small canvas while you are still iterating on
+The *shortest* clip at the default 1344x768 canvas already costs about two hours. The original measured
+duration range is cheaper at 576x320; the added longer lengths have not been timed. **Choose the small canvas while you are still iterating on
 the prompt**, and move up only once you have a shot you want at full size.
 
 Those are **dense 50-step** timings, and they are the reference numbers — not the ones you will
@@ -57,28 +57,22 @@ same 1344x768 / 5.17 s shot that takes about two hours dense was measured at **1
 the 4-step 768p adapter. It is a different sample rather than the same picture faster — see
 *Turbo — The Control That Changes The Cost Table* below before you rely on it.
 
-**Wall-clock cost and the length cap are separate things.** Turbo changes how long a render takes;
-it does not change which lengths exist. The fourteen clip lengths below, and the 14.38 s ceiling at
-the top of them, come from the frame lattice and the checkpoint's own clamp — no step count, adapter
-or attention implementation moves them.
+**Render cost and supported length are separate.** Turbo changes the number of evaluations;
+longer clips still require more memory and time. The measurements above cover the original
+124–345-frame range; they are not measurements of the newly admitted longer clips.
 
-## Fourteen Clip Lengths, And Nothing In Between
+## Clip Lengths Through 20 Seconds
 
-The video autoencoder packs frames in groups of 17, so a legal frame count is `17n + 5`, and the
-checkpoint clamps the result to roughly 5–15 seconds at 24 fps. What survives is exactly **fourteen**
-renderable lengths:
+H3's video autoencoder requires `17n + 5` frames. SceneWorks supports twenty-two lengths from
+**124 to 481 frames** at **24 fps**, or **5.17 to 20.04 seconds**. Select **481 frames** for a clip
+at least 20 seconds long. A 20-second duration request aligns upward to that frame count.
 
-`5.17 · 5.88 · 6.58 · 7.29 · 8.00 · 8.71 · 9.42 · 10.13 · 10.83 · 11.54 · 12.25 · 12.96 · 13.67 ·
-14.38` seconds.
+The Duration menu displays the exact valid frame counts. The longer options are 362, 379, 396,
+413, 430, 447, 464 and 481 frames; an explicit frame count off the lattice is rejected.
+Requests above 481 frames or below 124 frames are refused. There is no still-image mode.
 
-The Duration menu offers those and only those. A length outside the range is **refused**, not quietly
-rounded — including the 15 seconds MiniMax's own documentation advertises, which sits between the
-last rung (14.38 s) and the next one (15.08 s) and cannot be rendered at all. There is likewise **no
-single-image mode**: the model will not render fewer than about five seconds, so it cannot be used as
-a stills generator.
-
-Frame rate is fixed at **24 fps** — the lattice, the duration window and every measured render assume
-it.
+These longer lengths extend the original reference pipeline's 15-second policy. Canvas and
+memory admission checks still apply; no new runtime or quality measurements are claimed here.
 
 ## Sizes
 
@@ -311,9 +305,8 @@ on the validated shot it carried *more* detail and *more* motion than the 50-ste
 adapters are distilled at 544p/768p and MiniMax's own roadmap lists improving Turbo's fine detail as
 open work. Turn it off for the reference schedule; leave it on for everything else.
 
-What it does **not** change is the length: the fourteen clip lengths and the 14.38 s ceiling are
-properties of the frame lattice and the checkpoint's clamp, and no adapter moves them. Turbo buys
-back wall-clock time and nothing else.
+Turbo keeps the same supported 124–481-frame range. It reduces the number of evaluations, not
+the number of video or audio tokens needed for a given clip length.
 
 Each published adapter carries its own schedule, which is why the control is a menu rather than a
 switch:
@@ -365,6 +358,6 @@ download once no matter how many tiers you install.
 - [Hailuo 3.0 prompting guide](https://hailuoai.video/)
 - [MiniMax platform video generation docs](https://platform.minimax.io/docs/api-reference/video-generation)
 
-Written for SceneWorks against the open-weights checkpoints. The cost table, the fourteen clip
-lengths, the size buckets and the structured-schema A/B are measured on this build rather than
-quoted, so they describe what these weights do — which is not always what the hosted product does.
+Written for SceneWorks against the open-weights checkpoints. The cost table and structured-schema A/B describe measured cases. The supported frame range is
+a validated geometry and admission policy; the added lengths have no new performance or quality
+measurements in this guide.

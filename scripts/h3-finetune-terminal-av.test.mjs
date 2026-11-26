@@ -32,13 +32,13 @@ test('frame ladders are the source-derived engine rules, not approximations', ()
   // crates/sceneworks-core/src/video_request.rs: MINIMAX_H3_LEGAL_FRAME_COUNTS (523-525),
   // minimax_h3_frame_count aligns UP (556-563), ltx nearest 8k+1 (573-587),
   // wan floor 4k+1 (593-596), mochi nearest 6k+1 (610-620).
-  assert.deepEqual([...MINIMAX_H3_LEGAL_FRAME_COUNTS], [124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345]);
+  assert.deepEqual([...MINIMAX_H3_LEGAL_FRAME_COUNTS], [124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345, 362, 379, 396, 413, 430, 447, 464, 481]);
   assert.equal(MINIMAX_H3_FPS, 24);
   assert.equal(MINIMAX_H3_AUDIO_SAMPLE_RATE, 32_000);
   assert.equal(rawFrameCount(5.1667, 24), 124); // 124.0008 rounds to 124
   assert.equal(minimaxH3FrameCount(124), 124);
   assert.equal(minimaxH3FrameCount(125), 141, 'H3 aligns UP to the next 17n+5 rung');
-  assert.equal(minimaxH3FrameCount(9999), 345, 'clamped to the released ceiling');
+  assert.equal(minimaxH3FrameCount(9999), 481, 'clamped to the supported ceiling');
   assert.equal(ltxFrameCount(150), 153, 'LTX snaps to the nearest 8k+1');
   assert.equal(ltxFrameCount(1), 9);
   assert.equal(wanFrameCount(150), 149, 'Wan floors to the largest 4k+1');
@@ -72,6 +72,19 @@ test('a decoded H3 job that matches its resolved request is accepted', () => {
   assert.equal(report.audio.frameSamples, 1024);
 });
 
+test('twenty-second H3 requests retain all 481 picture frames and the rounded menu ceiling', () => {
+  for (const duration of [20, 20.0417]) {
+    const report = validateAVAgainstRequest(
+      h3Decoded({ frames: 481, audioDuration: 481 / 24 }),
+      h3Request({ duration }),
+      h3Contract({ frameCount: 481, hardMaxDuration: 481 / 24 }),
+    );
+    assert.equal(report.frameCount, 481);
+    assert.ok(report.durationSeconds >= 20);
+  }
+  rejects(h3Decoded({ frames: 481, audioDuration: 481 / 24 }), h3Request({ duration: 20.0418 }), h3Contract({ frameCount: 481 }), /above the renderable maximum/);
+});
+
 test('short video for a long request fails even though it decodes and has a positive duration', () => {
   rejects(h3Decoded({ frames: 100, videoDuration: 100 / 24 }), h3Request(), h3Contract(), /holds 100 frames/);
   // A 10 s (243-frame) request fulfilled by the 5 s clip.
@@ -90,8 +103,8 @@ test('wrong fps, frame lattice, dimensions, canvas grid and start time all fail'
 });
 
 test('out-of-window requests are refused, never clamped onto an endpoint rung', () => {
-  // 20 s * 24 fps snaps to the 345 ceiling, but the engine refuses >14.375 s.
-  rejects(h3Decoded({ frames: 345, videoDuration: 345 / 24, audioDuration: 345 / 24 }), h3Request({ duration: 20 }), h3Contract({ frameCount: 345 }), /above the renderable maximum/);
+  // A 21-second request exceeds the supported ceiling and cannot be silently shortened.
+  rejects(h3Decoded({ frames: 481, videoDuration: 481 / 24, audioDuration: 481 / 24 }), h3Request({ duration: 21 }), h3Contract({ frameCount: 481 }), /above the renderable maximum/);
   rejects(h3Decoded(), h3Request({ duration: 2 }), h3Contract(), /below the renderable minimum/);
 });
 

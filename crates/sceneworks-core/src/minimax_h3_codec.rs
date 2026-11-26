@@ -5,8 +5,9 @@
 //! the SAME key set but DIFFERENT fused-QKV row orders, so they must not be confused (inference
 //! `src/layout.rs` rule 2 and `src/dit/qkv.rs`); see [`H3QkvLayout`] for the measured rule.
 //! Native SwiGLU is gate-first;
-//! canonical SwiGLU is value-first. Normalization copies byte ranges, never casts precision,
-//! never materializes a dense tensor/model, and publishes through the shared derivative cache.
+//! canonical SwiGLU is value-first. Normalization preserves tensor precision except for lossless
+//! widening of reduced AdaLN tables to the provider's F32 contract. It never materializes a dense
+//! tensor/model and publishes through the shared derivative cache.
 //!
 //! Executable raw-to-Diffusers reference pinned at
 //! <https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py>
@@ -348,10 +349,11 @@ fn is_official_raw_shard_name(name: &str) -> bool {
 
 /// Exact consumer binding between an H3 source's reduced centered-curve AdaLN topology and the
 /// shared native generators (sc-26684). `identity` is the full 64-hex engine content hash over
-/// every canonical operand value in contract order, at the ORIGINAL stored dtype, produced by
+/// every canonical operand value in contract order, at the provider's stored dtype, produced by
 /// `gen_core_h3::pruned_adaln::PrunedAdaLn::identity_builder` over the same normalized bytes both
-/// native caches consume. `sourceBytes` counts stored operand bytes at their dtype width and
-/// `computeBytes` counts the same operands once widened to F32; they are deliberately separate
+/// native caches consume. Only the direct table is losslessly widened to F32. `sourceBytes` counts
+/// normalized component operand bytes at their dtype width; `computeBytes` counts the same
+/// operands once widened to F32. They are deliberately separate
 /// quantities, never interchangeable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -479,8 +481,7 @@ fn pruning_identity_hex(identity: PruningIdentity) -> String {
 }
 
 /// An iterable F32 view over one stored canonical operand. Reads stay inside one fixed chunk; the
-/// values are decoded losslessly from the ORIGINAL stored dtype exactly as the normalization copy
-/// schedule emits them (the schedule copies bytes, so canonical order equals source order).
+/// values are decoded losslessly from the original stored dtype in canonical copy order.
 struct OperandValues<'a> {
     reader: std::io::BufReader<File>,
     ranges: &'a [(u64, u64)],
@@ -508,7 +509,7 @@ impl<'a> OperandValues<'a> {
         let reader = std::io::BufReader::with_capacity(
             OPERAND_CHUNK,
             File::open(source)
-                .map_err(|error| format!("H3 AdaLN: {}: {error}", source.display()))?,
+                .map_err(|error| format!("H3 operand: {}: {error}", source.display()))?,
         );
         Ok(Self {
             reader,
@@ -544,7 +545,7 @@ impl<'a> OperandValues<'a> {
                     .seek(SeekFrom::Start(self.base + start))
                     .is_err()
                 {
-                    self.error = Some("H3 AdaLN: cannot seek the reduced operand payload".into());
+                    self.error = Some("H3 operand: cannot seek the payload".into());
                     return false;
                 }
                 self.remaining = length;
@@ -556,15 +557,13 @@ impl<'a> OperandValues<'a> {
             let take = self.remaining.min(self.chunk.len() as u64) as usize / width * width;
             if take == 0 {
                 self.error = Some(format!(
-                    "H3 AdaLN: reduced operand bytes are not aligned to {width}-byte {} values",
+                    "H3 operand: bytes are not aligned to {width}-byte {} values",
                     self.dtype.as_str()
                 ));
                 return false;
             }
             if let Err(error) = self.reader.read_exact(&mut self.chunk[..take]) {
-                self.error = Some(format!(
-                    "H3 AdaLN: truncated reduced operand payload: {error}"
-                ));
+                self.error = Some(format!("H3 operand: truncated payload: {error}"));
                 return false;
             }
             if let Err(error) = (self.check)() {
@@ -629,8 +628,21 @@ struct Tensor {
 }
 
 impl Tensor {
+    fn output_dtype(&self) -> &str {
+        if strip_prefix(&self.key) == TABLE_KEY {
+            "F32"
+        } else {
+            &self.dtype
+        }
+    }
+
     fn output_bytes(&self) -> u64 {
-        self.edit.output_bytes(&self.ranges)
+        let bytes = self.edit.output_bytes(&self.ranges);
+        if self.output_dtype() != self.dtype {
+            bytes * 2
+        } else {
+            bytes
+        }
     }
 }
 
@@ -910,27 +922,85 @@ impl H3SourceInventory {
                     // The pinned converter consumes this known non-parameter buffer: the provider
                     // regenerates it from config. Verify values, not just its familiar name.
                     let count = config.dim("rope_freq_dim")?;
-                    if dtype != "F32" || shape != [count] {
+                    if !matches!(dtype, "F32" | "BF16" | "F16") || shape != [count] {
                         return Err(format!(
-                            "H3 rope.inv_freq requires F32 [{count}], got {dtype} {shape:?}"
+                            "H3 rope.inv_freq requires dense F32/BF16/F16 [{count}], got {dtype} {shape:?}"
                         ));
                     }
                     let theta = config.0["rope_theta"]
                         .as_f64()
                         .ok_or("H3 rope_theta missing")? as f32;
-                    file.seek(SeekFrom::Start(body + start))
-                        .map_err(|e| e.to_string())?;
+                    let buffer = Tensor {
+                        source,
+                        key: key.clone(),
+                        dtype: dtype.into(),
+                        shape: shape.clone(),
+                        offset: body + start,
+                        ranges: vec![(0, end - start)],
+                        edit: fp8::PayloadEdit::Copy,
+                    };
+                    let stored_dtype = Dtype::parse(dtype).ok_or("invalid H3 rope dtype")?;
+                    let mut values = OperandValues::open(path, &buffer, stored_dtype, check)?;
                     for i in 0..count {
-                        let mut bytes = [0u8; 4];
-                        file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-                        let actual = f32::from_le_bytes(bytes);
+                        let actual = values.next().ok_or_else(|| {
+                            values
+                                .error
+                                .take()
+                                .unwrap_or_else(|| "truncated H3 rope.inv_freq".into())
+                        })?;
                         let expected = theta.powf(-(i as f32 / count as f32));
+                        // Compare the config's frequencies at the export's stored precision.
+                        let expected = match stored_dtype {
+                            Dtype::BF16 => half::bf16::from_f32(expected).to_f32(),
+                            Dtype::F16 => half::f16::from_f32(expected).to_f32(),
+                            _ => expected,
+                        };
                         if !actual.is_finite() || (actual - expected).abs() > expected.abs() * 2e-6
                         {
                             return Err(format!("H3 rope.inv_freq[{i}] conflicts with bound rope_theta/rope_freq_dim: {actual}, expected {expected}"));
                         }
                     }
                     continue;
+                }
+                if let Some((_, rank)) = pruned {
+                    // Some exporters retain the affine basis for later LoRA rebasing. The direct
+                    // table and folded projections already encode it; native inference never
+                    // reads these two auxiliaries. Validate them before consuming them.
+                    // https://huggingface.co/xmarre/MiniMax-H3-Pruned-Ref-Delta-Fused-r1024-ComfyUI/blob/main/tools/convert_h3_diffusers_to_comfy_v3.py
+                    let auxiliary_shape = match strip_prefix(key) {
+                        "adaln_basis" => Some(vec![rank, config.dim("time_embed_dim")?]),
+                        "adaln_mean" => Some(vec![config.dim("time_embed_dim")?]),
+                        _ => None,
+                    };
+                    if let Some(required) = auxiliary_shape {
+                        if encoding.is_none() || shape != required {
+                            return Err(format!("H3 AdaLN export auxiliary {key:?} requires dense F32/BF16/F16 {required:?}, got {dtype} {shape:?}"));
+                        }
+                        let auxiliary = Tensor {
+                            source,
+                            key: key.clone(),
+                            dtype: dtype.into(),
+                            shape,
+                            offset: body + start,
+                            ranges: vec![(0, end - start)],
+                            edit: fp8::PayloadEdit::Copy,
+                        };
+                        let stored_dtype =
+                            Dtype::parse(dtype).ok_or("invalid H3 auxiliary dtype")?;
+                        let mut values =
+                            OperandValues::open(path, &auxiliary, stored_dtype, check)?;
+                        for value in values.by_ref() {
+                            if !value.is_finite() {
+                                return Err(format!(
+                                    "H3 AdaLN export auxiliary {key:?} contains a nonfinite value"
+                                ));
+                            }
+                        }
+                        if let Some(error) = values.error {
+                            return Err(error);
+                        }
+                        continue;
+                    }
                 }
                 let mapped = if let Some(outputs) = quantized.get(key) {
                     outputs.clone()
@@ -1060,9 +1130,18 @@ impl H3SourceInventory {
         CheckpointDerivativeRequestV1 {
             kind: CheckpointDerivativeKindV1::NormalizedLayout,
             adapter_id: H3_MAPPING_ID.into(),
-            // 2: native fused QKV defaults to the contiguous ComfyUI layout (sc-26691). Version 1
-            // derivatives split it per-head interleaved and must never be served again.
-            adapter_version: "2".into(),
+            // 2 fixed the native QKV layout. 3 additionally widens F16/BF16 AdaLN tables to F32.
+            // Keep existing byte-identical derivatives reusable when widening is unnecessary.
+            adapter_version: if self
+                .tensors
+                .get(TABLE_KEY)
+                .is_some_and(|table| table.output_dtype() != table.dtype)
+            {
+                "3"
+            } else {
+                "2"
+            }
+            .into(),
             codec_id: self
                 .source_encoding()
                 .and_then(source_codec_id)
@@ -1128,7 +1207,7 @@ impl H3SourceInventory {
             let mut offset = 0u64;
             for (name, tensor) in &selected {
                 let len = tensor.output_bytes();
-                header.insert((*name).clone(),json!({"dtype":tensor.dtype,"shape":tensor.shape,"data_offsets":[offset,offset+len]}));
+                header.insert((*name).clone(),json!({"dtype":tensor.output_dtype(),"shape":tensor.shape,"data_offsets":[offset,offset+len]}));
                 index.insert((*name).clone(), json!(shard_name));
                 offset += len;
             }
@@ -1140,6 +1219,30 @@ impl H3SourceInventory {
                 .map_err(|e| e.to_string())?;
             let mut input = File::open(path).map_err(|e| e.to_string())?;
             for (_, tensor) in selected {
+                if tensor.output_dtype() != tensor.dtype {
+                    let dtype = Dtype::parse(&tensor.dtype).ok_or("invalid H3 table dtype")?;
+                    let mut values = OperandValues::open(path, tensor, dtype, check)?;
+                    while values.fill() {
+                        let len = values.values.len() * 4;
+                        for (bytes, value) in buffer[..len]
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(&values.values)
+                        {
+                            *bytes = value.to_le_bytes();
+                        }
+                        copy_checkpoint(copied_payload_bytes)?;
+                        out.write_all(&buffer[..len])
+                            .map_err(|error| error.to_string())?;
+                        copied_payload_bytes += len as u64;
+                        copy_checkpoint(copied_payload_bytes)?;
+                    }
+                    if let Some(error) = values.error {
+                        return Err(error);
+                    }
+                    continue;
+                }
                 if tensor
                     .edit
                     .write_replacement(&mut input, &mut out, tensor.offset, &|| {
@@ -1260,9 +1363,12 @@ fn pruning_geometry(physical: &H3Physical<'_>) -> Result<Option<(usize, usize)>,
         if strip_prefix(key) != TABLE_KEY {
             continue;
         }
-        if entry.get("dtype").and_then(Value::as_str) != Some("F32") {
+        if !matches!(
+            entry.get("dtype").and_then(Value::as_str),
+            Some("F32" | "BF16" | "F16")
+        ) {
             return Err(format!(
-                "H3 AdaLN: {TABLE_KEY} must be stored F32, got {:?}",
+                "H3 AdaLN: {TABLE_KEY} requires dense F32, BF16, or F16 storage, got {:?}",
                 entry.get("dtype")
             ));
         }
@@ -1316,9 +1422,9 @@ fn pruning_binding(
         config.dim("num_layers")?,
         config.dim("time_embed_dim")?,
         |name| {
-            tensors
-                .get(name)
-                .and_then(|tensor| Dtype::parse(&tensor.dtype).map(|d| (d, tensor.shape.clone())))
+            tensors.get(name).and_then(|tensor| {
+                Dtype::parse(tensor.output_dtype()).map(|d| (d, tensor.shape.clone()))
+            })
         },
     )?
     .ok_or_else(|| {
@@ -1337,7 +1443,7 @@ fn pruning_binding(
         let tensor = tensors
             .get(&operand.name)
             .ok_or_else(|| format!("H3 AdaLN: missing reduced operand {}", operand.name))?;
-        if Dtype::parse(&tensor.dtype) != Some(operand.dtype) {
+        if Dtype::parse(tensor.output_dtype()) != Some(operand.dtype) {
             return Err(format!(
                 "H3 AdaLN: {} stored as {}, but the inspected topology declares {:?}",
                 operand.name, tensor.dtype, operand.dtype
@@ -1351,7 +1457,8 @@ fn pruning_binding(
         let source = sources
             .get(tensor.source)
             .ok_or("H3 AdaLN: operand source is outside the declared files")?;
-        let mut values = OperandValues::open(source, tensor, operand.dtype, check)?;
+        let stored_dtype = Dtype::parse(&tensor.dtype).ok_or("invalid H3 operand dtype")?;
+        let mut values = OperandValues::open(source, tensor, stored_dtype, check)?;
         let hashed = builder.operand_values(&operand.name, &mut values);
         if let Some(error) = values.error.take() {
             return Err(error);

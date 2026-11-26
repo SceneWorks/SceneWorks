@@ -151,17 +151,18 @@ fn dispatch_routes_the_minimax_provider_into_its_own_arm() {
     }
 }
 
-/// The capture arm follows the engine's shared geometry contract. Check every supported duration
-/// and its `17n + 5` progression without maintaining another copy of the frame-count table.
+/// Provider geometry must agree with the shared request contract through the twenty-second
+/// ceiling. Independently check the 17n + 5 progression; historical captures keep their own shape.
 #[test]
 fn minimax_envelope_is_the_pinned_engines_own() {
     assert_eq!(mlx_gen_minimax_h3::SPATIAL_STRIDE, 32);
     assert_eq!(mlx_gen_minimax_h3::CANVAS_MAX_PIXELS, 1_032_192);
     assert_eq!(mlx_gen_minimax_h3::MINIMAX_H3_FPS, 24.0);
     assert_eq!(
-        mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.map(|frames| frames as u32),
-        mlx_gen::gen_core::h3_memory::LEGAL_FRAME_COUNTS
+        mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS,
+        mlx_gen::gen_core::h3_memory::LEGAL_FRAME_COUNTS.map(|frames| frames as i32)
     );
+    assert_eq!(mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.last(), Some(&481));
     for (index, frames) in mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.iter().enumerate() {
         assert_eq!(
             *frames,
@@ -180,15 +181,19 @@ fn minimax_envelope_is_the_pinned_engines_own() {
 fn the_geometry_envelope_refuses_off_lattice_off_stride_and_over_budget_canvases() {
     let admitted = validate_minimax_geometry(1344, 768, 124).unwrap();
     assert_eq!(admitted.frames, 124);
+    assert_eq!(
+        validate_minimax_geometry(576, 320, 481).unwrap().frames,
+        481
+    );
     // 124 = 17·7 + 5 ⇒ 5·7 + 2 video latents, and round(124/24·40) audio tokens.
     assert_eq!(admitted.video_latent_frames, 37);
     assert_eq!(admitted.audio_latent_frames, 207);
 
-    // Off-lattice, including a still (`T = 1` does not render at all) and LTX's own `1 + 8k`
-    // lattice, which shares no member with this one inside the legal range.
+    // Unsupported counts include a still, off-lattice values, and 498: the next lattice
+    // point above the supported ceiling.
     for frames in [0_u32, 1, 97, 121, 123, 125, 305, 346, 498, u32::MAX] {
         let error = validate_minimax_geometry(1344, 768, frames)
-            .expect_err("an off-lattice frame count must be refused");
+            .expect_err("an unsupported frame count must be refused");
         assert!(error.contains("17n+5 lattice"), "{frames}: {error}");
     }
 
@@ -203,7 +208,6 @@ fn the_geometry_envelope_refuses_off_lattice_off_stride_and_over_budget_canvases
     // so only the area check can refuse it.
     assert!(validate_minimax_geometry(1536, 672, 124).is_ok());
     assert!(validate_minimax_geometry(576, 320, 345).is_ok());
-    assert!(validate_minimax_geometry(576, 320, 481).is_ok());
     let error = validate_minimax_geometry(1536, 704, 124)
         .expect_err("an over-budget canvas must be refused");
     assert!(error.contains("canvas budget"), "{error}");

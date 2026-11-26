@@ -515,8 +515,9 @@ fn parse_safe_float(value: Option<&Value>) -> Option<f32> {
         .filter(|value| value.is_finite())
 }
 pub const MINIMAX_H3_FPS: u32 = 24;
-pub const MINIMAX_H3_LEGAL_FRAME_COUNTS: [u32; 14] = [
-    124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345,
+pub const MINIMAX_H3_LEGAL_FRAME_COUNTS: [u32; 22] = [
+    124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345, 362, 379, 396, 413, 430,
+    447, 464, 481,
 ];
 
 pub const LTX25_VAE_DECODER_CONV: &str = "conv";

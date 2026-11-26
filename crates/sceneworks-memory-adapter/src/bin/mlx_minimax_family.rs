@@ -40,8 +40,8 @@ pub(super) fn minimax_calibration_fingerprint(tier: &str) -> Result<String, Stri
 /// arm. It is the same four-clause gate the pinned provider's `route_gate` applies, read off the
 /// engine crate rather than transcribed:
 ///
-/// * the temporal lattice — `frames ∈ LEGAL_FRAME_COUNTS`, i.e. `17n + 5` clamped to the released
-///   checkpoint's supported duration range. `T = 1` is off the lattice and does not render,
+/// * the temporal lattice — `frames ∈ LEGAL_FRAME_COUNTS`, i.e. `17n + 5` through the supported
+///   481-frame ceiling. `T = 1` is off the lattice and does not render,
 ///   so a still geometry is refused here too;
 /// * the spatial stride — `SPATIAL_STRIDE` (32: the VAE's 16x compression times the DiT's width
 ///   patch of 2). A 16-aligned canvas survives the VAE and then has an odd latent column count with

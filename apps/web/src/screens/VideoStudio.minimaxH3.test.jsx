@@ -3,7 +3,7 @@
 // Every model fixture here is the SHIPPED manifest entry, read from
 // `config/manifests/builtin.models.jsonc` at test time. A retyped fixture would let the studio and
 // the catalog drift into disagreement about the very numbers this story exists to express — the
-// fourteen `17n + 5` duration rungs, the 9/3/3/12 reference caps and the 2-step floor — and a test
+// twenty-two `17n + 5` duration rungs, the 9/3/3/12 reference caps and the 2-step floor — and a test
 // that asserts a control against a hand-written copy of a limit proves nothing about the model the
 // user actually picks.
 //
@@ -154,17 +154,15 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
 
   // ---------------------------------------------------------------- geometry
 
-  it("offers exactly the fourteen lattice rungs and never 15s", async () => {
+  it("offers the supported lattice through at least twenty seconds", async () => {
     await render(baseContext());
     const options = [...selectLabelled("Duration").querySelectorAll("option")];
 
     // The MENU is the model's declared set, byte for byte — not a range, not a rounded subset.
     expect(options.map((option) => Number(option.value))).toEqual(MINIMAX.limits.durations);
-    expect(options).toHaveLength(14);
+    expect(options).toHaveLength(22);
 
-    // 15.0s is what MiniMax's own documentation advertises. The next lattice rung is 362 frames
-    // = 15.083s, so 15s is REFUSED rather than quietly delivered as 14.375s — it must not be
-    // offered, and neither must anything above the declared hard maximum.
+    // A flat 15 seconds is between rungs; the menu names exact frame counts instead.
     expect(options.some((option) => Number(option.value) === 15)).toBe(false);
     for (const option of options) {
       expect(Number(option.value)).toBeLessThanOrEqual(MINIMAX.limits.hardMaxDuration);
@@ -174,30 +172,22 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     // Labels name the frame count, because the lattice is a FRAME lattice: every rung's label
     // resolves to a frame count on `17n + 5`, which is what makes "nothing in between" true.
     expect(options[0].textContent).toBe("5.17s · 124 frames");
-    expect(options.at(-1).textContent).toBe("14.38s · 345 frames");
+    expect(options.at(-1).textContent).toBe("20.04s · 481 frames");
     for (const option of options) {
       const frames = Number(option.textContent.match(/· (\d+) frames/)[1]);
       expect(frames % 17, `${option.textContent} is off the 17n+5 lattice`).toBe(5);
     }
   });
 
-  it("tells the user in prose that 15s is refused, not shortened (sc-17162)", async () => {
-    // The menu test above proves the studio cannot SUBMIT 15s. It does not prove the user is ever
-    // told why the option they came for is missing, and an absent option explains nothing — a
-    // user who read MiniMax's advertised "5-15 s" will read the 14.38s cap as a SceneWorks
-    // shortcoming rather than a property of these weights.
-    //
-    // `ui.durationHint` is the field that carries that, and it has exactly ONE reader
-    // (`VideoStudio.jsx` → `<p className="helper-copy">`). Set-derived over the family, so a third
-    // partition is covered the day it ships, and read out of the DOM rather than off the manifest:
-    // pinning the string alone would stay green if the reader were dropped.
+  it("explains the twenty-second frame option in prose", async () => {
+    // Check the rendered guidance so the frame-based twenty-second choice is discoverable.
     for (const model of manifestModels.filter((entry) => entry.family === "minimax-h3")) {
       const fixture = { ...shipped(model.id), installState: "installed", usable: true };
       await render(baseContext({ videoModels: [fixture] }));
       const helper = [...container.querySelectorAll(".helper-copy")].map((node) => node.textContent);
       expect(
-        helper.some((text) => /\b15s is refused\b[^.]{0,60}\bshortened\b/.test(text)),
-        `${model.id} must render its durationHint's 15s refusal`,
+        helper.some((text) => /481 frames for at least 20 seconds/.test(text)),
+        `${model.id} must render its durationHint's twenty-second option`,
       ).toBe(true);
     }
   });
@@ -212,7 +202,7 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(Number(selectLabelled("Duration").value)).toBe(BERNINI.defaults.duration);
     expect(Number(selectLabelled("Duration").value)).not.toBe(BERNINI.limits.durations[0]);
 
-    // The H3 leg still runs: the default has to be ON the fourteen-rung lattice, which is a claim
+    // The H3 leg still runs: the default has to be ON the twenty-two-rung lattice, which is a claim
     // about the menu rather than about which entry is preselected.
     await render(baseContext());
     expect(Number(selectLabelled("Duration").value)).toBe(MINIMAX.defaults.duration);
@@ -228,6 +218,20 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     await act(async () => setSelect(selectLabelled("Duration"), String(target)));
     await click([...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip")));
     expect(context.createVideoJob.mock.calls[0][0].duration).toBe(target);
+  });
+
+  it.each(["minimax_h3", "eros_max_h3"])("submits the 481-frame option for %s", async (id) => {
+    const selected = id === "minimax_h3" ? MINIMAX : {
+      ...MINIMAX, id, baseModel: "minimax_h3", minimaxH3Partition: "hybrid",
+      importSourceShape: "transformer_directory",
+      importPlan: { checkpointId: "managed/eros_max_h3", planId: "plan", assembly: { schemaVersion: 1, partition: "hybrid" } },
+    };
+    const context = baseContext({ videoModels: [selected] });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Duration"), "20.0417"));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Render clip")));
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: id, duration: 20.0417 });
   });
 
   it("takes the Steps floor from the model rather than a hardcoded 1", async () => {

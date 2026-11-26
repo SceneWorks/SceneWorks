@@ -481,6 +481,53 @@ fn native_rope_buffer_must_match_bound_config() {
 }
 
 #[test]
+fn native_rope_buffers_validate_the_config_at_their_stored_precision() {
+    let mut cfg = config();
+    cfg.0["rope_freq_dim"] = json!(2);
+    cfg.0["attention_head_dim"] = json!(12);
+    cfg.0["rope_theta"] = json!(7000.0);
+    for dtype in ["F32", "BF16", "F16"] {
+        let mut entries = native(&canonical_for(&cfg, "BF16"), H3QkvLayout::Contiguous);
+        let values = [1.0_f32, 7000.0_f32.powf(-0.5)];
+        let encode = |values: &[f32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|&value| match dtype {
+                    "BF16" => half::bf16::from_f32(value).to_le_bytes().to_vec(),
+                    "F16" => half::f16::from_f32(value).to_le_bytes().to_vec(),
+                    _ => value.to_le_bytes().to_vec(),
+                })
+                .collect()
+        };
+        let key = "model.diffusion_model.rope.inv_freq";
+        entries.insert(key.into(), (vec![2], dtype.into(), encode(&values)));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("merge.safetensors");
+        write_file(
+            &file,
+            &entries,
+            Some(json!({"h3_config":cfg.0.to_string()})),
+        );
+        let files = [("merge.safetensors".into(), file.clone())];
+        let inventory = H3SourceInventory::from_files(&files).unwrap();
+        assert!(!inventory.tensors.contains_key("rope.inv_freq"));
+        for invalid in [[1.0, 2.0], [f32::NAN, values[1]]] {
+            entries.get_mut(key).unwrap().2 = encode(&invalid);
+            write_file(
+                &file,
+                &entries,
+                Some(json!({"h3_config":cfg.0.to_string()})),
+            );
+            let error = H3SourceInventory::from_files(&files).unwrap_err();
+            assert!(
+                error.contains("conflicts with bound rope_theta/rope_freq_dim"),
+                "{dtype}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn arbitrary_sidecar_and_incomplete_shards_keep_admission_diagnostics() {
     let dir = tempfile::tempdir().unwrap();
     let files = sharded(dir.path());
@@ -1315,6 +1362,157 @@ fn pruned_native_source_normalizes_to_identical_stored_bytes_and_dtype() {
 }
 
 #[test]
+fn reduced_precision_tables_normalize_losslessly_and_bind_the_provider_component() {
+    for dtype in ["BF16", "F16"] {
+        let mut entries = pruned_entries("BF16");
+        let table = entries.get_mut(TABLE_KEY).unwrap();
+        // Exercise several bounded decoder chunks and a final partial chunk.
+        table.0[0] = OPERAND_CHUNK / 2 + 1;
+        table.1 = dtype.into();
+        table.2 = stored_bytes(dtype, 13, table.0.iter().product());
+        let mut expected = entries.clone();
+        let table = expected.get_mut(TABLE_KEY).unwrap();
+        table.1 = "F32".into();
+        table.2 = stored_values(dtype, &table.2)
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let expected_identity = identity_hex(shared_identity(&expected));
+        let expected_counts = operand_byte_counts(&expected);
+        let mut exported = entries.clone();
+        exported.insert(
+            "adaln_basis".into(),
+            (
+                vec![PRUNED_RANK, 4],
+                dtype.into(),
+                stored_bytes(dtype, 14, PRUNED_RANK * 4),
+            ),
+        );
+        exported.insert(
+            "adaln_mean".into(),
+            (vec![4], dtype.into(), stored_bytes(dtype, 15, 4)),
+        );
+
+        for layout in ["native", "canonical", "sharded"] {
+            let data = tempfile::tempdir().unwrap();
+            let library = tempfile::tempdir().unwrap();
+            let relative = if layout == "sharded" {
+                write_pruned_shards(library.path(), "component", &exported);
+                "component"
+            } else {
+                let source = if layout == "native" {
+                    native(&exported, H3QkvLayout::Contiguous)
+                } else {
+                    exported.clone()
+                };
+                write_file(
+                    &library.path().join("merge.safetensors"),
+                    &source,
+                    Some(json!({"h3_config":config().0.to_string()})),
+                );
+                "merge.safetensors"
+            };
+            let plans = CheckpointPlanStore::open(data.path());
+            let root = plans.approve_root(library.path()).unwrap();
+            let compiled = plans.compile_linked(&root.root_id, relative).unwrap();
+            let resolved = plans.resolve(&compiled.checkpoint_id).unwrap();
+            let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+            let binding = inventory.pruning.clone().unwrap();
+            assert_eq!(binding.identity, expected_identity, "{dtype} {layout}");
+            assert_eq!(
+                (binding.source_bytes, binding.compute_bytes),
+                expected_counts
+            );
+            H3PruningBinding::from_value(&binding.to_json()).unwrap();
+            let derivatives = CheckpointDerivativeStore::open(data.path()).unwrap();
+            let request = inventory.derivative_request();
+            assert_eq!(request.adapter_version, "3");
+            derivatives
+                .ensure(&compiled.checkpoint_id, &request, |out| {
+                    inventory.produce(out)
+                })
+                .unwrap();
+            let output = derivatives
+                .cache()
+                .bundle_path(&derivatives.cache_key(&resolved, &request).unwrap())
+                .unwrap();
+            let mut actual = Entries::new();
+            let mut files = vec![
+                (H3_CONFIG_FILE.into(), output.join(H3_CONFIG_FILE)),
+                (H3_INDEX_FILE.into(), output.join(H3_INDEX_FILE)),
+            ];
+            for i in 0..inventory.sources.len() {
+                let name = inventory.shard_name(i);
+                let path = output.join(&name);
+                actual.extend(read_file(&path));
+                files.push((name, path));
+            }
+            assert_eq!(
+                actual, expected,
+                "{dtype} {layout}: the table is widened and export auxiliaries are consumed"
+            );
+            assert_eq!(
+                H3SourceInventory::from_files(&files).unwrap().pruning,
+                Some(binding)
+            );
+            assert_eq!(
+                H3SourceInventory::from_resolved(&resolved).unwrap().pruning,
+                inventory.pruning,
+                "normalization leaves the original source and its plan unchanged"
+            );
+        }
+    }
+}
+
+#[test]
+fn nonfinite_reduced_precision_tables_are_refused() {
+    for (dtype, bits) in [("BF16", 0x7fc0u16), ("F16", 0x7e00u16)] {
+        let mut entries = pruned_entries("BF16");
+        let table = entries.get_mut(TABLE_KEY).unwrap();
+        table.1 = dtype.into();
+        table.2 = stored_bytes(dtype, 13, table.0.iter().product());
+        table.2[..2].copy_from_slice(&bits.to_le_bytes());
+        let error = canonical_pruned_error(&entries);
+        assert!(
+            error.contains("invalid values for adaln_t_table"),
+            "{dtype}: {error}"
+        );
+    }
+}
+
+#[test]
+fn malformed_pruning_export_auxiliaries_are_refused() {
+    for (name, shape) in [
+        ("adaln_basis", vec![PRUNED_RANK, 4]),
+        ("adaln_mean", vec![4]),
+    ] {
+        let mut entries = pruned_entries("BF16");
+        entries.insert(
+            name.into(),
+            (
+                shape.clone(),
+                "F32".into(),
+                stored_bytes("F32", 17, shape.iter().product()),
+            ),
+        );
+        canonical_pruned_source(&entries);
+        entries.get_mut(name).unwrap().2[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(canonical_pruned_error(&entries).contains("contains a nonfinite value"));
+        let mut wrong_shape = shape;
+        wrong_shape[0] += 1;
+        entries.insert(
+            name.into(),
+            (
+                wrong_shape.clone(),
+                "F32".into(),
+                stored_bytes("F32", 18, wrong_shape.iter().product()),
+            ),
+        );
+        assert!(canonical_pruned_error(&entries).contains("requires dense"));
+    }
+}
+
+#[test]
 fn every_reduced_operand_value_is_bound_and_full_inventory_is_never_required() {
     let base = pruned_entries("BF16");
     let baseline = canonical_pruned_source(&base).1.pruning.unwrap().identity;
@@ -1368,10 +1566,13 @@ fn malformed_pruned_topologies_refuse_before_publication() {
 
     let mut entries = base.clone();
     let table = entries.get_mut(TABLE_KEY).unwrap();
-    table.1 = "BF16".into();
-    table.2 = stored_bytes("BF16", 1, table.0.iter().product());
+    table.1 = "U8".into();
+    table.2 = vec![0; table.0.iter().product()];
     let error = canonical_pruned_error(&entries);
-    assert!(error.contains("must be stored F32"), "{error}");
+    assert!(
+        error.contains("requires dense F32, BF16, or F16 storage"),
+        "{error}"
+    );
 
     let mut entries = base.clone();
     entries.remove("transformer_blocks.0.adaln_proj.linear.bias");

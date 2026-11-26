@@ -68,9 +68,7 @@ const familyEntries = manifestModels.filter((model) => model.family === FAMILY);
 //   `denseAttention` — dense by default; optional Veda requires its managed predictor and can
 //                   fall back to dense. `twoHourCost` — the measured dense 50-step cost of
 //                   the SHORTEST clip at the shipped default canvas (1344x768 @ 124 f) is ~7 394 s.
-//   `fifteenRefused` — `limits.hardMaxDuration` is 14.375 and the next `17n + 5` rung is 15.083 s,
-//                   so a flat 15 s request has no lattice point and ERRORS. It is not clamped, and
-//                   a user planning around MiniMax's advertised "5–15 s" must learn that here.
+//   `longClips` — the extended 481-frame ceiling reaches at least twenty seconds.
 //   `noStillImage` — `min_duration = 5.0` is hardcoded upstream, so `T = 1` does not render.
 const DESCRIPTION_CLAIMS = [
   { name: "names the withheld prompt front end", re: /H3-Context-IR/ },
@@ -80,39 +78,16 @@ const DESCRIPTION_CLAIMS = [
   { name: "names the optional managed Veda predictor", re: /optional Veda[^.]*managed predictor/i },
   { name: "says Veda falls back to dense when unavailable", re: /Veda[^.]*falls back to dense when it cannot run/ },
   { name: "gives the two-hour default-canvas cost", re: /two-hour render/ },
-  { name: "says 15s is refused, not shortened", re: /\b15s\b[^.]{0,120}\brefused\b/ },
+  { name: "states how to reach twenty seconds", re: /481 frames for at least 20 seconds/ },
   { name: "says there is no still-image mode", re: /no still-image mode/ },
 ];
 
-// The duration hint is a different field on a different screen (Video Studio), so it carries the
-// refusal independently — a user who never opens the Models screen still has to be told.
-//
-// Deliberately ONE claim: a `/5\.17s/` or `/14\.38s/` literal looked like it pinned the bounds and
-// did not. Both hints quote those figures again in the cost sentence ("5.17s at 576x320 is ~14
-// minutes", "the whole 14.38s range"), so a mutation that removed them from the RANGE clause left
-// the regex matching on the leftovers — an assertion that survives its own mutation. The bounds are
-// pinned instead by `hintQuotesTheDeclaredBounds` below, which derives them from `limits` so the
-// copy is checked against the numbers the engine enforces rather than against itself.
+// The duration hint reaches Studio users independently of the Models screen.
 const DURATION_HINT_CLAIMS = [
-  { name: "says 15s is refused, not shortened", re: /\b15s is refused\b[^.]{0,60}\bshortened\b/ },
+  { name: "states how to reach twenty seconds", re: /481 frames for at least 20 seconds/ },
 ];
 
-// The drift this actually guards: `limits.hardMinDuration` / `hardMaxDuration` move (a lattice
-// correction, a new clamp) and the prose keeps quoting the old window. Derived from the entry, so
-// changing a bound without changing the copy is red.
-//
-// ⚠️ THE TWO `includes` CHECKS ARE NOT SUFFICIENT ON THEIR OWN and were once claimed to be. They are
-// independent substring tests with no adjacency, and every hint quotes BOTH figures a second time in
-// its cost sentence ("5.17s at 576x320 is ~14 minutes", "the whole 14.38s range"). Delete the range
-// clause outright and both substrings survive on the leftovers, so the assertion passes over copy
-// that no longer states a range at all — an assertion that cannot fail its own mutation.
-//
-// `RANGE` is the anchor that closes that: it requires the two bounds ADJACENT, separated only by a
-// range connector, which the cost sentence's leftovers can never satisfy. Still derived from
-// `limits` rather than typed, so moving a bound without moving the copy is red for the same reason
-// the substring checks were meant to be. The connector set is deliberately small but covers both
-// shipped spellings — the manifest writes "5.17s to 14.38s", the `fallbackModels` mirror condenses
-// it to "5.17s-14.38s".
+// Derive the adjacent range from catalog limits so prose cannot silently keep an old ceiling.
 function hintQuotesTheDeclaredBounds(hint, entry, label) {
   const quoted = {};
   for (const [name, seconds] of [
@@ -153,7 +128,7 @@ describe("MiniMax-H3 catalog copy discloses the withheld upstream components (sc
     }
   });
 
-  it("states the 15s refusal on each entry's duration hint", () => {
+  it("states the extended range on each entry's duration hint", () => {
     expect(familyEntries.length).toBeGreaterThan(0);
     for (const entry of familyEntries) {
       const hint = entry.ui?.durationHint ?? "";
@@ -355,24 +330,11 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     ).toBe(true);
   });
 
-  it("keeps the 14.38s cap a LATTICE ceiling, distinct from wall-clock cost (sc-17162)", () => {
-    // Three different things on this page could be mistaken for the reason clips stop at 14.38 s —
-    // the dense-attention cost table, the Turbo adapter, and the withheld sparse-attention path —
-    // and all three are about WALL CLOCK. The ceiling is the `17n + 5` lattice meeting the
-    // checkpoint's own 5-15 s clamp. Every one of the three has to disclaim it in its own section,
-    // because a reader who only reads the Turbo section never sees the sparse-attention bullet.
-    expect(
-      /Wall-clock cost and the length cap are separate things/.test(guide),
-      "the cost section must separate the two",
-    ).toBe(true);
-    expect(
-      /Turbo changes how long a render takes;\s*\n?\s*it does not change which lengths exist/.test(guide),
-      "the cost section must say Turbo moves the clock, not the cap",
-    ).toBe(true);
-    expect(
-      /the fourteen clip lengths and the 14\.38 s ceiling are\s*\n?\s*properties of the frame lattice/.test(guide),
-      "the Turbo section must disclaim the cap on its own",
-    ).toBe(true);
+  it("separates the extended length policy from measured render cost", () => {
+    expect(/Render cost and supported length are separate/.test(guide)).toBe(true);
+    expect(/Turbo changes the number of evaluations/.test(guide)).toBe(true);
+    expect(/Turbo keeps the same supported 124–481-frame range/.test(guide)).toBe(true);
+    expect(/not measurements of the newly admitted longer clips/.test(guide)).toBe(true);
 
     // Turbo is presented as the MITIGATION for the dense table, with its measured figure and its
     // caveat — a cost table with no mitigation next to it reads as the whole story.
@@ -473,12 +435,9 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     ).toBe(false);
   });
 
-  it("does not attribute the 14.38s ceiling to the withheld sparse attention", () => {
-    // A live trap on this epic: the ceiling is the checkpoint's own 5-15 s clamp meeting the
-    // `17n + 5` lattice (`MINIMAX_H3_LEGAL_FRAME_COUNTS`), and the lattice comes from the VAE's
-    // chunking, which sparse attention does not touch. Sparse attention would move the COST of the
-    // long end, not the bound. The guide has to keep those apart.
-    expect(/It is not what caps the clip at 14\.38 s/.test(guide), "guide must separate cost from the ceiling").toBe(true);
+  it("does not attribute the supported duration range to sparse attention", () => {
+    expect(/The duration range is a separate policy/.test(guide)).toBe(true);
+    expect(/dense attention makes the longer options expensive/.test(guide)).toBe(true);
   });
 });
 

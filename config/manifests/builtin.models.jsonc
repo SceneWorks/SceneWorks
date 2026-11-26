@@ -13528,26 +13528,24 @@
         "scheduler": "default"
       },
       "limits": {
-        // ⚠️ The FOURTEEN legal clip lengths, and the reason this is a MENU rather than a range:
-        // frames must land on `17n + 5` and only 124…345 satisfy the checkpoint's own 5–15 s clamp,
+        // ⚠️ The twenty-two supported clip lengths, and the reason this is a MENU rather than a range:
+        // frames must land on `17n + 5` and 124…481 cover the supported range through at least 20 seconds,
         // so a slider would emit durations the engine refuses. Each value is `frames / 24` to 4 dp
         // and each rounds back to its own frame count exactly (5.1667 x 24 = 124.0008 → 124).
         // Derived from MINIMAX_H3_LEGAL_FRAME_COUNTS by
-        // `shipped_minimax_h3_duration_menu_is_exactly_the_fourteen_lattice_rungs`, so the menu and
+        // `shipped_minimax_h3_duration_menu_is_exactly_the_supported_lattice_rungs`, so the menu and
         // the lattice cannot drift.
-        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375, 15.0833, 15.7917, 16.5, 17.2083, 17.9167, 18.625, 19.3333, 20.0417],
         // 124 / 24. The reference ADVERTISES 5.0 s but has no lattice point there, and a shorter
         // request is refused rather than lengthened (sc-17152).
         "hardMinDuration": 5.1667,
-        // 345 / 24. The reference ADVERTISES 15.0 s and CANNOT reach it — the next rung is 362
-        // frames = 15.083 s — so 15 s is REFUSED here rather than silently delivered as 14.375 s,
-        // which is exactly what sc-17147 was doing.
-        "hardMaxDuration": 14.375,
+        // 481 / 24, rounded to the same four decimals as the menu.
+        "hardMaxDuration": 20.0417,
         // Stays at the hard bound deliberately: the real constraint is canvas x duration and a
         // scalar cannot express it. The full range is comfortable at 576x320; the SHORTEST clip at
         // the default canvas is already two hours. Recommending a shorter scalar would falsely
         // imply long clips are infeasible everywhere (sc-17152).
-        "recommendedMaxDuration": 14.375,
+        "recommendedMaxDuration": 20.0417,
         // 🔴 THE UNIT IS MODEL EVALUATIONS (NFE), and it is the same unit everywhere: `defaults.steps`
         // above, `advanced.steps`, this floor, and the `sampling.steps` each turbo adapter declares
         // in builtin.loras.jsonc. The engine builds the sigma grid as `linspace(1, 0, steps + 1)` —
@@ -13737,9 +13735,9 @@
         //      not render at all.
         // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
         // in the prompt guide, which is the only place a user would copy that syntax from.
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in twenty-two fixed lengths between 5.17s and 20.04s at 24fps; select 481 frames for at least 20 seconds. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render, while smaller canvases substantially reduce the cost. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
-        "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
+        "durationHint": "Clip lengths follow the 17n+5 frame spacing: 124–481 frames at 24fps (5.17s to 20.04s). Choose 481 frames for at least 20 seconds. Start at 576x320; longer clips and larger canvases require more memory and time.",
         "promptGuide": {
           "title": "MiniMax-H3 Prompt Guide",
           "path": "/prompt-guides/minimax-h3.md",
@@ -14081,10 +14079,10 @@
         // Identical geometry to `minimax_h3` — same DiT architecture, same VAE, same lattice. See
         // that entry for the derivations; the two are asserted equal by
         // `both_minimax_h3_partitions_declare_one_geometry`.
-        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375, 15.0833, 15.7917, 16.5, 17.2083, 17.9167, 18.625, 19.3333, 20.0417],
         "hardMinDuration": 5.1667,
-        "hardMaxDuration": 14.375,
-        "recommendedMaxDuration": 14.375,
+        "hardMaxDuration": 20.0417,
+        "recommendedMaxDuration": 20.0417,
         // Same scheduler, same two-EVALUATION floor as `minimax_h3` — see that entry for the unit
         // (NFE, not sigma grid points) and for why 2 is a product judgement rather than an engine
         // limit (sc-19426, corrected sc-18726).
@@ -14134,9 +14132,9 @@
         // reference. The two entries are separate model cards and a user can install THIS one
         // without ever reading that one's, so "see the other entry" would leave the withheld
         // components undisclosed on the surface where the decision is actually made.
-        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same twenty-two fixed lengths between 5.17s and 20.04s; select 481 frames for at least 20 seconds. There is no still-image mode.",
         "recommendedFor": ["reference_to_video"],
-        "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
+        "durationHint": "Clip lengths follow the 17n+5 frame spacing: 124–481 frames at 24fps (5.17s to 20.04s). Choose 481 frames for at least 20 seconds. Start at 576x320; longer clips and larger canvases require more memory and time.",
         "promptGuide": {
           "title": "MiniMax-H3 Prompt Guide",
           "path": "/prompt-guides/minimax-h3.md",
