@@ -587,6 +587,10 @@ pub(crate) async fn run_vqa_job(
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    // SW-7276: this typed handler bypasses the image generate seam, so it sets the shared candle
+    // FlashAttention-2 toggle itself (`advanced.flashAttn`, default on).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    crate::attention_path::apply_image_request(&request);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -1004,6 +1008,10 @@ pub(crate) async fn run_interleave_job(
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    // SW-7276: this typed handler bypasses the image generate seam, so it sets the shared candle
+    // FlashAttention-2 toggle itself (`advanced.flashAttn`, default on).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    crate::attention_path::apply_image_request(&request);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),

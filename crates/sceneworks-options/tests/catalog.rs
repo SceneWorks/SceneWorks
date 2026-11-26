@@ -164,3 +164,31 @@ fn timeline_context_fields_are_typed_context() {
         assert_eq!(spec.default, DefaultRule::Absent);
     }
 }
+
+#[test]
+fn flash_attention_applies_to_every_visual_family_except_moss() {
+    // SW-7276: candle-gen routes every candle model's attention through one shared FlashAttention-2
+    // toggle, so `advanced.flashAttn` is no longer an SDXL-only fact.
+    let flash = by_id("advanced.flashAttn").unwrap();
+    let applies = |model: Value| {
+        let context = OptionContext {
+            operation: "text_to_image",
+            model: &model,
+            features: &Value::Null,
+            target: &Value::Null,
+        };
+        flash.applies_when.matches(&context)
+    };
+    for (kind, family) in [
+        ("image", "sdxl"),
+        ("image", "flux2"),
+        ("image", "qwen-image"),
+        ("image", "z-image"),
+        ("video", "wan"),
+        ("video", "ltx-video"),
+    ] {
+        assert!(applies(json!({"type": kind, "family": family})), "{family}");
+    }
+    assert!(!applies(json!({"type": "image", "family": "moss_image"})));
+    assert!(!applies(json!({"type": "audio", "family": "kokoro"})));
+}

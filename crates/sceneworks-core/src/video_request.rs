@@ -91,6 +91,8 @@ video_option_fields! {
     distill_stage2_strength: f64 => number("distillStage2Strength"),
     use_uncensored_enhancer: bool => boolean("useUncensoredEnhancer"),
     no_audio: bool => boolean("noAudio"),
+    // SW-7276: shared candle FlashAttention-2 toggle; the worker reads the payload at dispatch.
+    flash_attn: bool => boolean("flashAttn"),
     lightning: bool => boolean("lightning"),
     video_cfg_guidance_scale: f64 => number("videoCfgGuidanceScale"),
     video_stg_guidance_scale: f64 => number("videoStgGuidanceScale"),
@@ -1571,6 +1573,19 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn video_options_bind_the_shared_flash_attention_toggle() {
+        // SW-7276: `advanced.flashAttn` is accepted on video requests (it was image/SDXL-only).
+        let authored = payload(json!({"advanced": {"flashAttn": false}}));
+        let options = VideoOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
+        assert!(!options.flash_attn.unwrap().value);
+        let absent = payload(json!({"advanced": {}}));
+        let options = VideoOptions::bind(&BindingInput::new(&absent, &absent)).unwrap();
+        assert!(options.flash_attn.is_none());
+        let invalid = payload(json!({"advanced": {"flashAttn": "yes"}}));
+        assert!(VideoOptions::bind(&BindingInput::new(&invalid, &invalid)).is_err());
     }
 
     #[test]

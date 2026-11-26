@@ -1102,6 +1102,9 @@ mod sdxl_control_tests {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn candle_flash_attention_is_reset_for_true_and_false_jobs() {
+        let _guard = crate::attention_path::TOGGLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         apply_sdxl_control_flash_attn(true);
         assert!(runtime_cuda::providers::sdxl::flash_attn_enabled());
         apply_sdxl_control_flash_attn(false);

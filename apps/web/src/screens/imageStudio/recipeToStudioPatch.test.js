@@ -26,6 +26,11 @@ describe("recipeToStudioPatch", () => {
       referenceTuningDeclaredArmed: false, promptEdited: true });
     expect(recipeToStudioPatch({ view: "Video" }, context)).toBeNull();
   });
+  it("restores flashAttn from the recipe: an opt-out stays off, absent means on (SW-7276)", () => {
+    expect(recipeToStudioPatch(launch({ flashAttn: false }), context).values.flashAttn).toBe(false);
+    expect(recipeToStudioPatch(launch({}), context).values.flashAttn).toBe(true);
+    expect(recipeToStudioPatch(launch({ flashAttn: true }), context).values.flashAttn).toBe(true);
+  });
   it("keeps explicit empty references and same-model reset ownership", () => {
     const { values, flags } = recipeToStudioPatch(launch({}, { model: "old", normalizedSettings: { referenceAssetIds: [] } }), context);
     expect(values.referenceAssetIds).toEqual([]);

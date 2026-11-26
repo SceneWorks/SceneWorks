@@ -393,6 +393,13 @@ async fn run_utility_job_inner(
         dispatch_settings.verified_plan_layers = source_guard.plan_layers();
         dispatch_settings.verified_revision_sources = source_guard.verified_revision_sources();
         let quantization_cache = saved_quantizations(&source_guard, &dispatch_settings);
+        // SW-7276: the shared candle FlashAttention-2 toggle is process-wide. Open one scope per
+        // candle generation job: it resets the toggle to its default (on) and the path counters,
+        // logs the `attention_path` event at the end and restores the default, so a stale "off"
+        // never leaks into the next job. The image and video lanes set the job's own
+        // `advanced.flashAttn` from their typed request (`attention_path::apply_*_request`).
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let attention_scope = crate::attention_path::AttentionJobScope::begin(&dispatch_job);
         let dispatch_result = load_progress::with_quantization_cache(
             Some(quantization_cache),
             dispatch_utility_job(
@@ -405,6 +412,10 @@ async fn run_utility_job_inner(
             ),
         )
         .await;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        if let Some(scope) = attention_scope {
+            scope.finish();
+        }
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
         // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
         // a raw loader error (sc-19708). An error with the source still present stays verbatim.
@@ -991,6 +1002,21 @@ fn shared_promptless_svd_passes_worker_admission_without_inventing_text() {
     let payload = serde_json::json!({"projectId":"p","model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image","modelManifestEntry":model});
     validate_static_job_options(&JobType::VideoGenerate, payload.as_object().unwrap()).unwrap();
     assert_eq!(payload["prompt"], "");
+}
+
+#[cfg(test)]
+#[test]
+fn shared_flash_attention_toggle_passes_worker_admission_for_image_and_video() {
+    // SW-7276: `advanced.flashAttn` is the one shared candle attention toggle, accepted on video
+    // requests as well as every non-MOSS image family (it was an SDXL-only image option).
+    let svd = sceneworks_core::registry::builtin_model_spec("svd")
+        .unwrap()
+        .project(None);
+    for flash in [true, false] {
+        let payload = serde_json::json!({"projectId":"p","model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image","modelManifestEntry":svd,"advanced":{"flashAttn":flash}});
+        validate_static_job_options(&JobType::VideoGenerate, payload.as_object().unwrap())
+            .unwrap_or_else(|error| panic!("video flashAttn={flash}: {error}"));
+    }
 }
 
 #[cfg(test)]

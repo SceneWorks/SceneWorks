@@ -493,6 +493,9 @@ pub use training_jobs::{flux3_training_config_witness, installed_aux_training_mo
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
 mod job_metrics;
+// Per-job shared FlashAttention-2 toggle + `attention_path` counters for candle jobs (SW-7276).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod attention_path;
 mod supervisor;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod vram_gate;

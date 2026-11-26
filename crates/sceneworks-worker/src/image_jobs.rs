@@ -992,6 +992,10 @@ async fn run_image_generate_job_unexplained(
     // imported, and ComfyUI lanes. Every route uses the same neutral assetWrites/progress/cancellation
     // harness. Gated on `backend_candle_enabled` (default off), so disabling Candle preserves the stub
     // behavior.
+    // SW-7276: the shared candle FlashAttention-2 toggle, set once per job from `advanced.flashAttn`
+    // (default on) for EVERY candle image lane and model family, before the route loads.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    crate::attention_path::apply_image_request(&execution);
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = matches!(
         dispatch::execute_candle_image_route(
