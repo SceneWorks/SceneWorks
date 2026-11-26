@@ -151,18 +151,16 @@ fn dispatch_routes_the_minimax_provider_into_its_own_arm() {
     }
 }
 
-/// The envelope's engine constants, pinned so a pin bump that moves one reds HERE rather than
-/// silently widening or narrowing what this arm will capture. The lattice is CHECKED as
-/// `17n + 5` rather than only tabulated, so a table that drifted into a different progression
-/// could not pass by matching itself.
+/// The capture arm follows the engine's shared geometry contract. Check every supported duration
+/// and its `17n + 5` progression without maintaining another copy of the frame-count table.
 #[test]
 fn minimax_envelope_is_the_pinned_engines_own() {
     assert_eq!(mlx_gen_minimax_h3::SPATIAL_STRIDE, 32);
     assert_eq!(mlx_gen_minimax_h3::CANVAS_MAX_PIXELS, 1_032_192);
     assert_eq!(mlx_gen_minimax_h3::MINIMAX_H3_FPS, 24.0);
     assert_eq!(
-        mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS,
-        [124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345]
+        mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.map(|frames| frames as u32),
+        mlx_gen::gen_core::h3_memory::LEGAL_FRAME_COUNTS
     );
     for (index, frames) in mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.iter().enumerate() {
         assert_eq!(
@@ -170,6 +168,7 @@ fn minimax_envelope_is_the_pinned_engines_own() {
             17 * index as i32 + 124,
             "the legal frame counts are 17n + 5, not a tabulated list"
         );
+        assert!(validate_minimax_geometry(1344, 768, *frames as u32).is_ok());
     }
     // The budget is a PRODUCT, and the published resolution list proves it cannot be a per-edge
     // cap: two shipped canvases whose long edges differ by 192px have the identical area.
@@ -187,7 +186,7 @@ fn the_geometry_envelope_refuses_off_lattice_off_stride_and_over_budget_canvases
 
     // Off-lattice, including a still (`T = 1` does not render at all) and LTX's own `1 + 8k`
     // lattice, which shares no member with this one inside the legal range.
-    for frames in [0_u32, 1, 97, 121, 123, 125, 305, 346, u32::MAX] {
+    for frames in [0_u32, 1, 97, 121, 123, 125, 305, 346, 498, u32::MAX] {
         let error = validate_minimax_geometry(1344, 768, frames)
             .expect_err("an off-lattice frame count must be refused");
         assert!(error.contains("17n+5 lattice"), "{frames}: {error}");
@@ -204,6 +203,7 @@ fn the_geometry_envelope_refuses_off_lattice_off_stride_and_over_budget_canvases
     // so only the area check can refuse it.
     assert!(validate_minimax_geometry(1536, 672, 124).is_ok());
     assert!(validate_minimax_geometry(576, 320, 345).is_ok());
+    assert!(validate_minimax_geometry(576, 320, 481).is_ok());
     let error = validate_minimax_geometry(1536, 704, 124)
         .expect_err("an over-budget canvas must be refused");
     assert!(error.contains("canvas budget"), "{error}");
