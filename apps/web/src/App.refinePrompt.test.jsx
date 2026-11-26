@@ -55,9 +55,7 @@ describe("refine my prompt (sc-2041)", () => {
       );
     });
 
-    // Prompt tools (UI-refinement 1b): selecting the "Refine my prompt" tile opens its panel and
-    // auto-runs the refine (autoStart) — no separate trigger button, the panel goes straight to
-    // the suggested rewrite.
+    // Opening the tool lets the user choose exclusions before starting the rewrite.
     const refineTile = [...document.body.querySelectorAll(".prompt-tool")].find((button) =>
       button.textContent.includes("Refine my prompt"),
     );
@@ -66,10 +64,17 @@ describe("refine my prompt (sc-2041)", () => {
     });
     await settle();
 
+    expect(refinePrompt).not.toHaveBeenCalled();
+    await act(async () => document.body.querySelector('.refine-control input[type="checkbox"]').click());
+    await settle();
+    await act(async () => document.body.querySelector('.refine-control .refine-button').click());
+    await settle();
+
     expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
       prompt: "A cinematic frame of a neon street at midnight",
       modelId: "z_image_turbo",
       workflow: "image",
+      promptExclusions: ["identifyingCharacteristics"],
       guide: "# Guide\n\nWrite vividly.",
       signal: expect.any(AbortSignal),
     }));

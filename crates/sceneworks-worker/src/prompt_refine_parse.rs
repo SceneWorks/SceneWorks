@@ -309,7 +309,7 @@ pub(super) async fn parse_refine_request(
     // Build the `(system, user)` chat text per task: the caption tasks swap Ideogram's caption system
     // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
     // rewrite assembles its guide/workflow system prompt with the user's prompt as the turn.
-    let (system, user_message) = match task {
+    let (mut system, user_message) = match task {
         RefineTask::ImageCaption => build_image_caption_messages(multi_reference),
         RefineTask::ImageDescribe => {
             // sc-8205: the describe style (prose vs booru tags) is selected per-model by the
@@ -419,6 +419,21 @@ pub(super) async fn parse_refine_request(
             )
         }
     };
+    let exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion> =
+        serde_json::from_value(
+            payload
+                .get("promptExclusions")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("Invalid prompt exclusions: {error}"))
+        })?;
+    let instruction = sceneworks_core::options::prompt_content::exclusion_instruction(&exclusions);
+    if !instruction.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&instruction);
+    }
     // The expansion runs the recipe's own reasoning mode (`enable_thinking` in its
     // `request_params.json`), which the engine put on the request.
     if let Some(expand) = &h3_expand {

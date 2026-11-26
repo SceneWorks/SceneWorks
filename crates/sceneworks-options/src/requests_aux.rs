@@ -196,6 +196,14 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .compat("Unknown or absent uses prose."),
     field!(
         "promptRefine",
+        "promptExclusions",
+        Strings,
+        Absent,
+        WhatToMake,
+        "optional content exclusions for refinement and image description"
+    ),
+    field!(
+        "promptRefine",
         "kvCompression",
         OneOf("off | qualified"),
         Provider("worker SCENEWORKS_LLM_KV_COMPRESSION"),

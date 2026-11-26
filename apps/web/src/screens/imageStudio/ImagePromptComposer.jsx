@@ -581,6 +581,7 @@ export function ImagePromptComposer({
                   <div className="prompt-tool-panel">
                     <ReferenceCaptionPicker
                       onCaption={onImageDescribe}
+                      showPromptOptions
                       onApply={(text) => setPromptFromUser(text)}
                       onReferenceImageLoaded={onReferenceImageLoaded}
                       referenceSnapKey={resolutionSnapKey}
@@ -609,7 +610,6 @@ export function ImagePromptComposer({
                 {refineActive ? (
                   <div className="prompt-tool-panel">
                     <RefinePromptControl
-                      autoStart
                       guidePath={promptGuide.path}
                       modelId={model}
                       onApply={setPromptFromUser}

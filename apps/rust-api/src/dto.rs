@@ -543,6 +543,8 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DatasetBatchDescribeJobRequest {
     #[serde(default)]
+    pub(crate) prompt_exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    #[serde(default)]
     pub(crate) model: Option<String>,
     /// The model tier (`q4`, `q8`, `bf16`), named `variant` like every other request that picks a
     /// tier. Only the Qwen3.8 27B describer has tiers; absent is its default (`q4`), and naming

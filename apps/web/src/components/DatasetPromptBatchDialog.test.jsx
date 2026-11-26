@@ -241,6 +241,19 @@ describe("DatasetPromptBatchDialog", () => {
     expect(button("Describe images").disabled).toBe(false);
   });
 
+  it("sends optional exclusions independently of the built-in or edited prompt", async () => {
+    await render();
+    const options = [...document.body.querySelectorAll('fieldset.dataset-caption-options input')];
+    expect(options).toHaveLength(4);
+    expect(options.every((option) => !option.checked)).toBe(true);
+    for (const option of options) await click(option);
+    await click(options[1]);
+    await click(button("Describe images"));
+    const body = JSON.parse(trainingApi.batchDescribeJobs.mock.calls.at(-1)[3].body);
+    expect(body.prompt).toBeUndefined();
+    expect(body.promptExclusions).toEqual(["identifyingCharacteristics", "colorMode", "style"]);
+  });
+
   it("shows a model that is not installed as unavailable with a download route", async () => {
     await render();
     const joy = document.body.querySelector('input[value="joycaption_beta_one"]');

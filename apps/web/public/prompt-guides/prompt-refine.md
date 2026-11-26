@@ -12,6 +12,8 @@ The refiner runs in-process on the native worker (MLX on macOS, candle on Window
 
 ## Practical Notes
 
+**Prompt options** are optional checkboxes. Select any combination to omit identifying characteristics, clothing and accessories, color versus black-and-white mode, or the medium and artistic style. These exclusions take precedence over normal refinement instructions and the model guide. Review the result before applying it.
+
 The refiner matches the language of your prompt: a non-English prompt is rewritten in the same language.
 
 It works without a model guide, but the rewrite is most useful when the selected generation model ships one — the refiner follows that guide's recommended structure and what-to-avoid guidance.

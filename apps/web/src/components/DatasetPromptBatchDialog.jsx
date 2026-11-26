@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Modal } from "./Modal.jsx";
 import { RequiredModelsNotice } from "./RequiredModelsNotice.jsx";
 import { DescribePromptPresets } from "./DescribePromptPresets.jsx";
+import { PromptContentOptions } from "./PromptContentOptions.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { trainingApi } from "../api/trainingResources.js";
 import { jobsApi } from "../api/jobsResources.js";
@@ -505,6 +506,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // Each model's default instruction and limit, by repo: `{ prompt, maxChars }`.
   const [defaults, setDefaults] = useState({});
   const [prompt, setPrompt] = useState("");
+  const [promptExclusions, setPromptExclusions] = useState([]);
   // Whether the editor shows the selected model's untouched default, so a model switch swaps it
   // for the other model's default; an edited text stays as typed.
   const [followDefault, setFollowDefault] = useState(true);
@@ -966,6 +968,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         };
       } else {
         body = { model: describer.entry.repo, requestedGpu: "auto" };
+        if (promptExclusions.length) body.promptExclusions = promptExclusions;
         if (describer.tier) body.variant = describer.tier;
         // The built-in default is sent as "no prompt" so the worker uses its own default instruction.
         if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
@@ -1406,6 +1409,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             The tool adds the JSON output format after this text, so edits never change the seven fields.
           </span>
         </label>
+        <PromptContentOptions value={promptExclusions} onChange={setPromptExclusions} disabled={busy} />
         <div className="dataset-prompt-batch-prompt-actions">
           <button
             className="secondary-action"

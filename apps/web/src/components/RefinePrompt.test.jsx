@@ -40,6 +40,20 @@ describe("RefinePromptControl", () => {
     act(() => root.render(ui));
   }
 
+  it("combines optional exclusions and removes deselected options from the rewrite request", async () => {
+    const refinePrompt = vi.fn(async () => "A revised scene");
+    render(<RefinePromptControl prompt="a portrait in a room" workflow="image" refinePrompt={refinePrompt} onApply={vi.fn()} />);
+    const options = [...container.querySelectorAll('input[type="checkbox"]')];
+    expect(options).toHaveLength(4);
+    expect(options.every((option) => !option.checked)).toBe(true);
+    for (const option of options) await act(async () => option.click());
+    await act(async () => options[2].click());
+    await act(async () => refineButton(container).click());
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      promptExclusions: ["identifyingCharacteristics", "clothingAndAccessories", "style"],
+    }));
+  });
+
   it.each(["pending", "server-required", "invalid"])("waits through %s before auto-starting the confirmed draft once", async (state) => {
     feedbackState.value = { state, refusal: { code: "invalid_option", field: "prompt", detail: "Fix this prompt" } };
     const refinePrompt = vi.fn(async () => "A confirmed rewrite");

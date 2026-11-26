@@ -635,7 +635,7 @@ fn resolve_max_new_tokens_defaults_and_override() {
     // The prose-describe task (epic 8203) gets the in-between default.
     assert_eq!(
         resolve_max_new_tokens(&obj(serde_json::json!({})), RefineTask::ImageDescribe, None),
-        1024
+        2048
     );
     // The free-text rewrite carries the per-shot film refine, whose output contract is
     // `MAX_PROMPT_CHARS` (sc-24029: 512 tokens cut a shot prompt off mid-sentence at 3026
@@ -1353,6 +1353,28 @@ fn build_image_describe_messages_returns_prose_system_and_user() {
     );
     assert!(!user.trim().is_empty(), "user block is non-empty");
     assert!(!user.contains("{{"));
+}
+
+#[test]
+fn single_image_description_covers_pose_and_scene_in_detail() {
+    let (system, _) = build_image_describe_messages(DescribeStyle::Prose, false);
+    for detail in [
+        "OWN left and right",
+        "elbow bend",
+        "fingers",
+        "knee bend",
+        "ROOM AND ENVIRONMENT",
+        "depth of field",
+        "camera height and angle",
+        "LIGHTING",
+        "CLOTHING AND ACCESSORIES",
+        "STYLE AND ERA",
+    ] {
+        assert!(
+            system.contains(detail),
+            "missing detailed guidance: {detail}"
+        );
+    }
 }
 
 // ── sc-8205 (epic 8203): captionStyle="tags" describe variant ──

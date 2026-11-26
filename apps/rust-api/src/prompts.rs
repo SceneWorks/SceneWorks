@@ -50,6 +50,12 @@ pub(crate) async fn create_prompt_refine_job(
     let prompt = payload.prompt.trim();
 
     let mut job_payload = JsonObject::new();
+    if !payload.prompt_exclusions.is_empty() {
+        job_payload.insert(
+            "promptExclusions".to_owned(),
+            json!(payload.prompt_exclusions),
+        );
+    }
     if !prompt.is_empty() {
         job_payload.insert("prompt".to_owned(), Value::String(prompt.to_owned()));
     }
