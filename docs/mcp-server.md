@@ -334,9 +334,9 @@ Expected failure modes: no/wrong token → `401` with
 
    ⚠️ **The `durations` and `fps` menus from `list_models` are exhaustive, and an
    off-menu value is refused rather than rounded to the nearest one.** MiniMax-H3
-   is the case that makes this bite: its fourteen legal clip lengths are a `17n+5`
-   frame lattice at 24 fps, so nothing between them renders, and the 15 s its own
-   documentation advertises is between the last rung and the next. `minSteps` is
+   is the case that makes this bite: its twenty-two clip lengths are a `17n+5`
+   frame lattice at 24 fps, covering 124–481 frames (5.17–20.04 seconds). Choose
+   481 frames for at least 20 seconds. `minSteps` is
    the same shape — below it the request is refused, not raised.
 
    ⚡ **A `loras` entry whose `list_loras` row carries `role: "accelerator"` and a

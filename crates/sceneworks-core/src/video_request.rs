@@ -546,7 +546,7 @@ pub fn payload_video_mode(payload: &JsonObject) -> String {
 
 /// The frame count `model` will actually render for `raw_frames` requested, coerced onto that
 /// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, **MiniMax-H3 `17n+5` clamped to the
-/// fourteen rungs of [`MINIMAX_H3_LEGAL_FRAME_COUNTS`]**, everything else (Wan and the families
+/// supported rungs of [`MINIMAX_H3_LEGAL_FRAME_COUNTS`]**, everything else (Wan and the families
 /// built on it) `4k+1`.
 ///
 /// THE ONE LADDER (sc-12371). It has two kinds of caller by design: [`VideoRequest::frame_count`],
@@ -583,31 +583,8 @@ pub fn video_frame_count(model: &str, raw_frames: u32) -> u32 {
     }
 }
 
-/// MiniMax-H3's complete legal frame set — **fourteen** values, 124 through 345 (sc-17158).
-///
-/// ⚠️ The epic's R7 and this story's own title say `4k + 1`. **Both are wrong**, measured false
-/// against the official diffusers reference (`MiniMaxH3`, diffusers `main` PR #14355) by the
-/// sc-17242 spike. The real lattice is `17n + 5` — the video VAE's `clip_length 17` with its
-/// `token_drop 3` — and the two lattices are **not nested**: 22, 39 and 56 are all legal `17n + 5`
-/// counts and none of them is `4k + 1`, so enforcing `4k + 1` would reject most of the legal set
-/// while admitting counts the engine refuses.
-///
-/// The checkpoint then clamps the clip to `5.0 ≤ frames / 24 ≤ 15.0` (`min_duration` /
-/// `max_duration` are hardcoded properties), i.e. `120 ≤ frames ≤ 360`. Intersecting the lattice
-/// with the clamp leaves exactly these fourteen rungs — which is why the manifest advertises a
-/// fourteen-value `limits.durations` MENU rather than a range: only fourteen clip lengths are
-/// renderable, and a slider over 5–15 s would emit requests the engine refuses.
-///
-/// **Neither advertised endpoint is a lattice point.** `345 / 24 = 14.375 s` and the next rung
-/// (362 frames) is 15.083 s, so upstream's advertised 15.0 s ceiling is unreachable — sc-17147 was
-/// silently delivering 14.375 s for a 15 s request. [`MINIMAX_H3_MIN_DURATION`] /
-/// [`MINIMAX_H3_MAX_DURATION`] are derived FROM this table for exactly that reason, and the
-/// manifest's `limits.hardMinDuration` / `limits.hardMaxDuration` are pinned to them, so the app
-/// refuses 15 s rather than quietly shortening it.
-///
-/// Re-derived from the `17n + 5` rule and the 5–15 s clamp by
-/// `minimax_h3_lattice_is_seventeen_n_plus_five_not_four_k_plus_one`, so this table cannot drift
-/// from the rule it encodes.
+/// Supported MiniMax-H3 frame counts: 124 through 481 on the required `17n + 5` lattice.
+/// The range covers at least 20 seconds at 24 fps; bounds derive from this same inventory.
 pub use sceneworks_options::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
 
 /// MiniMax-H3's one cadence. Not a menu: the lattice, the duration window and every measured
@@ -619,9 +596,7 @@ pub use sceneworks_options::video_request::MINIMAX_H3_FPS;
 /// drift apart. **Not** the reference's advertised 5.0: 5.0 s has no lattice point.
 pub use sceneworks_options::video_request::MINIMAX_H3_MIN_DURATION;
 
-/// The longest renderable MiniMax-H3 clip, in seconds — `345 / 24 = 14.375`. **Not** the
-/// reference's advertised 15.0, which sits between rungs and is now refused rather than delivered
-/// short.
+/// Longest supported MiniMax-H3 clip: 481 / 24 seconds (about 20.0417).
 pub const MINIMAX_H3_MAX_DURATION: f32 = MINIMAX_H3_LEGAL_FRAME_COUNTS
     [MINIMAX_H3_LEGAL_FRAME_COUNTS.len() - 1] as f32
     / MINIMAX_H3_FPS as f32;
@@ -2736,13 +2711,9 @@ mod tests {
         // checkpoint runs `sink_size = 0`, so a bounded-window AR clip drifts as it lengthens
         // (sc-15127). 5 s = 10 AR blocks, just past the reference driver's 9-block example.
         ("krea_realtime_14b", 5.0),
-        // MiniMax-H3's ceiling is a LATTICE bound, not a memory or stability one: 345 frames is the
-        // largest `17n + 5` count inside the checkpoint's own 5–15 s clamp, and `345 / 24` is
-        // 14.375. Upstream ADVERTISES 15.0 s and cannot reach it — the next rung, 362 frames, is
-        // 15.083 s — so the manifest must not repeat the advertisement or the engine will refuse
-        // its own dropdown (sc-17152; sc-17147 was silently delivering 14.375 s for a 15 s ask).
-        ("minimax_h3", 14.375),
-        ("minimax_h3_ref", 14.375),
+        // H3 exposes 481 frames at 24 fps: the first lattice rung at or above twenty seconds.
+        ("minimax_h3", 20.0417),
+        ("minimax_h3_ref", 20.0417),
     ];
 
     #[test]
@@ -2801,9 +2772,9 @@ mod tests {
             //    cap sat BELOW its own dropdown would start rejecting its own UI, which is what
             //    this assertion exists to catch before it ships.
             let advertised_max = buckets.iter().copied().fold(f64::MIN, f64::max);
+            // Compare at the f32 precision the request contract reads, as with the floor below.
             assert_eq!(
-                f64::from(*want_cap),
-                advertised_max,
+                *want_cap, advertised_max as f32,
                 "{id}: hardMaxDuration must equal the top of its advertised durations — a lower \
                  cap rejects the model's own dropdown; a higher one advertises less than it allows"
             );
@@ -2961,91 +2932,43 @@ mod tests {
         );
     }
 
-    /// sc-17158 — **the lattice this family actually has, re-derived from its rule.**
-    ///
-    /// The epic's R7 and sc-17158's own title both say `4k + 1`. Measured against the official
-    /// diffusers `MiniMaxH3` reference on real weights (sc-17242 spike, correction of record on
-    /// sc-17158 activity 18824), the rule is `17n + 5`, clamped by the checkpoint's hardcoded
-    /// `min_duration = 5.0` / `max_duration = 15.0` at 24 fps — i.e. `120 ≤ frames ≤ 360`.
-    ///
-    /// [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] is a transcribed table, so this test re-derives it from the
-    /// rule rather than reading it back: a typo in the table is RED here.
-    ///
-    /// DISCRIMINATING, and that is the whole point: the two candidate lattices are **not nested**,
-    /// so the wrong one is not merely coarser — it admits counts the engine refuses AND refuses
-    /// counts it accepts.
+    /// Re-derive the supported frame set from H3's temporal lattice and the extended duration policy.
+    /// The Wan lattice differs, so a mistaken shared-family fallback is detectable.
     #[test]
     fn minimax_h3_lattice_is_seventeen_n_plus_five_not_four_k_plus_one() {
-        // The reference's own clamp, in frames: `min <= aligned_frames / 24 <= max`.
-        const CLAMP_MIN_FRAMES: u32 = 120; // 5.0 s x 24
-        const CLAMP_MAX_FRAMES: u32 = 360; // 15.0 s x 24
-
-        let derived: Vec<u32> = (0..64)
-            .map(|n| 17 * n + 5)
-            .filter(|frames| (CLAMP_MIN_FRAMES..=CLAMP_MAX_FRAMES).contains(frames))
+        let derived: Vec<u32> = (124..=481)
+            .filter(|frames| (frames - 5) % 17 == 0)
             .collect();
-        assert_eq!(
-            derived,
-            MINIMAX_H3_LEGAL_FRAME_COUNTS.to_vec(),
-            "the table must be exactly `17n + 5` intersected with the 5-15 s clamp"
-        );
-        assert_eq!(derived.len(), 14, "exactly fourteen clip lengths render");
-        assert_eq!((derived[0], derived[13]), (124, 345));
+        assert_eq!(MINIMAX_H3_LEGAL_FRAME_COUNTS.as_slice(), derived.as_slice());
+        assert_eq!(derived.len(), 22);
+        assert_eq!((derived[0], *derived.last().unwrap()), (124, 481));
+        assert!(derived.iter().any(|frames| frames % 4 != 1));
+        assert_eq!(MINIMAX_H3_MIN_DURATION, 124.0 / 24.0);
+        assert_eq!(MINIMAX_H3_MAX_DURATION, 481.0 / 24.0);
+        assert!(f64::from(*derived.last().unwrap()) / 24.0 >= 20.0);
+    }
 
-        // NOT NESTED — the finding that makes shipping `4k + 1` a bug rather than an
-        // approximation. 22, 39 and 56 are on this lattice and none is `4k + 1`.
-        for off_lattice_for_wan in [22u32, 39, 56] {
+    #[test]
+    fn minimax_h3_frame_range_agrees_with_the_pinned_engine() {
+        use gen_core_h3::h3_memory as engine;
+        assert_eq!(MINIMAX_H3_LEGAL_FRAME_COUNTS[0], engine::MIN_FRAMES);
+        assert_eq!(
+            *MINIMAX_H3_LEGAL_FRAME_COUNTS.last().unwrap(),
+            engine::MAX_FRAMES
+        );
+        for frames in MINIMAX_H3_LEGAL_FRAME_COUNTS {
+            engine::validate_request_geometry(576, 320, u64::from(frames), 1).unwrap();
             assert_eq!(
-                (off_lattice_for_wan - 5) % 17,
-                0,
-                "{off_lattice_for_wan} must be a genuine 17n+5 count"
-            );
-            assert_ne!(
-                off_lattice_for_wan % 4,
-                1,
-                "{off_lattice_for_wan} must NOT be 4k+1, or this test proves nothing"
+                engine::align_frames_for_duration(declared_rung_seconds(frames) as f32).unwrap(),
+                frames
             );
         }
-        // …and inside the shipped window the disagreement is the majority case: enforcing `4k + 1`
-        // would reject most of the legal set.
-        let rejected_by_the_wrong_rule = MINIMAX_H3_LEGAL_FRAME_COUNTS
-            .iter()
-            .filter(|frames| *frames % 4 != 1)
-            .count();
-        assert!(
-            rejected_by_the_wrong_rule > MINIMAX_H3_LEGAL_FRAME_COUNTS.len() / 2,
-            "the two rules must disagree on most of the legal set, else the correction is cosmetic"
-        );
-
-        // The derived duration window, and why neither ADVERTISED endpoint may be declared: 5.0 s
-        // and 15.0 s are both off-lattice. Judged from the DERIVED rungs rather than from the
-        // constants, so this is a real comparison rather than a constant-folded tautology (and so
-        // clippy's `assertions_on_constants` has nothing to say about it).
-        let shortest = f64::from(derived[0]) / 24.0;
-        let longest = f64::from(derived[13]) / 24.0;
-        assert_eq!(MINIMAX_H3_MIN_DURATION, shortest as f32);
-        assert_eq!(MINIMAX_H3_MAX_DURATION, longest as f32);
-        assert_eq!(longest, 14.375);
-        assert!(
-            shortest > 5.0,
-            "the reference advertises 5.0 s and has no lattice point there: {shortest}"
-        );
-        assert!(
-            longest < 15.0,
-            "the reference advertises 15.0 s and cannot reach it — the next rung is 362 frames: \
-             {longest}"
-        );
-        // The first rung is `n = 7` (124) and there are 14 of them, so the last is `n = 20` and the
-        // first UNREACHABLE one is `n = 7 + 14 = 21`.
-        let next_rung = 17 * (7 + derived.len() as u32) + 5;
-        assert_eq!(next_rung, 362, "the unreachable next rung");
-        assert!(f64::from(next_rung) / 24.0 > 15.0);
     }
 
     /// The snap: frames align UP onto the next rung, clamped to the table's ends — the reference's
     /// `align_num_frames`. This is the sidecar-parity ladder (sc-12371), NOT the rejection gate;
     /// out-of-window requests are refused by [`duration_limit_error`], which
-    /// [`minimax_h3_refuses_the_advertised_fifteen_seconds_rather_than_shortening_it`] pins.
+    /// [`minimax_h3_admits_twenty_seconds_and_refuses_out_of_range_requests`] pins.
     #[test]
     fn minimax_h3_frame_count_snaps_up_onto_the_lattice() {
         // Every rung is a FIXED POINT — advertise it and it renders.
@@ -3060,8 +2983,8 @@ mod tests {
         // refuses them, so this must not panic or emit an off-lattice count.
         assert_eq!(minimax_h3_frame_count(1), 124, "T=1 does not render");
         assert_eq!(minimax_h3_frame_count(0), 124);
-        assert_eq!(minimax_h3_frame_count(362), 345);
-        assert_eq!(minimax_h3_frame_count(u32::MAX), 345);
+        assert_eq!(minimax_h3_frame_count(362), 362);
+        assert_eq!(minimax_h3_frame_count(u32::MAX), 481);
 
         // Dispatch: both partitions ride this arm, and neither falls through to the Wan 4k+1
         // fallback. 168 discriminates — `wan_frame_count(168) == 165`, which is off `17n + 5`.
@@ -3083,12 +3006,12 @@ mod tests {
     /// [`MINIMAX_H3_MIN_DURATION`]: `124 / 24` is 5.16666…, so the declared 5.1667 sits 8e-4 of a
     /// frame ABOVE the exact rung. That is deliberate — a request in that sliver is told the exact
     /// renderable value instead of being silently lengthened to it, which is the whole posture of
-    /// this gate. (`345 / 24 = 14.375` is exact, so the ceiling has no such gap.)
+    /// this gate. The upper bound uses the same four-decimal comparison.
     fn declared_rung_seconds(frames: u32) -> f64 {
         (f64::from(frames) / 24.0 * 10_000.0).round() / 10_000.0
     }
 
-    /// sc-17158 — the manifest's fourteen-value duration MENU is exactly the lattice, and every
+    /// sc-17158 — the manifest's twenty-two-value duration MENU is exactly the lattice, and every
     /// entry round-trips back to its own frame count.
     ///
     /// This is the anti-drift gate between a hand-authored JSONC array and the Rust table: the
@@ -3096,7 +3019,7 @@ mod tests {
     /// under test. Advertising a range instead of a menu, or rounding a rung to 3 dp so it snaps to
     /// the neighbouring count, is RED here.
     #[test]
-    fn shipped_minimax_h3_duration_menu_is_exactly_the_fourteen_lattice_rungs() {
+    fn shipped_minimax_h3_duration_menu_is_exactly_the_supported_lattice_rungs() {
         let models = builtin_video_models();
         for id in ["minimax_h3", "minimax_h3_ref"] {
             let entry = models
@@ -3124,7 +3047,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 advertised, derived,
-                "{id}: the duration menu must be the fourteen lattice rungs at 4 dp"
+                "{id}: the duration menu must be the supported lattice rungs at 4 dp"
             );
 
             // ROUND TRIP, which is what the 4 dp buys: each advertised second lands back on its own
@@ -3154,15 +3077,17 @@ mod tests {
 
             // The two bounds are the ENDS of the menu, at the same 4 dp.
             let floor = declared_rung_seconds(MINIMAX_H3_LEGAL_FRAME_COUNTS[0]) as f32;
-            let ceiling = declared_rung_seconds(MINIMAX_H3_LEGAL_FRAME_COUNTS[13]) as f32;
+            let ceiling = declared_rung_seconds(
+                MINIMAX_H3_LEGAL_FRAME_COUNTS[MINIMAX_H3_LEGAL_FRAME_COUNTS.len() - 1],
+            ) as f32;
             assert_eq!(hard_min_duration(entry), Some(floor));
             assert_eq!(hard_max_duration(entry), Some(ceiling));
             // …and each is the DECLARED rendering of its lattice rung, not an independent number:
-            // within half a frame of the exact quotient. The ceiling is exact (14.375); the floor
+            // within half a frame of the exact quotient. Both bounds are declared at four decimals; the floor
             // rounds 5.16666… UP by 8e-4 of a frame, which is the correct 4 dp value and the one
             // sc-17152 published.
             assert!((f64::from(floor) - 124.0 / 24.0).abs() < 0.5 / 24.0);
-            assert_eq!(ceiling, MINIMAX_H3_MAX_DURATION);
+            assert!((ceiling - MINIMAX_H3_MAX_DURATION).abs() < 0.0001);
             assert!(f64::from(floor) > f64::from(MINIMAX_H3_MIN_DURATION));
             // …and the shipped default is the shortest rung, because the cheapest clip at the
             // default canvas is already a ~2 hour render (sc-17152).
@@ -3287,57 +3212,27 @@ mod tests {
         }
     }
 
-    /// sc-17158 / sc-17152 — **15.0 s is REFUSED, not silently delivered as 14.375 s.**
-    ///
-    /// This is the standing trap the story warns about in its own words: SceneWorks normalization
-    /// can turn an engine geometry gate into a no-op, so the assertion has to be that the request
-    /// is REJECTED, not that some value got coerced onto the lattice. Before sc-17147 the reference
-    /// pipeline happily rendered 345 frames for a 360-frame ask; the app must not reproduce that.
-    ///
-    /// The symmetric case at the bottom matters just as much: a 3 s request is not a short clip for
-    /// this family, it is an unrenderable one.
+    /// Both H3 partitions admit twenty-second requests, aligning upward rather than shortening.
     #[test]
-    fn minimax_h3_refuses_the_advertised_fifteen_seconds_rather_than_shortening_it() {
+    fn minimax_h3_admits_twenty_seconds_and_refuses_out_of_range_requests() {
         let models = builtin_video_models();
         for id in ["minimax_h3", "minimax_h3_ref"] {
             let entry = models
                 .iter()
-                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
-                .unwrap_or_else(|| panic!("{id} present"))
+                .find(|m| m["id"] == id)
+                .unwrap()
                 .as_object()
-                .expect("model entry object");
-
-            // The number upstream ADVERTISES, and the number this catalog must refuse.
-            let over = duration_limit_error(id, 15.0, entry)
-                .unwrap_or_else(|| panic!("{id}: 15.0s must be refused, not delivered as 14.375s"));
-            assert!(over.contains("14.375s"), "{id}: states the cap: {over}");
-            assert!(over.contains("15s"), "{id}: states what was asked: {over}");
-
-            // …and the request would otherwise have been quietly satisfied: the snap alone produces
-            // a perfectly legal 345 frames, which is exactly why the snap cannot be the gate.
-            let request = VideoRequest::from_payload(&payload(json!({
-                "projectId": "p", "model": id, "duration": 15.0, "fps": 24,
-                "modelManifestEntry": Value::Object(entry.clone()),
-            })));
-            assert_eq!(request.raw_frame_count(), 360);
-            assert_eq!(
-                request.frame_count(),
-                345,
-                "the snap silently shortens it — the REJECTION above is the real gate"
-            );
-
-            // The floor, same shape. 3 s is under 5.1667 s.
-            let under = duration_limit_error(id, 3.0, entry)
-                .unwrap_or_else(|| panic!("{id}: 3.0s is unrenderable and must be refused"));
-            assert!(under.contains("5.1667s"), "{id}: states the floor: {under}");
-            assert!(under.contains("Lengthen"), "{id}: gives the lever: {under}");
-
-            // T = 1 has no lane at all: `min_duration` is a hardcoded 5.0 upstream, so a
-            // single-frame request is refused rather than rendered as a still.
-            assert!(
-                duration_limit_error(id, 1.0 / 24.0, entry).is_some(),
-                "{id}: a single-frame request must be refused — there is no image lane"
-            );
+                .unwrap();
+            for (duration, frames) in [(15.0, 362), (20.0, 481), (20.0417, 481)] {
+                assert_eq!(duration_limit_error(id, duration, entry), None);
+                let request = VideoRequest::from_payload(&payload(
+                    json!({"projectId":"p","model":id,"duration":duration,"fps":24,"modelManifestEntry":entry}),
+                ));
+                assert_eq!(request.frame_count(), frames);
+            }
+            for invalid in [3.0, 20.0418, 21.0] {
+                assert!(duration_limit_error(id, invalid, entry).is_some());
+            }
         }
     }
 
@@ -3929,7 +3824,7 @@ mod tests {
         // the fps blanket, and the reason this is a generalized invariant rather than two
         // coincidences. Pinned as a number so reintroducing a blanket default fails here.
         // 7 of 10 as of sc-8444 (krea_realtime_14b joined the 5s-capped group). Still 7 of 12 after
-        // sc-17158: MiniMax-H3's 14.375 s ceiling is well past the blanket, so neither partition
+        // sc-17158: MiniMax-H3's 20.0417 s ceiling is well past the blanket, so neither partition
         // joins this set — but both are caught by the FLOOR instead (`hardMinDuration` 5.1667 s is
         // under the blanket 6.0 s, so the blanket is admitted, just off their lattice).
         let over_cap: Vec<&str> = FPS_MENUS

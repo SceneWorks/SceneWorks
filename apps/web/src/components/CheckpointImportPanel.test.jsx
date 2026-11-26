@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { CheckpointImportPanel } from "./CheckpointImportPanel.jsx";
-import { setSelect } from "../testUtils/dom.js";
+import { setFileInput, setSelect } from "../testUtils/dom.js";
 
 // Drives the WHOLE unified experience — both ownerships, the linked lifecycle, the five managed
 // inputs, cancel, retry, typed-refusal surfacing, and the accessibility contract — against injected
@@ -258,6 +258,68 @@ describe("CheckpointImportPanel", () => {
     await type(labelled("Hugging Face repo"), "owner/h3-finetune");
     await setSelect(labelled("Family"), "minimax-h3");
   }
+
+  it("lets an uploaded checkpoint select Video and submit explicit hybrid compatibility", async () => {
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "h3-upload" } }));
+    await render({ onImportModel, models: h3Models, families: ["sdxl"] });
+    await click(byRole("radio", "Add to SceneWorks"));
+    const file = new File(["fixture"], "10Eros_Max_8stepTurbo_v1.0_hybrid.safetensors");
+    expect(labelled("Type").disabled).toBe(false);
+    await act(async () => {
+      setFileInput(container.querySelector('input[type="file"]'), [file]);
+      setSelect(labelled("Type"), "video");
+    });
+    expect(labelled("Type").value).toBe("video");
+    expect(labelled("Family").value).toBe("");
+    expect(container.textContent).toContain("choose family minimax-h3");
+    await act(async () => setSelect(labelled("Family"), "minimax-h3"));
+    await click(buttonNamed("Queue Import"));
+    expect(onImportModel).not.toHaveBeenCalled();
+    expect(importStatus()).toContain("minimaxH3Partition");
+    await act(async () => {
+      setSelect(labelled("Compatible base model"), "minimax_h3");
+      setSelect(labelled("MiniMax-H3 partition"), "hybrid");
+    });
+    await click(buttonNamed("Queue Import"));
+    expect(onImportModel).toHaveBeenCalledWith({
+      ownershipMode: "managed", type: "video", family: "minimax-h3",
+      baseModel: "minimax_h3", minimaxH3Partition: "hybrid",
+      source: { kind: "upload" }, file,
+    });
+  });
+
+  it("clears H3 compatibility when switching to Image and preserves the source", async () => {
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "image-upload" } }));
+    await prepareH3Import(onImportModel);
+    await act(async () => {
+      setSelect(labelled("Compatible base model"), "minimax_h3");
+      setSelect(labelled("MiniMax-H3 partition"), "hybrid");
+    });
+    await act(async () => setSelect(labelled("Type"), "image"));
+    expect(labelled("Family").value).toBe("");
+    expect(labelled("Compatible base model")).toBeUndefined();
+    await click(buttonNamed("Queue Import"));
+    expect(onImportModel).toHaveBeenCalledWith({
+      ownershipMode: "managed", type: "image",
+      source: { kind: "huggingFace", repo: "owner/h3-finetune" },
+    });
+    await act(async () => setSelect(labelled("Family"), "minimax-h3"));
+    expect(labelled("Type").value).toBe("video");
+    expect(labelled("Compatible base model").value).toBe("");
+    expect(labelled("MiniMax-H3 partition").value).toBe("");
+  });
+
+  it("keeps Video selected when returning to auto-detect and uses a known family's type", async () => {
+    await render({ models: [...h3Models, { id: "wan", family: "wan", type: "video" }], families: ["sdxl", "wan"] });
+    await click(byRole("radio", "Add to SceneWorks"));
+    await act(async () => setSelect(labelled("Family"), "minimax-h3"));
+    await act(async () => setSelect(labelled("Family"), ""));
+    expect(labelled("Type").value).toBe("video");
+    await act(async () => setSelect(labelled("Family"), "sdxl"));
+    expect(labelled("Type").value).toBe("image");
+    await act(async () => setSelect(labelled("Family"), "wan"));
+    expect(labelled("Type").value).toBe("video");
+  });
 
   it.each([
     ["fl2va", "minimax_h3"],

@@ -894,7 +894,16 @@ export function CheckpointImportPanel({
           ) : null}
           <label>
             Type
-            <select aria-readonly="true" disabled value={managed.type}>
+            <select
+              onChange={(event) => setManaged((current) => ({
+                ...current,
+                type: event.target.value,
+                family: "",
+                baseModel: "",
+                minimaxH3Partition: "",
+              }))}
+              value={managed.type}
+            >
               <option value="image">Image</option>
               <option value="video">Video</option>
             </select>
@@ -903,13 +912,18 @@ export function CheckpointImportPanel({
             Family
             <select
               disabled={!importFamilies.length}
-              onChange={(event) => setManaged((current) => ({
-                ...current,
-                family: event.target.value,
-                type: event.target.value === "minimax-h3" ? "video" : "image",
-                baseModel: "",
-                minimaxH3Partition: "",
-              }))}
+              onChange={(event) => {
+                const family = event.target.value;
+                const familyType = family === "minimax-h3" ? "video"
+                  : models.find((model) => model.family === family && ["image", "video"].includes(model.type))?.type ?? "image";
+                setManaged((current) => ({
+                  ...current,
+                  family,
+                  type: family ? familyType : current.type,
+                  baseModel: "",
+                  minimaxH3Partition: "",
+                }));
+              }}
               value={managed.family}
             >
               {importFamilies.length ? (
@@ -926,6 +940,11 @@ export function CheckpointImportPanel({
               )}
             </select>
           </label>
+          {managed.type === "video" && !managed.family ? (
+            <p className="inline-note">
+              For MiniMax-H3, choose family minimax-h3 to declare its compatible base model and partition.
+            </p>
+          ) : null}
           {isH3Import ? renderH3Declaration(managed, (field, value) =>
             setManaged((current) => ({ ...current, [field]: value })),
           ) : null}

@@ -1354,7 +1354,7 @@ mod tests {
         // The residue an import request that guessed `type: "image"` leaves behind must not survive:
         // route-owned fields are the partition's, not the request's.
         entry.insert("capabilities".to_owned(), json!(["text_to_image"]));
-        entry.insert("limits".to_owned(), json!({ "resolutions": ["1024x1024"] }));
+        entry.insert("limits".to_owned(), json!({ "resolutions": ["1024x1024"], "hardMaxDuration": 14.375, "durations": [5.1667, 14.375] }));
         crate::lora_family::apply_model_manifest_defaults(
             &mut entry,
             "video",
@@ -1363,6 +1363,7 @@ mod tests {
         let base = builtin_base_partition_entry().expect("the shipped catalog carries minimax_h3");
         assert_eq!(entry["capabilities"], base["capabilities"]);
         assert_eq!(entry["limits"], base["limits"]);
+        assert_eq!(entry["limits"]["hardMaxDuration"], 20.0417);
         assert_eq!(entry["defaults"], base["defaults"]);
         assert_eq!(
             entry["capabilities"],

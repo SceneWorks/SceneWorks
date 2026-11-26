@@ -18587,12 +18587,12 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
         "/api/v1/video/jobs",
         json!({
             "projectId": project_id, "model": "minimax_h3", "mode": "text_to_video",
-            "prompt": "a fox", "duration": 14.375
+            "prompt": "a fox", "duration": 20.0417
         }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{on_rung}");
-    assert_eq!(on_rung["payload"]["duration"], 14.375);
+    assert_eq!(on_rung["payload"]["duration"], 20.0417);
 }
 
 /// sc-17159 — the refusals sc-17158 established are INTACT after the family is made reachable, and
@@ -18627,12 +18627,12 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
     // 15.0 s: the reference ADVERTISES it and the lattice cannot reach it (the next rung, 362
     // frames, is 15.083 s). Refused rather than silently delivered as 14.375 — which is exactly
     // what sc-17147 was doing.
-    let (status, over) = submit("minimax_h3", json!({ "duration": 15.0 })).await;
+    let (status, over) = submit("minimax_h3", json!({ "duration": 21.0 })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         over["detail"],
-        "minimax_h3 renders clips up to 14.375s, but this request asks for 15s. Shorten the clip \
-         to 14.375s or less, or choose a model that renders longer clips."
+        "minimax_h3 renders clips up to 20.0417s, but this request asks for 21s. Shorten the clip \
+         to 20.0417s or less, or choose a model that renders longer clips."
     );
 
     // 3.0 s: under `hardMinDuration`. The floor is checked FIRST, so the message offers the
