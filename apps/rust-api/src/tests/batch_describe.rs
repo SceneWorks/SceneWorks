@@ -1179,15 +1179,22 @@ async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
     seed_qwen38_tier(&state.settings.data_dir, "q4");
     let rows = json!([{ "itemId": item_ids[0], "width": 640, "height": 480,
         "fields": { "description": "A woman, woman_1." }, "condensedText": "woman_1." }]);
+    let exclusions = json!([
+        "identifyingCharacteristics",
+        "clothingAndAccessories",
+        "colorMode",
+        "style"
+    ]);
     let condense = |tier: &str, measure: bool| {
         json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": tier, "fitTo": "krea_2_turbo",
-                "condenseRows": rows, "measureOnly": measure })
+                "condenseRows": rows, "measureOnly": measure, "promptExclusions": exclusions })
     };
 
     let (status, job) = request(app.clone(), "POST", &route, condense("q4", false)).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["payload"]["variant"], "q4");
     assert_eq!(job["payload"]["condenseOnly"], true);
+    assert_eq!(job["payload"]["promptExclusions"], exclusions);
     assert_eq!(job["payload"]["model"], QWEN38_27B_DESCRIBER_REPO);
     let entries: Vec<&str> = job["payload"]["modelManifestEntries"]
         .as_array()
@@ -1226,6 +1233,7 @@ async fn a_qwen38_condense_only_job_carries_its_tier_and_needs_it_installed() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let payload = job["payload"].as_object().expect("payload");
     assert_eq!(payload["measureOnly"], true);
+    assert_eq!(payload["promptExclusions"], exclusions);
     assert_eq!(payload["variant"], "q8");
     assert!(model_free_job(&JobType::DatasetBatchDescribe, payload));
     for carrier in [
