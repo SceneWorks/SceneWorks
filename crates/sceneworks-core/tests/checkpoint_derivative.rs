@@ -613,10 +613,10 @@ fn removing_a_root_drops_its_derivatives_and_leaves_the_library_intact() {
     );
 }
 
-/// A published derivative that is altered on disk is refused at the lease boundary rather than
-/// handed to a loader: the shared store's own full re-hash covers derivatives too.
+/// Completed derivatives share the runtime cache's trusted load path. Explicit verification
+/// remains available independently of acquisition and still detects changed bytes.
 #[test]
-fn an_altered_derivative_bundle_is_refused_at_the_lease_boundary() {
+fn completed_derivatives_fast_load_while_explicit_verification_detects_changes() {
     let fx = fixture("altered");
     let resolved = resolve(&fx);
     fx.store
@@ -637,19 +637,12 @@ fn an_altered_derivative_bundle_is_refused_at_the_lease_boundary() {
     let mut tampered = fs::read(&staged).unwrap();
     tampered.reverse();
     fs::write(&staged, tampered).unwrap();
-    // The TYPED refusal, not `is_err() || is_none()`: an or over two outcomes passes whichever one
-    // happens, so it could never have told a re-hash failure apart from the entry simply being
-    // gone, and it would have kept passing if the store stopped checking at all.
-    match fx.store.acquire(&resolved, &request()) {
-        Err(CheckpointDerivativeError::Cache(error)) => {
-            let message = error.to_string();
-            assert!(
-                message.contains("index.json") || message.contains("digest"),
-                "the refusal names what failed re-validation: {message}"
-            );
-        }
-        other => panic!("an altered derivative bundle must refuse at the lease, got {other:?}"),
-    }
+    let lease = fx.store.acquire(&resolved, &request()).unwrap().unwrap();
+    let message = lease.artifact().validate().unwrap_err().to_string();
+    assert!(
+        message.contains("index.json") || message.contains("digest"),
+        "explicit verification must still identify the changed derivative: {message}"
+    );
 }
 
 /// sc-26691 end to end: `ensure` hashes each output as the producer writes it, and publication

@@ -1618,17 +1618,10 @@ fn the_retention_scan_judges_on_paths_and_sizes_rather_than_rehashing_the_cache(
     );
 }
 
-/// Reads select a journal slot on paths and sizes; the LOAD path still re-hashes (sc-19711).
-///
-/// The split exists because journal reads are on hot, user-facing surfaces — the catalog GET, the
-/// Settings storage status, every pin read — and re-hashing a whole bundle to decide which slot to
-/// read puts the bundle's byte count behind each of them while proving nothing a reader may act
-/// on. sc-21534 extended the cheap mode to every read surface (`lookup_complete`, `enumerate`,
-/// the reservation short-circuit): they now see a same-size-altered entry as complete, and the
-/// ONE place that refuses it is the load boundary, `acquire_complete`, before any bytes reach a
-/// runtime.
+/// Runtime acquisition trusts complete publication and never hashes model files. Listings and
+/// retention keep their separate paths-and-sizes checks for accounting and confined removal.
 #[test]
-fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_bytes() {
+fn completed_journal_reads_and_runtime_loads_skip_weight_hashing() {
     let scratch = TempDir::new().unwrap();
     let library = scratch.path().join("library");
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
@@ -1656,9 +1649,10 @@ fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_
         .is_some());
     assert_eq!(store.enumerate().unwrap().len(), 1);
 
-    // The load path is unmoved: altered bytes are refused before an artifact reaches a runtime.
+    // Runtime loading trusts published bytes too; retention still tracks the lease.
     let resolver = resolver(&library, ActiveArtifactLeaseRegistry::default());
     assert!(store
         .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
-        .is_err());
+        .unwrap()
+        .is_some());
 }

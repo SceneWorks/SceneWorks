@@ -1,5 +1,5 @@
 //! Saved weight quantizations use the existing resolved-artifact store and its leases,
-//! atomic publication, content checks, source lifecycle and retention.
+//! atomic publication, source lifecycle and retention. Completed weights load without revalidation.
 use crate::model_artifacts::resolved_cache::{
     DerivedArtifactPlan, ReservationOutcome, ResolvedCacheLease, ResolvedCacheStore,
 };
@@ -14,10 +14,8 @@ use std::time::{Duration, Instant};
 
 /// The same provenance must be used when saving and deleting an import's derivatives.
 pub fn source_identity(entry: &crate::contracts::JsonObject) -> Option<&str> {
-    crate::jobs_store::checkpoint_plan_checkpoint_id(entry).or_else(|| {
-        crate::source_precision::SourcePrecision::dense_import(entry)?;
-        entry.get("id").and_then(serde_json::Value::as_str)
-    })
+    crate::jobs_store::checkpoint_plan_checkpoint_id(entry)
+        .or_else(|| entry.get("id").and_then(serde_json::Value::as_str))
 }
 
 pub struct SavedQuantizations {
@@ -69,6 +67,34 @@ impl SavedQuantizations {
         )
     }
 }
+fn artifact_plan(key: &QuantizationArtifactKey) -> gen_core::Result<(DerivedArtifactPlan, String)> {
+    let extension = key.extension();
+    if !matches!(extension, "ggml" | "safetensors") {
+        return Err(error("unsupported packed artifact extension"));
+    }
+    let filename = format!("projection.{extension}");
+    // The store uses 40-hex revisions; retain the rest in the variant so all 256 key bits
+    // still participate in the immutable artifact identity.
+    let variant = format!("{extension}-{}", &key.digest()[40..]);
+    let identity = ArtifactIdentity::pinned(
+        "sceneworks-weight-quantization/projection",
+        &key.digest()[..40],
+        variant,
+    )
+    .map_err(error)?;
+    let member = ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: Some("saved-quantization".to_owned()),
+        source: identity.clone(),
+        tier: None,
+        source_subpath: PathBuf::new(),
+        destination: PathBuf::new(),
+        files: vec![ArtifactFile::new(&filename).map_err(error)?],
+    };
+    let plan = DerivedArtifactPlan::new(identity, vec![member]).map_err(error)?;
+    Ok((plan, filename))
+}
+
 impl SavedQuantizations {
     fn materialize_with_timeout(
         &self,
@@ -95,30 +121,7 @@ impl SavedQuantizations {
         };
         let resolver =
             ModelArtifactResolver::new(ArtifactSourceLibrary::new(source_root).map_err(error)?);
-        let extension = key.extension();
-        if !matches!(extension, "ggml" | "safetensors") {
-            return Err(error("unsupported packed artifact extension"));
-        }
-        let filename = format!("projection.{extension}");
-        // The store uses 40-hex revisions; retain the rest in the variant so all 256 key bits
-        // still participate in the immutable artifact identity.
-        let variant = format!("{extension}-{}", &key.digest()[40..]);
-        let identity = ArtifactIdentity::pinned(
-            "sceneworks-weight-quantization/projection",
-            &key.digest()[..40],
-            variant,
-        )
-        .map_err(error)?;
-        let member = ResolvedBundleMember {
-            role: ArtifactMemberRole::Primary,
-            component_id: Some("saved-quantization".to_owned()),
-            source: identity.clone(),
-            tier: None,
-            source_subpath: PathBuf::new(),
-            destination: PathBuf::new(),
-            files: vec![ArtifactFile::new(&filename).map_err(error)?],
-        };
-        let plan = DerivedArtifactPlan::new(identity, vec![member]).map_err(error)?;
+        let (plan, filename) = artifact_plan(key)?;
         let cache_key = plan.cache_key().map_err(error)?;
         let deadline = Instant::now() + wait_timeout;
         loop {
@@ -184,6 +187,25 @@ impl QuantizationArtifactCache for SavedQuantizations {
         produce: &mut dyn FnMut(&Path) -> gen_core::Result<()>,
     ) -> gen_core::Result<Box<dyn QuantizationArtifact>> {
         self.materialize_with_timeout(key, produce, Duration::from_secs(60))
+    }
+
+    fn invalidate(&self, key: &QuantizationArtifactKey) -> gen_core::Result<bool> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| error("artifact store lock poisoned"))?
+            .clone();
+        let Some(store) = store else {
+            return Ok(false);
+        };
+        let (plan, _) = artifact_plan(key)?;
+        let cache_key = plan.cache_key().map_err(error)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(error)?
+            .as_secs();
+        store.remove_entry(&cache_key, now).map_err(error)?;
+        Ok(true)
     }
 }
 
@@ -277,11 +299,16 @@ mod tests {
         drop(artifact);
         drop(first);
         let reopened = store();
-        let artifact = reopened
-            .materialize(&key, &mut |_| {
+        let (artifact, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+            reopened.materialize(&key, &mut |_| {
                 panic!("a saved quantization must never run its quantizer again")
             })
-            .unwrap();
+        });
+        let artifact = artifact.unwrap();
+        assert_eq!(
+            hashes, 0,
+            "fresh-process cache hits must not hash the saved weights"
+        );
         assert_eq!(std::fs::read(artifact.path()).unwrap(), b"packed");
         assert_eq!(reopened.counts(), (1, 0));
         let changed =
@@ -294,6 +321,50 @@ mod tests {
             .unwrap();
         assert_ne!(changed.path(), artifact.path());
     }
+    #[test]
+    fn unreadable_runtime_weights_can_be_invalidated_after_the_loader_releases_its_lease() {
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let cache = SavedQuantizations::new(
+            data.path(),
+            source.path().to_owned(),
+            "model".into(),
+            "model/checkpoint".into(),
+        );
+        let key = QuantizationArtifactKey::new("runtime-repair-v1", &[4], b"source", "ggml");
+        let artifact = cache
+            .materialize(&key, &mut |path| {
+                std::fs::write(path, b"packed")?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            cache.invalidate(&key).is_err(),
+            "active runtime leases must remain protected"
+        );
+        let path = artifact.path().to_owned();
+        drop(artifact);
+        std::fs::remove_file(&path).unwrap();
+        let (trusted, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+            cache.materialize(&key, &mut |_| {
+                panic!("ready cache must reach the runtime reader directly")
+            })
+        });
+        let trusted = trusted.unwrap();
+        assert_eq!(hashes, 0);
+        assert_eq!(trusted.path(), path);
+        drop(trusted);
+        assert!(cache.invalidate(&key).unwrap());
+        let repaired = cache
+            .materialize(&key, &mut |path| {
+                std::fs::write(path, b"repaired")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(repaired.path()).unwrap(), b"repaired");
+        assert_eq!(cache.counts(), (1, 2));
+    }
+
     #[test]
     fn failed_quantization_never_publishes_a_partial_copy() {
         let data = tempfile::tempdir().unwrap();

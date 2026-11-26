@@ -10,6 +10,7 @@ import { providerClosureDigest } from "./inference-closure-digest.mjs";
 
 const ledger = JSON.parse(readFileSync(new URL("../config/inference-provider-closures.json", import.meta.url)));
 const revision = /^[0-9a-f]{40}$/u;
+const sourceReviews = JSON.parse(readFileSync(new URL("../config/scail2-memory-source-reviews.json", import.meta.url)));
 
 // These files form the reviewed diagnostic/bounded-proof delta and the separate
 // image follow-up. Other files in scripts/ci include production artifact producers.
@@ -65,7 +66,20 @@ function git(repo, ...args) {
   return execFileSync("git", ["-C", repo, ...args], { maxBuffer: 32 * 1024 * 1024 });
 }
 
-export function verifyCoverage(source, target, files, diffDigest, approvedDiff) {
+export function verifyCoverage(source, target, files, diffDigest, approvedDiff, sourceReview) {
+  if (approvedDiff !== diffDigest) throw new Error("The complete Git delta lacks matching independent review");
+  // A changed native closure never inherits a capture implicitly. An explicit source-equivalence
+  // review binds the complete immutable pair, every changed path, and both closure identities.
+  if (sourceReview) {
+    const sameFiles = JSON.stringify([...files].sort()) === JSON.stringify([...sourceReview.changed_files].sort());
+    if (source.provider !== target.provider || sourceReview.provider !== source.provider ||
+        sourceReview.tree_diff_sha256 !== diffDigest || !sameFiles ||
+        sourceReview.capture_provider_digest !== source.digest || sourceReview.target_provider_digest !== target.digest ||
+        sourceReview.capture_shared_contract_digest !== source.sharedContractDigest ||
+        sourceReview.target_shared_contract_digest !== target.sharedContractDigest ||
+        !sourceReview.review?.length) throw new Error("The exact source-equivalence review does not match this native delta");
+    return;
+  }
   if (source.provider !== target.provider || source.digest !== target.digest ||
       source.sharedContractDigest !== target.sharedContractDigest) {
     throw new Error("The provider or shared native contract changed");
@@ -100,7 +114,9 @@ export function audit(repo, capture, target, backend, approvedDiff) {
       tree_diff_sha256: diffDigest, capture_provider_digest: source.digest, target_provider_digest: dest.digest,
       capture_shared_contract_digest: source.sharedContractDigest, target_shared_contract_digest: dest.sharedContractDigest };
   }
-  verifyCoverage(source, dest, files, diffDigest, approvedDiff);
+  const sourceReview = sourceReviews.find((entry) => entry.capture_revision === capture &&
+    entry.target_revision === target && entry.provider === provider);
+  verifyCoverage(source, dest, files, diffDigest, approvedDiff, sourceReview);
   const packaged = ledger.providers[provider];
   if (ledger.inferenceRevision !== target || packaged.digest !== dest.digest ||
       packaged.sharedContractDigest !== dest.sharedContractDigest) {
