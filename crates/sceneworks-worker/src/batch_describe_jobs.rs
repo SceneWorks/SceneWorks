@@ -398,6 +398,7 @@ pub(crate) struct DescribePrompt {
     pub(crate) output_contract: String,
     pub(crate) user: String,
     exclusion_instruction: String,
+    compact_exclusion_instruction: String,
 }
 
 #[cfg(native_lane)]
@@ -408,6 +409,8 @@ impl DescribePrompt {
     ) -> Self {
         self.exclusion_instruction =
             sceneworks_core::options::prompt_content::exclusion_instruction(exclusions);
+        self.compact_exclusion_instruction =
+            sceneworks_core::options::prompt_content::compact_exclusion_instruction(exclusions);
         self
     }
 
@@ -427,6 +430,7 @@ impl DescribePrompt {
             ),
             user: crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, "USER"),
             exclusion_instruction: String::new(),
+            compact_exclusion_instruction: String::new(),
         };
         (prompt, is_default)
     }
@@ -442,14 +446,25 @@ impl DescribePrompt {
         }
     }
 
-    /// JoyCaption's one prompt: system plus user line, or system alone when it ends in exclusions.
+    /// JoyCaption's one prompt: instruction, contract, and the user line or compact exclusions.
     pub(crate) fn single_turn(&self) -> String {
         if self.exclusion_instruction.is_empty() {
             format!("{}\n\n{}", self.system(), self.user)
         } else {
-            // The exclusions are already last in system(). Replacing the redundant user line
-            // keeps JoyCaption under 4,000 characters even at the maximum instruction size.
-            self.system()
+            // Compact rules replace the user line, keeping JoyCaption under 4,000 characters
+            // even at the maximum instruction size. Other providers use the explicit rules.
+            format!(
+                "{}\n\n{}\n\n{}",
+                self.instruction, self.output_contract, self.compact_exclusion_instruction
+            )
+        }
+    }
+
+    pub(crate) fn user(&self) -> String {
+        if self.exclusion_instruction.is_empty() {
+            self.user.clone()
+        } else {
+            format!("{}\n\n{}", self.user, self.exclusion_instruction)
         }
     }
 }
@@ -1249,7 +1264,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         use gen_core::core_llm::StreamEvent;
         let (spec, requirements) = self.load_key();
         let system = prompt.system();
-        let user = prompt.user.clone();
+        let user = prompt.user();
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();

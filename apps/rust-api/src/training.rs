@@ -1748,22 +1748,7 @@ fn ensure_describe_tier_installed(
             "Qwen3.8 27B describe job carries no catalog entry",
         ));
     };
-    let mut entry = entry.clone();
-    crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
-    if crate::models::pinned_variant_installed(&entry, tier, data_dir) {
-        return Ok(());
-    }
-    let name = entry
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or(QWEN38_27B_DESCRIBER_MODEL_ID);
-    Err(ApiError::model_artifact_conflict(
-        format!(
-            "The {tier} tier of {name} is not installed. Download that tier in the Model \
-             Manager, or choose a tier that is installed."
-        ),
-        "model_artifact_incomplete",
-    ))
+    crate::models::ensure_pinned_variant_installed(entry, tier, data_dir, std::env::consts::OS)
 }
 
 /// The catalog entry of a "Fit to" target (SW-7163), as `resolve_model_manifest_entry` returned it

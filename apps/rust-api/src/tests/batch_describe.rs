@@ -1022,6 +1022,103 @@ async fn the_native_film_planner_runs_on_the_installed_qwen38_tier() {
     }
 }
 
+#[tokio::test]
+async fn qwen38_refinement_binds_each_selected_installed_tier_and_preserves_exclusions() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, _, _, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    for tier in ["q4", "q8", "bf16"] {
+        seed_qwen38_tier(&state.settings.data_dir, tier);
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompts/refine",
+            json!({
+                "prompt": "a posed subject in a room", "workflow": "image",
+                "model": QWEN38_27B_DESCRIBER_REPO, "variant": tier,
+                "promptExclusions": ["clothingAndAccessories", "style"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{tier}: {job}");
+        assert_eq!(job["payload"]["model"], QWEN38_27B_DESCRIBER_REPO);
+        assert_eq!(job["payload"]["variant"], tier);
+        assert_eq!(
+            job["payload"]["promptExclusions"],
+            json!(["clothingAndAccessories", "style"])
+        );
+        let (repo, _, bound_tier, files) =
+            bound_describer_source(&state, job["id"].as_str().unwrap(), "candle", "windows");
+        assert_eq!(bound_tier, tier);
+        assert_eq!(
+            repo,
+            if tier == "bf16" {
+                QWEN38_27B_DESCRIBER_REPO
+            } else {
+                sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_CANDLE_REPO
+            }
+        );
+        assert!(!files.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn qwen38_refinement_refuses_missing_or_unknown_tiers_before_queueing() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, _, _, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    seed_qwen38_tier(&state.settings.data_dir, "q4");
+    for (tier, expected) in [
+        ("q8", StatusCode::CONFLICT),
+        ("unknown", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompts/refine",
+            json!({"prompt":"a scene", "model":QWEN38_27B_DESCRIBER_REPO, "variant":tier}),
+        )
+        .await;
+        assert_eq!(status, expected, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn qwen38_image_describe_preserves_the_selected_installed_tier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, _, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "photo.png",
+        "image/png",
+        &png_rgb(16, 8, 80),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    for tier in ["q4", "q8", "bf16"] {
+        seed_qwen38_tier(&state.settings.data_dir, tier);
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompts/refine",
+            json!({
+                "task":"image_describe", "sourceAssetId":asset["id"], "projectId":project_id,
+                "model":QWEN38_27B_DESCRIBER_REPO,"variant":tier,"promptExclusions":["style"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{tier}: {job}");
+        assert_eq!(job["payload"]["variant"], tier);
+        assert_eq!(job["payload"]["promptExclusions"], json!(["style"]));
+        assert!(job["payload"]["imagePath"].is_string());
+        let (_, _, selected, _) =
+            bound_describer_source(&state, job["id"].as_str().unwrap(), "candle", "windows");
+        assert_eq!(selected, tier);
+    }
+}
+
 /// AC3 (install half): a tier this host has not installed is refused before a job exists, with a
 /// message that names the tier and what to do. Another installed tier does not stand in for it.
 #[tokio::test]

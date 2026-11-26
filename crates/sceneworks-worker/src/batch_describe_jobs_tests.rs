@@ -895,9 +895,10 @@ fn all_content_exclusions_preserve_the_contract_and_fit_joycaptions_limit() {
             let selected = base.clone().with_exclusions(&exclusions);
             assert_eq!(selected.output_contract, base.output_contract);
             assert_eq!(selected.instruction, base.instruction);
-            assert!(selected.system().contains("overriding prior content rules"));
+            assert!(selected.system().contains("MANDATORY CONTENT EXCLUSIONS"));
             assert!(selected.system().ends_with(&selected.exclusion_instruction));
-            assert!(selected.system().contains("all clothing/accessories"));
+            assert!(selected.system().contains("ANY clothing or accessories"));
+            assert!(selected.user().contains("MANDATORY CONTENT EXCLUSIONS"));
         }
     }
     let longest = "x".repeat(MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);

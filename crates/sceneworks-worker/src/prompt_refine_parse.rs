@@ -276,20 +276,27 @@ pub(super) async fn parse_refine_request(
     };
     let weights_dir = match &expander_dirs {
         Some(dirs) => dirs.weights.clone(),
-        // The native film planner is the shared Qwen3.8 27B checkpoint: its quantised tiers are
+        // The film planner, refiner and image describer share the Qwen3.8 27B checkpoint. Its tiers are
         // `<tier>/` folders of a per-engine re-host, not the upstream repository's snapshot root, so
         // it loads through the describer's tier resolution (the API froze the tier as `variant`).
-        None if task == RefineTask::FilmPlan
-            && sceneworks_core::dataset_batch_describe::is_qwen38_27b_describer(Some(&model)) =>
+        None if matches!(
+            task,
+            RefineTask::FilmPlan | RefineTask::Rewrite | RefineTask::ImageDescribe
+        ) && sceneworks_core::dataset_batch_describe::is_qwen38_27b_describer(Some(
+            &model,
+        )) =>
         {
             use sceneworks_core::dataset_batch_describe as describe;
+            if matches!(task, RefineTask::Rewrite | RefineTask::ImageDescribe) {
+                thinking_mode = gen_core::core_llm::ThinkingMode::Disabled;
+            }
             // A non-string tier is refused, never read as "no tier": that would run the default.
             let requested = match payload.get("variant") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(tier)) => Some(tier.as_str()),
                 Some(other) => {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "Film planning variant (the model tier) must be a string, got {other}."
+                        "Qwen3.8 variant (the model tier) must be a string, got {other}."
                     )))
                 }
             };
@@ -309,7 +316,7 @@ pub(super) async fn parse_refine_request(
     // Build the `(system, user)` chat text per task: the caption tasks swap Ideogram's caption system
     // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
     // rewrite assembles its guide/workflow system prompt with the user's prompt as the turn.
-    let (mut system, user_message) = match task {
+    let (mut system, mut user_message) = match task {
         RefineTask::ImageCaption => build_image_caption_messages(multi_reference),
         RefineTask::ImageDescribe => {
             // sc-8205: the describe style (prose vs booru tags) is selected per-model by the
@@ -433,6 +440,11 @@ pub(super) async fn parse_refine_request(
     if !instruction.is_empty() {
         system.push_str("\n\n");
         system.push_str(&instruction);
+        user_message = if task == RefineTask::Rewrite {
+            format!("Rewrite the original prompt below, removing every excluded detail. The exclusions explicitly change the original request: do not preserve or paraphrase excluded details, even when they occur in pose or lighting descriptions. Return only the rewritten prompt.\n\nOriginal prompt:\n{user_message}\n\n{instruction}")
+        } else {
+            format!("{user_message}\n\n{instruction}")
+        };
     }
     // The expansion runs the recipe's own reasoning mode (`enable_thinking` in its
     // `request_params.json`), which the engine put on the request.

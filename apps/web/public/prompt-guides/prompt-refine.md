@@ -1,6 +1,6 @@
 # Prompt Refiner Guide
 
-The Prompt Refiner is an 8B instruction LLM (TheDrummer/Anubis-Mini-8B-v1, a Llama-3.3 community finetune) that powers the "Refine my prompt" control in Image, Video, and Audio Studio. It rewrites your prompt to follow the selected generation model's own prompt guide — it does not generate images, video, or audio itself. The same model also backs Ideogram 4's magic-prompt expansion and reference-image captioning, so installing it once serves all of these.
+The default Prompt Refiner is an 8B instruction LLM (TheDrummer/Anubis-Mini-8B-v1, a Llama-3.3 community finetune) that powers the "Refine my prompt" control in Image, Video, and Audio Studio. It rewrites your prompt to follow the selected generation model's own prompt guide — it does not generate images, video, or audio itself. The same model also backs Ideogram 4's magic-prompt expansion and reference-image captioning, so installing it once serves all of these.
 
 ## What It Does
 
@@ -11,6 +11,8 @@ When you click **Refine my prompt**, your current prompt and the selected model'
 The refiner runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA) and is **not** auto-downloaded. Install it once from the **Models** screen (it is also offered inline the first time you refine before it is present). It is 16.1 GB — the stock bf16 checkpoint, downloaded and loaded as-is with no quantization — and downloads into the shared Hugging Face cache, so other tools reuse it.
 
 ## Practical Notes
+
+When Qwen3.8-27B tiers are installed in the Model Manager, the refinement model selector offers each installed tier (q4, q8, or full precision). Refinement runs the exact selected tier using the same installed snapshots as the batch describer. A removed tier is unavailable until it is installed again; it is never silently replaced by a different tier.
 
 **Prompt options** are optional checkboxes. Select any combination to omit identifying characteristics, clothing and accessories, color versus black-and-white mode, or the medium and artistic style. These exclusions take precedence over normal refinement instructions and the model guide. Review the result before applying it.
 
