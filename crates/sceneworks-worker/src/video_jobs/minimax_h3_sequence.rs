@@ -425,7 +425,7 @@ mod tests {
         );
         assert_eq!(
             minimax_h3_stall_timeout(1344, 768, u32::MAX, MinimaxH3StallRequest::EMPTY),
-            minimax_h3_stall_timeout(1344, 768, 345, MinimaxH3StallRequest::EMPTY)
+            minimax_h3_stall_timeout(1344, 768, 481, MinimaxH3StallRequest::EMPTY)
         );
         // A huge reference load saturates at the ceilings instead of growing without bound.
         let heavy: Vec<Conditioning> = (0..9)

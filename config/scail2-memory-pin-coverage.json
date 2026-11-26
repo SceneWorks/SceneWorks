@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
+    "target_revision": "154983e5bc0b6eff2cb82f3fbc3f6bba4eb2f217",
+    "backend": "mlx",
+    "provider_digest": "b98aacd85a1d2580a69926d098460748cb50e3fde30072c392e2ac9d22748e49",
+    "shared_contract_digest": "333b440cceb9b2e765e3d2facd89ebae5e6a51cbccaee9e0e63e006cc5f151ba",
+    "tree_diff_sha256": "d6903458a0f89bd35f9d28afdec52d051a6fa508aaad4a916f765fb3b9b691ee"
+  },
+  {
+    "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
+    "target_revision": "154983e5bc0b6eff2cb82f3fbc3f6bba4eb2f217",
+    "backend": "cuda",
+    "provider_digest": "9fcc6efc8274abd366e82f4f05a8f0cd39fb55e6919d204bf3747a76afc9bde2",
+    "shared_contract_digest": "333b440cceb9b2e765e3d2facd89ebae5e6a51cbccaee9e0e63e006cc5f151ba",
+    "tree_diff_sha256": "d6903458a0f89bd35f9d28afdec52d051a6fa508aaad4a916f765fb3b9b691ee"
+  }
+]

@@ -19685,7 +19685,7 @@ fn the_14b_i2v_no_longer_advertises_first_last_frame() {
 /// `contract_number`'s fractional branch had never carried a shipped value: every video model
 /// before MiniMax-H3 declares a whole-number `defaults.duration`, so the branch existed only for
 /// the integral case's sake. The first fractional default exposed it — `Value::from(5.1667_f32)`
-/// widens to `f64` and enqueues `5.1666998863220215`, which is not equal to ANY of the fourteen
+/// widens to `f64` and enqueues `5.1666998863220215`, which is not equal to ANY of the declared
 /// entries in that model's `limits.durations`. The duration dropdown preselects by comparing
 /// against that menu and a recipe replay is compared against the enqueued row, so the value has to
 /// be the declared one, not merely a number that rounds to it.
@@ -19698,7 +19698,7 @@ fn a_fractional_resolved_duration_keeps_the_manifests_own_decimal() {
     // Every other lattice rung the menu offers.
     for rung in [
         5.875_f32, 6.5833, 7.2917, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583,
-        13.6667, 14.375,
+        13.6667, 14.375, 15.0833, 15.7917, 16.5, 17.2083, 17.9167, 18.625, 19.3333, 20.0417,
     ] {
         let enqueued = crate::generation::contract_number(rung);
         assert_eq!(

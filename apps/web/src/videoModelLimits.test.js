@@ -95,12 +95,12 @@ describe("minStepsForModel", () => {
 });
 
 describe("duration labels", () => {
-  it("renders the fourteen shipped MiniMax-H3 rungs as 2dp seconds plus their frame count", () => {
+  it("renders the twenty-two shipped MiniMax-H3 rungs as 2dp seconds plus their frame count", () => {
     const fps = minimaxH3.defaults.fps;
     const labels = minimaxH3.limits.durations.map((value) => formatDurationOption(value, fps));
-    expect(labels).toHaveLength(14);
+    expect(labels).toHaveLength(22);
     expect(labels[0]).toBe("5.17s · 124 frames");
-    expect(labels.at(-1)).toBe("14.38s · 345 frames");
+    expect(labels.at(-1)).toBe("20.04s · 481 frames");
     // Every rung's frame count must land on the 17n+5 lattice — this is what makes the menu a
     // lattice rather than a rounded slider, and it is derived from the shipped seconds.
     for (const [index, duration] of minimaxH3.limits.durations.entries()) {
@@ -109,15 +109,16 @@ describe("duration labels", () => {
     }
   });
 
-  it("never labels a duration the model does not offer, including the advertised 15s", () => {
-    // MiniMax's own docs advertise 15.0s; the next lattice rung is 362 frames = 15.083s, so 15s
-    // is refused rather than delivered as 14.375s. It must therefore not appear in the menu.
+  it("labels only the offered rungs, including the extended ceiling", () => {
+    // An exact 15-second rung does not exist; the next supported count is 362 frames.
     expect(minimaxH3.limits.durations).not.toContain(15);
     expect(minimaxH3.limits.hardMaxDuration).toBe(Math.max(...minimaxH3.limits.durations));
     const labels = minimaxH3.limits.durations.map((value) =>
       formatDurationOption(value, minimaxH3.defaults.fps),
     );
-    expect(labels.some((label) => label.startsWith("15"))).toBe(false);
+    expect(labels).toContain("15.08s · 362 frames");
+    expect(labels).toContain("20.04s · 481 frames");
+    expect(labels.some((label) => label.startsWith("21"))).toBe(false);
   });
 
   it("leaves integral durations alone and degrades without an fps", () => {

@@ -53239,19 +53239,27 @@
           12.25,
           12.9583,
           13.6667,
-          14.375
+          14.375,
+          15.0833,
+          15.7917,
+          16.5,
+          17.2083,
+          17.9167,
+          18.625,
+          19.3333,
+          20.0417
         ],
         "fps": [
           24
         ],
-        "hardMaxDuration": 14.375,
+        "hardMaxDuration": 20.0417,
         "hardMinDuration": 5.1667,
         "hardMinSteps": 2,
         "maxPixels": 1032192,
         "maxReferenceAssets": 0,
         "maxReferenceAudioAssets": 0,
         "maxSourceClipAssets": 0,
-        "recommendedMaxDuration": 14.375,
+        "recommendedMaxDuration": 20.0417,
         "resolutions": [
           "1536x672",
           "672x1536",
@@ -53300,8 +53308,8 @@
       "type": "video",
       "ui": {
         "attribution": "Powered by MiniMax H3",
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
-        "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in twenty-two fixed lengths between 5.17s and 20.04s at 24fps; select 481 frames for at least 20 seconds. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render, while smaller canvases substantially reduce the cost. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
+        "durationHint": "Clip lengths follow the 17n+5 frame spacing: 124–481 frames at 24fps (5.17s to 20.04s). Choose 481 frames for at least 20 seconds. Start at 576x320; longer clips and larger canvases require more memory and time.",
         "label": "MiniMax-H3",
         "promptGuide": {
           "path": "/prompt-guides/minimax-h3.md",
@@ -54849,12 +54857,20 @@
           12.25,
           12.9583,
           13.6667,
-          14.375
+          14.375,
+          15.0833,
+          15.7917,
+          16.5,
+          17.2083,
+          17.9167,
+          18.625,
+          19.3333,
+          20.0417
         ],
         "fps": [
           24
         ],
-        "hardMaxDuration": 14.375,
+        "hardMaxDuration": 20.0417,
         "hardMinDuration": 5.1667,
         "hardMinSteps": 2,
         "maxCombinedReferenceAssets": 12,
@@ -54862,7 +54878,7 @@
         "maxReferenceAssets": 9,
         "maxReferenceAudioAssets": 3,
         "maxSourceClipAssets": 3,
-        "recommendedMaxDuration": 14.375,
+        "recommendedMaxDuration": 20.0417,
         "resolutions": [
           "1536x672",
           "672x1536",
@@ -54911,8 +54927,8 @@
       "type": "video",
       "ui": {
         "attribution": "Powered by MiniMax H3",
-        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
-        "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same twenty-two fixed lengths between 5.17s and 20.04s; select 481 frames for at least 20 seconds. There is no still-image mode.",
+        "durationHint": "Clip lengths follow the 17n+5 frame spacing: 124–481 frames at 24fps (5.17s to 20.04s). Choose 481 frames for at least 20 seconds. Start at 576x320; longer clips and larger canvases require more memory and time.",
         "label": "MiniMax-H3 References",
         "promptGuide": {
           "path": "/prompt-guides/minimax-h3.md",

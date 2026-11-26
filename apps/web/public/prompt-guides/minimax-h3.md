@@ -35,7 +35,7 @@ Two entries ship from the same family:
 >   They are declared in the tokenizer and **do nothing** against these weights — see *Markers from
 >   the upstream examples that do nothing*, below.
 
-## Cost Comes From The Canvas, Not The Length
+## Canvas And Clip Length Both Affect Cost
 
 This is the single most important thing to internalise before your first render. Measured 50-step
 timings on real weights:
@@ -47,8 +47,8 @@ timings on real weights:
 | 1344x768 | 5.17 s | **~2 hours** |
 | 1344x768 | 14.38 s | many hours |
 
-The *shortest* clip at the default 1344x768 canvas already costs about two hours. The *entire*
-duration range is comfortable at 576x320. **Choose the small canvas while you are still iterating on
+The *shortest* clip at the default 1344x768 canvas already costs about two hours. The original measured
+duration range is cheaper at 576x320; the added longer lengths have not been timed. **Choose the small canvas while you are still iterating on
 the prompt**, and move up only once you have a shot you want at full size.
 
 Those are **dense 50-step** timings, and they are the reference numbers — not the ones you will

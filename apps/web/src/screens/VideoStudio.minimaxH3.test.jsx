@@ -3,7 +3,7 @@
 // Every model fixture here is the SHIPPED manifest entry, read from
 // `config/manifests/builtin.models.jsonc` at test time. A retyped fixture would let the studio and
 // the catalog drift into disagreement about the very numbers this story exists to express — the
-// fourteen `17n + 5` duration rungs, the 9/3/3/12 reference caps and the 2-step floor — and a test
+// twenty-two `17n + 5` duration rungs, the 9/3/3/12 reference caps and the 2-step floor — and a test
 // that asserts a control against a hand-written copy of a limit proves nothing about the model the
 // user actually picks.
 //
@@ -202,7 +202,7 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(Number(selectLabelled("Duration").value)).toBe(BERNINI.defaults.duration);
     expect(Number(selectLabelled("Duration").value)).not.toBe(BERNINI.limits.durations[0]);
 
-    // The H3 leg still runs: the default has to be ON the fourteen-rung lattice, which is a claim
+    // The H3 leg still runs: the default has to be ON the twenty-two-rung lattice, which is a claim
     // about the menu rather than about which entry is preselected.
     await render(baseContext());
     expect(Number(selectLabelled("Duration").value)).toBe(MINIMAX.defaults.duration);

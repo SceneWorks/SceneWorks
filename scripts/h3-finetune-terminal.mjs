@@ -206,7 +206,7 @@ export async function decodeAV(file, command = exec) {
 //     crates/sceneworks-core/src/video_request.rs
 //       `raw_frame_count` (427-438) rounds `duration * fps`,
 //       `video_frame_count` (486-496) selects the family arm,
-//       `MINIMAX_H3_LEGAL_FRAME_COUNTS` (523-525) = 124..345 step 17,
+//       `MINIMAX_H3_LEGAL_FRAME_COUNTS` (523-525) = 124..481 step 17,
 //       `MINIMAX_H3_FPS` (529) = 24,
 //       `minimax_h3_frame_count` (556-563) aligns UP to the next rung,
 //       `ltx_frame_count` (573-587) nearest 8k+1 (min 9),
@@ -225,7 +225,7 @@ export async function decodeAV(file, command = exec) {
 //     from the picture only by the codec's own frame/padding quantum — one AAC
 //     frame (1024 samples) — not by an arbitrary slack.
 // ---------------------------------------------------------------------------
-export const MINIMAX_H3_LEGAL_FRAME_COUNTS = Object.freeze([124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345]);
+export const MINIMAX_H3_LEGAL_FRAME_COUNTS = Object.freeze([124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345, 362, 379, 396, 413, 430, 447, 464, 481]);
 export const MINIMAX_H3_FPS = 24;
 export const MINIMAX_H3_AUDIO_SAMPLE_RATE = 32_000;
 export const MINIMAX_H3_AUDIO_CHANNELS = 2;
@@ -254,7 +254,7 @@ export function videoFrameCount(model, raw) {
   if (isMinimaxH3Model(model)) return minimaxH3FrameCount(raw);
   return wanFrameCount(raw);
 }
-// True only for a value the engine's own lattice admits (`17n+5` + 5-15 s clamp
+// True only for a value the engine's own lattice admits (`17n+5` + the supported duration range
 // for H3, `8k+1`, `6k+1`, `4k+1` for the others).
 export function isLegalFrameCount(model, frames) {
   if (!Number.isInteger(frames) || frames <= 0) return false;
@@ -332,13 +332,14 @@ export function validateAVAgainstRequest(decoded, request, resolvedContract) {
   const duration = finiteNumber(request.duration, 'request duration');
   assert.ok(duration > 0, 'request duration must be positive');
   // The engine REFUSES out-of-window H3 durations rather than clamping them
-  // (`duration_limit_error`); the manifest's 5.1667..14.375 menu is 4-decimal
-  // rounding of 124/24..345/24, hence the 1e-4 menu-rounding epsilon.
+  // (`duration_limit_error`); compare H3's declared durations at the same four-decimal
+  // precision as its menu and native range validation.
   const lastH3Rung = MINIMAX_H3_LEGAL_FRAME_COUNTS[MINIMAX_H3_LEGAL_FRAME_COUNTS.length - 1];
   const hardMin = resolvedContract.hardMinDuration ?? (isMinimaxH3Model(model) ? MINIMAX_H3_LEGAL_FRAME_COUNTS[0] / MINIMAX_H3_FPS : undefined);
   const hardMax = resolvedContract.hardMaxDuration ?? (isMinimaxH3Model(model) ? lastH3Rung / MINIMAX_H3_FPS : undefined);
-  if (hardMin !== undefined) assert.ok(duration >= finiteNumber(hardMin, 'contract hardMinDuration') - 1e-4, `request duration ${duration}s is below the renderable minimum`);
-  if (hardMax !== undefined) assert.ok(duration <= finiteNumber(hardMax, 'contract hardMaxDuration') + 1e-6, `request duration ${duration}s is above the renderable maximum; the engine refuses rather than shortens`);
+  const boundarySeconds = value => isMinimaxH3Model(model) ? Math.round(value * 10_000) / 10_000 : value;
+  if (hardMin !== undefined) assert.ok(boundarySeconds(duration) >= boundarySeconds(finiteNumber(hardMin, 'contract hardMinDuration')) - (isMinimaxH3Model(model) ? 0 : 1e-4), `request duration ${duration}s is below the renderable minimum`);
+  if (hardMax !== undefined) assert.ok(boundarySeconds(duration) <= boundarySeconds(finiteNumber(hardMax, 'contract hardMaxDuration')) + (isMinimaxH3Model(model) ? 0 : 1e-6), `request duration ${duration}s is above the renderable maximum; the engine refuses rather than shortens`);
   const stride = spatialStride(model, resolvedContract);
   for (const [axis, value] of [['width', width], ['height', height]]) assert.equal(value % stride, 0, `resolved ${axis} ${value} is off the model's ${stride}px spatial grid`);
   if (resolvedContract.maxPixels !== undefined) {

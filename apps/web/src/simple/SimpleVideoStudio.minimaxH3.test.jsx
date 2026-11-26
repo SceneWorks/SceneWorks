@@ -175,7 +175,7 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     expect(line.textContent).toContain("MiniMax H3");
   });
 
-  it("labels the fourteen lattice rungs legibly and offers no 15s chip", async () => {
+  it("labels all twenty-two lattice rungs through twenty seconds", async () => {
     await openVideo(baseContext());
     const chips = [...container.querySelectorAll("button")].filter((node) =>
       /^\d+(\.\d+)?s$/.test(node.textContent.trim()),
@@ -196,6 +196,14 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
       "12.96s",
       "13.67s",
       "14.38s",
+      "15.08s",
+      "15.79s",
+      "16.5s",
+      "17.21s",
+      "17.92s",
+      "18.63s",
+      "19.33s",
+      "20.04s",
     ]);
     // Raw values would read "5.1667s" — the label is rounded, the underlying value is not.
     expect(labels.some((label) => label.includes("1667"))).toBe(false);
@@ -204,15 +212,13 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
   });
 
   it("renders the model's declared duration hint, not just the chips (sc-17162)", async () => {
-    // `ui.durationHint` had ONE reader (Advanced's helper copy), so the refusal it carries — "15s is
-    // refused rather than shortened" — reached no Simple user at all. Read back out of the DOM and
-    // compared against the MANIFEST string rather than a typed literal, so copy edits travel and a
-    // hint that renders empty is red.
+    // Read the hint from the DOM and compare with the shared manifest so Simple users receive
+    // the same duration and memory guidance as Advanced users.
     await openVideo(baseContext());
     const hint = container.querySelector(".su-duration-hint");
     expect(hint, "Simple must carry the model's duration copy, not only its chips").toBeTruthy();
     expect(hint.textContent).toBe(MINIMAX.ui.durationHint);
-    expect(hint.textContent).toContain("15s is refused");
+    expect(hint.textContent).toContain("481 frames for at least 20 seconds");
   });
 
   it("renders the model's declared description, not just its name (sc-17162)", async () => {

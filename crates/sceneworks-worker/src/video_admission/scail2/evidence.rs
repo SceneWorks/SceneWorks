@@ -283,10 +283,11 @@ fn permits_revision(capture: &str, target: &str, backend: Scail2FitBackend) -> b
         .get_or_init(|| {
             const BYTES: &[u8] =
                 include_bytes!("../../../../../config/scail2-memory-pin-coverage.json");
-            // Approve this digest only after reviewing the entire Git delta and matching both
-            // closure digests offline. Runtime uses the certified immutable pair.
+            // Approve this digest only after reviewing the complete Git delta and recomputing
+            // the target closure digests offline. See docs/h3-duration-pin-coverage.md for
+            // the H3-only delta; runtime still requires the certified immutable pair.
             const APPROVED: &str =
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570";
+                "d1e3375a5296f14f036cc6f7b14930438a89ab10b4e9cc7a32b9f7ca19ca8bf1";
             approved_pin_coverage(BYTES, APPROVED).unwrap_or_default()
         })
         .iter()
