@@ -328,7 +328,11 @@ pub(crate) fn generate_checked(
             if content_edit {
                 content_edited = true;
                 let draft = crate::text_clean::strip_reasoning_and_fence(&output.text);
-                let is_json = serde_json::from_str::<serde_json::Value>(&draft).is_ok();
+                // A budget-limited JSON draft still needs JSON editing so the caller can use
+                // its existing parse/recovery path. Do not turn a truncated object into prose.
+                let is_json = draft.starts_with('{')
+                    || draft.starts_with('[')
+                    || serde_json::from_str::<serde_json::Value>(&draft).is_ok();
                 let format = if is_json {
                     "Output only the edited JSON, preserving every key and value type. Leave excluded fields empty."
                 } else {
@@ -738,6 +742,35 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, 2);
+        assert_eq!(request.thinking, ThinkingMode::Enabled);
+        assert_eq!(request.constraint, None);
+    }
+
+    #[test]
+    fn a_truncated_json_draft_keeps_json_editing_for_the_callers_recovery_path() {
+        let mut request = image_request();
+        request.thinking = ThinkingMode::Enabled;
+        request.constraint = None;
+        let mut calls = 0;
+        let output = generate_checked(&mut request, &[ALL[3]], "fixture", false, |r| {
+            calls += 1;
+            if calls == 1 {
+                return Ok(TextLlmOutput {
+                    text: r#"{"description":"knees on a bed","pose":[{"label":"woman_1""#
+                        .to_owned(),
+                    ..Default::default()
+                });
+            }
+            assert_eq!(r.thinking, ThinkingMode::Disabled);
+            assert_eq!(r.constraint, Some(Constraint::Json));
+            Ok(TextLlmOutput {
+                text: r#"{"description":"knees on a bed","style":""}"#.to_owned(),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(serde_json::from_str::<serde_json::Value>(&output.text).is_ok());
         assert_eq!(request.thinking, ThinkingMode::Enabled);
         assert_eq!(request.constraint, None);
     }
