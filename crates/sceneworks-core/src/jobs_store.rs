@@ -454,6 +454,10 @@ pub struct JobsStore {
     /// say the app (or the machine) stopped mid-job instead of blaming a quiet worker. `None`
     /// keeps every stale job on the generic "lost contact" wording.
     session_started_at: Option<String>,
+    /// How long each of this store's connections waits for a competing SQLite
+    /// writer before failing `SQLITE_BUSY`. Production keeps the shared
+    /// [`crate::store_util::SQLITE_BUSY_TIMEOUT`]; see [`Self::with_busy_timeout`].
+    busy_timeout: std::time::Duration,
 }
 
 /// Selection work performed by the most recent claim on this store.
@@ -707,7 +711,21 @@ impl JobsStore {
             last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
             last_platform_reachability_sweep: Mutex::new(PlatformReachabilitySweepStats::default()),
             session_started_at: None,
+            busy_timeout: crate::store_util::SQLITE_BUSY_TIMEOUT,
         }
+    }
+
+    /// Override how long this store's connections wait for a competing writer
+    /// (default [`crate::store_util::SQLITE_BUSY_TIMEOUT`], 5 s). Production keeps
+    /// the default. Cross-store contention tests take a longer wait: SQLite's busy
+    /// handler polls rather than queueing, so on an oversubscribed host a waiter can
+    /// lose the write lock to back-to-back writers for the whole 5 s and fail after
+    /// waiting correctly (SW-7283). The wait never hides the SW-1054 regression: a
+    /// DEFERRED read->write upgrade gets `SQLITE_BUSY` without the busy handler
+    /// running, whatever this is set to.
+    pub fn with_busy_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.busy_timeout = timeout;
+        self
     }
 
     /// Record when the owning API process started (unix seconds), so the stale sweep can tell a
@@ -5150,6 +5168,9 @@ impl JobsStore {
                 database_path: &self.db_path,
             },
         )?;
+        if self.busy_timeout != crate::store_util::SQLITE_BUSY_TIMEOUT {
+            connection.busy_timeout(self.busy_timeout)?;
+        }
         Ok(connection)
     }
 
