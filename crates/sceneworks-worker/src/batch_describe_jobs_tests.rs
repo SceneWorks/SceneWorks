@@ -12,6 +12,36 @@ use sceneworks_core::dataset_batch_describe::MAX_JOYCAPTION_DESCRIBE_PROMPT_CHAR
 const DRAFT_OUTPUT_HEADING: &str = "## OUTPUT — one JSON object, no other text";
 
 #[test]
+fn explicit_custom_observation_instructions_keep_their_detail_level() {
+    let instruction = "Describe the clearly visible palm orientation and exact hand positions.";
+    let (prompt, is_default) =
+        DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, Some(instruction));
+    assert!(!is_default);
+    assert!(prompt.system().contains(instruction));
+    let mut request = gen_core::core_llm::TextLlmRequest::default();
+    let mut calls = 0;
+    let draft = "The palm lies flat on the table beside the hip.";
+    let output = crate::prompt_content_guard::generate_checked(
+        &mut request,
+        &prompt.exclusions,
+        "fixture",
+        prompt.use_default_observation,
+        |_| {
+            calls += 1;
+            Ok(gen_core::core_llm::TextLlmOutput {
+                text: draft.to_owned(),
+                ..Default::default()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(output.text, draft);
+    let (default, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    assert!(default.use_default_observation);
+}
+
+#[test]
 fn parsed_or_recovered_fields_cannot_bypass_selected_exclusions() {
     use sceneworks_core::options::prompt_content::PromptExclusion::*;
     for (category, key, value) in [

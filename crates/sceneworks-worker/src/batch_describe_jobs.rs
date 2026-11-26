@@ -400,6 +400,8 @@ pub(crate) struct DescribePrompt {
     exclusion_instruction: String,
     compact_exclusion_instruction: String,
     exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    /// Default observation rules must not rewrite an explicit custom instruction's detail level.
+    use_default_observation: bool,
 }
 
 #[cfg(native_lane)]
@@ -434,6 +436,7 @@ impl DescribePrompt {
             exclusion_instruction: String::new(),
             compact_exclusion_instruction: String::new(),
             exclusions: Vec::new(),
+            use_default_observation: is_default,
         };
         (prompt, is_default)
     }
@@ -1291,6 +1294,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let system = prompt.system();
         let user = prompt.user();
         let exclusions = prompt.exclusions.clone();
+        let review_pose = prompt.use_default_observation;
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
@@ -1323,7 +1327,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                     &mut request,
                     &exclusions,
                     &job_id,
-                    true,
+                    review_pose,
                     |request| {
                         let generation =
                             crate::load_progress::generate_text(model, request, &mut |event| {
