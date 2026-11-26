@@ -1163,6 +1163,7 @@ impl BatchDescriber for StubDescriber {
         &self,
         system: String,
         user: String,
+        _source: String,
         _cancel: CancelFlag,
         exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
     ) -> CondenseFuture {
@@ -3740,6 +3741,7 @@ impl BatchDescriber for LoadFailsOnCondense {
 
     fn condense(
         &self,
+        _: String,
         _: String,
         _: String,
         _: CancelFlag,

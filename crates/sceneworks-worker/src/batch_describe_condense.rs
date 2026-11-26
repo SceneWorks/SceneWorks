@@ -448,10 +448,11 @@ pub(crate) async fn condense_fields(
     // Before any reply, expect about three mentions of each person.
     let mut words = condense_word_target(token_bound, condense_char_bound(), labels.len() * 3);
     let policy = sceneworks_core::options::prompt_content::exclusion_instruction(exclusions);
+    let source = condense_user(fields);
     let user = if policy.is_empty() {
-        condense_user(fields)
+        source.clone()
     } else {
-        format!("{}\n\n{policy}", condense_user(fields))
+        format!("{source}\n\n{policy}")
     };
     let mut last: Option<Measured> = None;
     for attempt in 0..2 {
@@ -492,8 +493,13 @@ pub(crate) async fn condense_fields(
         } else {
             format!("{}\n\n{policy}", condense_system(words))
         };
-        let generation =
-            describer.condense(system, user.clone(), cancel.clone(), exclusions.to_vec());
+        let generation = describer.condense(
+            system,
+            user.clone(),
+            source.clone(),
+            cancel.clone(),
+            exclusions.to_vec(),
+        );
         let (was_canceled, reply) =
             StreamSupervisor::new(cancel, generation, progress_report_interval(settings), None)
                 .wait(api, settings, &job.id)

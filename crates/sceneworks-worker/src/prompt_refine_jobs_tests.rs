@@ -3080,6 +3080,7 @@ fn expansion_budget_recovery_precedes_exclusion_editing_with_original_references
             &[ClothingAndAccessories],
             "fixture",
             false,
+            None,
             Some(ExpansionContract {
                 workflow: Workflow::TextToImage,
                 allowed_ratios: &ratios,
@@ -3181,6 +3182,7 @@ fn expansion_cancellation_prevents_budget_retry_and_content_edit() {
         &[Style],
         "fixture",
         false,
+        None,
         Some(ExpansionContract {
             workflow: Workflow::TextToImage,
             allowed_ratios: &[],
@@ -3215,6 +3217,7 @@ fn expansion_without_exclusions_keeps_the_existing_partial_sentence_path() {
         &[],
         "fixture",
         false,
+        None,
         Some(ExpansionContract {
             workflow: Workflow::TextToImage,
             allowed_ratios: &[],
@@ -3234,4 +3237,37 @@ fn expansion_without_exclusions_keeps_the_existing_partial_sentence_path() {
     assert_eq!(output.text, raw);
     assert_eq!(output.finish_reason, Some(FinishReason::Length));
     assert_eq!(recovery, Recovery::None);
+}
+
+#[test]
+fn clothing_exclusion_rewrites_check_the_original_arm_relation() {
+    use gen_core::core_llm::{Message, TextLlmOutput, TextLlmRequest};
+    use sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories;
+    let source = "An arm extends down behind the bag; the hand is on the table.";
+    let mut request = TextLlmRequest::new(vec![Message::user(source)], 512);
+    let mut calls = 0;
+    let (output, _) = generate_refine_checked(
+        &mut request,
+        &[ClothingAndAccessories],
+        "fixture",
+        false,
+        Some(source),
+        None,
+        |_| {
+            calls += 1;
+            Ok(TextLlmOutput {
+                text: if calls == 1 {
+                    "The arm is down behind the back, hand on the table."
+                } else {
+                    "The arm extends down, hand on the table."
+                }
+                .to_owned(),
+                ..Default::default()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(output.text, "The arm extends down, hand on the table.");
+    assert_eq!(request.messages, vec![Message::user(source)]);
 }

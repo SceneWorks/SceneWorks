@@ -1079,6 +1079,11 @@ pub(crate) async fn run_prompt_refine_job(
         )
         .await?;
     }
+    let pose_source = (task == RefineTask::Rewrite
+        && prompt_exclusions.contains(
+            &sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories,
+        ))
+    .then(|| original_prompt.clone());
     let blocking = crate::load_progress::spawn(crate::refine_model_cache::with_cached_refiner(
         refine_spec,
         refine_reqs,
@@ -1272,6 +1277,7 @@ pub(crate) async fn run_prompt_refine_job(
                     &prompt_exclusions,
                     &job_id,
                     task == RefineTask::ImageDescribe && image_reference_count == 1,
+                    pose_source.as_deref(),
                     expansion_contract
                         .as_ref()
                         .map(|(workflow, allowed_ratios, aspect)| ExpansionContract {
@@ -1532,6 +1538,7 @@ fn generate_refine_checked(
     exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
     job_id: &str,
     review_pose: bool,
+    source: Option<&str>,
     mut expansion: Option<ExpansionContract<'_>>,
     mut generate: impl FnMut(
         &gen_core::core_llm::TextLlmRequest,
@@ -1544,11 +1551,12 @@ fn generate_refine_checked(
     use gen_core::core_llm::FinishReason;
     debug_assert!(!review_pose || expansion.is_none());
     let mut recovery = expand::Recovery::None;
-    let output = crate::prompt_content_guard::generate_checked(
+    let output = crate::prompt_content_guard::generate_checked_with_source(
         request,
         exclusions,
         job_id,
         review_pose,
+        source,
         |request| {
             let mut output = generate(request)?;
             // Only the first native call has the original expansion request and its references.

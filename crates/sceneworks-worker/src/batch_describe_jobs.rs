@@ -1036,6 +1036,7 @@ pub(crate) trait BatchDescriber: Send + Sync {
         &self,
         _system: String,
         _user: String,
+        _source: String,
         _cancel: CancelFlag,
         _exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
     ) -> CondenseFuture {
@@ -1383,6 +1384,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
         &self,
         system: String,
         user: String,
+        source: String,
         cancel: CancelFlag,
         exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
     ) -> CondenseFuture {
@@ -1402,11 +1404,12 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 let mut request =
                     condense_request(product_speculative, system, user, cancel, kv_compression);
                 let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
-                let generation = crate::prompt_content_guard::generate_checked(
+                let generation = crate::prompt_content_guard::generate_checked_with_source(
                     &mut request,
                     &exclusions,
                     &job_id,
                     false,
+                    Some(&source),
                     |request| {
                         let generation =
                             crate::load_progress::generate_text(model, request, &mut |event| {

@@ -630,6 +630,68 @@ fn retain_present_schema_fields(schema: &mut serde_json::Value, draft: &serde_js
     schema["required"] = json!(required);
 }
 
+/// A narrow English source-grounding backstop for an observed exclusion failure: an arm
+/// behind removed equipment must not be moved behind the person's body. Existing direct
+/// arm/body relations remain valid; this is not a general pose classifier.
+fn arm_behind_relation(text: &str, targets: &[&str]) -> Option<String> {
+    for part in answer_parts(text) {
+        for clause in part.split(['.', ';', '!', '?', '\n']) {
+            let normalized = normalize_text(clause);
+            let words: Vec<_> = normalized.split_whitespace().collect();
+            for (index, word) in words.iter().enumerate() {
+                if *word != "behind"
+                    || words[index.saturating_sub(4)..index]
+                        .iter()
+                        .any(|word| ["not", "never", "no"].contains(word))
+                    || !words[index.saturating_sub(12)..index].iter().any(|word| {
+                        [
+                            "arm", "arms", "forearm", "forearms", "hand", "hands", "elbow",
+                            "elbows",
+                        ]
+                        .contains(word)
+                    })
+                {
+                    continue;
+                }
+                let target = words
+                    .iter()
+                    .enumerate()
+                    .skip(index + 1)
+                    .take(5)
+                    .find(|(_, word)| {
+                        ![
+                            "a", "the", "her", "his", "their", "its", "own", "upper", "lower",
+                            "large", "dark", "leather",
+                        ]
+                        .contains(word)
+                    });
+                if let Some((end, _)) = target.filter(|(_, word)| targets.contains(word)) {
+                    return Some(words[index..=end].join(" "));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn introduced_arm_body_relation(source: &str, answer: &str) -> Vec<String> {
+    let body = ["back", "torso", "body"];
+    let equipment = [
+        "saddle", "bag", "backpack", "coat", "jacket", "cape", "cloak", "garment", "clothing",
+        "dress", "shirt", "scarf", "harness", "strap", "straps",
+    ];
+    if arm_behind_relation(source, &equipment).is_none()
+        || arm_behind_relation(source, &body).is_some()
+    {
+        return Vec::new();
+    }
+    arm_behind_relation(answer, &body)
+        .map(|relation| vec![format!("introduced arm/body relation: {relation}")])
+        .unwrap_or_default()
+}
+
+const SOURCE_POSE_EDIT: &str = "The source places an arm behind excluded equipment, not behind the person's body. Delete the introduced arm-behind-body phrase; retain the stated independent arm direction and any stated contact surface. Do not substitute another body landmark or move the limb. Original direct body relationships must remain unchanged.";
+
 /// Reuse the original request, cache, sampling and cancel flag. Visual verification keeps its
 /// images and reasoning; the text-only content edit is answer-only, constrained for JSON drafts.
 /// No second model/load path and no image-buffer clone. Callers record each native generation;
@@ -642,6 +704,19 @@ pub(crate) fn generate_checked(
     exclusions: &[PromptExclusion],
     job_id: &str,
     review_pose: bool,
+    generate: impl FnMut(&TextLlmRequest) -> WorkerResult<TextLlmOutput>,
+) -> WorkerResult<TextLlmOutput> {
+    generate_checked_with_source(request, exclusions, job_id, review_pose, None, generate)
+}
+
+/// Text rewrites/shortening may supply their original content separately from guides and
+/// exclusion instructions. It is used only to check the known equipment-removal substitution.
+pub(crate) fn generate_checked_with_source(
+    request: &mut TextLlmRequest,
+    exclusions: &[PromptExclusion],
+    job_id: &str,
+    review_pose: bool,
+    source: Option<&str>,
     mut generate: impl FnMut(&TextLlmRequest) -> WorkerResult<TextLlmOutput>,
 ) -> WorkerResult<TextLlmOutput> {
     if exclusions.is_empty() && !review_pose {
@@ -684,6 +759,11 @@ pub(crate) fn generate_checked(
                 Vec::new()
             };
             leaks.extend(precision_leaks.iter().cloned());
+            let source_leaks = source
+                .filter(|_| exclusions.contains(&PromptExclusion::ClothingAndAccessories))
+                .map(|source| introduced_arm_body_relation(source, &output.text))
+                .unwrap_or_default();
+            leaks.extend(source_leaks.iter().cloned());
             let pose_review = review_pose && !pose_reviewed && !content_edited;
             let content_edit =
                 (!exclusions.is_empty() || review_pose) && !content_edited && !pose_review;
@@ -732,6 +812,10 @@ pub(crate) fn generate_checked(
                     editor_system.push('\n');
                     editor_system.push_str(POSE_CONTENT_EDIT);
                 }
+                if !source_leaks.is_empty() {
+                    editor_system.push('\n');
+                    editor_system.push_str(SOURCE_POSE_EDIT);
+                }
                 visual_messages = Some(std::mem::replace(
                     &mut request.messages,
                     vec![
@@ -748,6 +832,9 @@ pub(crate) fn generate_checked(
                 return Ok(output);
             }
             if !leaks.is_empty() && content_edited && corrections == 2 {
+                if !source_leaks.is_empty() {
+                    return Err(WorkerError::Engine("The selected model changed an arm's body-relative position while excluding equipment after two correction attempts. Try another installed model or revise the source.".to_owned()));
+                }
                 if !precision_leaks.is_empty() {
                     return Err(WorkerError::Engine("The selected model still included unsupported fine hand details after two correction attempts. Try another installed model or revise the request.".to_owned()));
                 }
@@ -766,6 +853,10 @@ pub(crate) fn generate_checked(
             if !precision_leaks.is_empty() {
                 correction.push('\n');
                 correction.push_str(POSE_CONTENT_EDIT);
+            }
+            if !source_leaks.is_empty() {
+                correction.push('\n');
+                correction.push_str(SOURCE_POSE_EDIT);
             }
             let policy = exclusion_instruction(exclusions);
             if !policy.is_empty() {
@@ -788,6 +879,98 @@ pub(crate) fn generate_checked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_grounding_catches_equipment_to_anatomy_substitutions_only() {
+        let source = "Her left arm angles down behind the saddle; her hand rests on the bed.";
+        for bad in [
+            "Her left arm angles down behind her back, hand on the bed.",
+            "Her left arm angles down behind her torso, hand on the bed.",
+            "Her hand is behind the body.",
+        ] {
+            assert!(
+                !introduced_arm_body_relation(source, bad).is_empty(),
+                "{bad}"
+            );
+        }
+        for (original, output) in [
+            (source, "Her arm angles down with the hand on the bed."),
+            (
+                source,
+                "Her arm is not behind her back; the hand is on the bed.",
+            ),
+            (
+                "Her arm rests behind her back, covered by a jacket.",
+                "Her arm rests behind her torso.",
+            ),
+            (
+                "One arm is behind a bag; the other arm is behind her back.",
+                "An arm remains behind her back.",
+            ),
+            ("Her leg is behind a bag.", "Her arm is behind her back."),
+        ] {
+            assert!(
+                introduced_arm_body_relation(original, output).is_empty(),
+                "{original}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_grounding_reuses_bounded_editing_and_preserves_legitimate_original_poses() {
+        let source = "Her left arm angles down behind the saddle; her hand rests on the bed.";
+        let bad = "Her left arm angles down behind her torso, hand on the bed.";
+        let good = "Her left arm angles down, hand on the bed.";
+        for (original, exclusions, repair) in [
+            (source, vec![ALL[1]], Some(good)),
+            (source, vec![ALL[1]], None),
+            (
+                "Her left arm angles down behind her back, hand on the bed.",
+                vec![ALL[1]],
+                Some(bad),
+            ),
+            (source, vec![ALL[3]], Some(bad)),
+        ] {
+            let guarded = !introduced_arm_body_relation(original, bad).is_empty()
+                && exclusions.contains(&ALL[1]);
+            let mut request = TextLlmRequest::new(vec![Message::user(original)], 512);
+            let mut calls = 0;
+            let result = generate_checked_with_source(
+                &mut request,
+                &exclusions,
+                "fixture",
+                false,
+                Some(original),
+                |r| {
+                    calls += 1;
+                    if guarded && calls >= 2 {
+                        assert!(format!("{:?}", r.messages).contains(SOURCE_POSE_EDIT));
+                    }
+                    Ok(TextLlmOutput {
+                        text: if calls >= 2 {
+                            repair.unwrap_or(bad)
+                        } else {
+                            bad
+                        }
+                        .to_owned(),
+                        ..Default::default()
+                    })
+                },
+            );
+            if repair.is_none() {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("changed an arm's body-relative position"));
+                assert_eq!(calls, 4);
+            } else {
+                assert_eq!(result.unwrap().text, repair.unwrap());
+                assert_eq!(calls, 2);
+            }
+            assert_eq!(request.messages, vec![Message::user(original)]);
+            assert_eq!(request.constraint, None);
+        }
+    }
     use gen_core::core_llm::{Content, ImageRef, Role};
     use std::collections::VecDeque;
     const ALL: [PromptExclusion; 4] = [
