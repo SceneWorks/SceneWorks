@@ -36,6 +36,28 @@ fn long_lived_write_connection_has_wal_busy_timeout_and_foreign_keys() {
     assert_eq!(journal_mode, "wal", "WAL journal mode established");
 }
 
+/// SW-7283: `with_busy_timeout` reaches every connection the store opens, the
+/// long-lived writer and the short-lived readers alike, while the default store
+/// keeps the shared 5 s wait (asserted above).
+#[test]
+fn with_busy_timeout_applies_to_write_and_read_connections() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = JobsStore::new(dir.path().join("jobs.db"))
+        .with_busy_timeout(std::time::Duration::from_secs(60));
+    store.initialize().expect("store initializes");
+    let busy_timeout = |connection: &Connection| -> i64 {
+        connection
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("busy_timeout pragma reads")
+    };
+
+    let reader = store.open_connection().expect("read connection");
+    assert_eq!(busy_timeout(&reader), 60_000, "reader waits 60 s");
+    let mut guard = store.lock.lock();
+    let writer = store.write_connection(&mut guard).expect("write conn");
+    assert_eq!(busy_timeout(writer), 60_000, "writer waits 60 s");
+}
+
 /// The write connection is opened once and REUSED across ops: a connection-
 /// scoped `TEMP` table created on it survives into a later `write_connection`
 /// call. A fresh `Connection::open` per op (the pre-refactor churn) would not

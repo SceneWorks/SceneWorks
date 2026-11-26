@@ -9006,6 +9006,15 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
 /// IMMEDIATE makes each claimer read the queued set only after holding the write lock,
 /// so two claimers can't both see one job as `queued` (the old DEFERRED path raced the
 /// read→write upgrade, which SQLite fails immediately as `database is locked`).
+///
+/// SW-7283: the racing stores wait up to 60 s for the write lock instead of the
+/// production 5 s. SQLite's busy handler polls instead of queueing, so on an
+/// oversubscribed host four back-to-back writers can keep one waiter off the lock
+/// for the whole 5 s. Reproduced with ~4x CPU oversubscription: the failing claims
+/// had waited 5.9-6.1 s, and successful ones up to 5.7 s. A host-speed timeout is
+/// not the regression this test guards. A DEFERRED claim still fails at once,
+/// because SQLite returns BUSY on a read->write upgrade without calling the busy
+/// handler, so the longer wait does not weaken that guard.
 #[test]
 fn concurrent_claims_never_lock_and_stay_exactly_once() {
     use std::collections::HashSet;
@@ -9042,6 +9051,11 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
             .create_job(image_job(object(json!({ "prompt": format!("p{j}") }))))
             .expect("job creates");
     }
+    // Bind every carrier before the race. Otherwise all four claimers race to bind
+    // the same 60 rows first, and the contention under test stops being claims.
+    primary
+        .upgrade_historical_carriers()
+        .expect("carriers bind before the race");
 
     let claimed: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
     let errors: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -9056,7 +9070,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
         let remaining = Arc::clone(&remaining);
         let first_claim_start = Arc::clone(&first_claim_start);
         handles.push(thread::spawn(move || {
-            let store = JobsStore::new(path);
+            let store = JobsStore::new(path).with_busy_timeout(Duration::from_secs(60));
             let worker_id = format!("worker-{w}");
             // Make the first claim a real SQLite race. Without this rendezvous a
             // fast first thread can drain enough rows that the test only exercises
