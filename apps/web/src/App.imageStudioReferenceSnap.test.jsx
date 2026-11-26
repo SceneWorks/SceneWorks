@@ -180,25 +180,25 @@ describe("Image Studio img2img reference aspect snap", () => {
     // The user then picks a different Aspect for this render.
     await act(async () => {
       const select = aspectSelect();
-      select.value = "3:4"; // at the snapped 2.25 MP: 1328x1776
+      select.value = "3:4"; // at the snapped 2.25 MP: 1344x1728 on its 64 px preset grid
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
-    expect(outputSize()).toBe("1328x1776");
+    expect(outputSize()).toBe("1344x1728");
 
     // An asset-list refresh (new array identity, same reference still picked) must not re-snap.
     await act(async () => {
       root.render(studio([{ ...REFERENCE_ASSET }]));
     });
     await settle();
-    expect(outputSize()).toBe("1328x1776");
+    expect(outputSize()).toBe("1344x1728");
 
     // Nor may any number of further refreshes.
     await act(async () => {
       root.render(studio([{ ...REFERENCE_ASSET }, { ...REFERENCE_ASSET, id: "asset-generated" }]));
     });
     await settle();
-    expect(outputSize()).toBe("1328x1776");
+    expect(outputSize()).toBe("1344x1728");
   });
 
   it("names a deleted image reference before Generate and lets the user remove it", async () => {
@@ -334,7 +334,7 @@ describe("Image Studio img2img reference aspect snap", () => {
 
     await act(async () => {
       const select = aspectSelect();
-      select.value = "3:4"; // at the snapped 2.25 MP: 1328x1776
+      select.value = "3:4"; // at the snapped 2.25 MP: 1344x1728 on its 64 px preset grid
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
@@ -404,11 +404,11 @@ describe("Image Studio img2img reference aspect snap", () => {
 
     expect(outputSize()).toBe("896x1600");
     await act(async () => {
-      aspectSelect().value = "1:1"; // at the snapped 1.37 MP: 1184x1184
+      aspectSelect().value = "1:1"; // at the snapped 1.37 MP: 1152x1152 on its 64 px preset grid
       aspectSelect().dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
-    expect(outputSize()).toBe("1184x1184");
+    expect(outputSize()).toBe("1152x1152");
   });
 
   it("keeps the user's Aspect across a Text → Edit → Text round-trip (sc-18255)", async () => {
@@ -427,7 +427,7 @@ describe("Image Studio img2img reference aspect snap", () => {
 
     await act(async () => {
       const select = aspectSelect();
-      select.value = "3:4"; // at the snapped 2.25 MP: 1328x1776
+      select.value = "3:4"; // at the snapped 2.25 MP: 1344x1728 on its 64 px preset grid
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
@@ -444,6 +444,6 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
 
-    expect(outputSize()).toBe("1328x1776");
+    expect(outputSize()).toBe("1344x1728");
   });
 });

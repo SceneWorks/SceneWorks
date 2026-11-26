@@ -20,9 +20,12 @@ export function AspectResolutionPicker({ resolution, onChange, envelope, childre
   // repeated steps walk the request — not the rounded result, which would drift. Any outside change
   // to the size (a model switch refit, a preset, a reference snap) drops it, and both controls fall
   // back to reading the size itself.
+  // Tied to the envelope as well as the size: a model switch that keeps the same pixels can change
+  // the ratio menu (Mage-Flow's 4:1 is not on Krea's), so the remembered shape is dropped with it.
   const [requested, setRequested] = useState(null);
-  const current = requested?.resolution === resolution ? requested : null;
-  const ratio = current?.ratio ?? (size ? nearestAspectRatio(size.width, size.height, envelope.ratios) : envelope.ratios[0]);
+  const current = requested?.resolution === resolution && requested.envelope === envelope ? requested : null;
+  const ratio = current?.ratio ??
+    (size ? nearestAspectRatio(size.width, size.height, envelope.availableRatios) : envelope.availableRatios[0]);
   const megapixels = current?.megapixels ?? (size ? megapixelsOf(size.width, size.height) : 1);
   // The typed value is a draft until Enter/blur, so a half-typed "4." never resizes the image. It is
   // tagged with the resolution it was typed against, so any outside change to the size drops it.
@@ -48,7 +51,7 @@ export function AspectResolutionPicker({ resolution, onChange, envelope, childre
     const next = shape && resolutionFor(shape, nextMegapixels, envelope);
     if (!next) return;
     const clamped = Math.min(Math.max(nextMegapixels, envelope.minMegapixels), envelope.maxMegapixels);
-    setRequested({ resolution: next, ratio: shape, megapixels: clamped });
+    setRequested({ resolution: next, envelope, ratio: shape, megapixels: clamped });
     if (next !== resolution) onChange(next);
   };
   const commitDraft = () => {
@@ -70,7 +73,9 @@ export function AspectResolutionPicker({ resolution, onChange, envelope, childre
         Aspect
         <select onChange={(event) => apply(event.target.value, megapixels)} value={ratio.id}>
           {envelope.ratios.map((option) => (
-            <option key={option.id} value={option.id}>{option.label}</option>
+            <option disabled={!option.available} key={option.id} value={option.id}>
+              {option.available ? option.label : `${option.label} — not on this model`}
+            </option>
           ))}
         </select>
       </label>

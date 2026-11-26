@@ -21,8 +21,11 @@ const H3_IMAGE = ["2048x2048", "4096x4096", "4736x3552", "3552x4736", "5024x3360
 const H3_MODEL = { limits: { resolutions: H3_IMAGE, minDimension: 16, maxDimension: 9408 } };
 const QWEN_2_1 = { limits: { resolutions: ["2048x2048", "2752x1536", "1536x2752", "2368x1760", "1760x2368", "2496x1664", "1664x2496"],
   minDimension: 32, maxDimension: 2752, requiresDimensionsMultipleOf: 32 } };
-const MAGE = { limits: { resolutions: ["1024x1024", "2048x2048", "2048x512", "512x2048", "1536x768", "768x1536"],
+const MAGE = { limits: { resolutions: ["512x512", "1024x1024", "2048x2048", "2048x512", "512x2048", "1536x768", "768x1536"],
   requiresDimensionsMultipleOf: 16 } };
+const SDXL = ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344"];
+// SenseNova's engine caps each side at 2048 and clamps a longer one, changing the shape (sc-12384).
+const SENSENOVA = ["2048x2048", "2048x1152", "1152x2048", "1888x1248", "1248x1888", "1760x1312", "1312x1760"];
 
 const envelopeFor = (resolutions, limits = {}) =>
   resolutionEnvelope({ limits: { resolutions, ...limits } }, resolutions);
@@ -46,28 +49,60 @@ describe("resolutionEnvelope", () => {
     expect(resolutionFitsEnvelope("512x512", supra)).toBe(false);
   });
 
-  it("uses the declared grid when coarser than 16", () => {
+  it("reads the grid off the presets, which the worker pins to each engine's lattice", () => {
     expect(resolutionEnvelope(QWEN_2_1, QWEN_2_1.limits.resolutions).stride).toBe(32);
+    expect(envelopeFor(KREA_2).stride).toBe(16);
+    expect(envelopeFor(SENSENOVA).stride).toBe(32);
+    // SDXL/Kolors are ÷32 on MLX: their presets' 64 grid covers it on every backend.
+    expect(envelopeFor(SDXL).stride).toBe(64);
+  });
+
+  it("bounds sides by the presets unless the model declares an envelope", () => {
+    expect(envelopeFor(KREA_2)).toMatchObject({ minSide: 720, maxSide: 2048 });
+    expect(resolutionEnvelope(H3_MODEL, H3_IMAGE)).toMatchObject({ minSide: 32, maxSide: 9408 });
   });
 });
 
 describe("resolutionFor", () => {
-  it("derives the ComfyUI-style sizes on Krea 2 without exceeding its 2048² area", () => {
+  it("derives Krea 2 sizes inside its 2048² area and its engine's 2048 side", () => {
     const krea = envelopeFor(KREA_2);
     expect(resolutionFor("1:1", 4, krea)).toBe("2048x2048");
-    expect(resolutionFor("3:4", 4, krea)).toBe("1776x2352");
-    expect(resolutionFor("16:9", 4, krea)).toBe("2720x1536");
+    expect(resolutionFor("3:4", 4, krea)).toBe("1536x2048");
+    expect(resolutionFor("16:9", 4, krea)).toBe("2048x1152");
+    expect(resolutionFor("21:9", 4, krea)).toBe("2048x880");
     expect(resolutionFor("1:1", 1, krea)).toBe("1024x1024");
     for (const ratio of ASPECT_RATIOS) {
       const [w, h] = resolutionFor(ratio, 99, krea).split("x").map(Number);
       expect(w * h).toBeLessThanOrEqual(2048 * 2048);
+      expect(Math.max(w, h)).toBeLessThanOrEqual(2048);
       expect(w % 16 + h % 16).toBe(0);
     }
   });
 
+  it("keeps SenseNova's 16:9 at its 2048 side cap rather than a clamped 4:3", () => {
+    expect(resolutionFor("16:9", 99, envelopeFor(SENSENOVA))).toBe("2048x1152");
+  });
+
+  it("lands every SDXL size on the 32 px MLX lattice", () => {
+    const sdxl = envelopeFor(SDXL);
+    for (const ratio of sdxl.availableRatios) {
+      for (const megapixels of [0, 0.98, 99]) {
+        const [w, h] = resolutionFor(ratio, megapixels, sdxl).split("x").map(Number);
+        expect(w % 32 + h % 32).toBe(0);
+      }
+    }
+  });
+
   it("clamps to the band: Z-Image tops out at 1 MP, H3 starts at 4 MP", () => {
-    expect(resolutionFor("16:9", 4, envelopeFor(Z_IMAGE))).toBe("1360x768");
+    expect(resolutionFor("16:9", 4, envelopeFor(Z_IMAGE))).toBe("1280x720");
     expect(resolutionFor("1:1", 1, resolutionEnvelope(H3_MODEL, H3_IMAGE))).toBe("2048x2048");
+  });
+
+  it("grows both sides to the side floor, keeping the shape", () => {
+    const mage = resolutionEnvelope(MAGE, MAGE.limits.resolutions);
+    expect(mage.minSide).toBe(512);
+    expect(resolutionFor("4:1", 0, mage)).toBe("2048x512");
+    expect(resolutionFor("21:9", 0, mage)).toBe("1216x512");
   });
 
   it("reaches H3's published 21:9 presets exactly and never passes its 9408 edge", () => {
@@ -84,6 +119,14 @@ describe("resolutionFor", () => {
 });
 
 describe("model preset shapes", () => {
+  it("disables a ratio the side range cannot draw", () => {
+    const zImage = envelopeFor(Z_IMAGE);
+    expect(zImage.ratios.find((ratio) => ratio.id === "21:9").available).toBe(false);
+    expect(zImage.ratios.find((ratio) => ratio.id === "16:9").available).toBe(true);
+    // SDXL's 896x1152 preset still counts as its 3:4.
+    expect(envelopeFor(SDXL).ratios.find((ratio) => ratio.id === "3:4").available).toBe(true);
+  });
+
   it("adds Mage-Flow's panorama shapes and nothing for standard ladders", () => {
     expect(aspectRatiosFor(KREA_2)).toHaveLength(ASPECT_RATIOS.length);
     expect(aspectRatiosFor(H3_IMAGE)).toHaveLength(ASPECT_RATIOS.length);
@@ -103,17 +146,20 @@ describe("switching models", () => {
   it("keeps a size the new model can render and refits one it cannot, keeping the ratio", () => {
     const krea = envelopeFor(KREA_2);
     const zImage = envelopeFor(Z_IMAGE);
-    expect(resolutionFitsEnvelope("1776x2352", krea)).toBe(true);
-    expect(resolutionFitsEnvelope("1776x2352", zImage)).toBe(false);
-    expect(fitResolutionToEnvelope("1776x2352", zImage)).toBe("880x1184");
+    expect(resolutionFitsEnvelope("1536x2048", krea)).toBe(true);
+    expect(resolutionFitsEnvelope("1536x2048", zImage)).toBe(false);
+    expect(fitResolutionToEnvelope("1536x2048", zImage)).toBe("880x1184");
+    // Past Krea's 2048 side: refit, never kept.
+    expect(resolutionFitsEnvelope("2720x1536", krea)).toBe(false);
     // A preset of another model that this one can render is not rewritten.
     expect(resolutionFitsEnvelope("1216x832", krea)).toBe(true);
   });
 
-  it("enforces a declared grid but not an undeclared one", () => {
-    const mage = resolutionEnvelope(MAGE, MAGE.limits.resolutions);
-    expect(resolutionFitsEnvelope("1000x1000", mage)).toBe(false);
-    expect(resolutionFitsEnvelope("1000x1000", envelopeFor(KREA_2))).toBe(true);
+  it("refits a carried-over size that is off the new model's grid", () => {
+    const sdxl = envelopeFor(SDXL);
+    expect(resolutionFitsEnvelope("880x1184", sdxl)).toBe(false);
+    const [w, h] = fitResolutionToEnvelope("880x1184", sdxl).split("x").map(Number);
+    expect(w % 64 + h % 64).toBe(0);
   });
 });
 
