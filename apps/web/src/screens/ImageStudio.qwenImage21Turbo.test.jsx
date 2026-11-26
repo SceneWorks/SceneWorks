@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
+import { click, imageSize, mountRoot, setImageSize, setInput, unmountRoot } from "../testUtils/dom.js";
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -140,12 +140,14 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
   const typePrompt = (text) =>
     act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), text));
 
-  it("offers the seven presets, seeded on the 1:1 default", async () => {
+  it("sizes by ratio up to its largest preset, seeded on the 1:1 default", async () => {
     await render();
     const aspect = field(container, "Aspect");
-    expect([...aspect.options].map((option) => option.value)).toEqual(TURBO.limits.resolutions);
-    expect(aspect.options).toHaveLength(7);
-    expect(aspect.value).toBe("2048x2048");
+    expect(aspect.value).toBe("1:1");
+    expect(imageSize(container)).toBe("2048x2048");
+    // Never past the largest preset's area or the declared 2752 edge, and always on the 32 px grid.
+    await setImageSize(container, { ratio: "16:9", megapixels: 99 });
+    expect(imageSize(container)).toBe("2752x1536");
   });
 
   // *Mutation that reds this:* keying `qwenRewriterAppliesTo` on base's id (the pre-sc-25908 gate).

@@ -263,6 +263,8 @@ function readSnapshot(studio) {
 }
 const modelSelectValue = () => document.body.querySelector(".settings-field-model select")?.value;
 const aspectSelectValue = () => document.body.querySelector(".settings-field-aspect select")?.value;
+// Image Studio's ratio + megapixel picker reads its "WxH" out under the controls.
+const imageSizeValue = () => document.body.querySelector('[aria-label="Output size"] strong')?.textContent.replace(" × ", "x");
 const activeBasePresetName = () =>
   document.body.querySelector(".preset-chips:not(.general-preset-chips) button.preset-chip.active")?.textContent?.trim();
 const activeGeneralNames = () =>
@@ -309,7 +311,7 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     await click(document.body.querySelector(".advanced-section-toggle"));
 
     expect(modelSelectValue()).toBe("flux2_dev");
-    expect(aspectSelectValue()).toBe("1536x1536");
+    expect(imageSizeValue()).toBe("1536x1536");
     expect(activeBasePresetName()).toBe("Cinematic");
     expect(activeGeneralNames()).toEqual(["Enhance"]);
     expect(loraSlotNames()).toContain("Lora A");
@@ -336,7 +338,7 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     ]);
 
     expect(modelSelectValue()).toBe("flux2_dev");
-    expect(aspectSelectValue()).toBe("1536x1536");
+    expect(imageSizeValue()).toBe("1536x1536");
     expect(activeBasePresetName()).toBe("Cinematic");
     expect(activeGeneralNames()).toEqual(["Enhance"]);
 
@@ -358,7 +360,7 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     ]);
 
     expect(modelSelectValue()).toBe("flux2_dev");
-    expect(aspectSelectValue()).toBe("1536x1536");
+    expect(imageSizeValue()).toBe("1536x1536");
 
     const snap = readSnapshot("image");
     expect(snap.model).toBe("flux2_dev");

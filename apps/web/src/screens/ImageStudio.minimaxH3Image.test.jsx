@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, imageSize, mountRoot, setImageSize, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 import { evaluateModelDimensions } from "../resolutionOverride.js";
 import { fixedStepsForModel } from "../samplerOptions.js";
 import { MAX_USER_JOB_LORAS } from "../presetUtils.js";
@@ -116,18 +116,23 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
     await act(async () => {});
   }
 
-  it("offers the published presets and hides steps, guidance and negative prompt", async () => {
+  it("sizes up to its largest published preset and hides steps, guidance and negative prompt", async () => {
     await render(baseContext());
-    const presets = [...field(container, "Aspect").options].map((option) => option.value);
-    expect(presets).toEqual(H3_IMAGE.limits.resolutions);
-    expect(presets).toContain("6272x2688");
-    expect(field(container, "Aspect").value).toBe("2048x2048");
+    // Ratio + megapixels, capped at the largest preset's area (7552x5056, ~36.4 MP); every published
+    // shape is a standard ratio, so the menu adds none of its own.
+    expect([...field(container, "Aspect").options].map((option) => option.value)).toEqual(
+      ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9"],
+    );
+    expect(field(container, "Aspect").value).toBe("1:1");
+    expect(imageSize(container)).toBe("2048x2048");
+    expect(container.querySelector(".aspect-picker-limit").textContent).toBe("up to 36.41 MP on this model");
     for (const absent of ["Steps", "Guidance", "Negative prompt", "Guidance interval"]) {
       expect(field(container, absent), absent).toBeUndefined();
     }
     expect(field(container, "Seed")).toBeTruthy();
-    expect(presets).toContain("6144x6144");
-    expect(presets).toContain("9408x4032");
+    // The widest published preset is reachable exactly: 21:9 at its full size.
+    await setImageSize(container, { ratio: "21:9", megapixels: 40 });
+    expect(imageSize(container)).toBe("9408x4032");
     expect(field(container, "Width override").getAttribute("max")).toBe("9408");
     expect(container.querySelector(".studio-model-attribution")?.textContent).toBe(
       "Powered by MiniMax-H3-Image",
@@ -138,7 +143,9 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-h3-image" }));
     await render(baseContext({ createImageJob }));
     await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
-    await act(async () => setSelect(field(container, "Aspect"), "6272x2688"));
+    // 6272x2688 is 21:9 at 16.078125 MP (the model card's native 21:9 preset).
+    await setImageSize(container, { ratio: "21:9", megapixels: 16.078125 });
+    expect(imageSize(container)).toBe("6272x2688");
     await act(async () => setInput(field(container, "Seed"), "11"));
     await click(generateButton());
     const request = createImageJob.mock.calls[0][0];

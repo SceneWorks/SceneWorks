@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, unmountRoot } from "./testUtils/dom.js";
+import { click, imageSize, mountRoot, unmountRoot } from "./testUtils/dom.js";
 import {
   H3_IMAGE_EXPAND_COPY,
   h3ExpanderChoices,
@@ -196,10 +196,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe(EXPANSION.refinedPrompt);
     // Applying the prompt did not change the size; the size is its own accept.
     await click(document.body.querySelector(".advanced-section-toggle"));
-    const aspect = [...container.querySelectorAll("label")]
-      .find((node) => node.querySelector("select") && node.firstChild?.textContent?.trim() === "Aspect")
-      ?.querySelector("select");
-    expect(aspect.value).toBe("2048x2048");
+    expect(imageSize(container)).toBe("2048x2048");
   });
 
   // Width/Height overrides outrank the Aspect preset, so accepting a proposed size has to clear

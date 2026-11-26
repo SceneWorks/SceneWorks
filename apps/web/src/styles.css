@@ -2806,6 +2806,106 @@ label {
   min-width: 120px;
 }
 
+/* Ratio + megapixel size picker: the shape and the size side by side, the derived pixel size read
+   out underneath. Wider than the old single bucket select, so it claims more of the row. */
+.settings-field-aspect.aspect-picker {
+  flex: 2 1 300px;
+  min-width: 260px;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 6px;
+}
+
+/* The picker is two rows tall (controls, then the readout), so its row aligns fields by their
+   labels rather than their bottoms — otherwise Model and Variations sink to the readout line. */
+.settings-bar-row:has(> .aspect-picker) {
+  align-items: flex-start;
+}
+
+.aspect-picker > .field-hint,
+.aspect-picker-readout {
+  grid-column: 1 / -1;
+}
+
+.aspect-picker-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.mp-stepper {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 32px;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.settings-field .mp-stepper input {
+  height: 34px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 4px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.mp-stepper input::-webkit-outer-spin-button,
+.mp-stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.mp-stepper button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: 400 17px var(--font-ui);
+  cursor: pointer;
+}
+
+.mp-stepper button:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.mp-stepper button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.aspect-picker-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font: 400 12px var(--font-ui);
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.aspect-picker-readout strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.aspect-picker-limit {
+  margin-left: auto;
+  color: var(--text-faint);
+}
+
 .settings-field-count {
   flex: 0 1 96px;
   min-width: 82px;
