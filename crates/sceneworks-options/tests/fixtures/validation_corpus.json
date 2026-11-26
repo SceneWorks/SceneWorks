@@ -7186,7 +7186,6 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           }
@@ -7221,7 +7220,6 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -7336,7 +7334,6 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -7383,7 +7380,6 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -7535,7 +7531,6 @@
           "advanced": {
             "resolution": "768x512",
             "steps": 8,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "motion": "slow push-in",
             "quantization": "auto",
@@ -7580,7 +7575,6 @@
           "fps": 7,
           "advanced": {
             "resolution": "1024x576",
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "motion": "slow push-in",
             "quantization": "auto",
@@ -8013,7 +8007,6 @@
           "advanced": {
             "conditioningScale": 1,
             "maskingStrength": 1,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "motion": "slow push-in",
             "quantization": "auto",
@@ -8492,7 +8485,6 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -8946,7 +8938,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -8988,7 +8979,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -9027,7 +9017,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9072,7 +9061,6 @@
             "maxImages": 10,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9118,7 +9106,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           }
@@ -9158,7 +9145,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false
           },
@@ -9203,7 +9189,6 @@
             "trueCfgScale": 1.5,
             "maxImages": 6,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9250,7 +9235,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9294,7 +9278,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9338,7 +9321,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9382,7 +9364,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,
@@ -9430,7 +9411,6 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
             "mlxQuantizeExplicit": false,
             "convRot": false,
             "imageGuidanceScale": 1.0,

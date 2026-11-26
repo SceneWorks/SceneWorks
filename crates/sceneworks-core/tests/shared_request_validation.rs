@@ -268,6 +268,28 @@ fn effective_defaults_do_not_fabricate_unsupported_family_controls() {
 }
 
 #[test]
+fn flash_attention_is_accepted_but_never_injected_into_effective_options() {
+    // SW-7276: `advanced.flashAttn` is accepted for non-MOSS image families, but an absent value
+    // stays absent so an unchanged job's effective payload (replay digests, recipe identity) does
+    // not move; the worker treats absent as on. An authored value is kept.
+    for model in ["flux_dev", "qwen_image_2_1", "flux3_klein"] {
+        let entry = facts(model, "text_to_image");
+        let entry = entry.as_object().unwrap();
+        let bare = json!({"projectId":"p","model":model,"prompt":"tree"});
+        let resolved =
+            options::request_validation::resolve("image", bare.as_object().unwrap(), entry)
+                .unwrap();
+        assert!(resolved["advanced"].get("flashAttn").is_none(), "{model}");
+        let authored =
+            json!({"projectId":"p","model":model,"prompt":"tree","advanced":{"flashAttn":false}});
+        let resolved =
+            options::request_validation::resolve("image", authored.as_object().unwrap(), entry)
+                .unwrap();
+        assert_eq!(resolved["advanced"]["flashAttn"], json!(false), "{model}");
+    }
+}
+
+#[test]
 fn shared_promptless_video_requires_authoritative_svd_facts() {
     use sceneworks_core::{options_context, registry::builtin_model_spec, request_validation};
     let model = options_context::for_model(

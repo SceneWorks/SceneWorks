@@ -262,8 +262,9 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     // FlashAttention-2 dispatch behind a single per-job toggle, so the option is no longer an SDXL
     // fact. The catalog does not carry a per-family candle/MLX flag (the backend is chosen at job
     // routing), so it applies to every image and video model; MLX ignores it and the studios hide the
-    // control there. MOSS-Image refuses it (`moss_validation`) and never receives a default.
-    opt!("flashAttn", Bool, Literal("true"), All(&[VISUAL, Not(&MOSS)]), MachineBudget, "Shared candle FlashAttention-2 attention toggle (image and video)"),
+    // control there. No injected default (absent stays absent, so effective payloads and replay
+    // identities are unchanged); the worker treats absent as on. MOSS-Image refuses it.
+    opt!("flashAttn", Bool, Absent, All(&[VISUAL, Not(&MOSS)]), MachineBudget, "Shared candle FlashAttention-2 attention toggle (image and video)"),
     opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]).compat("JSON integer or numeric string. Explicit null blocks portable bound-tier fallback; absent selection is resolved after verified source binding."),
     opt!("mlxQuantizeExplicit", Bool, Literal("false"), VISUAL, MachineBudget, "user tier selection provenance"),
     opt!("convRot", Bool, Literal("false"), IMAGE, MachineBudget, "ConvRot load recipe").limits(&["declared memory routes"]),
