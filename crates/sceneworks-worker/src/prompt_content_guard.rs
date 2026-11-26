@@ -473,6 +473,142 @@ const CLOTHING_EDIT: &str = "Calling excluded clothing, accessories or worn/carr
 
 const POSE_CONTENT_EDIT: &str = "For this image-derived draft, also apply this precision rule even when other facts are retained verbatim: in environmental or full-body views, remove fine guesses about palm/finger orientation and relative hand offsets. Retain broad arm direction, contact surfaces and meaningful gestures. When a hand contacts a supporting surface, omit extra claims locating that hand relative to the hip, chest or other hand; keep the contact surface itself. Preserve direct contacts such as a hand resting ON the hip and gestures such as a hand held beside the face. Do not relocate hands, invent occlusion, or change any other limb, torso or room facts. Keep fine hand geometry only for an explicitly described, clearly resolved close-up of the hands. Preserve the existing output structure and return only the minimally edited draft.";
 
+/// Backstop the declared coarse-hand policy in explicitly environmental/full-body English drafts.
+/// This does not classify whether a pose is true. Direct hand-on-body contacts and gestures stay
+/// permitted; unknown framing and hand close-ups stay with the visual/semantic verification.
+fn known_fine_hand_details(text: &str) -> Vec<String> {
+    let parts = answer_parts(text);
+    let context = normalize_text(&parts.join(" "));
+    let framing_words: Vec<_> = context.split_whitespace().collect();
+    let hand_close_up = framing_words.windows(2).enumerate().any(|(index, pair)| {
+        pair == ["close", "up"]
+            && (framing_words[index + 2..]
+                .iter()
+                .take(8)
+                .any(|word| ["hand", "hands"].contains(word))
+                || index
+                    .checked_sub(1)
+                    .is_some_and(|before| ["hand", "hands"].contains(&framing_words[before])))
+    });
+    if hand_close_up
+        || ![
+            "medium shot",
+            "medium view",
+            "medium full shot",
+            "full body",
+            "full length",
+            "wide shot",
+            "long shot",
+            "environmental view",
+        ]
+        .iter()
+        .any(|phrase| context.contains(&format!(" {phrase} ")))
+    {
+        return Vec::new();
+    }
+    let mut details = Vec::new();
+    for part in parts {
+        for clause in part.split(['.', ';', '!', '?', '\n']) {
+            let normalized = normalize_text(clause);
+            let words: Vec<_> = normalized.split_whitespace().collect();
+            for (index, word) in words.iter().enumerate() {
+                if !["hand", "hands"].contains(word) {
+                    continue;
+                }
+                let end = words.len().min(index + 26);
+                for offset in index + 1..end {
+                    let contact = &words[index + 1..offset];
+                    if contact.iter().any(|word| {
+                        ["hand", "hands", "arm", "arms", "elbow", "elbows"].contains(word)
+                    }) {
+                        break;
+                    }
+                    if !contact.iter().any(|word| {
+                        [
+                            "bed",
+                            "mattress",
+                            "bedding",
+                            "bedspread",
+                            "coverlet",
+                            "table",
+                            "floor",
+                            "ground",
+                            "surface",
+                            "counter",
+                            "desk",
+                            "sofa",
+                            "couch",
+                            "seat",
+                            "bench",
+                            "wall",
+                            "chair",
+                        ]
+                        .contains(word)
+                    }) {
+                        continue;
+                    }
+                    let rest = &words[offset..end];
+                    let relation = match rest {
+                        ["near" | "beside" | "alongside" | "behind", ..] => 1,
+                        ["close", "to", ..] | ["next", "to", ..] | ["ahead", "of", ..] => 2,
+                        ["in", "front", "of", ..] | ["in", "line", "with", ..] => 3,
+                        _ => continue,
+                    };
+                    let body = rest
+                        .iter()
+                        .enumerate()
+                        .skip(relation)
+                        .take(5)
+                        .find(|(_, word)| {
+                            ![
+                                "her", "his", "their", "the", "a", "raised", "lowered", "right",
+                                "left", "other", "own", "upper", "lower", "opposite",
+                            ]
+                            .contains(word)
+                        });
+                    if let Some((body_index, _)) = body.filter(|(_, word)| {
+                        [
+                            "hip",
+                            "hips",
+                            "chest",
+                            "torso",
+                            "waist",
+                            "shoulder",
+                            "shoulders",
+                            "thigh",
+                            "thighs",
+                            "knee",
+                            "knees",
+                            "hand",
+                            "hands",
+                        ]
+                        .contains(word)
+                    }) {
+                        details.push(format!(
+                            "fine hand offset: {}",
+                            rest[..=body_index].join(" ")
+                        ));
+                        break;
+                    }
+                }
+            }
+            for phrase in [
+                "flat palm",
+                "flat palms",
+                "palm flat",
+                "palms flat",
+                "fingers splayed",
+                "splayed fingers",
+            ] {
+                if normalized.contains(&format!(" {phrase} ")) {
+                    details.push(format!("fine hand geometry: {phrase}"));
+                }
+            }
+        }
+    }
+    details
+}
+
 /// A recovered JSON draft can omit fields whose tokens were never reached. Keep the original
 /// constraints on present values, but never force the editor to invent a missing field.
 fn retain_present_schema_fields(schema: &mut serde_json::Value, draft: &serde_json::Value) {
@@ -541,7 +677,13 @@ pub(crate) fn generate_checked(
             total.generated_tokens = total
                 .generated_tokens
                 .saturating_add(output.usage.generated_tokens);
-            let leaks = known_leaks(&output.text, exclusions);
+            let mut leaks = known_leaks(&output.text, exclusions);
+            let precision_leaks = if review_pose && content_edited {
+                known_fine_hand_details(&output.text)
+            } else {
+                Vec::new()
+            };
+            leaks.extend(precision_leaks.iter().cloned());
             let pose_review = review_pose && !pose_reviewed && !content_edited;
             let content_edit =
                 (!exclusions.is_empty() || review_pose) && !content_edited && !pose_review;
@@ -606,6 +748,9 @@ pub(crate) fn generate_checked(
                 return Ok(output);
             }
             if !leaks.is_empty() && content_edited && corrections == 2 {
+                if !precision_leaks.is_empty() {
+                    return Err(WorkerError::Engine("The selected model still included unsupported fine hand details after two correction attempts. Try another installed model or revise the request.".to_owned()));
+                }
                 return Err(WorkerError::Engine("The selected model still included excluded content after two correction attempts. Try another installed model or revise the request.".to_owned()));
             }
             let mut correction = if pose_review {
@@ -617,6 +762,10 @@ pub(crate) fn generate_checked(
             if !leaks.is_empty() && !pose_review {
                 corrections += 1;
                 correction.push_str(&format!("\nIt still contains forbidden content: {}. Remove these details everywhere, including pose, lighting and background fields. Do not replace excluded items with anonymous forms or objects.", leaks.join(", ")));
+            }
+            if !precision_leaks.is_empty() {
+                correction.push('\n');
+                correction.push_str(POSE_CONTENT_EDIT);
             }
             let policy = exclusion_instruction(exclusions);
             if !policy.is_empty() {
@@ -732,6 +881,69 @@ mod tests {
             "coat, belt, trees",
         ] {
             assert!(!known_leaks(excluded, &[ALL[1]]).is_empty(), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn fine_hand_backstop_respects_framing_contacts_and_independent_gestures() {
+        for allowed in [
+            "Medium shot. One hand rests on the hip and the other is held beside the face.",
+            "Medium shot. A hand rests on the bed at the front edge.",
+            "Medium shot. One hand rests on the bed while the other hand is held beside the hip.",
+            "Close-up of the hands. A hand on the table near the other hand, fingers splayed.",
+            "Medium shot with an inset close-up of a hand. A hand on the table near the other hand.",
+            "A hand rests on the bed near the hip.",
+        ] {
+            assert!(known_fine_hand_details(allowed).is_empty(), "{allowed}");
+        }
+        for bad in [
+            "Medium shot. The hand presses on the bed close to her hips.",
+            "Full-body view. Hands on the mattress beside the raised hip.",
+            "Wide shot. A hand on the table in front of the chest.",
+            "Medium shot. Hands on the bed near the other hand.",
+            "Medium shot. Fingers splayed on the bed.",
+            r#"{"camera":"Medium shot","pose":"The hand presses on the bed close to her hips."}"#,
+        ] {
+            assert!(!known_fine_hand_details(bad).is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_editor_cannot_silently_return_a_known_fine_hand_offset() {
+        let bad = "Medium shot. The hand presses on the bed close to her hips.";
+        let good = "Medium shot. The hand presses on the bed.";
+        for (review_pose, fixes_offset) in [(true, true), (true, false), (false, false)] {
+            let mut request = image_request();
+            let mut calls = 0;
+            let result = generate_checked(&mut request, &[ALL[3]], "fixture", review_pose, |r| {
+                calls += 1;
+                if calls == 4 && review_pose {
+                    let messages = format!("{:?}", r.messages);
+                    assert!(messages.contains("fine hand offset"));
+                    assert!(messages.contains(POSE_CONTENT_EDIT));
+                }
+                Ok(TextLlmOutput {
+                    text: if fixes_offset && calls == 4 {
+                        good
+                    } else {
+                        bad
+                    }
+                    .to_owned(),
+                    ..Default::default()
+                })
+            });
+            if review_pose && !fixes_offset {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unsupported fine hand details"));
+                assert_eq!(calls, 5);
+            } else {
+                assert_eq!(result.unwrap().text, if fixes_offset { good } else { bad });
+                assert_eq!(calls, if review_pose { 4 } else { 2 });
+            }
+            assert_eq!(request.messages.len(), 1);
+            assert_eq!(request.constraint, Some(Constraint::Json));
         }
     }
 
