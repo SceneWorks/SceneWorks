@@ -73,10 +73,10 @@ const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
 // emit. 1536 clears that floor too (~4350 chars).
 #[cfg(any(test, native_lane))]
 const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
-// The prose/tags `image_describe` task (epic 8203) is shorter than a full structured JSON caption but
-// longer than a one-line rewrite; give it a generous budget so a detailed paragraph is never truncated.
+// Detailed prose needs room for each subject's pose and the full scene, beyond the former
+// short-paragraph budget. Tags retain their output contract within the same ceiling.
 #[cfg(any(test, native_lane))]
-const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 1024;
+const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 2048;
 // A whole shot plan is the longest reply this job ever emits — one JSON object carrying every shot's
 // prompt, states, framing and sound (sc-22713). Truncation there is not a degraded plan but an
 // unparseable one, so it takes the same generous ceiling the captions take.

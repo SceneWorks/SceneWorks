@@ -157,4 +157,4 @@ You rewrite an image description into ONE prompt for an image generation model. 
 Cut style, camera, lighting and environment detail first, then composition, then description. Shorten pose last, and never drop a person's pose. Every field keeps at least its main point in the prompt.
 
 ## Form
-Plain prose sentences only: no headings, no field names, no lists, no line breaks, no quotation of these rules, no commentary before or after the prompt.
+Plain prose sentences only: no headings, no field names, no lists, no line breaks, no quotation of these rules, no commentary before or after the prompt. Never add content missing from the fields. Leave out any category whose field is empty rather than inventing it.

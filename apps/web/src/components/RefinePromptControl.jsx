@@ -1,5 +1,6 @@
 import { LOOP_UTILITY_NAME, loopPromptSource, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
 import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
+import { PromptContentOptions } from "./PromptContentOptions.jsx";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import { fetchPromptGuide } from "../promptGuides.js";
@@ -37,13 +38,13 @@ export function RefinePromptControl({
   onDownloadRefineModel,
   loopModel,
   onDownloadLoopModel,
-  // When true (the Image Studio prompt-tools tile), run the refine as soon as the control
-  // mounts and hide the standalone trigger button — the tile is the trigger, so the panel
-  // goes straight to the suggested rewrite. Default off keeps the inline button for callers
-  // that render this control persistently (e.g. Video Studio).
+  // Optional immediate-run mode for callers that need no setup step. Image and Video Studio
+  // use the default button so users can choose content exclusions before starting.
   autoStart = false,
 }) {
   const [useLoop, setUseLoop] = useState(false);
+  const [promptExclusions, setPromptExclusions] = useState([]);
+  const exclusions = promptExclusions.length ? { promptExclusions } : {};
   const [loopVariant, setLoopVariant] = useState(null);
   const selectedTier = loopUtilityTier(loopModel, loopVariant);
   const source = loopPromptSource(useLoop ? selectedTier : null);
@@ -58,7 +59,7 @@ export function RefinePromptControl({
 
   const trimmed = (prompt ?? "").trim();
   const portableFeedback = usePortableFeedback(
-    "promptRefine", { prompt: trimmed, modelId, workflow, ...source }, null, Boolean(trimmed),
+    "promptRefine", { prompt: trimmed, modelId, workflow, ...source, ...exclusions }, null, Boolean(trimmed),
   );
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   const busy = status === "loading";
@@ -114,7 +115,7 @@ export function RefinePromptControl({
           guide = "";
         }
       }
-      const result = await refinePrompt({ prompt: trimmed, modelId, workflow, guide, signal, ...source });
+      const result = await refinePrompt({ prompt: trimmed, modelId, workflow, guide, signal, ...source, ...exclusions });
       if (signal.aborted) {
         return;
       }
@@ -153,6 +154,11 @@ export function RefinePromptControl({
 
   return (
     <div className="refine-control">
+      <PromptContentOptions value={promptExclusions} disabled={busy} onChange={(value) => {
+        setPromptExclusions(value);
+        setStatus("idle");
+        setError("");
+      }} />
       {loopModel || useLoop ? (
         <label>
           Refinement model

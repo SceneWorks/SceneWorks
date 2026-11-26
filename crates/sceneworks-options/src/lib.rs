@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 mod advanced;
+pub mod prompt_content;
 mod requests;
 mod requests_aux;
 mod requests_yue2;

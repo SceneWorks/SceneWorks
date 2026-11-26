@@ -397,10 +397,20 @@ pub(crate) struct DescribePrompt {
     /// The fixed JSON output contract, never editable.
     pub(crate) output_contract: String,
     pub(crate) user: String,
+    exclusion_instruction: String,
 }
 
 #[cfg(native_lane)]
 impl DescribePrompt {
+    pub(crate) fn with_exclusions(
+        mut self,
+        exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
+    ) -> Self {
+        self.exclusion_instruction =
+            sceneworks_core::options::prompt_content::exclusion_instruction(exclusions);
+        self
+    }
+
     /// Build `model`'s prompt for a job's optional instruction. Returns the prompt and whether the
     /// model's default instruction was used.
     pub(crate) fn for_instruction(model: DescribeModel, instruction: Option<&str>) -> (Self, bool) {
@@ -416,20 +426,31 @@ impl DescribePrompt {
                 model.output_section(),
             ),
             user: crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, "USER"),
+            exclusion_instruction: String::new(),
         };
         (prompt, is_default)
     }
 
-    /// The system message: instruction, then the output contract. The contract is appended last so
-    /// it is the final word on the reply's shape whatever the instruction says.
+    /// Instruction, fixed output contract, then optional exclusions. Exclusions take precedence
+    /// over content requests while explicitly preserving the contract's output shape.
     pub(crate) fn system(&self) -> String {
-        format!("{}\n\n{}", self.instruction, self.output_contract)
+        let system = format!("{}\n\n{}", self.instruction, self.output_contract);
+        if self.exclusion_instruction.is_empty() {
+            system
+        } else {
+            format!("{system}\n\n{}", self.exclusion_instruction)
+        }
     }
 
-    /// The one prompt a single-turn describer (JoyCaption) receives: the system text (instruction,
-    /// then contract), then the user line.
+    /// JoyCaption's one prompt: system plus user line, or system alone when it ends in exclusions.
     pub(crate) fn single_turn(&self) -> String {
-        format!("{}\n\n{}", self.system(), self.user)
+        if self.exclusion_instruction.is_empty() {
+            format!("{}\n\n{}", self.system(), self.user)
+        } else {
+            // The exclusions are already last in system(). Replacing the redundant user line
+            // keeps JoyCaption under 4,000 characters even at the maximum instruction size.
+            self.system()
+        }
     }
 }
 
@@ -1804,6 +1825,17 @@ fn parse_batch_describe_request(
         }
     };
     let (prompt, default_prompt) = DescribePrompt::for_instruction(model, instruction);
+    let exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion> =
+        serde_json::from_value(
+            payload
+                .get("promptExclusions")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!("Invalid prompt exclusions: {error}"))
+        })?;
+    let prompt = prompt.with_exclusions(&exclusions);
     let fit = condense::parse_fit_target(payload)?;
     let flag = |key: &str| payload.get(key).and_then(Value::as_bool) == Some(true);
     let mode = match (flag("condenseOnly"), flag("measureOnly")) {

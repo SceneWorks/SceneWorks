@@ -74,6 +74,38 @@ async fn dataset_fixture(
 }
 
 #[tokio::test]
+async fn batch_describe_forwards_content_exclusions_without_replacing_the_prompt() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let exclusions = json!([
+        "identifyingCharacteristics",
+        "clothingAndAccessories",
+        "colorMode",
+        "style"
+    ]);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({"promptExclusions": exclusions}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["promptExclusions"], exclusions);
+    assert!(job["payload"].get("prompt").is_none());
+    let (status, _) = request(
+        app,
+        "POST",
+        &route,
+        json!({"promptExclusions": ["unknown"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn batch_describe_job_enqueues_every_image_with_the_vision_captioner_by_default() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id, dataset_id, item_ids, paths, _) = dataset_fixture(&temp_dir).await;

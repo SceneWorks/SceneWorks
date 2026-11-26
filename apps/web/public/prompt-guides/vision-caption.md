@@ -14,6 +14,8 @@ Point it at a reference image and it observes what is actually in the frame — 
 
 ## Practical Notes
 
+For models using plain-text prompts, **Describe image** produces a meticulous description of pose, clothing and accessories, the room or environment, lighting, camera angle, composition, depth of field, style and era. Its optional **Prompt options** can exclude identifying characteristics, clothing and accessories, color versus black-and-white mode, and medium or artistic style. The dataset batch describer offers the same independently selectable options; its normal default still excludes physical traits.
+
 The goal is **style and composition variations**, not a pixel-perfect reconstruction of the source. Expect the caption to capture the look, mood, palette, and layout — then vary the specifics when you regenerate.
 
 Captioning is a fast first pass. Review the generated caption and tweak it before generating if you want to push the result in a particular direction.

@@ -702,6 +702,9 @@ pub struct PromptRefineRequest {
     /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
     /// verbatim; the worker parses it (unknown/absent → prose).
     pub caption_style: Option<String>,
+    /// Optional content exclusions for generic refinement and plain-text image description.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_exclusions: Vec<crate::prompt_content::PromptExclusion>,
     /// Compressed KV cache opt-in for this generation (sc-20682): `"off"` or `"qualified"`.
     /// Absent leaves the worker's own default (`SCENEWORKS_LLM_KV_COMPRESSION`, off unless set).
     /// `"qualified"` never forces compression: the engine runs compressed only for a single

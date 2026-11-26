@@ -1,5 +1,6 @@
 import { LOOP_UTILITY_NAME, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
 import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
+import { PromptContentOptions } from "./PromptContentOptions.jsx";
 // Shared reference-image → prompt picker (epic 8203, sc-8208).
 //
 // Factored out of StructuredPromptBuilder so BOTH reference-image flows share one
@@ -61,6 +62,7 @@ export default function ReferenceCaptionPicker({
   // consumers that don't opt in are byte-unaffected. `moodBoardMax` bounds the board (server also caps).
   showMoodBoard = false,
   moodBoardMax = 6,
+  showPromptOptions = false,
 }) {
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [moodBoardIds, setMoodBoardIds] = useState([]);
@@ -70,6 +72,7 @@ export default function ReferenceCaptionPicker({
   const selectedTier = loopUtilityTier(loopModel, loopVariant);
   const selectedReady = useLoop ? loopTierInstalled(loopModel, selectedTier) : visionCaptionReady;
   const [error, setError] = useState("");
+  const [promptExclusions, setPromptExclusions] = useState([]);
 
   // The extra mood-board picks, minus the primary (it is already the first image) and capped. This is
   // what actually augments the describe call; `referenceAssetId` stays the primary reference.
@@ -105,7 +108,9 @@ export default function ReferenceCaptionPicker({
       const arg = moodBoardExtras.length > 0
         ? [referenceAssetId, ...moodBoardExtras]
         : referenceAssetId;
-      const result = useLoop ? await onCaption(arg, selectedTier) : await onCaption(arg);
+      const result = showPromptOptions && promptExclusions.length
+        ? await onCaption(arg, useLoop ? selectedTier : undefined, promptExclusions)
+        : useLoop ? await onCaption(arg, selectedTier) : await onCaption(arg);
       if (result) {
         onApply(result);
       } else {
@@ -182,6 +187,9 @@ export default function ReferenceCaptionPicker({
         {/* Describe → prompt (epic 8203): the vision captioner turns the picked reference (or the whole
             mood board) into prompt text. img2img reference-guidance is a SEPARATE prompt-tool tile now
             (sc-10195), so this component is purely describe + mood board. */}
+        {showPromptOptions ? (
+          <PromptContentOptions value={promptExclusions} onChange={setPromptExclusions} disabled={busy} />
+        ) : null}
         {selectedReady ? (
           <button
             type="button"

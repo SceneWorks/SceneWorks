@@ -880,6 +880,41 @@ fn only_the_qwen38_describer_requests_auto_speculation() {
 const JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS: usize = 4_000;
 
 #[test]
+fn all_content_exclusions_preserve_the_contract_and_fit_joycaptions_limit() {
+    use sceneworks_core::options::prompt_content::PromptExclusion::*;
+    let exclusions = [
+        IdentifyingCharacteristics,
+        ClothingAndAccessories,
+        ColorMode,
+        Style,
+    ];
+    for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
+        for instruction in [None, Some("custom clothing and style instructions")] {
+            let (base, _) = DescribePrompt::for_instruction(model, instruction);
+            assert_eq!(base.clone().with_exclusions(&[]), base);
+            let selected = base.clone().with_exclusions(&exclusions);
+            assert_eq!(selected.output_contract, base.output_contract);
+            assert_eq!(selected.instruction, base.instruction);
+            assert!(selected.system().contains("overriding prior content rules"));
+            assert!(selected.system().ends_with(&selected.exclusion_instruction));
+            assert!(selected.system().contains("all clothing/accessories"));
+        }
+    }
+    let longest = "x".repeat(MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
+    for instruction in [None, Some(longest.as_str())] {
+        let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, instruction);
+        assert!(
+            prompt
+                .with_exclusions(&exclusions)
+                .single_turn()
+                .chars()
+                .count()
+                <= JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS
+        );
+    }
+}
+
+#[test]
 fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
     let (prompt, is_default) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
     assert!(is_default);

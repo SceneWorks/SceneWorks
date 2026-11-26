@@ -180,6 +180,26 @@ pub fn resolve_prompt_refine(payload: &JsonObject) -> JsonObject {
 
 /// Accept authored asset ids or the API-resolved path carrier; path confinement remains native.
 pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefusal> {
+    if let Some(value) = payload.get("promptExclusions") {
+        let exclusions: Vec<crate::prompt_content::PromptExclusion> =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                ValidationRefusal::new(
+                    "promptExclusions",
+                    format!("Invalid prompt exclusions: {error}"),
+                )
+            })?;
+        if !exclusions.is_empty()
+            && !matches!(
+                prompt_refine_task(payload.get("task").and_then(Value::as_str)),
+                "refine" | "image_describe"
+            )
+        {
+            return Err(ValidationRefusal::new(
+                "promptExclusions",
+                "Prompt exclusions apply only to refinement and image description",
+            ));
+        }
+    }
     let image_paths = payload
         .get("imagePaths")
         .map(|value| {
@@ -281,6 +301,32 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod prompt_exclusion_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_exclusions_are_validated_for_the_supported_tasks() {
+        for task in ["refine", "image_describe"] {
+            let payload = json!({"task": task, "prompt": "a room", "imagePath": "image.png",
+                "promptExclusions": ["identifyingCharacteristics", "clothingAndAccessories", "colorMode", "style"]});
+            crate::request_validation::validate_shape("promptRefine", payload.as_object().unwrap())
+                .unwrap();
+        }
+        for exclusions in [json!(["unknown"]), json!([1]), json!("style"), json!(null)] {
+            let payload = json!({"prompt": "a room", "promptExclusions": exclusions});
+            assert!(crate::request_validation::validate_shape(
+                "promptRefine",
+                payload.as_object().unwrap()
+            )
+            .is_err());
+        }
+        let payload =
+            json!({"prompt": "a room", "task": "magic_prompt", "promptExclusions": ["style"]});
+        assert!(validate_prompt_refine(payload.as_object().unwrap()).is_err());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -91,6 +91,19 @@ describe("ReferenceCaptionPicker", () => {
     expect(buttonByText("✨ Describe image").disabled).toBe(false);
   });
 
+  it("passes multiple optional exclusions with the selected reference", async () => {
+    const onCaption = vi.fn(async () => "A carefully posed subject in a room");
+    await mount({ onCaption, showPromptOptions: true });
+    await selectReference();
+    const options = [...container.querySelectorAll('input[type="checkbox"]')];
+    expect(options).toHaveLength(4);
+    expect(options.every((option) => !option.checked)).toBe(true);
+    for (const option of options) await clickAndSettle(option);
+    await clickAndSettle(buttonByText("✨ Describe image"));
+    expect(onCaption).toHaveBeenCalledWith("ref-1", undefined,
+      ["identifyingCharacteristics", "clothingAndAccessories", "colorMode", "style"]);
+  });
+
   it("uses the selected Loop tier and keeps ordered mood-board references", async () => {
     const onCaption = vi.fn(async () => "fox, snow, daylight");
     const onApply = vi.fn();

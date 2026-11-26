@@ -81,7 +81,7 @@ export function useStructuredPrompt({
     // The shared picker passes a single asset id (string) for one reference, or an ARRAY of ids for a
     // mood board (sc-8595). Normalize: >1 rides `sourceAssetIds` (worker synthesizes one prompt from the
     // shared style), exactly one collapses to the scalar `sourceAssetId` (the unchanged single path).
-    async (source, variant) => {
+    async (source, variant, promptExclusions = []) => {
       if (typeof imageDescribe !== "function") {
         throw new Error("Image description is unavailable.");
       }
@@ -97,6 +97,7 @@ export function useStructuredPrompt({
         model: VISION_CAPTION_MODEL_REPO,
         ...loopPromptSource(variant),
         captionStyle: describeCaptionStyle,
+        ...(promptExclusions.length ? { promptExclusions } : {}),
       });
       const trimmed = (text || "").trim();
       if (!trimmed) {

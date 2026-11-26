@@ -12013,7 +12013,8 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
             "sourceAssetId": asset_id,
             "projectId": project_id,
             "model": "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated",
-            "captionStyle": "tags"
+            "captionStyle": "tags",
+            "promptExclusions": ["clothingAndAccessories", "style"]
         }),
     )
     .await;
@@ -12021,6 +12022,10 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
     assert_eq!(job["type"], "prompt_refine");
     assert_eq!(job["payload"]["task"], "image_describe");
     assert_eq!(job["payload"]["captionStyle"], "tags");
+    assert_eq!(
+        job["payload"]["promptExclusions"],
+        json!(["clothingAndAccessories", "style"])
+    );
     assert!(job["payload"].get("prompt").is_none());
     // Match canonical confinement and native path separators (macOS aliases / Windows).
     let expected =
