@@ -5,7 +5,7 @@ import { batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summa
 import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
 import { promptBatchSize } from "./samplingControls.js";
 import { PROMPT_REFINE_MODEL_ID, terminalStatuses } from "../../constants.js";
-import { validatePortableRequest } from "../../portableValidation.js";
+import { MAX_VALIDATION_BATCH, validatePortableBatch } from "../../portableValidation.js";
 
 // This factory receives only the publisher, so an asynchronous run cannot pin
 // a retired React render's jobs, catalogs, previews, or component callbacks.
@@ -140,45 +140,74 @@ export function createImageBatchRuntime(setBatchRun) {
       }
       if (chunk.length) yield chunk;
     }
-    for (const chunk of chunks()) {
-      await waitForBatchSlot(owner, BATCH_ACTIVE_JOB_LIMIT);
-      if (stopped()) {
-        break;
-      }
-      const [{ prompt: cleanPrompt, resolution }] = chunk;
-      const n = chunk.length;
-      try {
-        let request;
-        if (structuredPromptModel) {
-          // Structured-caption models (Ideogram 4) reject raw plain text, so auto-expand each
-          // resolved prompt into a JSON caption first (sc-9980) — N sequential refine calls.
-          // A prompt that fails to expand fails only that item; the rest continue.
-          const expanded = await onMagicExpand(cleanPrompt);
-          if (stopped()) break;
-          if (!validateCaption(expanded).ok) {
-            throw new Error("Auto-generated caption was invalid.");
+    const chunkIterator = chunks();
+    let nextChunk = chunkIterator.next();
+    // All direct-prompt models share bounded validation windows. Keep structured-caption
+    // refinement just-in-time, so stopping or a refusal never rewrites later prompts.
+    async function prepareValidationBatch() {
+      const prepared = [];
+      const limit = structuredPromptModel ? 1 : MAX_VALIDATION_BATCH;
+      for (let index = 0; index < limit && !stopped(); index += 1) {
+        if (nextChunk.done) break;
+        const chunk = nextChunk.value;
+        nextChunk = chunkIterator.next();
+        const [{ prompt: cleanPrompt, resolution }] = chunk;
+        const entry = { n: chunk.length };
+        prepared.push(entry);
+        try {
+          if (structuredPromptModel) {
+            // Structured-caption models need a JSON caption before validation (sc-9980).
+            // A prompt that fails to expand fails only that item; the rest continue.
+            const expanded = await onMagicExpand(cleanPrompt);
+            if (stopped()) return [];
+            if (!validateCaption(expanded).ok) {
+              throw new Error("Auto-generated caption was invalid.");
+            }
+            entry.request = buildBatchJobRequest(cleanPrompt, {
+              promptToSend: serializeCaption(expanded),
+              sendStructured: true,
+              submitCaption: expanded,
+              submitBackend: PROMPT_REFINE_MODEL_ID,
+              resolution,
+            });
+          } else {
+            entry.request = buildBatchJobRequest(cleanPrompt, { resolution, appearancePromptBatch: entry.n > 1 ? chunk.map((item) => item.prompt) : undefined });
+            // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
+            if (entry.n > 1) {
+              const requests = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }));
+              entry.request.prompts = requests.map((item) => item.prompt);
+            }
           }
-          request = buildBatchJobRequest(cleanPrompt, {
-            promptToSend: serializeCaption(expanded),
-            sendStructured: true,
-            submitCaption: expanded,
-            submitBackend: PROMPT_REFINE_MODEL_ID,
-            resolution,
-          });
-        } else {
-          request = buildBatchJobRequest(cleanPrompt, { resolution, appearancePromptBatch: n > 1 ? chunk.map((item) => item.prompt) : undefined });
-          // Each prompt composed exactly as its own job would be; `prompt` stays prompts[0].
-          if (n > 1) {
-            const requests = chunk.map((item) => buildBatchJobRequest(item.prompt, { resolution }));
-            request.prompts = requests.map((item) => item.prompt);
-          }
+        } catch (error) {
+          entry.error = error;
         }
-        if (stopped()) break;
-        // Structured captions exist only after refinement. Validate the exact resolved
-        // request here, including a cold browser module, before admitting this batch item.
-        const portable = await validatePortableRequest({
-          kind: "image", payload: { ...request, projectId: owner.projectId }, token, signal: owner.controller.signal,
-        });
+      }
+      const ready = prepared.filter((entry) => !("error" in entry));
+      if (ready.length && !stopped()) {
+        try {
+          const results = await validatePortableBatch({
+            kind: "image", requests: ready.map(({ request }) => ({ ...request, projectId: owner.projectId })),
+            token, signal: owner.controller.signal,
+          });
+          ready.forEach((entry, index) => { entry.portable = results[index]; });
+        } catch (cause) {
+          const error = new Error(cause?.message || "Could not validate image jobs.");
+          error.portableStop = true;
+          ready.forEach((entry) => { entry.error = error; });
+        }
+      }
+      return prepared;
+    }
+    let prepared = [];
+    while (!stopped() && (prepared.length || !nextChunk.done)) {
+      await waitForBatchSlot(owner, BATCH_ACTIVE_JOB_LIMIT);
+      if (stopped()) break;
+      if (!prepared.length) prepared = await prepareValidationBatch();
+      if (stopped() || !prepared.length) break;
+      const entry = prepared.shift();
+      const { n, request, portable } = entry;
+      try {
+        if ("error" in entry) throw entry.error;
         if (stopped()) break;
         if (portable.state !== "valid") {
           const error = new Error(portable.state === "invalid"
