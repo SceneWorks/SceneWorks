@@ -1870,6 +1870,35 @@ mod tests {
         model.get(backend).and_then(pick).or_else(|| pick(model))
     }
 
+    /// The backend-effective declared side bound `limits[key]` (`minDimension` / `maxDimension`):
+    /// the `<backend>.limits[key]` override if present, else the base `limits[key]` — the scalar
+    /// twin of [`effective_list`]. `None` when the model declares nothing for that edge.
+    ///
+    /// A key that IS present must be a positive integer that fits `u32`. The enqueue reader
+    /// (`image_dimension_envelope`) silently treats anything else as undeclared, so a typo there
+    /// would quietly fall back to the API's blanket bounds while the web picker read something
+    /// else; here it is RED instead.
+    #[cfg(native_lane)]
+    fn effective_dimension_limit(
+        model: &serde_json::Value,
+        backend: &str,
+        key: &str,
+    ) -> Option<u32> {
+        let id = model["id"].as_str().unwrap_or("<no id>");
+        let pick = |scope: &serde_json::Value| {
+            scope.get("limits").and_then(|l| l.get(key)).map(|value| {
+                value
+                    .as_u64()
+                    .filter(|v| *v >= 1)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or_else(|| {
+                        panic!("{id}: limits.{key} must be a positive integer side, got {value}")
+                    })
+            })
+        };
+        model.get(backend).and_then(pick).or_else(|| pick(model))
+    }
+
     /// The request width/height STRIDE the PINNED image engine enforces (÷8/÷16/÷32), read off the
     /// SAME backend bundle the `[min_size, max_size]` envelope comes from — the axis the sc-12384
     /// guard's SCOPE note deferred, now tied for real (sc-12612, the image twin of the video
@@ -2037,6 +2066,11 @@ mod tests {
     /// to a pinned const (as sc-12409 did for the wan-14B family, and sc-12587 tracks for the
     /// remaining VIDEO strides) is a coverage extension tracked in sc-12612 — the image twin — not a
     /// live miss.
+    ///
+    /// DECLARED ENVELOPE: a model's `limits.minDimension` / `limits.maxDimension` (backend-effective)
+    /// must also sit inside the pinned `[min_size, max_size]`. Those bounds are trusted verbatim by
+    /// the Image Studio size picker and the image API's enqueue check, neither of which sees the
+    /// engine caps, so an over-declared edge is an advertised size the engine cannot render.
     #[cfg(native_lane)]
     #[test]
     fn shipped_image_geometry_is_within_the_pinned_engine_envelope() {
@@ -2127,6 +2161,47 @@ mod tests {
                      `size_floor`, but `pinned_image_stride` says {stride:?}. The descriptor is \
                      the authority — correct the table (sc-24108).",
                     resolved.engine_id()
+                );
+            }
+            // The DECLARED free-size envelope (`limits.minDimension` / `limits.maxDimension`) is a
+            // claim too, and a stronger one than any bucket: Image Studio's ratio + megapixel picker
+            // (`apps/web/src/aspectResolution.js`, `resolutionEnvelope`) derives sizes from it, and
+            // the image API's enqueue check (`sceneworks_options::image_limits::image_dimension_envelope`)
+            // admits any side inside it. Neither knows the engine's own caps — those are not in the
+            // served catalog — so a `maxDimension` above the pinned engine's `max_size` would let
+            // the picker offer, and the API admit, a size the shipped engine rejects (candle) or
+            // silently clamps to a wrong shape (SenseNova's >2048 squash, sc-12384). Each declared
+            // bound must therefore sit inside the PINNED engine's `[min_size, max_size]` on this
+            // backend: a manifest edit that over-declares, or a `runtime-*` pin bump that narrows an
+            // engine under an existing declaration, is RED here.
+            let declared_min = effective_dimension_limit(model, backend, "minDimension");
+            let declared_max = effective_dimension_limit(model, backend, "maxDimension");
+            if let Some(declared_min) = declared_min {
+                assert!(
+                    declared_min >= min,
+                    "{id}: declares limits.minDimension {declared_min}, below its PINNED engine {:?}'s \
+                     min_size {min} on the {backend} backend — the size picker and the enqueue check \
+                     would admit a side the shipped engine rejects. Raise minDimension to the engine \
+                     floor, or move the `runtime-*` pin and the catalog in lockstep.",
+                    resolved.engine_id()
+                );
+            }
+            if let Some(declared_max) = declared_max {
+                assert!(
+                    declared_max <= max,
+                    "{id}: declares limits.maxDimension {declared_max}, above its PINNED engine {:?}'s \
+                     max_size {max} on the {backend} backend — the size picker and the enqueue check \
+                     would admit a side the shipped engine rejects (candle) or silently clamps to a \
+                     wrong shape (sc-12384). Lower maxDimension to the engine cap, or move the \
+                     `runtime-*` pin and the catalog in lockstep.",
+                    resolved.engine_id()
+                );
+            }
+            if let (Some(declared_min), Some(declared_max)) = (declared_min, declared_max) {
+                assert!(
+                    declared_min <= declared_max,
+                    "{id}: declares limits.minDimension {declared_min} above limits.maxDimension \
+                     {declared_max} on the {backend} backend — an empty envelope admits no size"
                 );
             }
             for res in buckets.iter().chain(default.iter()) {
