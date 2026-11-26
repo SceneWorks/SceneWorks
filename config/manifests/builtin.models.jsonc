@@ -6660,6 +6660,15 @@
         // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
         // that run ≤1536² fine).
         "resolutions": ["1024x1024", "896x896", "768x768", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
+        // The per-side request envelope, declared so Image Studio's ratio + megapixel picker can draw
+        // every shape at the model's 4 MP (2048²) ceiling — 21:9 at 3120x1344, 16:9 at 2720x1536 —
+        // instead of stopping at the 2048 edge of the presets. These are exactly the PINNED engine's
+        // RES_MIN / RES_MAX on BOTH backends (candle-gen-krea `lib.rs`, mlx-gen-krea `model.rs`); the
+        // area stays bounded by the largest preset (the picker's ceiling, and the memory gate above
+        // it). Equal to the API's blanket 256..4096, so enqueue admission is unchanged; no grid is
+        // declared, so the image API keeps not enforcing one (the engine's own ÷16 check does).
+        "minDimension": 256,
+        "maxDimension": 4096,
         "count": [1, 2, 4],
         // Krea Turbo routes the per-generation sampler/scheduler knobs through the unified framework
         // (run_flow_sampler / resolve_flow_schedule), exactly like z_image_turbo — so it advertises the
@@ -6899,6 +6908,15 @@
         // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
         // that run ≤1536² fine).
         "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
+        // The per-side request envelope, declared so Image Studio's ratio + megapixel picker can draw
+        // every shape at the model's 4 MP (2048²) ceiling — 21:9 at 3120x1344, 16:9 at 2720x1536 —
+        // instead of stopping at the 2048 edge of the presets. These are exactly the PINNED engine's
+        // RES_MIN / RES_MAX on BOTH backends (candle-gen-krea `lib.rs`, mlx-gen-krea `model.rs`); the
+        // area stays bounded by the largest preset (the picker's ceiling, and the memory gate above
+        // it). Equal to the API's blanket 256..4096, so enqueue admission is unchanged; no grid is
+        // declared, so the image API keeps not enforcing one (the engine's own ÷16 check does).
+        "minDimension": 256,
+        "maxDimension": 4096,
         "count": [1, 2, 4],
         // Raw routes the per-generation sampler/scheduler knobs through the unified framework, exactly
         // like Turbo — the `krea_2_raw` descriptor advertises curated_sampler_names()/

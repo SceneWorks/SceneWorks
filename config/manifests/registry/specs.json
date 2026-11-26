@@ -38170,6 +38170,8 @@
           2,
           4
         ],
+        "maxDimension": 4096,
+        "minDimension": 256,
         "resolutions": [
           "1024x1024",
           "768x1024",
@@ -40972,6 +40974,8 @@
           2,
           4
         ],
+        "maxDimension": 4096,
+        "minDimension": 256,
         "resolutions": [
           "1024x1024",
           "896x896",
