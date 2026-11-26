@@ -96,9 +96,9 @@ export function meetsMacosMinimum(productVersion) {
   return i < 0 || version[i] > minimum[i];
 }
 
-// Use the same two immutable approvals compiled by the candidate worker before deriving a
-// standalone ceiling from its package. The worker independently checks these when it quotes.
-export function scailPackageDigests(index, coverage, source) {
+// Authenticate the physical capture index compiled by the candidate worker before deriving a
+// standalone ceiling. Capture revisions are provenance and do not need cross-pin approval.
+export function scailPackageDigests(index, source) {
   function approved(bytes, constant) {
     const declarations = [...source.matchAll(new RegExp(`\\bconst ${constant}: &str\\s*=\\s*"([a-f0-9]{64})"\\s*;`, "g"))];
     assert.equal(declarations.length, 1, `missing or ambiguous SCAIL approval ${constant}`);
@@ -106,7 +106,7 @@ export function scailPackageDigests(index, coverage, source) {
     assert.equal(digest, declarations[0][1], `candidate SCAIL package differs from ${constant}`);
     return digest;
   }
-  return { indexSha256: approved(index, "APPROVED_INDEX_SHA256"), coverageSha256: approved(coverage, "APPROVED") };
+  return { indexSha256: approved(index, "APPROVED_INDEX_SHA256") };
 }
 
 const partialCaptures = [
@@ -146,22 +146,15 @@ function acceptedCapture(row, mlx) {
     && row.inference_revision === "7f6c4cca3fc053030bd71f0bfce6886adb762eb6";
 }
 
-export function scailFitEvidence(pool, backend, { compiledPin, coverage, closures, host }) {
+export function scailFitEvidence(pool, backend, { host } = {}) {
   const mlx = backend === "mlx", platform = mlx ? "macos" : "windows";
   const counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
-  assert.match(compiledPin, /^[a-f0-9]{40}$/);
-  assert.ok(Array.isArray(pool) && Array.isArray(coverage), "invalid packaged SCAIL fit rows");
-  const closure = closures?.providers?.[(mlx ? "mlx" : "candle") + ":scail2_14b"];
+  assert.ok(Array.isArray(pool), "invalid packaged SCAIL fit rows");
   if (host && mlx) assert.ok(meetsMacosMinimum(host.runtime),
     `SCAIL requires macOS ${MACOS_MINIMUM_PRODUCT_VERSION} or later; this Mac reports macOS ${host.runtime}`);
   const rows = [];
   for (const row of pool) {
     if (row.platform !== platform) continue;
-    if (row.inference_revision !== compiledPin && !coverage.some((c) =>
-      c.capture_revision === row.inference_revision && c.target_revision === compiledPin && c.backend === backend
-      && closures?.inferenceRevision === compiledPin && digestPattern.test(c.tree_diff_sha256)
-      && digestPattern.test(c.provider_digest) && c.provider_digest === closure?.digest
-      && digestPattern.test(c.shared_contract_digest) && c.shared_contract_digest === closure?.sharedContractDigest)) continue;
     const a = row.axes;
     if (a?.backend !== backend || a.artifact_sha256 !== scailArtifactSha256 || a.effective_tier !== "q4"
       || a.artifact_tier !== "q4" || a.width !== 832 || a.height !== 480 || !Number.isInteger(a.references) || a.references < 2 || a.references > 6) continue;
@@ -199,10 +192,9 @@ export function scailFitEvidence(pool, backend, { compiledPin, coverage, closure
       grossUnifiedBytes: mlx ? physicalPrice(b.unified, a.floor_unified_bytes) : 0,
     };
     if (mlx) assert.ok(b.mlx_decode_budget_bytes <= price.grossUnifiedBytes, "decoder budget exceeds unified price");
-    // The worker authenticates the index, hardware and compatible compiled pin before quoting.
+    // The worker authenticates the index, hardware and native execution axes before quoting.
     const nativePolicy = JSON.stringify([row.device, row.runtime, ...(!mlx ? [deviceTotalMib] : []), a.load_policy, a.execution_policy.map(({ name, value }) => [name, value])]);
-    // Each Windows count has its own complete measurement. Every cross-revision donor above
-    // must identify the compiled pin's provider and shared contract before counts can be joined.
+    // Each Windows count has its own complete measurement, retaining its original revision.
     // One campaign ran on one physical card, so counts from two identical cards never combine.
     const campaign = JSON.stringify([nativePolicy, mlx ? row.inference_revision : null, row.guard_policy_sha256, b.mlx_decode_budget_bytes ?? null,
       mlx ? null : adapter.cuda_uuid]);

@@ -169,6 +169,7 @@ fn minimax_envelope_is_the_pinned_engines_own() {
             17 * index as i32 + 124,
             "the legal frame counts are 17n + 5, not a tabulated list"
         );
+        assert!(validate_minimax_geometry(1344, 768, *frames as u32).is_ok());
     }
     // The budget is a PRODUCT, and the published resolution list proves it cannot be a per-edge
     // cap: two shipped canvases whose long edges differ by 192px have the identical area.

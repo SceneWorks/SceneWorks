@@ -1,7 +1,7 @@
 {
   "_comment": "Current source inventory re-scanned for the combined cache/H3 update: 815 provenance candidates and 146 production-Rust crate prefixes. This combines the reviewed shared runtime-weight cache fix with the H3-only duration extension through 481 frames. The H3 delta changes temporal geometry, request validation, memory bounds, tests and comments; it introduces no new third-party material, include sites, dependency or crate classification. Existing runtime-cache, Iris, MOSS and FLUX.3 source classifications remain as reviewed on main. Unclassified source areas remain open items reported by check-license-coverage.",
-  "inferenceRevision": "6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8",
-  "auditDigest": "e4f0155a142cb8b90a0c700ac8d6f3f574aa6004f74facb9a55eec4f19ed6fce",
+  "inferenceRevision": "94ccc3310fe90dbc826f4d05373a5d7d33917060",
+  "auditDigest": "cb305faaf8afd0fb0fc8f6d96cae87242f53785296eb97740dc0f3ce9aad334b",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8",
+    "revision": "94ccc3310fe90dbc826f4d05373a5d7d33917060",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -1055,7 +1055,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8",
+    "revision": "94ccc3310fe90dbc826f4d05373a5d7d33917060",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 146,
     "cratePopulationSha256": "dd5c31283ab160566bc23f3da7cd8af6f0cda29e0a43d09cd5b1acf8e75049c5"

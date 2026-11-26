@@ -997,7 +997,10 @@ pub fn validate_minimax_h3_trainer_header(
             .iter()
             .any(|leaf| key.contains(leaf))
     });
-    let declares_trainer = network_module == Some(MINIMAX_H3_TRAINER_NETWORK_MODULE);
+    // Converted ComfyUI/PEFT exports retain the trainer's metadata. Only apply the
+    // trainer census to flattened tensors; the stamp still identifies their family.
+    let declares_trainer = network_module == Some(MINIMAX_H3_TRAINER_NETWORK_MODULE)
+        && tensor_keys.iter().any(|key| key.starts_with("lora_unet_"));
     if !declares_trainer && !has_trainer_prefix {
         if h3_expected && tensor_keys.iter().any(|key| key.starts_with("lora_unet_")) {
             return Err(format!(
@@ -4901,6 +4904,33 @@ mod tests {
     }
 
     #[test]
+    fn converted_h3_exports_keep_trainer_metadata_without_the_trainer_census() {
+        // A converted trainer export: 50 blocks, four targets,
+        // A/B factors, no per-target alpha and no token-refiner metadata.
+        for keys in [
+            minimax_h3_comfyui_keys()
+                .into_iter()
+                .filter(|key| !key.contains("token_refiner") && !key.ends_with(".alpha"))
+                .collect::<Vec<_>>(),
+            minimax_h3_diffusers_keys(),
+        ] {
+            let mut header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+            header["__metadata__"] = json!({
+                "ss_network_module": MINIMAX_H3_TRAINER_NETWORK_MODULE,
+                "ss_network_dim": "16",
+                "ss_network_alpha": "16.0",
+            });
+            assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+            for h3_expected in [false, true] {
+                assert_eq!(
+                    validate_minimax_h3_trainer_header(&header, h3_expected).unwrap(),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
     fn trainer_header_rejects_independent_partial_shape_flag_and_namespace_mutations() {
         let mut missing_leaf = minimax_h3_trainer_header(16);
         missing_leaf
@@ -4922,6 +4952,20 @@ mod tests {
         let error = validate_minimax_h3_trainer_header(&token_refiner, true)
             .expect_err("an absent refiner cannot be implicit");
         assert!(error.contains("must be False"), "{error}");
+
+        let mut missing_flag = minimax_h3_trainer_header(16);
+        missing_flag["__metadata__"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MINIMAX_H3_TOKEN_REFINER_METADATA_KEY);
+        let error = validate_minimax_h3_trainer_header(&missing_flag, true).unwrap_err();
+        assert!(error.contains("must be False"), "{error}");
+
+        let mut mixed = minimax_h3_trainer_header(16);
+        mixed["diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight"] =
+            json!({ "shape": [16, 5376] });
+        let error = validate_minimax_h3_trainer_header(&mixed, true).unwrap_err();
+        assert!(error.contains("unsupported or malformed"), "{error}");
 
         let mut wrong_network = minimax_h3_trainer_header(16);
         wrong_network["__metadata__"]["ss_network_module"] = json!("networks.lora_h3_guess");

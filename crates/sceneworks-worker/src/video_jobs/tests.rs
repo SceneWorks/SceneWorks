@@ -587,8 +587,7 @@ fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices
         "post_execution_verified":true, "guard_exit_code":0, "axes":row.axes, "prompt_tokens":tokens, "bounds":bounds}]);
     let bytes = serde_json::to_vec(&projection).unwrap();
     let approved = sha256_bytes(&bytes);
-    let verify =
-        |bytes: &[u8], digest: &str| scail2_verified_test_quotes(bytes, digest, os, &revision, 2);
+    let verify = |bytes: &[u8], digest: &str| scail2_verified_test_quotes(bytes, digest, os, 2);
     let qualified = verify(&bytes, &approved).unwrap().pop().unwrap();
     assert_eq!(
         qualified
@@ -596,16 +595,9 @@ fn scail_plural_package_authenticates_projected_axes_and_derives_physical_prices
             .max(qualified.gross_device_bytes),
         cap + 128
     );
-    assert!(
-        scail2_verified_test_quotes(&bytes, &approved, os, &"2".repeat(40), 2)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        scail2_verified_test_quotes(&bytes, &approved, os, &revision, 6)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(scail2_verified_test_quotes(&bytes, &approved, os, 6)
+        .unwrap()
+        .is_empty());
     let mut empirical = projection.clone();
     let pool = if os == "macos" { "unified" } else { "device" };
     empirical[0]["bounds"][pool] = json!({"basis":"measured_aggregate","observed_peak_bytes":cap-256,"classified_peak_bytes":cap,

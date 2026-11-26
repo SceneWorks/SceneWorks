@@ -36,12 +36,11 @@ pub(crate) fn scail2_verified_test_quotes(
     bytes: &[u8],
     index_digest: &str,
     os: &str,
-    revision: &str,
     count: usize,
 ) -> Result<Vec<gen_core::generator::scail2_fit::Scail2FitWitness>, String> {
     Ok(evidence::qualify_index(bytes, index_digest)?
         .into_iter()
-        .filter(|q| q.covers(os, revision, count))
+        .filter(|q| q.covers(os, count))
         .map(|q| q.witness)
         .collect())
 }
@@ -60,6 +59,7 @@ mod plural {
     /// The digest names the reviewed physical capture that supplied both domains.
     pub(crate) struct WitnessSource {
         artifact_id: u64,
+        capture_revision: String,
         digest: String,
         witness: Scail2FitWitness,
     }
@@ -67,6 +67,7 @@ mod plural {
     struct Quotation {
         evidence_references: u32,
         artifact_id: u64,
+        capture_revision: String,
         evidence: String,
         price: Scail2FitPrice,
     }
@@ -196,13 +197,8 @@ mod plural {
         count: usize,
     ) -> crate::WorkerResult<Vec<WitnessSource>> {
         let rows = packaged()?;
-        let eligible = |r: &super::evidence::QualifiedWitness| {
-            r.covers(
-                std::env::consts::OS,
-                sceneworks_core::inference_provenance::INFERENCE_REVISION,
-                count,
-            )
-        };
+        let eligible =
+            |r: &super::evidence::QualifiedWitness| r.covers(std::env::consts::OS, count);
         if !rows.iter().any(eligible) {
             return Ok(Vec::new());
         }
@@ -222,6 +218,7 @@ mod plural {
             .filter(|r| eligible(r) && r.matches_host(&host))
             .map(|r| WitnessSource {
                 artifact_id: r.artifact_id,
+                capture_revision: r.inference_revision.clone(),
                 digest: r.evidence_sha256.clone(),
                 witness: r.witness.clone(),
             })
@@ -301,6 +298,7 @@ mod plural {
                     .cloned()
                     .map(|witness| WitnessSource {
                         artifact_id: 0,
+                        capture_revision: "1".repeat(40),
                         digest: "test-capture".into(),
                         witness,
                     })
@@ -405,6 +403,7 @@ mod plural {
                     prices.push(Quotation {
                         evidence_references: row.witness.axes.references,
                         artifact_id: row.artifact_id,
+                        capture_revision: row.capture_revision.clone(),
                         evidence: row.digest.clone(),
                         price,
                     });
@@ -504,6 +503,7 @@ mod plural {
                 tracing::info!(event="scail2_plural_fit", jobId=%self.job, stage, backend=LANE.as_key(),
                     tier=%self.profile.axes().effective_tier, artifactTier=%self.profile.axes().artifact_tier,
                     referenceRgbSha256=%self.reference_digests, evidenceSha256=%quote.evidence, evidenceArtifactId=quote.artifact_id, evidenceReferences=quote.evidence_references,
+                    evidenceInferenceRevision=%quote.capture_revision, inferenceRevision=sceneworks_core::inference_provenance::INFERENCE_REVISION,
                     grossHostBytes=price.host_bytes, grossDeviceBytes=price.device_bytes, grossUnifiedBytes=price.unified_bytes,
                     acceleratorReserveBytes=budget.reserved_headroom_bytes,
                     artifactSha256=%self.profile.axes().artifact_sha256,
