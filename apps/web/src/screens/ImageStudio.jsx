@@ -1468,9 +1468,19 @@ export function ImageStudio() {
   // memory reading, and models with no declared memory floor (see resolutionMemory.js). The
   // downstream snap/default effects keep the selection valid within the gated list.
   const resolutionOptions = useMemo(() => {
-    const declared = selectedModel?.limits?.resolutions?.length
+    const ladder = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTION_OPTIONS;
+    // A declared area ceiling (`limits.maxPixels`, which the image API refuses above) also bounds
+    // every preset consumer — the reference snap and batch `[WxH]` directives read this list.
+    const maxPixels = Number(selectedModel?.limits?.maxPixels);
+    const capped = Number.isInteger(maxPixels) && maxPixels > 0
+      ? ladder.filter((value) => {
+          const size = parseResolution(value);
+          return !size || size.width * size.height <= maxPixels;
+        })
+      : ladder;
+    const declared = capped.length > 0 ? capped : ladder;
     const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
       backend: activeBackend,
       tier: quantTier,

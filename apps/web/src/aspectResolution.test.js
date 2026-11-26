@@ -16,9 +16,9 @@ const KREA_2 = ["1024x1024", "896x896", "768x768", "768x1024", "1024x768", "1280
   "1408x2048", "2048x2048"];
 const Z_IMAGE = ["768x768", "1024x1024", "1280x720", "720x1280"];
 const H3_IMAGE = ["2048x2048", "4096x4096", "4736x3552", "3552x4736", "5024x3360", "3360x5024",
-  "5472x3072", "3072x5472", "6272x2688", "6144x6144", "7104x5344", "5344x7104", "7552x5056",
-  "5056x7552", "8224x4608", "4608x8224", "9408x4032"];
-const H3_MODEL = { limits: { resolutions: H3_IMAGE, minDimension: 16, maxDimension: 9408 } };
+  "5472x3072", "3072x5472", "6272x2688"];
+// Offered to 24 MP: a declared area ceiling above its native ~16 MP presets.
+const H3_MODEL = { limits: { resolutions: H3_IMAGE, minDimension: 16, maxDimension: 9408, maxPixels: 24 * 1024 * 1024 } };
 const QWEN_2_1 = { limits: { resolutions: ["2048x2048", "2752x1536", "1536x2752", "2368x1760", "1760x2368", "2496x1664", "1664x2496"],
   minDimension: 32, maxDimension: 2752, requiresDimensionsMultipleOf: 32 } };
 const MAGE = { limits: { resolutions: ["512x512", "1024x1024", "2048x2048", "2048x512", "512x2048", "1536x768", "768x1536"],
@@ -37,7 +37,7 @@ describe("resolutionEnvelope", () => {
     expect(envelopeFor(Z_IMAGE).maxMegapixels).toBe(1);
     const h3 = resolutionEnvelope(H3_MODEL, H3_IMAGE);
     expect(h3.minMegapixels).toBe(4);
-    expect(h3.maxMegapixels).toBeCloseTo(36.41, 2);
+    expect(h3.maxMegapixels).toBe(24);
     expect(h3.maxSide).toBe(9408);
   });
 
@@ -105,10 +105,25 @@ describe("resolutionFor", () => {
     expect(resolutionFor("21:9", 0, mage)).toBe("1216x512");
   });
 
-  it("reaches H3's published 21:9 presets exactly and never passes its 9408 edge", () => {
+  it("sizes H3 past its presets up to its declared 24 MP ceiling, and no further", () => {
     const h3 = resolutionEnvelope(H3_MODEL, H3_IMAGE);
     expect(resolutionFor("21:9", 6272 * 2688 / (1024 * 1024), h3)).toBe("6272x2688");
-    expect(resolutionFor("21:9", 99, h3)).toBe("9408x4032");
+    for (const ratio of ASPECT_RATIOS) {
+      const [w, h] = resolutionFor(ratio, 99, h3).split("x").map(Number);
+      expect(w * h).toBeLessThanOrEqual(24 * 1024 * 1024);
+    }
+    expect(resolutionFor("21:9", 99, h3)).toBe("7648x3264");
+    expect(resolutionFor("1:1", 99, h3)).toBe("4992x4992");
+  });
+
+  it("never lets a declared area ceiling outrank the memory gate", () => {
+    // A host whose memory gate offers only 2048x2048 keeps that as the ceiling, as before.
+    const gated = resolutionEnvelope(H3_MODEL, ["2048x2048"].concat([]));
+    expect(gated.fixed).toBe(true);
+    const twoLeft = resolutionEnvelope(H3_MODEL, ["2048x2048", "4096x4096"]);
+    expect(twoLeft.maxMegapixels).toBe(16);
+    // Nothing trimmed: the declaration is the ceiling.
+    expect(resolutionEnvelope(H3_MODEL, H3_IMAGE).maxMegapixels).toBe(24);
   });
 
   it("keeps Qwen-Image 2.1 square, on its 32 px grid and inside its 2752 edge", () => {

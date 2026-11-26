@@ -125,7 +125,11 @@ function declaredLimit(model, key) {
 //              (Krea 2, Z-Image and SenseNova engines all stop at 2048 a side; SenseNova clamps a
 //              longer side and renders the wrong shape), so an undeclared model never goes past the
 //              longest — or below the shortest — side it publishes.
-//   minArea / maxArea — the smallest / largest preset area (the megapixel band).
+//   minArea / maxArea — the smallest / largest preset area (the megapixel band). A declared
+//              `limits.maxPixels` replaces the preset ceiling — MiniMax-H3-Image's presets stop at
+//              its native ~16 MP but it is offered to 24 MP — EXCEPT when the per-host memory gate has
+//              trimmed the model's top presets, where the largest preset that still fits stays the
+//              ceiling (a declaration never outranks what this machine can hold).
 export function resolutionEnvelope(model, options) {
   const sizes = (Array.isArray(options) ? options : []).map(parseResolution).filter(Boolean);
   const presetSides = sizes.flatMap((size) => [size.width, size.height]);
@@ -142,7 +146,13 @@ export function resolutionEnvelope(model, options) {
   const longestPreset = presetSides.length ? Math.max(...presetSides) : 2048;
   const minSide = Math.ceil((declaredMin ?? shortestPreset) / stride) * stride;
   const maxSide = Math.floor((declaredMax ?? longestPreset) / stride) * stride;
-  const maxArea = sizes.length ? Math.max(...sizes.map((size) => size.width * size.height)) : MEGAPIXEL;
+  const areaOf = (size) => size.width * size.height;
+  const offeredCeiling = sizes.length ? Math.max(...sizes.map(areaOf)) : MEGAPIXEL;
+  const declaredSizes = (Array.isArray(model?.limits?.resolutions) ? model.limits.resolutions : [])
+    .map(parseResolution).filter(Boolean);
+  const memoryTrimmed = declaredSizes.some((size) => areaOf(size) > offeredCeiling);
+  const declaredPixels = declaredLimit(model, "maxPixels");
+  const maxArea = declaredPixels && !memoryTrimmed ? declaredPixels : offeredCeiling;
   const minArea = sizes.length ? Math.min(...sizes.map((size) => size.width * size.height)) : MIN_MEGAPIXELS * MEGAPIXEL;
   const fixed = sizes.length === 1;
   const envelope = {

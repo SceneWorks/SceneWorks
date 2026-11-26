@@ -1330,8 +1330,8 @@
               "maxPixels": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn max_pixels_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "match max_pixels_of(model_manifest_entry)" }],
-                "description": "Maximum rendered pixel area; core fits requested geometry within this ceiling."
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "fn max_pixels_of(" }, { "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "match max_pixels_of(model_manifest_entry)" }, { "path": "crates/sceneworks-options/src/image_limits.rs", "anchor": "pub fn image_max_pixels" }, { "path": "apps/web/src/aspectResolution.js", "anchor": "declaredLimit(model, \"maxPixels\")" }, { "path": "apps/web/src/screens/ImageStudio.jsx", "anchor": "selectedModel?.limits?.maxPixels" }],
+                "description": "Maximum rendered pixel area. VIDEO: core fits requested geometry within this ceiling. IMAGE: the ceiling the image API REFUSES above at enqueue (image_dimension_error), never fitted under, and Image Studio's ratio + megapixel picker sizes every shape up to it in place of the largest preset's area (unless the per-host memory gate has trimmed the model's top presets); presets above it are not offered. MiniMax-H3-Image declares 24 MP (25165824)."
               },
               "requiresDimensionsMultipleOf": {
                 "type": "integer", "minimum": 1,

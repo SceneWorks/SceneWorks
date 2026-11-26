@@ -100,6 +100,24 @@ pub fn image_dimension_envelope(model_manifest_entry: &JsonObject) -> ImageDimen
     }
 }
 
+/// `limits.maxPixels` on an IMAGE model — the largest output area, in pixels, it is offered at — or
+/// `None` when it declares none.
+///
+/// The same manifest key the video lane reads (`video_request::max_pixels_of`), with the image
+/// lane's reading: a ceiling the request is REFUSED above, never fitted under (the video lane fits a
+/// custom size into it). A side envelope alone cannot bound area — MiniMax-H3-Image's 9408 edge
+/// admits a 9408x9408 — so a model whose cost or quality ceiling is an AREA states it here.
+/// Absent, zero or non-integer means no area ceiling, so every model that declares nothing is
+/// unchanged.
+pub fn image_max_pixels(model_manifest_entry: &JsonObject) -> Option<u64> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("maxPixels"))
+        .and_then(Value::as_u64)
+        .filter(|cap| *cap > 0)
+}
+
 /// Reject an image request whose geometry falls outside the model's declared envelope, or `None`.
 ///
 /// Reject, never coerce. Image dimensions have always COERCED silently in this codebase (the video
@@ -164,6 +182,18 @@ pub fn image_dimension_error(
                     value - value % multiple + multiple
                 ));
             }
+        }
+    }
+    if let Some(cap) = image_max_pixels(model_manifest_entry) {
+        let area = u64::from(width) * u64::from(height);
+        if area > cap {
+            const MEGAPIXEL: f64 = 1024.0 * 1024.0;
+            return Some(format!(
+                "{model} renders at most {cap} pixels ({:.2} MP); this request asks for \
+                 {width}x{height} ({:.2} MP). Choose a smaller size.",
+                cap as f64 / MEGAPIXEL,
+                area as f64 / MEGAPIXEL
+            ));
         }
     }
     None

@@ -2696,9 +2696,15 @@ mod request_validation_tests {
             .clone();
         let preset = json!({"model":"minimax_h3_image","width":6272,"height":2688,"count":1});
         assert!(check(preset.clone(), entry.clone()).is_ok());
-        let above_16mp = json!({"model":"minimax_h3_image","width":9408,"height":4032,"count":1});
+        // Above the native 16 MP table and up to the declared 24 MP area ceiling (`maxPixels`).
+        let above_16mp = json!({"model":"minimax_h3_image","width":7648,"height":3264,"count":1});
         assert!(check(above_16mp, entry.clone()).is_ok());
-        assert!(check(json!({"width":9409,"height":2688}), entry.clone()).is_err());
+        // The 9408 edge still admits a long, thin size inside the area ceiling...
+        assert!(check(json!({"width":9408,"height":1024}), entry.clone()).is_ok());
+        assert!(check(json!({"width":9409,"height":1024}), entry.clone()).is_err());
+        // ...but the former ~36 MP presets are refused by area, not shrunk.
+        assert!(check(json!({"width":9408,"height":4032}), entry.clone()).is_err());
+        assert!(check(json!({"width":6144,"height":6144}), entry.clone()).is_err());
         assert!(check(json!({"width":6272,"height":2688}), json!({})).is_err());
         assert_eq!(
             default_resolution(entry.as_object().unwrap()),

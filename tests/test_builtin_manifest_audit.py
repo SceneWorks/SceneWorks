@@ -4253,13 +4253,14 @@ def test_minimax_h3_image_downloads_only_the_diffusers_components():
 
 
 def test_minimax_h3_image_size_envelope_is_its_own():
-    """E25: the published 16 MP presets plus their ~36 MP scalings (9408 px edge),
-    the 2048x2048 default, fixed six steps — declared on this entry alone; no other image model
-    declares an edge above 4096."""
+    """E25: the published 16 MP presets, a 24 MP area ceiling (maxPixels = 24 x 1024^2) inside a
+    9408 px edge, the 2048x2048 default, fixed six steps — declared on this entry alone; no other
+    image model declares an edge above 4096."""
     models = _models_by_id()
     entry = models["minimax_h3_image"]
     limits = entry["limits"]
     assert limits["maxDimension"] == 9408
+    assert limits["maxPixels"] == 24 * 1024 * 1024
     assert entry["defaults"]["resolution"] == "2048x2048"
     for preset in (
         "4096x4096",
@@ -4267,11 +4268,13 @@ def test_minimax_h3_image_size_envelope_is_its_own():
         "5024x3360",
         "5472x3072",
         "6272x2688",
-        "6144x6144",
-        "9408x4032",
     ):
         assert preset in limits["resolutions"], preset
-    for preset in ("8192x8192", "12544x5376"):
+    # No preset above the area ceiling: the former ~36 MP rows are gone, and nothing larger.
+    for preset in limits["resolutions"]:
+        width, height = (int(side) for side in preset.split("x"))
+        assert width * height <= limits["maxPixels"], preset
+    for preset in ("6144x6144", "9408x4032", "8192x8192", "12544x5376"):
         assert preset not in limits["resolutions"], preset
     assert "requiresDimensionsMultipleOf" not in limits
     assert limits["hardMinSteps"] == limits["hardMaxSteps"] == entry["defaults"]["steps"] == 6
