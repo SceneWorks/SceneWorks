@@ -18587,12 +18587,12 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
         "/api/v1/video/jobs",
         json!({
             "projectId": project_id, "model": "minimax_h3", "mode": "text_to_video",
-            "prompt": "a fox", "duration": 14.375
+            "prompt": "a fox", "duration": 20.0417
         }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{on_rung}");
-    assert_eq!(on_rung["payload"]["duration"], 14.375);
+    assert_eq!(on_rung["payload"]["duration"], 20.0417);
 }
 
 /// sc-17159 — the refusals sc-17158 established are INTACT after the family is made reachable, and
@@ -18624,15 +18624,13 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
         }
     };
 
-    // 15.0 s: the reference ADVERTISES it and the lattice cannot reach it (the next rung, 362
-    // frames, is 15.083 s). Refused rather than silently delivered as 14.375 — which is exactly
-    // what sc-17147 was doing.
-    let (status, over) = submit("minimax_h3", json!({ "duration": 15.0 })).await;
+    // 21 s exceeds the extended 481-frame ceiling and must be refused rather than shortened.
+    let (status, over) = submit("minimax_h3", json!({ "duration": 21.0 })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         over["detail"],
-        "minimax_h3 renders clips up to 14.375s, but this request asks for 15s. Shorten the clip \
-         to 14.375s or less, or choose a model that renders longer clips."
+        "minimax_h3 renders clips up to 20.0417s, but this request asks for 21s. Shorten the clip \
+         to 20.0417s or less, or choose a model that renders longer clips."
     );
 
     // 3.0 s: under `hardMinDuration`. The floor is checked FIRST, so the message offers the
@@ -19687,7 +19685,7 @@ fn the_14b_i2v_no_longer_advertises_first_last_frame() {
 /// `contract_number`'s fractional branch had never carried a shipped value: every video model
 /// before MiniMax-H3 declares a whole-number `defaults.duration`, so the branch existed only for
 /// the integral case's sake. The first fractional default exposed it — `Value::from(5.1667_f32)`
-/// widens to `f64` and enqueues `5.1666998863220215`, which is not equal to ANY of the fourteen
+/// widens to `f64` and enqueues `5.1666998863220215`, which is not equal to ANY of the declared
 /// entries in that model's `limits.durations`. The duration dropdown preselects by comparing
 /// against that menu and a recipe replay is compared against the enqueued row, so the value has to
 /// be the declared one, not merely a number that rounds to it.
@@ -19700,7 +19698,7 @@ fn a_fractional_resolved_duration_keeps_the_manifests_own_decimal() {
     // Every other lattice rung the menu offers.
     for rung in [
         5.875_f32, 6.5833, 7.2917, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583,
-        13.6667, 14.375,
+        13.6667, 14.375, 15.0833, 15.7917, 16.5, 17.2083, 17.9167, 18.625, 19.3333, 20.0417,
     ] {
         let enqueued = crate::generation::contract_number(rung);
         assert_eq!(

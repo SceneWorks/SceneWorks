@@ -9268,14 +9268,14 @@ fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lat
         );
         previous = policy.timeout;
     }
-    // The longest legal full-canvas text-only clip: 104,478 rows.
-    assert_eq!(previous, Duration::from_secs(3310));
+    // The 481-frame full-canvas clip uses the shared packed-row cost model.
+    assert_eq!(previous, Duration::from_secs(6029));
 
     // Mutation/bound proof: an out-of-contract frame count clamps onto the legal lattice, and a
     // request the layout envelope refuses is budgeted at the finite ceiling, never small.
     assert_eq!(
         video_stall_timeout_policy(None, "minimax_h3", 768, 1344, u32::MAX, None, NO_H3).timeout,
-        Duration::from_secs(3310)
+        Duration::from_secs(6029)
     );
     let refused = video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0, None, NO_H3);
     assert_eq!(
@@ -16584,8 +16584,8 @@ fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
         }
     }
     assert_eq!(
-        inexact, 9,
-        "nine of the fourteen rungs must actually distinguish the two candidate bounds"
+        inexact, 15,
+        "fifteen of the twenty-two rungs must distinguish the two candidate bounds"
     );
 
     // Degenerate fps mirrors `encode_inner`'s own `.max(1)` clamp rather than dividing by zero.
@@ -16596,7 +16596,7 @@ fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
     );
 }
 
-/// The measured half of the guard above: run the real two-step encode at **all fourteen** MiniMax-H3
+/// The measured half of the guard above: run the real two-step encode at **all twenty-two** MiniMax-H3
 /// legal frame counts with a soundtrack fitted to the picture, and decode the resulting mp4 back.
 /// Every frame must survive.
 ///
@@ -16607,7 +16607,7 @@ fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
 /// 141/192/243/294/345 (the exactly-aligned five) would pass for either policy, which is why the
 /// loop is the whole lattice.
 ///
-/// 64x64 keeps fourteen encodes cheap; the policy is about timestamps, not pixels. Skips when no
+/// 64x64 keeps the lattice sweep cheap; the policy is about timestamps, not pixels. Skips when no
 /// ffmpeg is reachable, like the sibling encode tests.
 #[tokio::test]
 async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
@@ -16657,8 +16657,8 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
         // "truthful" means and it is what gives this assertion reach independent of the count
         // check below. MEASURED: reverting to `-shortest` leaves the container still advertising
         // the nominal 5.170 s at 124 while the file holds 122 frames (5.083 s) — so the same bound
-        // written against `count` is GREEN under that mutation at all fourteen rungs and guards
-        // nothing. This form is red at all five trimming counts.
+        // written against `count` is GREEN under that mutation at all supported rungs and guards
+        // nothing. This form is red at every trimming count.
         assert_duration_matches_picture(&media_path, held, fps);
         assert_eq!(
             held, count,
@@ -16666,7 +16666,10 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 14, "all fourteen lattice rungs must be exercised");
+    assert_eq!(
+        checked, 22,
+        "all twenty-two lattice rungs must be exercised"
+    );
 
     // The other direction, which is what `-shortest` was there for and why "just delete the flag"
     // is not the fix: a soundtrack twice the picture's length must not extend the container.
@@ -16709,7 +16712,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
 /// (sc-19425 AC2) — a player reading `mvhd` and a decoder counting frames must agree.
 ///
 /// The tolerance is 20 ms, which sits between two measured quantities. Below it: ffmpeg prints
-/// `Duration:` to centiseconds, so the read itself carries ±5 ms, and across all fourteen lattice
+/// `Duration:` to centiseconds, so the read itself carries ±5 ms, and across all twenty-two lattice
 /// rungs the residual is exactly that ±5 ms and never more. Above it: one frame at 24 fps is
 /// 41.7 ms, so 20 ms is under HALF a frame interval and a container off by even a single frame
 /// cannot pass (measured: 45 ms at the one-frame rungs, 87–123 ms at the two- and three-frame ones).

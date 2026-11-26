@@ -110,10 +110,9 @@ export function VideoGenerationSettings({
               <label className="settings-field settings-field-count">
                 Duration
                 {/* A MENU, never a range: `limits.durations` is the model's exact renderable set,
-                    and MiniMax-H3 is the case that makes the distinction visible — its fourteen
+                    and MiniMax-H3 is the case that makes the distinction visible — its supported
                     `17n + 5` lattice rungs are the ONLY lengths the checkpoint renders, so a
-                    slider would emit durations the engine refuses (15.0s among them, which its own
-                    docs advertise and which sits between the last rung and the next). The label
+                    slider would emit durations between valid frame counts. The label
                     carries the frame count because that is what the lattice is counting. */}
                 <select
                   onChange={(event) => {

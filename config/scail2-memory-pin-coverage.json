@@ -14,5 +14,21 @@
     "provider_digest": "f5f17bf1eb3b28856ad5ba60fc7a996f0f66a54b7e99648feed2aef877bc2d57",
     "shared_contract_digest": "4f17b88d59ab67112f02a3e27a55c6cbb5b48c095242b671e83ce7a07486fb88",
     "tree_diff_sha256": "5bc6bce27866d5c08c35869588730e40adab7d13326178284d2e3d6cba8c7f7e"
+  },
+  {
+    "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
+    "target_revision": "6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8",
+    "backend": "mlx",
+    "provider_digest": "b98aacd85a1d2580a69926d098460748cb50e3fde30072c392e2ac9d22748e49",
+    "shared_contract_digest": "a44d9000806ff28d3212dde16dec7dfb4d8ddf43518e62e7bb3a0428825f4dd8",
+    "tree_diff_sha256": "b1240ff79fb6e856eceed280d16ec9f23ff657fda1a7f2a2a4d352c3329bdcc5"
+  },
+  {
+    "capture_revision": "8754126942f51043f5d5b803cf69e8e32bff857f",
+    "target_revision": "6f9c24047a0ebbb473dd83a4aa6247d7fe5e36a8",
+    "backend": "cuda",
+    "provider_digest": "f78b4029ab2cb457ad8cb61688ab30acd7aee9b491fc09a240b39957db9792cd",
+    "shared_contract_digest": "a44d9000806ff28d3212dde16dec7dfb4d8ddf43518e62e7bb3a0428825f4dd8",
+    "tree_diff_sha256": "b1240ff79fb6e856eceed280d16ec9f23ff657fda1a7f2a2a4d352c3329bdcc5"
   }
 ]
