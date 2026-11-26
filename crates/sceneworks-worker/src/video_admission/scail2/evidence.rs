@@ -201,7 +201,7 @@ impl HostClass {
 
 pub(super) struct QualifiedWitness {
     platform: String,
-    inference_revision: String,
+    pub(super) inference_revision: String,
     pub(super) class: HostClass,
     pub(super) artifact_id: u64,
     pub(super) evidence_sha256: String,
@@ -209,14 +209,10 @@ pub(super) struct QualifiedWitness {
 }
 
 impl QualifiedWitness {
-    pub(super) fn covers(&self, platform: &str, revision: &str, count: usize) -> bool {
-        self.platform == platform
-            && permits_revision(
-                &self.inference_revision,
-                revision,
-                self.witness.axes.backend,
-            )
-            && (2..=self.witness.axes.references as usize).contains(&count)
+    pub(super) fn covers(&self, platform: &str, count: usize) -> bool {
+        // Capture revision is provenance, not an admission key. A pin change must
+        // preserve the same physical bounds; receipt and native-axis checks still apply.
+        self.platform == platform && (2..=self.witness.axes.references as usize).contains(&count)
     }
 
     /// The capture's physical card identity is provenance and never selects a host. On a Mac
@@ -229,95 +225,6 @@ impl QualifiedWitness {
                 && meets_macos_minimum(&host.runtime);
         }
         self.class == *host
-    }
-}
-
-/// A cross-pin qualification is limited to a reviewed pair of immutable revisions and one
-/// native backend. The full source-tree delta covers inputs outside the provider's compile digest.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PinCoverage {
-    capture_revision: String,
-    target_revision: String,
-    backend: Scail2FitBackend,
-    provider_digest: String,
-    shared_contract_digest: String,
-    tree_diff_sha256: String,
-}
-
-impl PinCoverage {
-    fn matches(&self, capture: &str, target: &str, backend: Scail2FitBackend) -> bool {
-        self.capture_revision == capture
-            && self.target_revision == target
-            && self.backend == backend
-    }
-
-    fn valid(&self) -> bool {
-        valid_hex(&self.capture_revision, 40)
-            && valid_hex(&self.target_revision, 40)
-            && self.capture_revision != self.target_revision
-            && [
-                &self.provider_digest,
-                &self.shared_contract_digest,
-                &self.tree_diff_sha256,
-            ]
-            .iter()
-            .all(|digest| valid_hex(digest, 64))
-    }
-}
-
-fn approved_pin_coverage(bytes: &[u8], approved: &str) -> Option<Vec<PinCoverage>> {
-    if sceneworks_core::hashing::sha256_bytes(bytes) != approved {
-        return None;
-    }
-    let rows: Vec<PinCoverage> = serde_json::from_slice(bytes).ok()?;
-    rows.iter().all(PinCoverage::valid).then_some(rows)
-}
-
-fn permits_revision(capture: &str, target: &str, backend: Scail2FitBackend) -> bool {
-    if capture == target {
-        return true;
-    }
-    static APPROVALS: OnceLock<Vec<PinCoverage>> = OnceLock::new();
-    APPROVALS
-        .get_or_init(|| {
-            const BYTES: &[u8] =
-                include_bytes!("../../../../../config/scail2-memory-pin-coverage.json");
-            // Approve this digest only after reviewing the entire Git delta and matching both
-            // closure digests offline. Runtime uses the certified immutable pair.
-            const APPROVED: &str =
-                "be7df32e1adbd51ac5278a99684eb168b6c9c19ea2d155e5de4bc6ee931420fc";
-            approved_pin_coverage(BYTES, APPROVED).unwrap_or_default()
-        })
-        .iter()
-        .any(|entry| entry.matches(capture, target, backend))
-}
-
-#[cfg(test)]
-#[test]
-fn scail_plural_pin_coverage_binds_source_target_backend_and_reviewed_digests() {
-    let capture = "a".repeat(40);
-    let target = "b".repeat(40);
-    let unrelated = "c".repeat(40);
-    let fixture = serde_json::json!([{"capture_revision":capture,"target_revision":target,"backend":"mlx",
-        "provider_digest":"1".repeat(64),"shared_contract_digest":"2".repeat(64),"tree_diff_sha256":"3".repeat(64)}]);
-    let bytes = serde_json::to_vec(&fixture).unwrap();
-    let approved = sceneworks_core::hashing::sha256_bytes(&bytes);
-    let rows = approved_pin_coverage(&bytes, &approved).unwrap();
-    assert!(rows[0].matches(&capture, &target, Scail2FitBackend::Mlx));
-    assert!(!rows[0].matches(&unrelated, &target, Scail2FitBackend::Mlx));
-    assert!(!rows[0].matches(&capture, &unrelated, Scail2FitBackend::Mlx));
-    assert!(!rows[0].matches(&capture, &target, Scail2FitBackend::Cuda));
-    for key in [
-        "provider_digest",
-        "shared_contract_digest",
-        "tree_diff_sha256",
-    ] {
-        let mut tampered = fixture.clone();
-        tampered[0][key] = serde_json::json!("9".repeat(64));
-        assert!(
-            approved_pin_coverage(&serde_json::to_vec(&tampered).unwrap(), &approved).is_none()
-        );
     }
 }
 
@@ -520,13 +427,70 @@ pub(super) fn packaged() -> crate::WorkerResult<&'static [QualifiedWitness]> {
 }
 
 #[test]
-fn packaged_evidence_covers_every_plural_count_at_the_pinned_inference_revision() {
-    let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
+fn historical_revision_preserves_prices_and_remains_integrity_bound() {
+    use serde_json::{json, Value};
+    let mut capture = serde_json::from_slice::<Vec<Value>>(INDEX)
+        .unwrap()
+        .remove(0);
+    capture["artifact_id"] = json!(123);
+    capture["receipt_sha256"] = json!("a".repeat(64));
+    capture["accepted"] = json!(true);
+    capture["count_accepted"] = Value::Null;
+    capture["recovery_certificate_sha256"] = Value::Null;
+    capture["inference_revision"] = json!("1".repeat(40));
+    let bytes = serde_json::to_vec(&vec![capture.clone()]).unwrap();
+    let approved = sceneworks_core::hashing::sha256_bytes(&bytes);
+    let original = qualify_index(&bytes, &approved).unwrap().remove(0);
+    assert_eq!(original.inference_revision, "1".repeat(40));
+
+    capture["inference_revision"] = json!("2".repeat(40));
+    let historical = serde_json::to_vec(&vec![capture.clone()]).unwrap();
+    assert!(qualify_index(&historical, &approved).is_err());
+    let historical = qualify_index(
+        &historical,
+        &sceneworks_core::hashing::sha256_bytes(&historical),
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(historical.inference_revision, "2".repeat(40));
+    assert!(historical.covers(capture["platform"].as_str().unwrap(), 2));
+    assert_eq!(
+        historical.witness.gross_host_bytes,
+        original.witness.gross_host_bytes
+    );
+    assert_eq!(
+        historical.witness.gross_device_bytes,
+        original.witness.gross_device_bytes
+    );
+    assert_eq!(
+        historical.witness.gross_unified_bytes,
+        original.witness.gross_unified_bytes
+    );
+    assert_eq!(
+        historical.witness.mlx_decode_budget_bytes,
+        original.witness.mlx_decode_budget_bytes
+    );
+
+    for (field, value) in [
+        ("inference_revision", json!("malformed")),
+        ("guard_exit_code", json!(125)),
+    ] {
+        let mut invalid = capture.clone();
+        invalid[field] = value;
+        let invalid = serde_json::to_vec(&vec![invalid]).unwrap();
+        assert!(
+            qualify_index(&invalid, &sceneworks_core::hashing::sha256_bytes(&invalid)).is_err()
+        );
+    }
+}
+
+#[test]
+fn packaged_historical_evidence_covers_every_plural_count() {
     let rows = packaged().unwrap();
     for platform in ["macos", "windows"] {
         for count in 2..=6 {
             assert!(
-                rows.iter().any(|r| r.covers(platform, pin, count)),
+                rows.iter().any(|r| r.covers(platform, count)),
                 "{platform} {count}"
             );
         }
@@ -535,14 +499,13 @@ fn packaged_evidence_covers_every_plural_count_at_the_pinned_inference_revision(
 
 #[test]
 fn packaged_mlx_evidence_matches_the_chip_on_any_supported_macos_not_the_capture_build() {
-    let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
     let rows = packaged().unwrap();
     let quotes = |device: &str, version: &str| {
         let host = HostClass::new(device, version, None).unwrap();
         (2..=6)
             .filter(|count| {
                 rows.iter()
-                    .any(|r| r.covers("macos", pin, *count) && r.matches_host(&host))
+                    .any(|r| r.covers("macos", *count) && r.matches_host(&host))
             })
             .count()
     };
@@ -568,7 +531,6 @@ fn packaged_mlx_evidence_matches_the_chip_on_any_supported_macos_not_the_capture
 #[test]
 fn packaged_cuda_evidence_matches_the_hardware_class_not_the_capture_card() {
     use serde_json::{json, Value};
-    let pin = sceneworks_core::inference_provenance::INFERENCE_REVISION;
     let class = |device: &str, runtime: &str, mib| HostClass::new(device, runtime, mib).unwrap();
     let rtx = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition";
     let host = class(rtx, "596.36", Some(97_887));
@@ -576,7 +538,7 @@ fn packaged_cuda_evidence_matches_the_hardware_class_not_the_capture_card() {
         (2..=6)
             .flat_map(|count| {
                 rows.iter()
-                    .filter(move |r| r.covers("windows", pin, count) && r.matches_host(host))
+                    .filter(move |r| r.covers("windows", count) && r.matches_host(host))
                     .map(move |r| {
                         let w = &r.witness;
                         (
