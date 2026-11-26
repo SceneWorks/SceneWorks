@@ -512,6 +512,43 @@ fn known_fine_hand_details(text: &str) -> Vec<String> {
             let normalized = normalize_text(clause);
             let words: Vec<_> = normalized.split_whitespace().collect();
             for (index, word) in words.iter().enumerate() {
+                // An arm described as planted locates its supporting hand too. Catch the
+                // observed comparative offset without treating ordinary arm gestures as
+                // guessed hand contacts or changing the existing framing exceptions.
+                if ["hand", "hands", "arm", "arms"].contains(word) {
+                    let tail: Vec<_> = words
+                        .iter()
+                        .skip(index + 1)
+                        .take(12)
+                        .copied()
+                        .take_while(|word| {
+                            !["hand", "hands", "arm", "arms", "elbow", "elbows"].contains(word)
+                        })
+                        .collect();
+                    for offset in 0..tail.len().saturating_sub(1) {
+                        if ["farther", "further"].contains(&tail[offset])
+                            && [
+                                "back",
+                                "backward",
+                                "backwards",
+                                "forward",
+                                "forwards",
+                                "ahead",
+                            ]
+                            .contains(&tail[offset + 1])
+                            && tail[..offset]
+                                .iter()
+                                .any(|word| ["planted", "placed"].contains(word))
+                        {
+                            details.push(format!(
+                                "fine hand offset: {} {}",
+                                word,
+                                tail[..=offset + 1].join(" ")
+                            ));
+                            break;
+                        }
+                    }
+                }
                 if !["hand", "hands"].contains(word) {
                     continue;
                 }
@@ -1076,6 +1113,9 @@ mod tests {
             "Close-up of the hands. A hand on the table near the other hand, fingers splayed.",
             "Medium shot with an inset close-up of a hand. A hand on the table near the other hand.",
             "A hand rests on the bed near the hip.",
+            "Medium shot. The arm is raised farther back in a wave.",
+            "Medium shot. The arm is planted on the bed; a foot is farther back.",
+            "Close-up of the hands. One hand is placed a little farther back.",
         ] {
             assert!(known_fine_hand_details(allowed).is_empty(), "{allowed}");
         }
@@ -1085,6 +1125,8 @@ mod tests {
             "Wide shot. A hand on the table in front of the chest.",
             "Medium shot. Hands on the bed near the other hand.",
             "Medium shot. Fingers splayed on the bed.",
+            "Medium shot. The frame-right arm is planted a little farther back.",
+            "Full-body view. One hand is placed slightly further forward.",
             r#"{"camera":"Medium shot","pose":"The hand presses on the bed close to her hips."}"#,
         ] {
             assert!(!known_fine_hand_details(bad).is_empty(), "{bad}");
