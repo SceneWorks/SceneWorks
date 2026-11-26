@@ -1577,7 +1577,7 @@ fn preset_resolution_follows_the_models_declared_size_envelope() {
     use crate::recipe_presets::validate_recipe_preset_resolution;
     let models = vec![
         json!({ "id": "minimax_h3_image", "type": "image",
-                "limits": { "minDimension": 16, "maxDimension": 9408 } }),
+                "limits": { "minDimension": 16, "maxDimension": 9408, "maxPixels": 25_165_824 } }),
         json!({ "id": "plain_image", "type": "image" }),
     ];
     let preset = |model: Option<&str>, resolution: &str| {
@@ -1592,8 +1592,7 @@ fn preset_resolution_follows_the_models_declared_size_envelope() {
         "3552x4736",
         "6272x2688",
         "2048x2048",
-        "6144x6144",
-        "9408x4032",
+        "7648x3264",
     ] {
         assert!(
             validate_recipe_preset_resolution(
@@ -1605,9 +1604,18 @@ fn preset_resolution_follows_the_models_declared_size_envelope() {
         );
     }
     let over =
-        validate_recipe_preset_resolution(&models, &preset(Some("minimax_h3_image"), "9440x4032"))
+        validate_recipe_preset_resolution(&models, &preset(Some("minimax_h3_image"), "9440x2048"))
             .expect_err("past the declared 9408 ceiling");
     assert!(format!("{over:?}").contains("9408"), "{over:?}");
+    // Inside the edge but above the declared 24 MP area ceiling: the former ~36 MP presets.
+    for resolution in ["6144x6144", "9408x4032"] {
+        let over = validate_recipe_preset_resolution(
+            &models,
+            &preset(Some("minimax_h3_image"), resolution),
+        )
+        .expect_err("above the declared 24 MP ceiling");
+        assert!(format!("{over:?}").contains("24.00 MP"), "{over:?}");
+    }
     // Every other model, and a model-less general preset, keeps the blanket 256..=4096 bound.
     for model in [Some("plain_image"), None] {
         assert!(validate_recipe_preset_resolution(&models, &preset(model, "4096x4096")).is_ok());

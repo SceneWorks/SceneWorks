@@ -77,3 +77,25 @@ export async function settle({ microtasks = 6, lazy = false, delayMs = 0 } = {})
 }
 
 export const settleLazyImports = () => settle({ lazy: true });
+
+// Image Studio's ratio + megapixel size picker (aspectResolution.js): the derived "WxH" it reads
+// out, and a driver that picks a ratio and/or commits a typed megapixel value the way a user does
+// (type, then Enter). Either argument may be omitted to leave that control alone.
+export function imageSize(container) {
+  const text = container.querySelector('[aria-label="Output size"] strong')?.textContent;
+  return text ? text.replace(" × ", "x") : undefined;
+}
+
+export async function setImageSize(container, { ratio, megapixels } = {}) {
+  const picker = container.querySelector(".aspect-picker");
+  if (ratio !== undefined) {
+    await act(async () => setSelect(picker.querySelector("select"), ratio));
+  }
+  if (megapixels !== undefined) {
+    const input = picker.querySelector('input[aria-label="Megapixels"]');
+    await act(async () => setInput(input, String(megapixels)));
+    await act(async () => {
+      input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+  }
+}

@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setFileInput, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, imageSize, mountRoot, setFileInput, setImageSize, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // Pose loaders fetch best-effort on mount; stub the API so render never touches
 // the network. The studio's own mutations go through context fns, not apiFetch.
@@ -765,15 +765,19 @@ describe("ImageStudio resolution continuity", () => {
     vi.clearAllMocks();
   });
 
+  // The size picker is a ratio + megapixels inside the model's own presets: their area band, their
+  // side extent and their grid. A switch keeps the size when the destination can render it, and
+  // otherwise keeps the RATIO (or the nearest one the destination can draw) and refits the size.
   it.each([
-    ["exact 2K landscape", "2048x1408", ["1024x1024", "2048x1408"], "2048x1408"],
-    ["nearby 2K landscape", "2048x1408", ["1024x1024", "1536x1024", "2048x1440"], "2048x1440"],
-    ["smaller landscape", "2048x1408", ["1024x1024", "1536x1024", "1024x1536"], "1536x1024"],
-    ["portrait", "1408x2048", ["1024x1024", "1024x1536", "1536x1024"], "1024x1536"],
-    ["closest square size", "2048x2048", ["1024x1024", "1536x1536"], "1536x1536"],
-  ])("keeps the %s composition through switching and submission", async (_, previous, options, expected) => {
+    ["fitting 3:2", "3:2", 4, ["1024x1024", "2048x2048"], "2048x1344", "2048x1344", "3:2", "2048x1344"],
+    ["capped 3:2", "3:2", 4, ["1024x1024", "1536x1024"], "2048x1344", "1536x1024", "3:2", "1536x1024"],
+    // 2:3 cannot be drawn inside a 768..1024 side range, so the refit takes the nearest shape it can;
+    // back on the source, 768 is under ITS 1024 side floor, so it grows (keeping 3:4) to fit again.
+    ["undrawable 2:3 portrait", "2:3", 4, ["768x768", "1024x1024"], "1344x2048", "768x1024", "3:4", "1024x1344"],
+    ["capped square", "1:1", 4, ["1024x1024", "1536x1536"], "2048x2048", "1536x1536", "1:1", "1536x1536"],
+  ])("keeps the %s composition through switching and submission", async (_, ratio, megapixels, options, previous, expected, expectedRatio, back) => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
-    const source = { ...Z_IMAGE, limits: { resolutions: ["1024x1024", previous] } };
+    const source = { ...Z_IMAGE, limits: { resolutions: ["1024x1024", "2048x2048"] } };
     const destination = {
       ...Z_IMAGE,
       id: "destination",
@@ -787,19 +791,72 @@ describe("ImageStudio resolution continuity", () => {
         </AppContext.Provider>,
       );
     });
-    const resolutionSelect = () => field(container, "Aspect");
-    await act(async () => setSelect(resolutionSelect(), previous));
+    await setImageSize(container, { ratio, megapixels });
+    expect(imageSize(container)).toBe(previous);
     await act(async () => setSelect(field(container, "Model"), destination.id));
-    expect(resolutionSelect().value).toBe(expected);
+    expect(imageSize(container)).toBe(expected);
+    expect(field(container, "Aspect").value).toBe(expectedRatio);
 
     await vi.waitFor(() => expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate")?.disabled).toBe(false));
     await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
     expect(createImageJob.mock.calls[0][0].advanced.resolution).toBe(expected);
 
-    // Returning to the source preserves the current choice when possible, rather than
+    // Returning to the source preserves the current choice where it fits there, rather than
     // restoring an old per-model preference or resetting to the square default.
     await act(async () => setSelect(field(container, "Model"), source.id));
-    expect(resolutionSelect().value).toBe(previous);
+    expect(imageSize(container)).toBe(back);
+  });
+
+  it("drops a remembered ratio the next model does not offer, even when the size carries over", async () => {
+    const panorama = { ...Z_IMAGE, id: "panorama", name: "Panorama",
+      limits: { resolutions: ["512x512", "1024x1024", "2048x2048", "2048x512", "512x2048"] } };
+    const standard = { ...Z_IMAGE, id: "standard", name: "Standard",
+      limits: { resolutions: ["512x512", "1024x1024", "2048x2048"] } };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={baseContext({ imageModels: [panorama, standard] })}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await setImageSize(container, { ratio: "4:1", megapixels: 1 });
+    expect(imageSize(container)).toBe("2048x512");
+    // 2048x512 is inside the standard model's presets, so the size is kept — but 4:1 is not on its
+    // menu, so the picker reads the nearest shape it does offer and steps from THAT, not a hidden 4:1.
+    await act(async () => setSelect(field(container, "Model"), standard.id));
+    expect(imageSize(container)).toBe("2048x512");
+    expect([...field(container, "Aspect").options].map((option) => option.value)).not.toContain("4:1");
+    expect(field(container, "Aspect").value).toBe("21:9");
+    await click(container.querySelector('button[aria-label="Increase megapixels"]'));
+    const [width, height] = imageSize(container).split("x").map(Number);
+    expect(Math.abs(Math.log(width / height / (21 / 9)))).toBeLessThan(0.08);
+  });
+
+  it("offers megapixels only up to the model's largest preset and steps within it", async () => {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={baseContext({ imageModels: [{ ...Z_IMAGE, limits: { resolutions: ["768x768", "1024x1024"] } }] })}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    expect(container.querySelector(".aspect-picker-limit").textContent).toBe("up to 1.00 MP on this model");
+    expect([...field(container, "Aspect").options].map((option) => option.value)).toEqual(
+      ["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9"],
+    );
+    // Shapes its 768..1024 presets cannot draw are listed but disabled.
+    const disabled = [...field(container, "Aspect").options].filter((option) => option.disabled).map((option) => option.value);
+    expect(disabled).toEqual(["2:3", "3:2", "9:16", "16:9", "21:9"]);
+    // Typing past the ceiling clamps to it; the + button is then spent.
+    await setImageSize(container, { ratio: "1:1", megapixels: 9 });
+    expect(imageSize(container)).toBe("1024x1024");
+    const increase = container.querySelector('button[aria-label="Increase megapixels"]');
+    expect(increase.disabled).toBe(true);
+    // The box shows the requested step; the readout shows the on-grid result.
+    await click(container.querySelector('button[aria-label="Decrease megapixels"]'));
+    expect(field(container, "Megapixels").value).toBe("0.90");
+    expect(imageSize(container)).toBe("960x960");
+    expect(increase.disabled).toBe(false);
   });
 });
 
@@ -3149,14 +3206,14 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
       await act(async () => {
         probes[1].onload();
       });
-      expect(field(container, "Aspect").value).toBe("1536x1024");
+      expect(imageSize(container)).toBe("1536x1024");
 
       probes[0].naturalWidth = 900;
       probes[0].naturalHeight = 1600;
       await act(async () => {
         staleOnload();
       });
-      expect(field(container, "Aspect").value).toBe("1536x1024");
+      expect(imageSize(container)).toBe("1536x1024");
     } finally {
       restore();
     }
@@ -3199,7 +3256,9 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
       await click(tileByText("Use Selection"));
       expect(probes).toHaveLength(1);
       const staleOnload = probes[0].onload;
-      expect(field(container, "Aspect").value).toBe("1024x1536");
+      // Both presets are 1.5 MP, so the carried-over 1024x1024 keeps its square shape and is
+      // lifted into the model's band: 1216x1216 on the presets' 64 px grid.
+      expect(imageSize(container)).toBe("1216x1216");
 
       // Keep the same asset and selected model id while refreshing its declared
       // resolution buckets. The in-flight probe must be cancelled and restarted
@@ -3212,21 +3271,21 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
         }),
       );
       expect(probes).toHaveLength(2);
-      expect(field(container, "Aspect").value).toBe("1024x1536");
+      expect(imageSize(container)).toBe("1216x1216");
 
       probes[1].naturalWidth = 900;
       probes[1].naturalHeight = 1200;
       await act(async () => {
         probes[1].onload();
       });
-      expect(field(container, "Aspect").value).toBe("768x1024");
+      expect(imageSize(container)).toBe("768x1024");
 
       probes[0].naturalWidth = 900;
       probes[0].naturalHeight = 1200;
       await act(async () => {
         staleOnload();
       });
-      expect(field(container, "Aspect").value).toBe("768x1024");
+      expect(imageSize(container)).toBe("768x1024");
     } finally {
       restore();
     }

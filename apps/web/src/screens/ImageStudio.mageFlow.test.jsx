@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, imageSize, mountRoot, setImageSize, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // Studio UI coverage for the Mage-Flow native-resolution image family (sc-14058, epic 14034 P6).
 // Mage rides the generic manifest/tier/catalog machinery, so these tests assert the family-specific
@@ -213,21 +213,26 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
     expect(optionLabels(picker)).not.toContain("Mage-Flow RL");
   });
 
-  it("offers the 4:1 aspect preset and its inverse in the resolution menu", async () => {
+  it("offers the 4:1 aspect preset and its inverse in the ratio menu", async () => {
     await render(baseContext({ imageModels: [MAGE_RL] }));
     const aspect = field(container, "Aspect");
     expect(aspect).toBeTruthy();
-    expect(optionValues(aspect)).toEqual(expect.arrayContaining(["2048x512", "512x2048", "2048x2048"]));
+    // The model's own non-standard preset shapes join the standard ratios.
+    expect(optionValues(aspect)).toEqual(expect.arrayContaining(["1:1", "4:1", "1:4"]));
     // Default seeds to the native square.
-    expect(aspect.value).toBe("1024x1024");
+    expect(aspect.value).toBe("1:1");
+    expect(imageSize(container)).toBe("1024x1024");
+    // 4:1 at the 2048 edge is the published 2048x512 preset.
+    await setImageSize(container, { ratio: "4:1", megapixels: 4 });
+    expect(imageSize(container)).toBe("2048x512");
   });
 
   it("gates resolutions with the selected installed tier, not the blanket floor", async () => {
     await render(
       baseContext({ imageModels: [TIERED_HIGHRES], macCapabilities: MAC_CAPS }),
     );
-    const aspect = field(container, "Aspect");
-    expect(optionValues(aspect)).toContain("2048x2048");
+    // The installed tier's evidence admits 2048x2048, so the megapixel ceiling is its 4.00 MP.
+    expect(container.querySelector(".aspect-picker-limit").textContent).toBe("up to 4.00 MP on this model");
   });
 
   it("stamps the ÷16 native-resolution stride and 512–2048 range on the free Width/Height overrides", async () => {
@@ -334,7 +339,7 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
     await render(baseContext({ imageModels: [MAGE_TURBO] }));
     await openAdvanced();
     await act(async () => {});
-    expect(field(container, "Aspect").value).toBe("1024x1024");
+    expect(imageSize(container)).toBe("1024x1024");
     expect(field(container, "Steps").getAttribute("placeholder")).toBe("4");
     expect(exactField(container, "Guidance").getAttribute("placeholder")).toBe("1");
   });

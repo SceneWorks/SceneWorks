@@ -7,6 +7,7 @@ import { LoraPickerSection, SavePresetPanel, SourcePrecisionField, StyleAxisRow,
 import { tierLabel } from "../../quantTier.js";
 import { mossAccelerationAvailable, mossAccelerationMode } from "../../mossImage.js";
 import { STYLE_GROUPS } from "../../data/styleCatalog.js";
+import { AspectResolutionPicker } from "./AspectResolutionPicker.jsx";
 
 export function ImageGenerationSettings({
   selectedModel,
@@ -25,8 +26,7 @@ export function ImageGenerationSettings({
   downloadMossAcceleration,
   handleResolutionChange,
   resolution,
-  resolutionOptions,
-  formatResolutionLabel,
+  sizeEnvelope,
   patchGridNotice,
   nativeResolutionNotice,
   setCount,
@@ -109,13 +109,7 @@ export function ImageGenerationSettings({
                       <button type="button" disabled={mossDownload.busy} onClick={downloadMossAcceleration}>Download 8-step components</button>
                     </div> : null}
                     {mossDownload.error ? <p role="alert">{mossDownload.error}</p> : null}
-              <label className="settings-field settings-field-aspect">
-                Aspect
-                <select onChange={(event) => handleResolutionChange(event.target.value)} value={resolution}>
-                  {resolutionOptions.map((option) => (
-                    <option key={option} value={option}>{formatResolutionLabel(option)}</option>
-                  ))}
-                </select>
+              <AspectResolutionPicker envelope={sizeEnvelope} onChange={handleResolutionChange} resolution={resolution}>
                 {/* sc-25681: informational only — the size is never restricted. */}
                 {patchGridNotice ? (
                   <span className="field-hint" role="note">
@@ -127,7 +121,7 @@ export function ImageGenerationSettings({
                     {nativeResolutionNotice}
                   </span>
                 ) : null}
-              </label>
+              </AspectResolutionPicker>
               <label className="settings-field settings-field-count">
                 Variations
                 <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />

@@ -147,6 +147,42 @@ fn the_declared_envelope_lets_a_model_render_below_the_blanket_floor() {
 }
 
 #[test]
+fn a_declared_pixel_ceiling_refuses_a_larger_area_even_inside_the_side_envelope() {
+    // MiniMax-H3-Image's shape: a 9408 edge with a 24 MP (24 x 1024²) area ceiling. The side
+    // envelope alone would admit 9408x9408; the area ceiling is what binds.
+    let entry = payload(json!({
+        "limits": { "minDimension": 16, "maxDimension": 9408, "maxPixels": 25_165_824 }
+    }));
+    assert_eq!(image_max_pixels(&entry), Some(25_165_824));
+    // 21:9 at the ceiling (7664x3280 = 23.97 MP) and the native 16 MP table are legal.
+    for (w, h) in [(7664, 3280), (6272, 2688), (4096, 4096), (2048, 2048)] {
+        assert_eq!(
+            image_dimension_error("minimax_h3_image", w, h, &entry, 256, 4096),
+            None,
+            "{w}x{h} is inside the 24 MP ceiling"
+        );
+    }
+    // The former ~36 MP presets are refused, not shrunk, and the message names both areas.
+    for (w, h) in [(9408, 4032), (6144, 6144), (7552, 5056)] {
+        let message = image_dimension_error("minimax_h3_image", w, h, &entry, 256, 4096)
+            .unwrap_or_else(|| panic!("{w}x{h} is above the 24 MP ceiling"));
+        assert!(message.contains("24.00 MP"), "{message}");
+        assert!(message.contains(&format!("{w}x{h}")), "{message}");
+    }
+    // No declaration, or a zero, is no ceiling: every other image model is unchanged.
+    for entry in [
+        payload(json!({ "limits": {} })),
+        payload(json!({ "limits": { "maxPixels": 0 } })),
+    ] {
+        assert_eq!(image_max_pixels(&entry), None);
+        assert_eq!(
+            image_dimension_error("m", 4096, 4096, &entry, 256, 4096),
+            None
+        );
+    }
+}
+
+#[test]
 fn an_off_grid_size_is_refused_with_the_two_legal_neighbours_named() {
     // An off-stride size used to pass every check in the app and die inside the provider. The
     // message has to be actionable, which means naming where to go rather than only what is

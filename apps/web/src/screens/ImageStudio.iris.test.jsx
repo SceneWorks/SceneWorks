@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, imageSize, mountRoot, setImageSize, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // Studio UI coverage for Iris-3B (sc-25679 / sc-25681, epic 25678): it rides the generic catalog
 // machinery, so these assert the controls the catalog row declares — exactly the engine's surface:
@@ -228,11 +228,13 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     const hint = () =>
       [...container.querySelectorAll('[role="note"]')].find((node) => node.textContent.includes("patch grid"));
     expect(hint()).toBeUndefined();
-    await act(async () => setSelect(field(container, "Aspect"), "512x512"));
+    await setImageSize(container, { ratio: "1:1", megapixels: 0.25 });
+    expect(imageSize(container)).toBe("512x512");
     expect(hint()?.textContent).toBe("Below 1024px a side, Iris 3B shows a visible patch grid.");
-    await act(async () => setSelect(field(container, "Aspect"), "1152x896"));
+    await setImageSize(container, { ratio: "4:3", megapixels: 1 });
     expect(hint()?.textContent).toMatch(/patch grid/);
-    await act(async () => setSelect(field(container, "Aspect"), "1024x1024"));
+    await setImageSize(container, { ratio: "1:1", megapixels: 1 });
+    expect(imageSize(container)).toBe("1024x1024");
     expect(hint()).toBeUndefined();
     // The free size override still admits a sub-1024 size on the 16-px grid.
     expect(field(container, "Width override").getAttribute("min")).toBe("16");

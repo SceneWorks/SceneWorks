@@ -801,11 +801,12 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       const createImageJob = vi.fn(async () => ({ id: "job-edited-flux3" }));
       await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob,
         studioLaunch: launch(flux3Recipe(null, null)) }));
-      await editControl(control(field), field === "Aspect" ? "1536x1024" : "512");
+      // Picking 3:2 keeps the current 1.00 MP: 1280x832 on the fixture's 64 px preset grid.
+      await editControl(control(field), field === "Aspect" ? "3:2" : "512");
       await click(buttonByText("Generate"));
       expect(createImageJob.mock.calls[0][0]).toMatchObject({
-        width: field === "Width override" ? 512 : field === "Aspect" ? 1536 : 1024,
-        height: field === "Height override" ? 512 : 1024,
+        width: field === "Width override" ? 512 : field === "Aspect" ? 1280 : 1024,
+        height: field === "Height override" ? 512 : field === "Aspect" ? 832 : 1024,
       });
       expect(control("Width override").placeholder).not.toContain("Auto");
       expect(control("Height override").placeholder).not.toContain("Auto");

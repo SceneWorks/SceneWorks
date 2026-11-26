@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
+import { click, imageSize, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
 
 // Studio UI coverage for Supra2-IMG (sc-24215, epic 24212): the catalog row declares exactly the
 // published interface — prompt, seed, guidance, steps, image count at a native 256x256 with a
@@ -119,7 +119,10 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
 
   it("offers exactly the published controls and states the native size and prompt budget", async () => {
     await render(baseContext());
-    expect([...field(container, "Aspect").options].map((option) => option.value)).toEqual(["256x256"]);
+    // One published size: no ratio or megapixel choice, just the fixed size.
+    expect(field(container, "Aspect")).toBeUndefined();
+    expect(imageSize(container)).toBe("256x256");
+    expect(container.querySelector(".aspect-picker").textContent).toContain("Fixed by this model");
     expect(container.textContent).toContain("Supra2-IMG renders at its native 256×256 only.");
     expect(container.textContent).toContain(
       "Supra2-IMG reads up to 128 prompt tokens; anything longer is truncated and the image is flagged.",

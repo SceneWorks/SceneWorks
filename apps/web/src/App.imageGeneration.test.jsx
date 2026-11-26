@@ -5,6 +5,7 @@ import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { withAppContext, withImageStudioContext, FakeEventSource, response, settle, field, changeField } from "./main.testSupport.jsx";
 import { MAX_USER_JOB_LORAS } from "./presetUtils.js";
 import { EDIT_PROMPT_TEMPLATES } from "./data/editPromptTemplates.js";
+import { imageSize } from "./testUtils/dom.js";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -1068,9 +1069,12 @@ describe("SceneWorks app shell", () => {
 
     const aspect = field(container, "Aspect");
     const optionValues = [...aspect.querySelectorAll("option")].map((option) => option.value);
-    expect(optionValues).toEqual(["2048x2048", "2720x1536", "1536x2720"]);
-    // 1024x1024 isn't a SenseNova bucket, so the picker snaps to the model default.
-    expect(aspect.value).toBe("2048x2048");
+    expect(optionValues).toEqual(["1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9", "21:9"]);
+    // SenseNova's presets are all ~4 MP, so the carried-over 1024x1024 keeps its square shape and is
+    // lifted into the model's band: the 2048x2048 default.
+    expect(aspect.value).toBe("1:1");
+    expect(imageSize(container)).toBe("2048x2048");
+    expect(container.querySelector(".aspect-picker-limit").textContent).toBe("up to 4.00 MP on this model");
   });
 
   it("surfaces model and preset first and lets image generation run with no preset", async () => {

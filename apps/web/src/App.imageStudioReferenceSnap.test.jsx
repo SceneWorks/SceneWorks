@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withImageStudioContext, FakeEventSource, response, settle } from "./main.testSupport.jsx";
+import { imageSize } from "./testUtils/dom.js";
 
 // sc-18255: picking an img2img reference auto-presets the Aspect to the bucket closest to the
 // reference's own aspect (sc-10195). That snap must fire ONCE per picked reference — the effect
@@ -113,6 +114,8 @@ describe("Image Studio img2img reference aspect snap", () => {
       button.textContent.trim().startsWith(text),
     );
   const aspectSelect = () => document.body.querySelector(".settings-field-aspect select");
+  // The snap writes a "WxH" size; the ratio + megapixel picker reads it out under the controls.
+  const outputSize = () => imageSize(document.body);
   const enterPrompt = async (label, value) => {
     await act(async () => {
       const field = document.querySelector(`textarea[aria-label="${label}"]`);
@@ -172,30 +175,30 @@ describe("Image Studio img2img reference aspect snap", () => {
     await pickReference();
 
     // The 1080x1920 reference snaps the Aspect to its closest declared bucket.
-    expect(aspectSelect().value).toBe("1152x2048");
+    expect(outputSize()).toBe("1152x2048");
 
     // The user then picks a different Aspect for this render.
     await act(async () => {
       const select = aspectSelect();
-      select.value = "768x1024";
+      select.value = "3:4"; // at the snapped 2.25 MP: 1344x1728 on its 64 px preset grid
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
-    expect(aspectSelect().value).toBe("768x1024");
+    expect(outputSize()).toBe("1344x1728");
 
     // An asset-list refresh (new array identity, same reference still picked) must not re-snap.
     await act(async () => {
       root.render(studio([{ ...REFERENCE_ASSET }]));
     });
     await settle();
-    expect(aspectSelect().value).toBe("768x1024");
+    expect(outputSize()).toBe("1344x1728");
 
     // Nor may any number of further refreshes.
     await act(async () => {
       root.render(studio([{ ...REFERENCE_ASSET }, { ...REFERENCE_ASSET, id: "asset-generated" }]));
     });
     await settle();
-    expect(aspectSelect().value).toBe("768x1024");
+    expect(outputSize()).toBe("1344x1728");
   });
 
   it("names a deleted image reference before Generate and lets the user remove it", async () => {
@@ -327,11 +330,11 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
     await pickReference();
-    expect(aspectSelect().value).toBe("1152x2048");
+    expect(outputSize()).toBe("1152x2048");
 
     await act(async () => {
       const select = aspectSelect();
-      select.value = "768x1024";
+      select.value = "3:4"; // at the snapped 2.25 MP: 1344x1728 on its 64 px preset grid
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
@@ -343,7 +346,7 @@ describe("Image Studio img2img reference aspect snap", () => {
     await pickReference();
 
     // Re-picking is a deliberate user action, so the aspect preset applies again.
-    expect(aspectSelect().value).toBe("1152x2048");
+    expect(outputSize()).toBe("1152x2048");
   });
 
   it("re-snaps when the resolution options themselves change (sc-18255)", async () => {
@@ -358,7 +361,7 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
     await pickReference();
-    expect(aspectSelect().value).toBe("1152x2048");
+    expect(outputSize()).toBe("1152x2048");
 
     // The reference is still armed, so the snap must run again on the NEW bucket list
     // when switching models, preserving the reference's 9:16 composition.
@@ -373,7 +376,7 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
 
-    expect(aspectSelect().value).toBe("896x1600");
+    expect(outputSize()).toBe("896x1600");
   });
 
   it("stops steering the Aspect on a model with no img2img panel (sc-18255)", async () => {
@@ -388,7 +391,7 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
     await pickReference();
-    expect(aspectSelect().value).toBe("1152x2048");
+    expect(outputSize()).toBe("1152x2048");
 
     // The panel owning the reference is gone. Resolution continuity still preserves the
     // previous composition, but the invisible reference must not steer later manual choices.
@@ -399,13 +402,13 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
 
-    expect(aspectSelect().value).toBe("896x1600");
+    expect(outputSize()).toBe("896x1600");
     await act(async () => {
-      aspectSelect().value = "1024x1024";
+      aspectSelect().value = "1:1"; // at the snapped 1.37 MP: 1152x1152 on its 64 px preset grid
       aspectSelect().dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
-    expect(aspectSelect().value).toBe("1024x1024");
+    expect(outputSize()).toBe("1152x1152");
   });
 
   it("keeps the user's Aspect across a Text → Edit → Text round-trip (sc-18255)", async () => {
@@ -420,11 +423,11 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
     await pickReference();
-    expect(aspectSelect().value).toBe("1152x2048");
+    expect(outputSize()).toBe("1152x2048");
 
     await act(async () => {
       const select = aspectSelect();
-      select.value = "768x1024";
+      select.value = "3:4"; // at the snapped 2.25 MP: 1344x1728 on its 64 px preset grid
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     await settle();
@@ -441,6 +444,6 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
 
-    expect(aspectSelect().value).toBe("768x1024");
+    expect(outputSize()).toBe("1344x1728");
   });
 });

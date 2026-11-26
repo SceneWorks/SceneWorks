@@ -132,7 +132,8 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     const tiles = [...container.querySelectorAll(".su-sheet .su-option-tile")];
     expect(tiles).toHaveLength(H3_IMAGE.limits.resolutions.length);
     expect(tiles.some((tile) => tile.textContent.includes("6272") && tile.textContent.includes("2688"))).toBe(true);
-    expect(tiles.some((tile) => tile.textContent.includes("9408") && tile.textContent.includes("4032"))).toBe(true);
+    // The former ~36 MP rows are gone: nothing above the declared 24 MP ceiling is offered.
+    expect(tiles.some((tile) => tile.textContent.includes("9408") && tile.textContent.includes("4032"))).toBe(false);
   });
 
   it("hides steps, guidance and negative prompt, accepts a 9408 px width and sends no steps", async () => {
@@ -146,12 +147,13 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     expect(width.getAttribute("max")).toBe("9408");
     await act(async () => setTextarea(container.querySelector("#su-image-prompt"), "a harbour at dawn"));
     await act(async () => setInput(width, "9408"));
-    await act(async () => setInput(container.querySelector("input[aria-label=\"Custom height\"]"), "4032"));
+    // 9408x2560 is 22.97 MP: the full edge, inside the 24 MP area ceiling.
+    await act(async () => setInput(container.querySelector("input[aria-label=\"Custom height\"]"), "2560"));
     await act(async () => {});
     await vi.waitFor(() => expect(container.querySelector(".su-generate")?.disabled).toBe(false));
     await click(container.querySelector(".su-generate"));
     const request = context.createImageJob.mock.calls[0][0];
-    expect(request).toMatchObject({ model: "minimax_h3_image", width: 9408, height: 4032 });
+    expect(request).toMatchObject({ model: "minimax_h3_image", width: 9408, height: 2560 });
     expect(request.advanced?.steps).toBeUndefined();
     expect(request.advanced?.guidanceScale).toBeUndefined();
   });

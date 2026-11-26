@@ -6660,6 +6660,15 @@
         // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
         // that run ≤1536² fine).
         "resolutions": ["1024x1024", "896x896", "768x768", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
+        // The per-side request envelope, declared so Image Studio's ratio + megapixel picker can draw
+        // every shape at the model's 4 MP (2048²) ceiling — 21:9 at 3120x1344, 16:9 at 2720x1536 —
+        // instead of stopping at the 2048 edge of the presets. These are exactly the PINNED engine's
+        // RES_MIN / RES_MAX on BOTH backends (candle-gen-krea `lib.rs`, mlx-gen-krea `model.rs`); the
+        // area stays bounded by the largest preset (the picker's ceiling, and the memory gate above
+        // it). Equal to the API's blanket 256..4096, so enqueue admission is unchanged; no grid is
+        // declared, so the image API keeps not enforcing one (the engine's own ÷16 check does).
+        "minDimension": 256,
+        "maxDimension": 4096,
         "count": [1, 2, 4],
         // Krea Turbo routes the per-generation sampler/scheduler knobs through the unified framework
         // (run_flow_sampler / resolve_flow_schedule), exactly like z_image_turbo — so it advertises the
@@ -6899,6 +6908,15 @@
         // client gate covers, not this floor (raising it would wrongly hide the model on 48 GB Macs
         // that run ≤1536² fine).
         "resolutions": ["1024x1024", "768x1024", "1024x768", "1280x720", "720x1280", "1216x832", "832x1216", "1152x896", "896x1152", "1536x1536", "2048x1152", "1152x2048", "2048x1408", "1408x2048", "2048x2048"],
+        // The per-side request envelope, declared so Image Studio's ratio + megapixel picker can draw
+        // every shape at the model's 4 MP (2048²) ceiling — 21:9 at 3120x1344, 16:9 at 2720x1536 —
+        // instead of stopping at the 2048 edge of the presets. These are exactly the PINNED engine's
+        // RES_MIN / RES_MAX on BOTH backends (candle-gen-krea `lib.rs`, mlx-gen-krea `model.rs`); the
+        // area stays bounded by the largest preset (the picker's ceiling, and the memory gate above
+        // it). Equal to the API's blanket 256..4096, so enqueue admission is unchanged; no grid is
+        // declared, so the image API keeps not enforcing one (the engine's own ÷16 check does).
+        "minDimension": 256,
+        "maxDimension": 4096,
         "count": [1, 2, 4],
         // Raw routes the per-generation sampler/scheduler knobs through the unified framework, exactly
         // like Turbo — the `krea_2_raw` descriptor advertises curated_sampler_names()/
@@ -14361,12 +14379,14 @@
       },
       // E25 — this model's own size envelope. The engine accepts ANY positive size (it generates on
       // a 32 px canvas of at least 4 MP and resizes back), so there is no stride; the presets are the
-      // upstream default (2048x2048), the model card's published 16 MP aspect table, and that same
-      // table scaled 1.5x (~36 MP) onto the 32 px grid (SW-7206). Upstream sets NO maximum and
-      // 16 MP is the model's native size, not its ceiling; the edge bound is the largest offered
-      // preset's edge (9408, the ~36 MP 21:9 row). A real 6144x6144 Candle render peaked at
-      // 66.9 GB Resident. ~64 MP is not offered until it has an in-app measurement. The 4096 px
-      // blanket edge stays in force for every model that declares no `maxDimension`.
+      // upstream default (2048x2048) and the model card's published 16 MP aspect table. Upstream
+      // sets NO maximum and 16 MP is the model's native size, not its ceiling. SceneWorks offers it
+      // up to 24 MP (`maxPixels` = 24 x 1024²): Image Studio's ratio + megapixel picker sizes every
+      // shape up to that area (21:9 is 7664x3280), and the image API refuses a larger area at
+      // enqueue. The ~36 MP rows (the 16 MP table scaled 1.5x, SW-7206; a real 6144x6144 Candle
+      // render peaked at 66.9 GB Resident) are no longer offered. The 9408 edge stays — the area
+      // ceiling is what binds — and the 4096 px blanket edge stays in force for every model that
+      // declares no `maxDimension`.
       "limits": {
         "resolutions": [
           "2048x2048",
@@ -14377,19 +14397,12 @@
           "3360x5024",
           "5472x3072",
           "3072x5472",
-          "6272x2688",
-          "6144x6144",
-          "7104x5344",
-          "5344x7104",
-          "7552x5056",
-          "5056x7552",
-          "8224x4608",
-          "4608x8224",
-          "9408x4032"
+          "6272x2688"
         ],
         "count": [1],
         "minDimension": 16,
         "maxDimension": 9408,
+        "maxPixels": 25165824,
         // SW-7101: the model card's edit ceiling (`gen_core::h3_image::MAX_REFERENCES`), counted over
         // the flattened ordered list at enqueue, by the worker, and by the Image Studio picker.
         "maxReferenceAssets": 16,
@@ -14420,7 +14433,7 @@
         "label": "MiniMax-H3-Image",
         // §IV.2: "MiniMax-H3-Image", exactly — the H3 video entries' "MiniMax H3" does not satisfy it.
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — its native size is about 16 megapixels (the model card's presets reach 6272 px on the long edge at 21:9), SceneWorks also offers those presets scaled to about 36 megapixels (up to 9408 px on the long edge), and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — its native size is about 16 megapixels (the model card's presets reach 6272 px on the long edge at 21:9), SceneWorks offers it at any aspect up to 24 megapixels, and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are SceneWorks conversions published at SceneWorks/minimax-h3-image-mlx. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
         "recommendedFor": ["text_to_image", "edit_image"],
         // SW-7101: the ordered multi-reference picker (plural `referenceAssetIds`) for the edit; its
         // ceiling is `limits.maxReferenceAssets`. No `img2img`: an H3-Image reference has no strength.

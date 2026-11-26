@@ -8,7 +8,7 @@ import { useStudioAdvancedSettings } from "../hooks/useStudioAdvancedSettings.js
 import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
 import { StudioPromptGuide, CharacterLookFields } from "../components/StudioFields.jsx";
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
-import { preferredOption, preferredResolution, formatResolutionLabel } from "../studioDefaults.js";
+import { preferredOption, preferredResolution } from "../studioDefaults.js";
 import { ImageAdvancedPanel } from "./imageStudio/ImageAdvancedPanel.jsx";
 import { ImagePromptComposer } from "./imageStudio/ImagePromptComposer.jsx";
 import { ImageGenerationSettings } from "./imageStudio/ImageGenerationSettings.jsx";
@@ -165,6 +165,7 @@ import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { BATCH_EXPAND_MAX, H3_IMAGE_EXPAND_COPY } from "../minimaxH3ImageExpand.js";
 import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
+import { fitResolutionToEnvelope, resolutionEnvelope, resolutionFitsEnvelope } from "../aspectResolution.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 
 import {
@@ -1467,9 +1468,19 @@ export function ImageStudio() {
   // memory reading, and models with no declared memory floor (see resolutionMemory.js). The
   // downstream snap/default effects keep the selection valid within the gated list.
   const resolutionOptions = useMemo(() => {
-    const declared = selectedModel?.limits?.resolutions?.length
+    const ladder = selectedModel?.limits?.resolutions?.length
       ? selectedModel.limits.resolutions
       : DEFAULT_RESOLUTION_OPTIONS;
+    // A declared area ceiling (`limits.maxPixels`, which the image API refuses above) also bounds
+    // every preset consumer — the reference snap and batch `[WxH]` directives read this list.
+    const maxPixels = Number(selectedModel?.limits?.maxPixels);
+    const capped = Number.isInteger(maxPixels) && maxPixels > 0
+      ? ladder.filter((value) => {
+          const size = parseResolution(value);
+          return !size || size.width * size.height <= maxPixels;
+        })
+      : ladder;
+    const declared = capped.length > 0 ? capped : ladder;
     const gated = fitsResolutionOptions(selectedModel, declared, unifiedMemoryGb, {
       backend: activeBackend,
       tier: quantTier,
@@ -1478,12 +1489,18 @@ export function ImageStudio() {
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
   }, [selectedModel, unifiedMemoryGb, activeBackend, quantTier]);
+  // The ratio + megapixel picker's envelope: this model's grid, side bounds and megapixel ceiling,
+  // the ceiling being the largest preset it OFFERS on this host (the memory-gated list above).
+  const sizeEnvelope = useMemo(
+    () => resolutionEnvelope(selectedModel, resolutionOptions),
+    [selectedModel, resolutionOptions],
+  );
   // Accepting a size the prompt expander/rewriter proposes. Width/Height overrides outrank the
   // Aspect preset, so a preset must clear them or the accepted size would silently not render; a
   // size that is not a preset lands in the override fields instead (mirrors Simple Studio).
   const handleApplyProposedSize = (value) => {
     if (typeof value !== "string" || !value) return;
-    if (resolutionOptions.includes(value)) {
+    if (resolutionOptions.includes(value) || resolutionFitsEnvelope(value, sizeEnvelope)) {
       handleResolutionChange(value);
       setWidthOverride("");
       setHeightOverride("");
@@ -1730,8 +1747,10 @@ export function ImageStudio() {
       setEnhancePrompt(false);
     }
   }, [enhancePrompt, promptEnhance]);
-  // Preserve resolution across models; if unavailable, choose the closest supported
-  // aspect ratio and size instead of resetting the composition to the model default.
+  // Preserve resolution across models; if the new model cannot render it (above its megapixel
+  // ceiling, outside its side bounds, off its declared grid, or not its one fixed size), keep the
+  // aspect ratio and refit the size into the model's envelope instead of resetting the
+  // composition to the model default.
   // Guard on a resolved model (sc-11962): before the catalog loads `resolutionOptions`
   // falls back to DEFAULT_RESOLUTION_OPTIONS, so an un-guarded snap would revert a
   // restored model-specific resolution (e.g. 1536x1536) during restart-restore.
@@ -1750,12 +1769,15 @@ export function ImageStudio() {
     const autoReferenceIntent = referenceDimensionIntent?.model === model &&
       referenceDimensionIntent?.mode === mode &&
       (referenceDimensionIntent.width === null || referenceDimensionIntent.height === null);
-    const dims = !autoReferenceIntent && parseResolution(resolution);
+    // An automatic-reference canvas is never a user size choice, even when it happens to fit.
+    if (!autoReferenceIntent && resolutionFitsEnvelope(resolution, sizeEnvelope)) {
+      return;
+    }
     setResolution(
-      (dims && pickClosestResolution(dims.width, dims.height, resolutionOptions))
+      (!autoReferenceIntent && fitResolutionToEnvelope(resolution, sizeEnvelope))
         || preferredResolution(selectedModel, resolutionOptions),
     );
-  }, [resolutionOptions, resolution, selectedModel, referenceDimensionIntent, model, mode]);
+  }, [resolutionOptions, sizeEnvelope, resolution, selectedModel, referenceDimensionIntent, model, mode]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
   // (sticky-for-this-(screen,model) → declared default → q8 base → q4 → first installed). Clears "" when
@@ -3529,8 +3551,7 @@ export function ImageStudio() {
             downloadMossAcceleration={downloadMossAcceleration}
             handleResolutionChange={handleResolutionChange}
             resolution={resolution}
-            resolutionOptions={resolutionOptions}
-            formatResolutionLabel={formatResolutionLabel}
+            sizeEnvelope={sizeEnvelope}
             patchGridNotice={patchGridNotice}
             nativeResolutionNotice={nativeResolutionNotice}
             setCount={setCount}
