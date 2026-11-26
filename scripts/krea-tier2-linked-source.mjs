@@ -53,6 +53,13 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "bd92ec4aae54f89581a06dad9ef3072f7ef278821038164097731fa0c766d2c9",
   ]],
+  // Shared cache loading changes only the runtime guard in this source set. Publication still
+  // verifies and freezes snapshots; this records source review, not a new physical proof.
+  ["14025270f2d790b7980ddbb6360a6e168dc51ccf", [
+    "9d9191f521d43c3f0850e4d80f305c187b97a3119f3e0681044670a7e61a1676",
+    REPAIR_SHA256[1], REPAIR_SHA256[2],
+    "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
+  ]],
 ];
 
 async function readSource(root, file) {

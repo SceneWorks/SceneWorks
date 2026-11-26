@@ -896,11 +896,9 @@ impl ResolvedCacheStore {
             // on a single job submission, against a default budget of 64 GiB — so populating the
             // cache made every submission slower than the load the cache exists to save.
             //
-            // What makes the cheap scan safe is that it is not the last word: `acquire_complete`
-            // re-verifies at full strength under the entry's locks immediately before the lease
-            // that hands bytes to a runtime, and every write validates at full strength. A scan
-            // that offers an entry whose bytes were altered after publication therefore cannot
-            // load it; the lease refuses and the caller falls back to the source tier.
+            // Publication verifies content before marking the bundle complete. Runtime
+            // acquisition trusts that completed state under a lease; explicit maintenance
+            // verification is independent of this availability scan.
             if let Err(error) = validate_complete_metadata_inner(
                 &store,
                 &metadata,
@@ -1441,7 +1439,9 @@ impl ResolvedCacheStore {
         let artifact_lock = self.artifact_lock_shared_with_check(&digest, check)?;
         let metadata_lock = self.lock_metadata_with_check(&digest, check)?;
         check()?;
-        let mut metadata = match self.read_metadata_unlocked(&digest)? {
+        let mut metadata = match self
+            .read_metadata_unlocked_with(&digest, ContentVerification::PublishedMetadata)?
+        {
             JournalRead::Valid { metadata, .. }
                 if metadata.state == ResolvedCacheEntryState::Complete =>
             {
@@ -1449,23 +1449,27 @@ impl ResolvedCacheStore {
             }
             _ => return Ok(None),
         };
-        // FULL STRENGTH, deliberately — and exactly ONCE (sc-21534): this is the load boundary.
-        // The scan ([`Self::valid_local_artifacts`]), the listings, and the retention sweep all
-        // validate on paths and sizes only, and this re-hash under the entry's locks is precisely
-        // what makes that safe — it is the ONE check that must refuse an altered bundle before any
-        // bytes reach a runtime. The lease acquisition and the usage stamp below run under these
-        // same locks in this same call, so re-hashing there added no window this check does not
-        // already close; it only multiplied the cost (4 full hashes of a 33 GB bundle = the Krea
-        // bf16 4.5-minute verify that outlasted the stale-worker sweep). The property is pinned by
-        // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`
-        // and the single-pass cost by `the_load_boundary_hashes_the_closure_exactly_once`.
-        //
-        // The pass is now receipt-gated (see `validate_complete_metadata`): it still refuses an
-        // altered bundle, but it re-reads the bytes only when the closure's stat identity differs
-        // from the one the last successful verification recorded. It reads and stamps that verdict
-        // under the `metadata_lock` held above — the same lock the usage stamp below is written
-        // under — so a verdict is never recorded without the lock that made it true.
-        validate_complete_metadata_with_check(self, &metadata, check)?;
+        if !matches!(&metadata.artifact.location, ArtifactLocation::ResolvedLocal { root } if root == &self.bundle_path(cache_key)?)
+        {
+            return Err(ResolvedCacheError::new(
+                "complete cache artifact has the wrong local root",
+            ));
+        }
+        validate_completion_roots(self, cache_key)?;
+        if self
+            .entry_path(cache_key)?
+            .join("corrupt.marker.json")
+            .try_exists()?
+        {
+            return Err(ResolvedCacheError::new(
+                "cache entry was invalidated by explicit recovery",
+            ));
+        }
+        // Completed bundles were validated before atomic publication. Runtime acquisition trusts
+        // that saved state: no source scan, stat-verification receipt or content/SHA pass belongs
+        // on a cache hit. Keep the shared lease and journal transaction so retention cannot remove
+        // weights while the backend maps/uploads them. Explicit verification/recovery remains
+        // separate from the normal load path.
         check()?;
         let artifact = Arc::new(metadata.artifact.clone());
         let runtime_lease = resolver
@@ -1484,7 +1488,11 @@ impl ResolvedCacheStore {
         let record_path = self.write_session_record(&record)?;
         metadata.last_used_at = Some(now);
         metadata.updated_at = now;
-        self.write_metadata_unlocked(&digest, &metadata)?;
+        self.write_metadata_unlocked_with(
+            &digest,
+            &metadata,
+            ContentVerification::PublishedMetadata,
+        )?;
         drop(metadata_lock);
         Ok(Some(ResolvedCacheLease {
             runtime_lease: Some(runtime_lease),
@@ -1531,8 +1539,7 @@ impl ResolvedCacheStore {
                     // The opening listing found a structurally damaged Complete entry. Persist a
                     // per-entry observation so it remains visible for manual recovery, but do
                     // not let this one residue prevent recovery of the rest of the cache. This
-                    // stays paths-and-sizes only: `acquire_complete` is still the sole strict
-                    // digest boundary before any artifact reaches a runtime.
+                    // stays paths-and-sizes only; runtime acquisition trusts completed publication.
                     if summary.state == ResolvedCacheEntryState::Corrupt
                         && metadata.state == ResolvedCacheEntryState::Complete
                         && validate_complete_metadata_inner(
@@ -1544,6 +1551,19 @@ impl ResolvedCacheStore {
                     {
                         self.write_corrupt_marker(&digest)?;
                         continue;
+                    }
+                    let corrupt_marker = self
+                        .entry_path(&summary.cache_key)?
+                        .join("corrupt.marker.json");
+                    if metadata.state == ResolvedCacheEntryState::Complete
+                        && corrupt_marker.try_exists()?
+                    {
+                        // Only explicit recovery can redeem its own invalidation. Normal loads
+                        // never re-verify files to decide whether a previously rejected cache healed.
+                        if validate_complete_metadata(self, &metadata).is_err() {
+                            continue;
+                        }
+                        std::fs::remove_file(&corrupt_marker)?;
                     }
                     if had_invalid_slot {
                         // FULL STRENGTH before the pin (sc-21534, same defense as the receipt
@@ -1665,6 +1685,12 @@ impl ResolvedCacheStore {
                         let marker_path = self.eviction_marker_path(&digest);
                         if std::fs::symlink_metadata(&marker_path).is_ok() {
                             std::fs::remove_file(&marker_path)?;
+                        }
+                        let corrupt_marker = self
+                            .entry_path(&summary.cache_key)?
+                            .join("corrupt.marker.json");
+                        if corrupt_marker.try_exists()? {
+                            std::fs::remove_file(corrupt_marker)?;
                         }
                         metadata.recovery_status = RecoveryStatus::ReconstructedFromCompleteReceipt;
                         metadata.artifact_pinned = true;
@@ -1962,6 +1988,14 @@ impl ResolvedCacheStore {
     }
 
     fn read_metadata_unlocked(&self, digest: &str) -> Result<JournalRead, ResolvedCacheError> {
+        self.read_metadata_unlocked_with(digest, ContentVerification::PathsAndSizesOnly)
+    }
+
+    fn read_metadata_unlocked_with(
+        &self,
+        digest: &str,
+        verification: ContentVerification,
+    ) -> Result<JournalRead, ResolvedCacheError> {
         if let Some(marker) = self.read_eviction_marker(digest)? {
             return Ok(JournalRead::Evicted {
                 marker: Box::new(marker),
@@ -1978,20 +2012,12 @@ impl ResolvedCacheStore {
                 continue;
             }
             had_file = true;
-            // Slot SELECTION is paths-and-sizes only. A journal slot's own integrity is proven by
-            // its checksummed envelope; re-hashing the whole bundle to decide which slot to read
-            // would put the bundle's byte count behind every pin read, every status listing and
-            // every catalog GET, and it would prove nothing a caller may act on — the load path
-            // ([`validate_complete_metadata`]) still re-hashes before an artifact reaches a
-            // runtime, and every write still validates at full strength.
+            // The envelope protects journal integrity. Completed runtime loads inspect only
+            // saved contract metadata; discovery and maintenance retain their file-size checks.
             match read_journal(&path) {
                 Ok(envelope)
-                    if validate_metadata_shape_with(
-                        &envelope.metadata,
-                        digest,
-                        ContentVerification::PathsAndSizesOnly,
-                    )
-                    .is_ok() =>
+                    if validate_metadata_shape_with(&envelope.metadata, digest, verification)
+                        .is_ok() =>
                 {
                     valid.push(envelope)
                 }
@@ -2028,14 +2054,19 @@ impl ResolvedCacheStore {
         digest: &str,
         metadata: &ResolvedCacheMetadata,
     ) -> Result<(), ResolvedCacheError> {
-        // Shape only (sc-21534): a journal write records a state or usage transition; it never
-        // changes bundle bytes, and re-hashing the closure here charged a full-bundle SHA-256 to
-        // every usage stamp and pin flip. Every boundary that STAMPS `Complete` content proves it
-        // itself immediately before writing (`record_complete` / `publish_staged` / `recover`'s
-        // receipt path run a full `artifact.validate()`), and the load boundary
-        // (`acquire_complete`) re-hashes before any bytes reach a runtime.
-        validate_metadata_shape_with(metadata, digest, ContentVerification::PathsAndSizesOnly)?;
-        let generation = match self.read_metadata_unlocked(digest) {
+        self.write_metadata_unlocked_with(digest, metadata, ContentVerification::PathsAndSizesOnly)
+    }
+
+    fn write_metadata_unlocked_with(
+        &self,
+        digest: &str,
+        metadata: &ResolvedCacheMetadata,
+        verification: ContentVerification,
+    ) -> Result<(), ResolvedCacheError> {
+        // A usage stamp changes the journal, not model bytes. Use the caller's policy so
+        // completed runtime loads never walk the bundle merely to record their lease.
+        validate_metadata_shape_with(metadata, digest, verification)?;
+        let generation = match self.read_metadata_unlocked_with(digest, verification) {
             Ok(JournalRead::Valid { .. }) => {
                 highest_generation(&self.inner.root.join("entries").join(digest))?
                     .checked_add(1)
@@ -3367,6 +3398,10 @@ fn validate_metadata_shape_with(
         validate_pending_derivative_shape(&metadata.artifact)?;
     } else {
         match verification {
+            ContentVerification::PublishedMetadata => metadata
+                .artifact
+                .validate_metadata()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
             ContentVerification::RehashEveryFile => metadata
                 .artifact
                 .validate()
@@ -3423,31 +3458,6 @@ fn validate_metadata_shape_with(
     Ok(())
 }
 
-/// Full-strength validation of a complete entry, with the content re-read gated on a receipt.
-///
-/// sc-21534 established that this is the ONE boundary that must refuse a content-altered bundle,
-/// and it earned that by re-hashing the whole closure. The cost of asking, though, was paid on
-/// every acquisition rather than every change: a 19 GB bundle measured ~61 s of SHA-256 between
-/// "Worker claimed job" and "Preparing N image(s)", on a bundle whose bytes had not moved since the
-/// last job asked the same question and got the same answer.
-///
-/// So the answer is now recorded. A successful content pass stamps the closure's stat identity
-/// (`ClosureFileStat` — bundle-relative path, size, mtime, per file) into the entry's
-/// [`ClosureContentReceipt`] sidecar, and a later acquisition that observes the SAME identity is
-/// entitled to the recorded verdict without re-reading the bytes. Anything else — a receipt that is
-/// absent or unreadable, a file whose size or mtime moved, a closure whose membership changed —
-/// falls straight back to the full re-hash and re-stamps.
-///
-/// What is NOT weakened: the paths-and-sizes pass still runs unconditionally on both branches, so
-/// presence, sizes, confinement, closure shape, artifact identity and `verified_bytes` are proven
-/// at every acquisition exactly as before. The receipt only ever elides re-reading bytes that no
-/// filesystem operation has touched. A write to a bundle file cannot leave both size and mtime
-/// unchanged by accident, which is the drift this boundary exists to catch (see `ClosureFileStat`
-/// for what this does and does not claim).
-///
-/// Every caller holds the entry's metadata lock, which is what makes the read-decide-write below a
-/// single transition rather than three racing ones. Entries that predate receipts simply have none:
-/// their first acquisition after upgrade hashes once, as today, and stamps.
 /// Whether a recorded verdict has stood longer than [`CONTENT_RECEIPT_MAX_AGE_SECONDS`].
 ///
 /// Fails CLOSED in both odd directions. A receipt stamped in the future — a clock that moved
@@ -3561,36 +3571,14 @@ impl EntryListing {
     }
 }
 
-/// How thoroughly a complete entry's own bundle bytes are re-verified.
+/// Verification policy chosen by the operation that owns the cache entry.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContentVerification {
-    /// Re-reads and re-hashes every bundle file. The cost is proportional to the bundle size.
-    ///
-    /// The load boundary selects this mode whenever it cannot redeem a recorded verdict — see
-    /// [`validate_complete_metadata`] and [`ClosureContentReceipt`] — which is the case on a first
-    /// acquisition, after any change to the closure's stat identity, and once a standing verdict
-    /// passes [`CONTENT_RECEIPT_MAX_AGE_SECONDS`]. It is no longer entered on *every* acquisition.
+    /// Parse the saved contract only; never stat or verify completed model files.
+    PublishedMetadata,
+    /// Explicit maintenance or publication checks may re-read every bundle file.
     RehashEveryFile,
-    /// Validates identity, shape, confinement, file presence and sizes, but does not re-hash file
-    /// contents. Used by every path that is *reading* rather than loading: journal slot selection,
-    /// the status listing, the local-tier scan, and retention. Retention is deciding whether to
-    /// *delete* the bundle rather than load it, so the link/escape confinement checks are what
-    /// keep a removal inside the managed root; re-hashing gigabytes would hold locks that block
-    /// model loads.
-    ///
-    /// This mode is safe on a read path only because it is never the last word: the load boundary
-    /// ([`ResolvedCacheStore::acquire_complete`]) is the one place that proves content, and every
-    /// boundary that stamps `Complete` content (`record_complete`, `publish_staged`, `recover`'s
-    /// receipt resurrection) proves the bytes itself immediately before writing. Do not weaken the
-    /// load boundary — it is what this mode leans on.
-    ///
-    /// What the load boundary now guarantees, precisely, because it is no longer "re-hash every
-    /// time": every acquisition runs THIS mode's checks, and it re-reads the bytes unless a
-    /// recorded verdict covers them — same closure, same per-file size and mtime, taken less than
-    /// [`CONTENT_RECEIPT_MAX_AGE_SECONDS`] ago. So an alteration that moves any of that is still
-    /// refused on the next load, and one that moves none of it is still caught, but within the
-    /// max-age rather than on the very next job. Widening that window, or dropping the age bound,
-    /// is what "weakening the load boundary" would now mean.
+    /// Discovery and retention inspect file presence, confinement and sizes without hashes.
     PathsAndSizesOnly,
 }
 
@@ -3633,6 +3621,10 @@ fn validate_complete_metadata_inner_with_check(
     // and sizes while skipping the content re-read; every other invariant is unchanged, and the
     // cache key deliberately excludes post-copy verification enrichment, so it is unaffected.
     match verification {
+        ContentVerification::PublishedMetadata => metadata
+            .artifact
+            .validate_metadata()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
         ContentVerification::RehashEveryFile => metadata
             .artifact
             .validate_with_check(check)
@@ -3722,11 +3714,11 @@ fn artifact_without_content_hashes(artifact: &ResolvedModelArtifact) -> Resolved
     artifact
 }
 
-fn validate_completion_confinement(
+/// Constant-cost confinement of the managed cache directories, without walking model files.
+fn validate_completion_roots(
     store: &ResolvedCacheStore,
     cache_key: &str,
-    artifact: &ResolvedModelArtifact,
-) -> Result<(), ResolvedCacheError> {
+) -> Result<(PathBuf, PathBuf, PathBuf), ResolvedCacheError> {
     let canonical_root = std::fs::canonicalize(store.root())?;
     if canonical_root != store.root() {
         return Err(ResolvedCacheError::new(
@@ -3759,6 +3751,15 @@ fn validate_completion_confinement(
             "resolved cache bundle escaped its managed entry",
         ));
     }
+    Ok((entry, bundle, canonical_entry))
+}
+
+fn validate_completion_confinement(
+    store: &ResolvedCacheStore,
+    cache_key: &str,
+    artifact: &ResolvedModelArtifact,
+) -> Result<(), ResolvedCacheError> {
+    let (entry, bundle, canonical_entry) = validate_completion_roots(store, cache_key)?;
     for path in artifact
         .closure
         .rebased_paths(artifact.location.root())

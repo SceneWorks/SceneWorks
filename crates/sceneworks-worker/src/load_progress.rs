@@ -407,10 +407,12 @@ impl Context {
                 THREAD_JOB.with(|slot| *slot.borrow_mut() = self.previous.take());
             }
         }
+        let quantization = self.quantization.install();
+        let runtime_weights = candle_gen::quantization_cache::install_runtime_cache_context();
         Guard {
             previous: THREAD_JOB.with(|slot| slot.replace(self.session.clone())),
             _observer: self.activity.install(),
-            _quantization: self.quantization.install(),
+            _quantization: (quantization, runtime_weights),
         }
     }
     pub(crate) fn scope<F: Future>(&self, future: F) -> ScopedFuture<F> {

@@ -204,14 +204,9 @@ impl ModelResolution {
     /// scan itself was converted: measured at ~175 s for a 5.65 GB bundle, at a software-SHA rate
     /// that scales to roughly half an hour at the 64 GiB default budget.
     ///
-    /// It is safe to drop because this function answers an AVAILABILITY question and never hands
-    /// bytes to a loader. The load boundary re-proves content identity three separate times —
-    /// `ResolvedCacheStore::acquire_complete`, `ModelArtifactResolver::acquire_runtime_lease`, and
-    /// the full-strength journal write that stamps usage — so an artifact admitted here whose
-    /// bytes were altered after publication is refused at the lease and the caller falls back to
-    /// the source tier. Everything a wrong availability answer could depend on is still proven:
-    /// the artifact's identity, its closure shape, that it is confined to the app-owned resolved
-    /// tier, and that every file it claims exists at the recorded size.
+    /// This availability check inspects identity, closure shape, confinement, presence and sizes.
+    /// Publication verifies content before marking the bundle complete; runtime acquisition
+    /// trusts that completed cache under a lease without repeating content verification.
     pub fn local_ready(artifact: ResolvedModelArtifact) -> Result<Self, ExternalLibraryError> {
         artifact
             .validate_paths_and_sizes()
