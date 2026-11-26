@@ -2118,7 +2118,7 @@ async fn trusted_lora_hash(
     }
 
     let identity_before = model_file_identity(file)?;
-    let hash = match sha256_file(api, settings, &job.id, file).await {
+    let hash = match attribution_sha256(api, settings, &job.id, file).await {
         Ok(hash) => hash,
         Err(error) => {
             tracing::warn!(path = %file.display(), %error, "LoRA attribution hash failed");
@@ -2184,6 +2184,31 @@ async fn trusted_loras_for_share(
     loras
 }
 
+/// Full-content SHA-256 of an attribution source, acquired through [`gen_core::ArtifactSeal`] so it
+/// shares the weight loader's proven-digest memo (in process, and persisted across restarts in
+/// `cache/seal-digests`, see `worker_loop.rs`) instead of re-reading the whole file.
+///
+/// The install marker is only a best-effort cache: a sealed or read-only bundle cannot store the
+/// digest back, and a raw hash here then re-read a multi-GB checkpoint on EVERY job (measured
+/// ~18 s per Krea job on a 23.9 GB checkpoint). The seal memo is keyed on the file's whole seal
+/// identity (path chain, entry and target fingerprints), so it never reuses a digest for a file
+/// the seal could see change. Runs on the blocking pool with the worker heartbeat kept alive,
+/// because a cold miss still reads every byte.
+async fn attribution_sha256(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    file: &Path,
+) -> WorkerResult<String> {
+    let file = file.to_path_buf();
+    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
+        gen_core::ArtifactSeal::pin(&file)
+            .map(|seal| seal.content_sha256_hex())
+            .map_err(|error| WorkerError::Io(std::io::Error::other(error.to_string())))
+    });
+    heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
+}
+
 /// Read the digest retained by model import, or backfill one legacy marker once. Hashing failure is
 /// attribution failure, not generation failure: the image remains usable and merely lacks a card.
 async fn trusted_imported_model_hash(
@@ -2203,7 +2228,7 @@ async fn trusted_imported_model_hash(
     }
 
     let identity_before = model_file_identity(&file)?;
-    let hash = match sha256_file(api, settings, &job.id, &file).await {
+    let hash = match attribution_sha256(api, settings, &job.id, &file).await {
         Ok(hash) => hash,
         Err(error) => {
             tracing::warn!(path = %file.display(), %error, "checkpoint attribution hash failed");
