@@ -133,9 +133,9 @@ async fn minimax_h3_image_runs_only_after_its_license_is_accepted_and_admits_its
         "2026-11-10T00:00:00Z",
     )
     .unwrap();
-    // The 21:9 16 MP preset's 6272 px edge and the ~36 MP row's 9408 px edge are this model's own
-    // (SW-7206); one past the declared 9408 edge is refused.
-    for (width, height) in [(6272, 2688), (9408, 4032)] {
+    // The 21:9 16 MP preset's 6272 px edge, the 24 MP ceiling at 21:9, and the declared 9408 edge
+    // inside that ceiling are this model's own (SW-7206); one past the edge is refused.
+    for (width, height) in [(6272, 2688), (7648, 3264), (9408, 2560)] {
         let (status, created) = request(
             app.clone(),
             "POST",
@@ -145,8 +145,19 @@ async fn minimax_h3_image_runs_only_after_its_license_is_accepted_and_admits_its
         .await;
         assert_eq!(status, StatusCode::CREATED, "{width}x{height}: {created}");
     }
-    let (status, over) = request(app.clone(), "POST", "/api/v1/image/jobs", job(9409, 2688)).await;
+    let (status, over) = request(app.clone(), "POST", "/api/v1/image/jobs", job(9409, 2560)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{over}");
+    // Inside the edge but above the declared 24 MP area ceiling (`limits.maxPixels`): the former
+    // ~36 MP 21:9 row is refused at enqueue, by area, rather than shrunk.
+    let (status, over) = request(app.clone(), "POST", "/api/v1/image/jobs", job(9408, 4032)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{over}");
+    assert!(
+        over["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("24.00 MP"),
+        "{over}"
+    );
 }
 
 /// SW-7100 review: retry and duplicate reach the same run-licence gate as the typed image route.
