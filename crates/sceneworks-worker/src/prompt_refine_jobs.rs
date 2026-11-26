@@ -77,6 +77,10 @@ const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
 // short-paragraph budget. Tags retain their output contract within the same ceiling.
 #[cfg(any(test, native_lane))]
 const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 2048;
+// Visual reasoning and the final scene description share this bounded budget on models that
+// support reasoning. The non-reasoning 8B path keeps its existing answer-only ceiling.
+#[cfg(native_lane)]
+pub(crate) const REASONING_DESCRIBE_MAX_NEW_TOKENS: u32 = 8192;
 // A whole shot plan is the longest reply this job ever emits — one JSON object carrying every shot's
 // prompt, states, framing and sound (sc-22713). Truncation there is not a degraded plan but an
 // unparseable one, so it takes the same generous ceiling the captions take.
@@ -95,23 +99,25 @@ fn resolve_max_new_tokens(
     // the worker's caption ceiling, which is far below either card.
     rewriter: Option<crate::qwen_prompt_rewrite::Rewriter>,
 ) -> u32 {
+    explicit_max_new_tokens(payload).unwrap_or(match task {
+        RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
+        RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
+        RefineTask::QwenImageRewrite => rewriter
+            .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
+            .max_new_tokens(),
+        RefineTask::MiniMaxH3ImageExpand => DEFAULT_CAPTION_MAX_NEW_TOKENS,
+        RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
+        RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
+    })
+}
+
+#[cfg(any(test, native_lane))]
+fn explicit_max_new_tokens(payload: &serde_json::Map<String, Value>) -> Option<u32> {
     payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
-        .unwrap_or(match task {
-            RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
-            RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
-            RefineTask::QwenImageRewrite => rewriter
-                .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
-                .max_new_tokens(),
-            // SW-7102: the published recipe's own budget (4096, thinking and answer together) is
-            // read from the prompt files and replaces this fallback when no override is given.
-            RefineTask::MiniMaxH3ImageExpand => DEFAULT_CAPTION_MAX_NEW_TOKENS,
-            RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
-            RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
-        })
 }
 
 /// The engine-built H3 expansion `request` (SW-7102) as the job runs it: the request
@@ -351,15 +357,16 @@ fn base_rules(medium: &str) -> String {
         "- Output exactly one rewritten prompt and nothing else — no explanations, reasoning, \
          commentary, options, or labels."
             .to_owned(),
-        format!(
-            "- Preserve the user's intent: do not change the subjects, attributes, actions, \
-             relationships, or core setting they described. You may add concrete details only when \
-             they make the {medium} more coherent and stay consistent with the user's meaning."
-        ),
-        "- If the user's prompt is already detailed and on-guide, make only minimal edits for \
-         fluency."
+        "- Preserve the user's intent: do not change the subjects, attributes, actions, \
+             relationships, or core setting they described, except details explicitly excluded by \
+             the user. Do not invent or alter body support, limb positions, gaze, garments, props \
+             or camera specifications. Improve wording while preserving the remaining facts."
             .to_owned(),
-        "- Follow the guide's recommended structure, phrasing, and what-to-avoid guidance."
+        "- If the user's prompt is already detailed and on-guide, make only minimal edits for \
+         fluency and the requested exclusions."
+            .to_owned(),
+        "- Follow the guide's recommended structure, phrasing, and what-to-avoid guidance where \
+         compatible with the user's exclusions. Examples in a guide are not facts to add to the scene."
             .to_owned(),
         "- Match the user's language: if their prompt is not in English, respond in the same \
          language."
@@ -811,7 +818,10 @@ pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -
         (DescribeStyle::Tags, false) => IMAGE_DESCRIBE_TAGS_V1,
         (DescribeStyle::Tags, true) => IMAGE_DESCRIBE_MOODBOARD_TAGS_V1,
     };
-    let system = magic_section_from(asset, "SYSTEM");
+    let system = sceneworks_core::dataset_batch_describe::render_scene_observation(
+        &magic_section_from(asset, "SYSTEM"),
+        true,
+    );
     let mut user = magic_section_from(asset, "USER");
     if user.is_empty() {
         user = match (style, multi) {
@@ -950,6 +960,7 @@ pub(crate) async fn run_prompt_refine_job(
         weights_dir,
         system,
         user_message,
+        prompt_exclusions,
         h3_expand,
     } = parse_refine_request(settings, job).await?;
     // SW-7102: an expansion runs the request the engine assembled; only its reply contract travels
@@ -1070,6 +1081,7 @@ pub(crate) async fn run_prompt_refine_job(
             Value,
             Value,
             crate::minimax_h3_image_prompt_expand::Recovery,
+            gen_core::core_llm::ThinkingMode,
         )> {
             emit_event(
                 "prompt_refine_load_start",
@@ -1100,8 +1112,16 @@ pub(crate) async fn run_prompt_refine_job(
                 // SW-7102: the engine-built expansion request keeps its messages, sampling recipe,
                 // budget, reasoning knobs and reply schema; it gains this job's cancel flag,
                 // progress observer and KV opt-in, and (SW-7204) `auto` checked linearly.
-                let request = if let Some(request) = prepared_request {
-                    prepare_expansion_request(request, blocking_cancel.clone(), kv_compression)
+                let mut request = if let Some(request) = prepared_request {
+                    let mut request =
+                        prepare_expansion_request(request, blocking_cancel.clone(), kv_compression);
+                    let policy = sceneworks_core::options::prompt_content::exclusion_instruction(
+                        &prompt_exclusions,
+                    );
+                    if !policy.is_empty() {
+                        request.messages.push(Message::user(policy));
+                    }
+                    request
                 } else {
                     let mut messages = Vec::with_capacity(2);
                     if !system.trim().is_empty() {
@@ -1238,8 +1258,21 @@ pub(crate) async fn run_prompt_refine_job(
                         }
                     }
                 };
-                let (mut output, mut kv_cache) =
-                    generate_refined(refiner, &request, &mut on_event, &job_id)?;
+                let mut kv_cache = Value::Null;
+                let mut final_thinking = request.thinking;
+                let mut output = crate::prompt_content_guard::generate_checked(
+                    &mut request,
+                    &prompt_exclusions,
+                    &job_id,
+                    task == RefineTask::ImageDescribe && image_reference_count == 1,
+                    |request| {
+                        final_thinking = request.thinking;
+                        let (output, kv) =
+                            generate_refined(refiner, request, &mut on_event, &job_id)?;
+                        kv_cache = kv;
+                        Ok(output)
+                    },
+                )?;
                 // An expansion whose reasoning used up the whole budget wrote no caption (or not
                 // one whole sentence of it). Rather than fail, ask again on the same resident model
                 // with reasoning off: the schema constraint then applies from the first token, so
@@ -1260,8 +1293,20 @@ pub(crate) async fn run_prompt_refine_job(
                         "MiniMax-H3-Image prompt expansion: the reasoning used the whole budget; \
                          asking again with reasoning off"
                     );
-                    let retry = answer_only_expansion_request(&request);
-                    (output, kv_cache) = generate_refined(refiner, &retry, &mut on_event, &job_id)?;
+                    let mut retry = answer_only_expansion_request(&request);
+                    output = crate::prompt_content_guard::generate_checked(
+                        &mut retry,
+                        &prompt_exclusions,
+                        &job_id,
+                        false,
+                        |request| {
+                            final_thinking = request.thinking;
+                            let (output, kv) =
+                                generate_refined(refiner, request, &mut on_event, &job_id)?;
+                            kv_cache = kv;
+                            Ok(output)
+                        },
+                    )?;
                     recovery = crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetry;
                 }
                 // SW-7204: an expansion records what it decoded with.
@@ -1274,7 +1319,7 @@ pub(crate) async fn run_prompt_refine_job(
                 } else {
                     Value::Null
                 };
-                (output, kv_cache, decode, recovery)
+                (output, kv_cache, decode, recovery, final_thinking)
             };
 
             Ok(output)
@@ -1314,8 +1359,17 @@ pub(crate) async fn run_prompt_refine_job(
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    let (output, kv_cache, decode, recovery) =
+    let (output, kv_cache, decode, recovery, final_thinking) =
         result.map_err(|error| task_join_error("prompt refine task join", error))??;
+    let thinking_mode_name = if final_thinking == thinking_mode {
+        thinking_mode_name
+    } else {
+        match final_thinking {
+            gen_core::core_llm::ThinkingMode::Auto => "auto",
+            gen_core::core_llm::ThinkingMode::Enabled => "enabled",
+            gen_core::core_llm::ThinkingMode::Disabled => "disabled",
+        }
+    };
     let h3_expand_reply = h3_expand_reply.map(|mut reply| {
         reply.decode = decode;
         reply.recovery = recovery;

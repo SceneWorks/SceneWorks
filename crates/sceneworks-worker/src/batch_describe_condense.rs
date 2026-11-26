@@ -432,6 +432,7 @@ pub(crate) fn measure_edited(
 /// is over a limit (counting the variable-value reserve), is not one plain prompt, or names a
 /// different set of person labels than the fields. Returns `None` when the job was canceled
 /// meanwhile.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn condense_fields(
     api: &ApiClient,
     settings: &Settings,
@@ -439,13 +440,19 @@ pub(crate) async fn condense_fields(
     describer: &dyn BatchDescriber,
     fit: &FitTarget,
     fields: &[String; DESCRIBE_FIELDS.len()],
+    exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
     (index, total): (usize, usize),
 ) -> WorkerResult<Option<Condensed>> {
     let labels = field_labels(fields);
     let token_bound = condense_token_bound(fit.limit, fit.counter.is_some());
     // Before any reply, expect about three mentions of each person.
     let mut words = condense_word_target(token_bound, condense_char_bound(), labels.len() * 3);
-    let user = condense_user(fields);
+    let policy = sceneworks_core::options::prompt_content::exclusion_instruction(exclusions);
+    let user = if policy.is_empty() {
+        condense_user(fields)
+    } else {
+        format!("{}\n\n{policy}", condense_user(fields))
+    };
     let mut last: Option<Measured> = None;
     for attempt in 0..2 {
         if let Some(previous) = &last {
@@ -480,7 +487,13 @@ pub(crate) async fn condense_fields(
             .await?;
         }
         let cancel = CancelFlag::new();
-        let generation = describer.condense(condense_system(words), user.clone(), cancel.clone());
+        let system = if policy.is_empty() {
+            condense_system(words)
+        } else {
+            format!("{}\n\n{policy}", condense_system(words))
+        };
+        let generation =
+            describer.condense(system, user.clone(), cancel.clone(), exclusions.to_vec());
         let (was_canceled, reply) =
             StreamSupervisor::new(cancel, generation, progress_report_interval(settings), None)
                 .wait(api, settings, &job.id)

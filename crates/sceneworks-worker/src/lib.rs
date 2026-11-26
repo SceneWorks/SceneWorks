@@ -647,6 +647,8 @@ mod face_likeness;
 // Character Studio Assets; routed as the `face_likeness_compare` job type.
 mod face_likeness_compare_jobs;
 use face_likeness_compare_jobs::*;
+#[cfg(any(test, native_lane))]
+mod prompt_content_guard;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
 // SW-7082 — the dataset prompt-batch describe job: a vision-language describer over a training

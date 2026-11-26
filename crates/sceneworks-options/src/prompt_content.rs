@@ -10,6 +10,33 @@ pub enum PromptExclusion {
     Style,
 }
 
+/// Remove content requests before adding prohibitions. Keeping both was causing VLMs to
+/// satisfy the earlier clothing/style sections despite the exclusion suffix. The headings
+/// are human-readable in the editable prompt, and custom text outside these sections survives.
+pub fn select_content_sections(prompt: &str, exclusions: &[PromptExclusion]) -> String {
+    let mut omit = false;
+    let mut lines = Vec::new();
+    for line in prompt.lines() {
+        if line.trim().starts_with("# ") {
+            omit = false;
+        }
+        if let Some(heading) = line.trim().strip_prefix("## ") {
+            let category = heading.split_whitespace().next().unwrap_or("");
+            omit = match category {
+                "APPEARANCE" => exclusions.contains(&PromptExclusion::IdentifyingCharacteristics),
+                "CLOTHING" => exclusions.contains(&PromptExclusion::ClothingAndAccessories),
+                "STYLE" => exclusions.contains(&PromptExclusion::Style),
+                "COLOR" => exclusions.contains(&PromptExclusion::ColorMode),
+                _ => false,
+            };
+        }
+        if !omit {
+            lines.push(line);
+        }
+    }
+    lines.join("\n").trim().to_owned()
+}
+
 /// Compact instruction for providers such as JoyCaption with a 4,000-character input limit.
 pub fn compact_exclusion_instruction(exclusions: &[PromptExclusion]) -> String {
     let selected: Vec<_> = [
@@ -31,7 +58,7 @@ pub fn compact_exclusion_instruction(exclusions: &[PromptExclusion]) -> String {
         return String::new();
     }
     format!(
-        "Omit throughout, overriding prior content rules: {}. Keep output format; use empty fields if excluded. Never infer nudity or state omissions.",
+        "Omit everywhere, overriding prior content rules: {}. Preserve format; excluded fields empty. No nudity, omission notices or substitute objects.",
         selected.join("; ")
     )
 }
@@ -40,8 +67,8 @@ pub fn compact_exclusion_instruction(exclusions: &[PromptExclusion]) -> String {
 /// turn too: real-image runs showed the 8B captioner ignoring a short system-only suffix.
 pub fn exclusion_instruction(exclusions: &[PromptExclusion]) -> String {
     let rules: Vec<_> = [
-        (PromptExclusion::IdentifyingCharacteristics, "Do not mention ANY identifying or physical characteristics of a person: no hair color, length or style, facial hair, skin color or tone, ethnicity, eye color, age, build, tattoos, piercings or makeup. Delete these details from an original prompt instead of paraphrasing them. Even uncolored references to hair or skin are excluded. Keep their pose, gaze and expression; use neutral nouns or the existing person labels."),
-        (PromptExclusion::ClothingAndAccessories, "Do not mention or describe ANY clothing or accessories at all, in any sentence or field. Omit garments, underwear, footwear, jewelry, necklaces, hats, bags, straps, and worn or carried equipment, including saddles, stirrups and harnesses and their colors, materials and fit. Also omit equipment draped across or resting on a person. Remove these details even from pose, lighting highlights and reflections. Describe body positions without referring to what is worn. Do not infer nudity."),
+        (PromptExclusion::IdentifyingCharacteristics, "Do not mention ANY identifying or physical characteristics of a person: no hair color, length or style, facial hair, skin color or tone, ethnicity, eye color, age, build, tattoos, piercings or makeup. Delete these details from an original prompt instead of paraphrasing them. Even uncolored references to hair or skin are excluded. Keep their permitted pose, head orientation, gaze and expression; use neutral nouns or the existing person labels."),
+        (PromptExclusion::ClothingAndAccessories, "Do not mention or describe ANY clothing or accessories at all, in any sentence or field. Omit garments, underwear, footwear, jewelry, necklaces, hats, bags, straps, and worn or carried equipment, including saddles, stirrups and harnesses and their colors, materials and fit. Also omit equipment draped across or resting on a person. Remove these details even from pose, lighting highlights and reflections. Describe body positions without referring to what is worn. Never replace excluded items with anonymous objects, shapes, dark forms or coverings on/near the person. Do not describe missing clothing, bare or uncovered body parts or infer nudity."),
         (PromptExclusion::ColorMode, "Do not say or imply whether the image is color or black-and-white. Do not mention monochrome, grayscale, sepia, black-and-white palettes, color film or the absence of color. Object colors may be described unless another exclusion forbids them."),
         (PromptExclusion::Style, "Do not mention the medium or artistic style. Do not use photograph, photographic, illustration, painting, drawing, render, sketch, cinematic or editorial style, film look, studio aesthetic or an artist/style attribution. If the format has a style field, return \"style\": \"\"; do not move its content to other fields. Describe the visible scene, pose, framing and lighting directly."),
     ].into_iter().filter_map(|(key, rule)| exclusions.contains(&key).then_some(rule)).collect();
@@ -54,6 +81,44 @@ pub fn exclusion_instruction(exclusions: &[PromptExclusion]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_selection_removes_requests_without_losing_pose_or_other_sections() {
+        let prompt = "Intro\n## POSE\ncontacts\n## APPEARANCE\nhair request\n## CLOTHING\ngarment request\n## STYLE\nmedium request\n### nested\nstyle example\n## COLOR\nmode request\n## LIGHTING\nshadows\n# Other guide\nretain";
+        let keys = [
+            PromptExclusion::IdentifyingCharacteristics,
+            PromptExclusion::ClothingAndAccessories,
+            PromptExclusion::Style,
+            PromptExclusion::ColorMode,
+        ];
+        for mask in 0..16 {
+            let selected: Vec<_> = keys
+                .iter()
+                .enumerate()
+                .filter_map(|(i, k)| (mask & (1 << i) != 0).then_some(*k))
+                .collect();
+            let text = select_content_sections(prompt, &selected);
+            for (i, requested) in [
+                "hair request",
+                "garment request",
+                "medium request",
+                "mode request",
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert_eq!(
+                    text.contains(requested),
+                    mask & (1 << i) == 0,
+                    "{mask}: {requested}"
+                );
+            }
+            assert!(
+                text.contains("contacts") && text.contains("shadows") && text.contains("retain")
+            );
+            assert_eq!(text.contains("style example"), mask & 4 == 0);
+        }
+    }
 
     #[test]
     fn exclusions_are_optional_independent_and_bounded() {

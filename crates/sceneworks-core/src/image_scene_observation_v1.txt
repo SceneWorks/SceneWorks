@@ -1,0 +1,34 @@
+## POSE — visible support and limb placement
+Establish the pose before describing other details. Trace the torso, both arms and both legs separately in the image. Distinguish the direction of the whole body from the direction of the chest, hips and head. Give positions relative to the frame, the surface and other body parts.
+
+Name the visible support points: hands, forearms, elbows, knees, feet, hips or back. Only call a part a support when it actually contacts the surface. A vertical or downward forearm stays ABOVE a supporting surface: it is not resting flat against that surface just because the hand supports the body. Check wrist, elbow and shoulder separately. Distinguish a torso leaning forward on supporting arms from a torso lying flat, sitting upright or resting on forearms. Describe whether the hips are raised or resting on the surface. Follow bent legs from thigh through knee to lower leg; a lower leg extending backward does not make the entire leg straight.
+
+Use anatomical left/right only when the side is clear; otherwise use frame-left/frame-right or nearer/farther limb. Never invent a hand position behind an occluder, finger configuration, exact angle, hidden foot placement or toe direction. If actual hand contact is hidden, describe the visible arm direction and say contact is obscured; do not assert a flat palm. Describe the visible segment and state what is obscured. Check that the separate limb descriptions agree with the support points and overall pose.
+
+In environmental and full-body views, keep hand detail coarse: describe the visible arm direction and broad support, without palm orientation, finger configuration or exact relative hand offsets. Do not assert that a palm is flat or that one hand is ahead of the other at that scale. Reserve these fine details for a clearly resolved close-up of the hands. Contact hidden behind a near edge stays unspecified.
+
+Separate face orientation from pupil direction. For environmental scenes, full-body images and other views that are not close-up portraits, describe head orientation and expression only: omit claims about eye direction, eye contact, looking at the camera, viewer or lens. Fine eye details cannot be reliably resolved at that scale. For a close-up portrait only, eye direction may be stated if unmistakably visible. Head orientation alone never proves eye direction.
+
+## SUBJECTS
+Describe subject count, expression and interactions. Use consistent references. Prioritize visible facts over mood labels. Never add a person, object or gesture to make the description more complete.
+
+## APPEARANCE
+Include clearly visible personal appearance, without guessing hidden characteristics or ethnicity.
+
+## CLOTHING
+Describe visible garments, footwear, jewelry, accessories and worn/carried equipment: type, material, fit, layering and placement. Use a broad category when the exact garment cut or material cannot be seen; never invent hidden fasteners or layers. Distinguish worn objects from separate objects nearby. Trace visible legs through the ankle and foot before deciding footwear is a loose prop. Keep equipment separate from anatomy. Do not turn worn footwear into loose objects or infer nudity from missing garment details.
+
+## ENVIRONMENT
+Describe architecture, furniture, surfaces, props and vegetation, positioned at frame-left/right and in foreground/background. Distinguish bedding from upholstery. Quote only legible text.
+
+## CAMERA
+Describe framing, viewpoint, crop, subject placement, perspective and visible focus/blur. Do not guess a camera format, make, lens, aperture, film stock or numerical settings. Describe depth of field from the actual sharpness of scene layers.
+
+## LIGHTING
+Describe evidenced light direction, hardness, highlights and shadows. Do not invent unseen windows, fill lamps, rim lights or a studio setup. A visible lamp is not necessarily illuminating the scene.
+
+## STYLE
+Describe the visible medium and aesthetic briefly. Give an era only when there is specific visible evidence, rather than assigning a decade from an old-fashioned room. Do not infer a studio location or lighting setup from a formal pose. Avoid invented process, stock, glamour labels and generic praise.
+
+## COLOR
+State the image's color mode and palette when useful. Describe visible object colors without treating tonal values as evidence of the person's actual coloring.

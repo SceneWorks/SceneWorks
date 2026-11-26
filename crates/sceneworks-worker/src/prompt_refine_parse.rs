@@ -19,6 +19,7 @@ pub(super) struct RefineRequest {
     pub(super) weights_dir: PathBuf,
     pub(super) system: String,
     pub(super) user_message: String,
+    pub(super) prompt_exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
     /// SW-7102: the engine-built MiniMax-H3-Image expansion request and what its reply is checked
     /// against. `None` for every other task.
     pub(super) h3_expand: Option<H3Expand>,
@@ -287,8 +288,12 @@ pub(super) async fn parse_refine_request(
         )) =>
         {
             use sceneworks_core::dataset_batch_describe as describe;
-            if matches!(task, RefineTask::Rewrite | RefineTask::ImageDescribe) {
+            if task == RefineTask::Rewrite {
                 thinking_mode = gen_core::core_llm::ThinkingMode::Disabled;
+            } else if task == RefineTask::ImageDescribe {
+                thinking_mode = gen_core::core_llm::ThinkingMode::Enabled;
+                max_new_tokens =
+                    explicit_max_new_tokens(payload).unwrap_or(REASONING_DESCRIBE_MAX_NEW_TOKENS);
             }
             // A non-string tier is refused, never read as "no tier": that would run the default.
             let requested = match payload.get("variant") {
@@ -438,6 +443,16 @@ pub(super) async fn parse_refine_request(
         })?;
     let instruction = sceneworks_core::options::prompt_content::exclusion_instruction(&exclusions);
     if !instruction.is_empty() {
+        system =
+            sceneworks_core::options::prompt_content::select_content_sections(&system, &exclusions);
+        user_message = if task == RefineTask::Rewrite {
+            user_message
+        } else {
+            sceneworks_core::options::prompt_content::select_content_sections(
+                &user_message,
+                &exclusions,
+            )
+        };
         system.push_str("\n\n");
         system.push_str(&instruction);
         user_message = if task == RefineTask::Rewrite {
@@ -457,6 +472,7 @@ pub(super) async fn parse_refine_request(
         gen_core::core_llm::ThinkingMode::Disabled => "disabled",
     };
     Ok(RefineRequest {
+        prompt_exclusions: exclusions,
         task,
         original_prompt,
         image_refs,

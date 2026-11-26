@@ -1359,24 +1359,25 @@ fn build_image_describe_messages_returns_prose_system_and_user() {
 fn single_image_description_covers_pose_and_scene_in_detail() {
     let (system, _) = build_image_describe_messages(DescribeStyle::Prose, false);
     for detail in [
-        "OWN left and right",
-        "elbow bend",
-        "fingers",
-        "knee bend",
-        "ROOM AND ENVIRONMENT",
+        "visible support points",
+        "both arms and both legs",
+        "finger configuration",
+        "## ENVIRONMENT",
         "depth of field",
-        "camera height and angle",
-        "LIGHTING",
-        "CLOTHING AND ACCESSORIES",
-        "STYLE AND ERA",
+        "viewpoint",
+        "## LIGHTING",
+        "## CLOTHING",
+        "## STYLE",
+        "## COLOR",
     ] {
         assert!(
             system.contains(detail),
             "missing detailed guidance: {detail}"
         );
     }
+    assert!(!system.contains("{{scene_observation}}"));
+    assert!(!system.contains("350–550"));
 }
-
 // ── sc-8205 (epic 8203): captionStyle="tags" describe variant ──
 
 #[test]
@@ -1500,7 +1501,7 @@ fn builtin_booru_model_declarations_select_the_tags_asset() {
         let (system, _) = build_image_describe_messages(style, false);
         assert_eq!(style, DescribeStyle::Prose);
         assert!(
-            system.contains("natural-language description"),
+            system.contains("Output ONLY flowing prose paragraphs"),
             "absent and explicit prose select the prose asset"
         );
         assert!(!system.contains("comma-separated booru"));
