@@ -1303,16 +1303,14 @@ test("SCAIL proof tooling and the worker share the 26.2 macOS minimum and compar
   }
 });
 
-test("standalone SCAIL refusal authenticates both compiled candidate digests and identifies the leased device", async () => {
+test("standalone SCAIL refusal authenticates the compiled capture index and identifies the leased device", async () => {
   const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
   const { scailHostIdentity } = await import("./tier2-ab.mjs");
-  const [index, coverage, approvals] = await Promise.all([readFile(path.join(root, "config/scail2-plural-memory.json")),
-    readFile(path.join(root, "config/scail2-memory-pin-coverage.json")),
+  const [index, approvals] = await Promise.all([readFile(path.join(root, "config/scail2-plural-memory.json")),
     readFile(path.join(root, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8")]);
-  assert.deepEqual(scailPackageDigests(index, coverage, approvals), { indexSha256: sha256(index), coverageSha256: sha256(coverage) });
-  assert.throws(() => scailPackageDigests(index + " ", coverage, approvals), /APPROVED_INDEX_SHA256/);
-  assert.throws(() => scailPackageDigests(index, coverage + " ", approvals), /APPROVED/);
-  assert.throws(() => scailPackageDigests(index, coverage, ""), /missing or ambiguous/);
+  assert.deepEqual(scailPackageDigests(index, approvals), { indexSha256: sha256(index) });
+  assert.throws(() => scailPackageDigests(index + " ", approvals), /APPROVED_INDEX_SHA256/);
+  assert.throws(() => scailPackageDigests(index, ""), /missing or ambiguous/);
   for (const backend of ["mlx", "cuda"]) {
     const mlx = backend === "mlx";
     const uuid = "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0", luid = "luid_0x00000000_0x00000002";
@@ -1357,7 +1355,6 @@ test("SCAIL product reads the actual projector output, including shared receipt 
   for (const backend of ["mlx", "cuda"]) {
     const mlx = backend === "mlx", counts = mlx ? [2, 6] : [2, 3, 4, 5, 6];
     const revision = "1".repeat(40);
-    const contract = { compiledPin: revision, coverage: [], closures: {} };
     const receipt = { accepted: true, run_id: "4321", run_attempt: "1", contract: {protocol: "scail2-plural-fit-v1", head: revision},
       hardware: { name:"board", chip:"board", driver_version:"runtime", os_build:"runtime" }, counts:{}, logs:{} };
     if (!mlx) Object.assign(receipt.hardware, { uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", "memory.total": "97887" });
@@ -1407,13 +1404,13 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         path.join(dir, "receipt.json"), path.join(dir, "review.json")], { encoding:"utf8" });
       assert.equal(produced.status, 0, produced.stderr); projected.push(JSON.parse(produced.stdout));
     }
-    const read = (pool, compatibility = contract) => scailFitEvidence(pool, backend, compatibility);
+    const read = (pool, options) => scailFitEvidence(pool, backend, options);
     const rows = read(projected);
     assert.deepEqual(rows.map((r) => r.references), counts);
     // A Mac host reports its product version; the capture recorded a different OS build ("runtime").
     const host = { device: "board", runtime: mlx ? "27.0.1" : "runtime", env: {},
       ...(!mlx ? { deviceTotalMib: 97887, captureAdapter: projected[0].bounds.capture_adapter } : {}) };
-    const scoped = (pool, current = host) => read(pool, { ...contract, host: current });
+    const scoped = (pool, current = host) => read(pool, { host: current });
     if (mlx) {
       // SW-7271: any macOS at or above 26.2 matches the chip's evidence whatever build it ran on;
       // below the minimum the refusal names it.
@@ -1513,40 +1510,33 @@ test("SCAIL product reads the actual projector output, including shared receipt 
     wrong((r) => { (mlx ? r.bounds.unified : r.bounds.host).classified_peak_bytes = 2; });
     wrong((r) => { if (mlx) r.axes.floor_unified_bytes=154; else r.axes.floor_device_bytes=176; });
     wrong((r) => { (mlx ? r.bounds.unified : r.bounds.host).co_live_extra_bytes = Number.MAX_SAFE_INTEGER; });
-    const target = "2".repeat(40), closure = {digest:sha256("provider"),sharedContractDigest:sha256("shared")};
-    const coverage = {capture_revision:revision,target_revision:target,backend, provider_digest:closure.digest,
-      shared_contract_digest:closure.sharedContractDigest, tree_diff_sha256:sha256("diff")};
-    const changed = { compiledPin:target, coverage:[coverage], closures:{inferenceRevision:target,providers:{[(mlx?"mlx":"candle")+":scail2_14b"]:closure}} };
-    assert.deepEqual(read(projected, changed), rows);
+    // Historical revisions retain their prices and provenance without per-pin approval.
+    const target = "2".repeat(40), historical = structuredClone(projected);
+    for (const row of historical) row.inference_revision = target;
+    const historicalRows = read(historical);
+    const physicalQuotes = (quotes) => quotes.map(({ inferenceRevision, campaign, ...quote }) => quote);
+    assert.deepEqual(physicalQuotes(historicalRows), physicalQuotes(rows));
+    assert.ok(historicalRows.every((row) => row.inferenceRevision === target));
+    wrong((r) => { r.inference_revision = "malformed"; });
     const split = structuredClone(projected), six = split.at(-1);
     six.inference_revision = "3".repeat(40);
     six.artifact_id = 1562;
     six.receipt_sha256 = sha256("separate quiet six run");
-    const both = { ...changed, coverage: [...changed.coverage, { ...coverage, capture_revision: six.inference_revision,
-      tree_diff_sha256: sha256("six to compiled target") }] };
-    assert.throws(() => read(split, changed), /no packaged native/);
-    if (mlx) assert.throws(() => read(split, both), /no packaged native/);
+    if (mlx) assert.throws(() => read(split), /no packaged native/);
     else {
-      const { scailPackageDigests } = await import("./lib/tier2-scail.mjs");
-      const exactSix = structuredClone(split); exactSix[4].inference_revision = target;
-      const indexBytes = JSON.stringify(exactSix), staleApproval = JSON.stringify([]);
-      const approvals = `const APPROVED_INDEX_SHA256: &str = "${sha256(indexBytes)}"; const APPROVED: &str = "${sha256(staleApproval)}";`;
-      assert.deepEqual(read(exactSix, changed).map((r) => r.references), counts);
-      assert.throws(() => scailPackageDigests(indexBytes, JSON.stringify(changed.coverage), approvals), /APPROVED/);
       const archived = structuredClone(split);
       Object.assign(archived[4], {accepted:false, artifact_id:14719969057,
         inference_revision:"7f6c4cca3fc053030bd71f0bfce6886adb762eb6",
         receipt_sha256:"750313a3cdb89dd4a0e4e49b31935949301b309fe9410f2bf0ce47cb4628575f", recovery_certificate_sha256:"dcc7c1eb186b001c75f4a9df2d49dd06501e8064be7d1818adb2ea59031c093f"});
       archived[4].bounds.device_interval = "load_through_completed_rgb";
       archived[4].bounds.device = {...archived[4].bounds.host};
-      const archiveCoverage = {...both, coverage:[coverage, {...both.coverage[1], capture_revision:archived[4].inference_revision}]};
-      assert.equal(read(archived, archiveCoverage).at(-1).recoveryCertificateSha256, archived[4].recovery_certificate_sha256);
+      assert.equal(read(archived).at(-1).recoveryCertificateSha256, archived[4].recovery_certificate_sha256);
       for (const mutate of [r => {r.accepted=true;}, r => {r.receipt_sha256=sha256("other");},
         r => {r.artifact_id+=1;}, r => {delete r.recovery_certificate_sha256;},
         r => {r.recovery_certificate_sha256=sha256("other certification");},
         r => {r.accepted=true; delete r.recovery_certificate_sha256; delete r.bounds.device_interval;},
         r => {r.bounds.device_interval="full_job";}]) {
-        const wrong = structuredClone(archived); mutate(wrong[4]); assert.throws(() => read(wrong, archiveCoverage));
+        const wrong = structuredClone(archived); mutate(wrong[4]); assert.throws(() => read(wrong));
       }
       const partial = structuredClone(archived);
       const partialPin = "f5c9ff80acd00334fd668e4ecc8d56be3347affd";
@@ -1564,8 +1554,7 @@ test("SCAIL product reads the actual projector output, including shared receipt 
           r.bounds.device_interval = "load_through_completed_rgb";
         }
       }
-      const partialCoverage = {...archiveCoverage, coverage:[...archiveCoverage.coverage, {...coverage, capture_revision:partialPin}]};
-      assert.deepEqual(read(partial, partialCoverage).map(r => r.references), counts);
+      assert.deepEqual(read(partial).map(r => r.references), counts);
       for (const [count, change] of [
         [3, r => {delete r.recovery_certificate_sha256;}],
         [3, r => {r.recovery_certificate_sha256=certificates[5];}],
@@ -1580,10 +1569,9 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       ]) {
         const wrong = structuredClone(partial);
         change(wrong.find(r => r.axes.references === count));
-        assert.throws(() => read(wrong, partialCoverage));
+        assert.throws(() => read(wrong));
       }
       const latestPin = "4fdd13cce7f590be0aed3c52a73a9cea9e6d1b54";
-      const latestCoverage = {...both, coverage:[...both.coverage, {...coverage, capture_revision:latestPin}]};
       const latest = structuredClone(partial);
       for (const r of latest) {
         Object.assign(r, {artifact_id:14735122440, receipt_sha256:"d711f34b0c83b54b41b147921b9601fe999b74ccaec8823b6dceadcd6d9fc545",
@@ -1592,7 +1580,7 @@ test("SCAIL product reads the actual projector output, including shared receipt 
         else delete r.recovery_certificate_sha256;
         if (![3,6].includes(r.axes.references)) delete r.bounds.device_interval;
       }
-      assert.deepEqual(read(latest, latestCoverage).map(r => r.references), counts);
+      assert.deepEqual(read(latest).map(r => r.references), counts);
       for (const [count, mutate] of [
         [3, r => {delete r.recovery_certificate_sha256;}], [3, r => {r.recovery_certificate_sha256 = certificates[3];}],
         [3, r => {r.count_accepted = true;}], [6, r => {delete r.bounds.device_interval;}],
@@ -1601,24 +1589,19 @@ test("SCAIL product reads the actual projector output, including shared receipt 
       ]) {
         const wrong = structuredClone(latest);
         mutate(wrong.find(r => r.axes.references === count));
-        assert.throws(() => read(wrong, latestCoverage));
+        assert.throws(() => read(wrong));
       }
-      const joined = read(split, both);
+      const joined = read(split);
       assert.deepEqual(joined.map((r) => [r.references, r.artifactId, r.sha256, r.inferenceRevision]),
         split.map((r) => [r.axes.references, r.artifact_id, r.receipt_sha256, r.inference_revision]));
-      for (const key of ["provider_digest", "shared_contract_digest", "target_revision"]) {
-        assert.throws(() => read(split, { ...both, coverage:[coverage, {...both.coverage[1], [key]:sha256("crossed")}] }));
-      }
       const altered = structuredClone(split);
       altered[4].guard_policy_sha256 = sha256("different capture guard");
-      assert.throws(() => read(altered, both), /no packaged native/);
+      assert.throws(() => read(altered), /no packaged native/);
       altered[4].bounds.device.unsampled_overshoot_upper_bytes -= 1;
-      assert.throws(() => read([...split, altered[4]], both), /different capture guards/);
+      assert.throws(() => read([...split, altered[4]]), /different capture guards/);
       for (const row of altered) row.guard_policy_sha256 = sha256("different capture guard");
-      assert.throws(() => read([...split, ...altered], both), /different capture guards/);
+      assert.throws(() => read([...split, ...altered]), /different capture guards/);
     }
-    assert.throws(() => read(projected, { ...changed, coverage:[] }), /no packaged native/);
-    assert.throws(() => read(projected, { ...changed, coverage:[{ ...coverage, provider_digest:sha256("wrong") }] }), /no packaged native/);
   }
 });
 

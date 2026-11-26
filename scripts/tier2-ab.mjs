@@ -1214,20 +1214,16 @@ async function preflight(env, cfg, report, signal) {
   report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
   if (cfg.routes.some((route) => route.scailCandidate)) {
-    const config = (name) => readFile(path.join(cfg.headDir, "config", name));
     const standalone = cfg.routes.length === 1 && cfg.routes[0].refuse;
     const authenticate = standalone || cfg.backend === "cuda";
-    const [index, coverage, closures] = await Promise.all([config("scail2-plural-memory.json"),
-      config("scail2-memory-pin-coverage.json").catch((error) => { if (!authenticate && error.code === "ENOENT") return "[]"; throw error; }),
-      config("inference-provider-closures.json")]);
+    const index = await readFile(path.join(cfg.headDir, "config/scail2-plural-memory.json"));
     let host, packageDigests;
     if (authenticate) {
       const approvals = await readFile(path.join(cfg.headDir, "crates/sceneworks-worker/src/video_admission/scail2/evidence.rs"), "utf8");
-      packageDigests = scailPackageDigests(index, coverage, approvals);
+      packageDigests = scailPackageDigests(index, approvals);
       host = await scailHostIdentity(cfg.backend, env);
     }
-    const evidence = scailFitEvidence(JSON.parse(index), cfg.backend, { compiledPin: report.head.inferencePin,
-      coverage: JSON.parse(coverage), closures: JSON.parse(closures), host: host && { ...host, env } });
+    const evidence = scailFitEvidence(JSON.parse(index), cfg.backend, { host: host && { ...host, env } });
     for (const item of report.routes.filter((r) => ROUTES[r.id].scailCandidate)) item.nativeFitEvidence = evidence;
     if (standalone) report.routes[0].packagedRefusal = { ...host, ...packageDigests, capBytes: scailPackagedRefusalCapBytes(evidence) };
   }
