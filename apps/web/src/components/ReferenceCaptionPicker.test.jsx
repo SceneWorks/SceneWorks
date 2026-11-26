@@ -104,6 +104,21 @@ describe("ReferenceCaptionPicker", () => {
       ["identifyingCharacteristics", "clothingAndAccessories", "colorMode", "style"]);
   });
 
+  it.each(["q4", "q8", "bf16"])("describes with the installed Qwen3.8-27B %s tier when the 8B is missing", async (tier) => {
+    const onCaption = vi.fn(async () => "A posed subject on a bed");
+    await mount({ onCaption, showPromptOptions: true, visionCaptionReady: false,
+      qwenModel: { variants: [{ variant: tier, installState: "installed" }] } });
+    await act(async () => {
+      const select = container.querySelector("select"); select.value = `qwen38:${tier}`;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await selectReference();
+    await clickAndSettle(container.querySelector('input[type="checkbox"]'));
+    await clickAndSettle(buttonByText("✨ Describe image"));
+    expect(onCaption).toHaveBeenCalledWith("ref-1", undefined, ["identifyingCharacteristics"],
+      { model: "huihui-ai/Huihui-Qwen3.8-27B-abliterated", variant: tier });
+  });
+
   it("uses the selected Loop tier and keeps ordered mood-board references", async () => {
     const onCaption = vi.fn(async () => "fox, snow, daylight");
     const onApply = vi.fn();

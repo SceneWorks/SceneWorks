@@ -1621,6 +1621,29 @@ pub(crate) fn pinned_variant_installed(model: &Value, tier: &str, data_dir: &FsP
             .all(|(_, health)| health.as_ref().is_some_and(|health| health.installed))
 }
 
+/// Shared pinned-tier admission for utility models that load pre-quantised snapshots.
+pub(crate) fn ensure_pinned_variant_installed(
+    model: &Value,
+    tier: &str,
+    data_dir: &FsPath,
+    os: &str,
+) -> Result<(), ApiError> {
+    let mut entry = model.clone();
+    retain_downloads_for_os(&mut entry, os);
+    if pinned_variant_installed(&entry, tier, data_dir) {
+        return Ok(());
+    }
+    let name = model
+        .get("name")
+        .or_else(|| model.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("model");
+    Err(ApiError::model_artifact_conflict(
+        format!("The {tier} tier of {name} is not installed. Download that tier in the Model Manager, or choose a tier that is installed."),
+        "model_artifact_incomplete",
+    ))
+}
+
 // Build the per-variant install state for every selected download entry. Each entry is probed
 // independently against the HF cache using that tier's own `files` filter, so the catalog can
 // advertise (e.g.) bf16 installed while q4 is missing.

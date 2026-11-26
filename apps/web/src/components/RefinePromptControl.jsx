@@ -1,6 +1,8 @@
 import { LOOP_UTILITY_NAME, loopPromptSource, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
 import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
 import { PromptContentOptions } from "./PromptContentOptions.jsx";
+import { installedQwen38Tiers, QWEN38_MODEL_ID, qwen38PromptSource } from "../qwen38Utility.js";
+import { useAppContextOptional } from "../context/AppContext.js";
 import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { formatDecimalGb } from "../formatting.js";
 import { fetchPromptGuide } from "../promptGuides.js";
@@ -37,18 +39,25 @@ export function RefinePromptControl({
   refineModel,
   onDownloadRefineModel,
   loopModel,
+  qwenModel: suppliedQwenModel,
   onDownloadLoopModel,
   // Optional immediate-run mode for callers that need no setup step. Image and Video Studio
   // use the default button so users can choose content exclusions before starting.
   autoStart = false,
 }) {
-  const [useLoop, setUseLoop] = useState(false);
+  const app = useAppContextOptional();
+  const qwenModel = suppliedQwenModel ?? app?.models?.find((entry) => entry.id === QWEN38_MODEL_ID);
+  const installedQwenTiers = installedQwen38Tiers(qwenModel);
+  const [sourceChoice, setSourceChoice] = useState("default");
+  const useLoop = sourceChoice === "loop";
+  const qwenTier = sourceChoice.startsWith("qwen38:") ? sourceChoice.slice(7) : null;
+  const useQwen = Boolean(qwenTier);
   const [promptExclusions, setPromptExclusions] = useState([]);
   const exclusions = promptExclusions.length ? { promptExclusions } : {};
   const [loopVariant, setLoopVariant] = useState(null);
   const selectedTier = loopUtilityTier(loopModel, loopVariant);
-  const source = loopPromptSource(useLoop ? selectedTier : null);
-  const sourceReady = !useLoop || loopTierInstalled(loopModel, selectedTier);
+  const source = useQwen ? qwen38PromptSource(qwenTier) : loopPromptSource(useLoop ? selectedTier : null);
+  const sourceReady = useQwen ? installedQwenTiers.some(([key]) => key === qwenTier) : !useLoop || loopTierInstalled(loopModel, selectedTier);
 
   const [status, setStatus] = useState("idle"); // idle | loading | review | error
   const [refined, setRefined] = useState("");
@@ -65,7 +74,7 @@ export function RefinePromptControl({
   const busy = status === "loading";
   const disabled = !sourceReady || busy || !trimmed || portableFeedbackBlocks(portableFeedback) || typeof refinePrompt !== "function";
 
-  const modelMissing = !useLoop && status === "error" && isModelMissing(refineModel, error);
+  const modelMissing = !useLoop && !useQwen && status === "error" && isModelMissing(refineModel, error);
   const installState = refineModel?.installState;
 
   // When the refinement model finishes downloading (a catalog refresh flips its
@@ -87,7 +96,7 @@ export function RefinePromptControl({
 
   // Start once after the current draft passes server validation.
   useEffect(() => {
-    if (autoStart && !loopModel && !useLoop && !autoStarted.current && trimmed && typeof refinePrompt === "function" && !portableFeedbackBlocks(portableFeedback)) {
+    if (autoStart && !loopModel && !installedQwenTiers.length && !useLoop && !useQwen && !autoStarted.current && trimmed && typeof refinePrompt === "function" && !portableFeedbackBlocks(portableFeedback)) {
       autoStarted.current = true;
       handleRefine();
     }
@@ -159,19 +168,22 @@ export function RefinePromptControl({
         setStatus("idle");
         setError("");
       }} />
-      {loopModel || useLoop ? (
+      {loopModel || useLoop || installedQwenTiers.length || useQwen ? (
         <label>
           Refinement model
-          <select disabled={busy} value={useLoop ? "loop" : "default"} onChange={(event) => {
-            setUseLoop(event.target.value === "loop");
+          <select disabled={busy} value={sourceChoice} onChange={(event) => {
+            setSourceChoice(event.target.value);
             setStatus("idle");
             setError("");
           }}>
             <option value="default">{modelName}</option>
-            <option value="loop">{LOOP_UTILITY_NAME}</option>
+            {loopModel || useLoop ? <option value="loop">{LOOP_UTILITY_NAME}</option> : null}
+            {useQwen && !sourceReady ? <option value={sourceChoice}>Qwen3.8-27B {qwenTier} — not installed</option> : null}
+            {installedQwenTiers.map(([tier, label]) => <option key={tier} value={`qwen38:${tier}`}>Qwen3.8-27B — {label}</option>)}
           </select>
         </label>
       ) : null}
+      {useQwen && !sourceReady ? <p className="inline-warning" role="status">This Qwen3.8-27B tier is no longer installed. Choose an installed tier or install it in the Model Manager.</p> : null}
       {useLoop ? (
         <LoopUtilityTier model={loopModel} tier={selectedTier} disabled={busy}
           onChange={(tier) => { setLoopVariant(tier); setStatus("idle"); setError(""); }}

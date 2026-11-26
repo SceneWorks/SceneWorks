@@ -1,6 +1,8 @@
 import { LOOP_UTILITY_NAME, loopTierInstalled, loopUtilityTier } from "../loopUtility.js";
 import { LoopUtilityTier } from "./LoopUtilityTier.jsx";
 import { PromptContentOptions } from "./PromptContentOptions.jsx";
+import { installedQwen38Tiers, QWEN38_MODEL_ID, qwen38PromptSource } from "../qwen38Utility.js";
+import { useAppContextOptional } from "../context/AppContext.js";
 // Shared reference-image → prompt picker (epic 8203, sc-8208).
 //
 // Factored out of StructuredPromptBuilder so BOTH reference-image flows share one
@@ -49,6 +51,7 @@ export default function ReferenceCaptionPicker({
   // Reference-image caption gate (sc-8110).
   visionCaptionReady = true,
   loopModel,
+  qwenModel: suppliedQwenModel,
   visionCaptionOffers = [],
   visionCaptionDownloadJobs = [],
   onDownloadModel,
@@ -67,10 +70,16 @@ export default function ReferenceCaptionPicker({
   const [referenceAssetId, setReferenceAssetId] = useState("");
   const [moodBoardIds, setMoodBoardIds] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [useLoop, setUseLoop] = useState(false);
+  const app = useAppContextOptional();
+  const qwenModel = suppliedQwenModel ?? app?.models?.find((entry) => entry.id === QWEN38_MODEL_ID);
+  const installedQwenTiers = showPromptOptions ? installedQwen38Tiers(qwenModel) : [];
+  const [sourceChoice, setSourceChoice] = useState("default");
+  const useLoop = sourceChoice === "loop";
+  const qwenTier = sourceChoice.startsWith("qwen38:") ? sourceChoice.slice(7) : null;
+  const useQwen = Boolean(qwenTier);
   const [loopVariant, setLoopVariant] = useState(null);
   const selectedTier = loopUtilityTier(loopModel, loopVariant);
-  const selectedReady = useLoop ? loopTierInstalled(loopModel, selectedTier) : visionCaptionReady;
+  const selectedReady = useQwen ? installedQwenTiers.some(([key]) => key === qwenTier) : useLoop ? loopTierInstalled(loopModel, selectedTier) : visionCaptionReady;
   const [error, setError] = useState("");
   const [promptExclusions, setPromptExclusions] = useState([]);
 
@@ -108,7 +117,8 @@ export default function ReferenceCaptionPicker({
       const arg = moodBoardExtras.length > 0
         ? [referenceAssetId, ...moodBoardExtras]
         : referenceAssetId;
-      const result = showPromptOptions && promptExclusions.length
+      const result = useQwen ? await onCaption(arg, undefined, promptExclusions, qwen38PromptSource(qwenTier))
+        : showPromptOptions && promptExclusions.length
         ? await onCaption(arg, useLoop ? selectedTier : undefined, promptExclusions)
         : useLoop ? await onCaption(arg, selectedTier) : await onCaption(arg);
       if (result) {
@@ -125,24 +135,27 @@ export default function ReferenceCaptionPicker({
 
   return (
     <div className="structured-reference">
-      {loopModel || useLoop ? (
+      {loopModel || useLoop || installedQwenTiers.length || useQwen ? (
         <label>
           Caption model
-          <select disabled={busy} value={useLoop ? "loop" : "default"} onChange={(event) => {
-            setUseLoop(event.target.value === "loop");
+          <select disabled={busy} value={sourceChoice} onChange={(event) => {
+            setSourceChoice(event.target.value);
             setError("");
           }}>
             <option value="default">Vision Captioner (Qwen3-VL-8B)</option>
-            <option value="loop">{LOOP_UTILITY_NAME}</option>
+            {loopModel || useLoop ? <option value="loop">{LOOP_UTILITY_NAME}</option> : null}
+            {useQwen && !selectedReady ? <option value={sourceChoice}>Qwen3.8-27B {qwenTier} — not installed</option> : null}
+            {installedQwenTiers.map(([tier, label]) => <option key={tier} value={`qwen38:${tier}`}>Qwen3.8-27B — {label}</option>)}
           </select>
         </label>
       ) : null}
+      {useQwen && !selectedReady ? <p className="inline-warning" role="status">This Qwen3.8-27B tier is no longer installed. Choose an installed tier or install it in the Model Manager.</p> : null}
       {useLoop ? (
         <LoopUtilityTier model={loopModel} tier={selectedTier} disabled={busy}
           onChange={(tier) => { setLoopVariant(tier); setError(""); }} onDownload={onDownloadModel} />
       ) : null}
       <ModelAvailabilityGate
-        ready={useLoop || visionCaptionReady}
+        ready={useQwen || useLoop || visionCaptionReady}
         title={gateTitle}
         description={gateDescription}
         offers={visionCaptionOffers}
@@ -169,7 +182,7 @@ export default function ReferenceCaptionPicker({
             synthesizes ONE prompt/caption from the aesthetic they share. Only once a primary is chosen
             (it is the first image). Both pickers share project assets, uploads, and characters.
             Capped at moodBoardMax − 1 extras; the server enforces the same ceiling. */}
-        {selectedReady && (showMoodBoard || useLoop) && referenceAssetId ? (
+        {selectedReady && (showMoodBoard || useLoop || useQwen) && referenceAssetId ? (
           <ImageEditSourcePickerField
             assets={referenceAssets.filter((asset) => asset.id !== referenceAssetId)}
             buttonLabel="Add mood-board images"

@@ -8,6 +8,7 @@ import { Modal } from "./Modal.jsx";
 import { RequiredModelsNotice } from "./RequiredModelsNotice.jsx";
 import { DescribePromptPresets } from "./DescribePromptPresets.jsx";
 import { PromptContentOptions } from "./PromptContentOptions.jsx";
+import { QWEN38_MODEL_ID, QWEN38_MODEL_REPO, QWEN38_TIERS } from "../qwen38Utility.js";
 import { useAppContext } from "../context/AppContext.js";
 import { trainingApi } from "../api/trainingResources.js";
 import { jobsApi } from "../api/jobsResources.js";
@@ -57,10 +58,10 @@ const loopDescriber = {
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
 // A describer with `tiers` runs one quant tier, sent as the job's `variant` (the first is the
 // default); the others take no `variant`.
-// Keep the larger describer's identifiers with this lazy-loaded dialog. Its quant tier travels
-// as the describe request's `variant`.
-export const VISION_DESCRIBE_MODEL_ID = "vision_describe_qwen3_8_27b";
-export const VISION_DESCRIBE_MODEL_REPO = "huihui-ai/Huihui-Qwen3.8-27B-abliterated";
+// Share the larger describer's identifiers and tiers with the prompt tools. A selected tier
+// travels as the request's `variant`.
+export const VISION_DESCRIBE_MODEL_ID = QWEN38_MODEL_ID;
+export const VISION_DESCRIBE_MODEL_REPO = QWEN38_MODEL_REPO;
 export const DESCRIBE_MODELS = [
 // `condenses`: the describer has a text-only step that "Fit to" condenses with (SW-7163).
   { id: VISION_CAPTION_MODEL_ID, repo: VISION_CAPTION_MODEL_REPO, label: "Vision Captioner (Qwen3-VL-8B)", condenses: true },
@@ -69,11 +70,7 @@ export const DESCRIBE_MODELS = [
     repo: VISION_DESCRIBE_MODEL_REPO,
     label: "Vision Describer (Qwen3.8-27B)",
     condenses: true,
-    tiers: [
-      ["q4", "q4"],
-      ["q8", "q8"],
-      ["bf16", "Full precision"],
-    ],
+    tiers: QWEN38_TIERS,
   },
   { id: JOY_CAPTION_MODEL_ID, repo: joyCaptionModel, label: "JoyCaption beta-one", condenses: false },
 ];

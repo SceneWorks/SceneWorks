@@ -6,6 +6,7 @@ import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { RefinePromptControl } from "./RefinePromptControl.jsx";
+import { AppContext } from "../context/AppContext.js";
 
 
 
@@ -39,6 +40,45 @@ describe("RefinePromptControl", () => {
     root = createRoot(container);
     act(() => root.render(ui));
   }
+
+  it.each(["q4", "q8", "bf16"])("refines with the exact installed Qwen3.8-27B %s tier and exclusions", async (tier) => {
+    const refinePrompt = vi.fn(async () => "A rewritten scene");
+    const qwenModel = { id: "vision_describe_qwen3_8_27b", variants: [
+      { variant: "q4", installState: "installed" },
+      { variant: "q8", installState: "installed" },
+      { variant: "bf16", installState: "installed" },
+    ] };
+    render(<RefinePromptControl prompt="a portrait" workflow="image" refinePrompt={refinePrompt} onApply={vi.fn()} qwenModel={qwenModel} />);
+    await act(async () => {
+      const select = container.querySelector("select");
+      select.value = `qwen38:${tier}`;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => container.querySelector('input[type="checkbox"]').click());
+    await act(async () => refineButton(container).click());
+    expect(refinePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      model: "huihui-ai/Huihui-Qwen3.8-27B-abliterated", variant: tier,
+      promptExclusions: ["identifyingCharacteristics"], workflow: "image",
+    }));
+    await act(async () => root.render(<RefinePromptControl prompt="a portrait" workflow="image" refinePrompt={refinePrompt} onApply={vi.fn()} qwenModel={{ ...qwenModel, variants: [] }} />));
+    expect(refineButton(container).disabled).toBe(true);
+    expect(container.textContent).toContain("no longer installed");
+  });
+
+  it("offers only installed Qwen3.8 tiers", () => {
+    render(<RefinePromptControl prompt="a portrait" refinePrompt={vi.fn()} onApply={vi.fn()}
+      qwenModel={{ variants: [{ variant: "q4", installState: "missing" }, { variant: "q8", installState: "installed" }, { variant: "bf16", installState: "missing" }] }} />);
+    expect([...container.querySelectorAll("option")].map((row) => row.value)).toEqual(["default", "qwen38:q8"]);
+  });
+
+  it("discovers installed tiers from the live catalog and waits for a model choice before auto-start", () => {
+    const refinePrompt = vi.fn();
+    render(<AppContext.Provider value={{ models: [{ id: "vision_describe_qwen3_8_27b", variants: [{ variant: "q8", installState: "installed" }] }] }}>
+      <RefinePromptControl autoStart prompt="a portrait" refinePrompt={refinePrompt} onApply={vi.fn()} />
+    </AppContext.Provider>);
+    expect(container.querySelector('option[value="qwen38:q8"]')).not.toBeNull();
+    expect(refinePrompt).not.toHaveBeenCalled();
+  });
 
   it("combines optional exclusions and removes deselected options from the rewrite request", async () => {
     const refinePrompt = vi.fn(async () => "A revised scene");

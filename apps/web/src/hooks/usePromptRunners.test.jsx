@@ -44,6 +44,12 @@ describe("prompt option transport", () => {
     expect(pollJobToCompletion).toHaveBeenLastCalledWith(expect.objectContaining({
       body: expect.objectContaining({ prompt: "a scene", promptExclusions }),
     }));
+    await callbacks.onImageDescribe("ref-1", undefined, promptExclusions,
+      { model: "huihui-ai/Huihui-Qwen3.8-27B-abliterated", variant: "bf16" });
+    expect(pollJobToCompletion).toHaveBeenLastCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ task: "image_describe", promptExclusions,
+        model: "huihui-ai/Huihui-Qwen3.8-27B-abliterated", variant: "bf16" }),
+    }));
     await callbacks.onImageDescribe("ref-1");
     expect(pollJobToCompletion.mock.calls.at(-1)[0].body.promptExclusions).toBeUndefined();
   });

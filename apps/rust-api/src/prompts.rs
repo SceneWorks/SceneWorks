@@ -268,7 +268,30 @@ pub(crate) async fn create_prompt_refine_job(
     }
 
     let source = payload.model.as_deref().map(str::trim);
-    if source == Some(sceneworks_core::loop_utility::MODEL_REPO) {
+    if sceneworks_core::dataset_batch_describe::is_qwen38_27b_describer(source)
+        && matches!(task, None | Some("refine") | Some("image_describe"))
+    {
+        use sceneworks_core::dataset_batch_describe as describe;
+        let tier = describe::resolve_describe_tier(source, payload.variant.as_deref())
+            .map_err(ApiError::bad_request)?
+            .expect("Qwen3.8 tier default");
+        let entry = crate::models::resolve_model_manifest_entry(
+            &state,
+            describe::QWEN38_27B_DESCRIBER_MODEL_ID,
+        )
+        .await?;
+        crate::models::ensure_pinned_variant_installed(
+            &entry,
+            tier,
+            &state.settings.data_dir,
+            std::env::consts::OS,
+        )?;
+        job_payload.insert(
+            "model".to_owned(),
+            json!(describe::QWEN38_27B_DESCRIBER_REPO),
+        );
+        job_payload.insert("variant".to_owned(), json!(tier));
+    } else if source == Some(sceneworks_core::loop_utility::MODEL_REPO) {
         if !is_vision_task && !matches!(task, None | Some("refine")) {
             return Err(ApiError::bad_request(
                 "This prompt task cannot use SenseNova-Loop-9B.",

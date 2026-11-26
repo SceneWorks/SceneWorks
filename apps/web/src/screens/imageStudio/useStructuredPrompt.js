@@ -1,4 +1,5 @@
 import { LOOP_UTILITY_ID, loopPromptSource } from "../../loopUtility.js";
+import { QWEN38_MODEL_ID, QWEN38_MODEL_REPO } from "../../qwen38Utility.js";
 import { useCallback } from "react";
 import { parseMagicPromptCaption, parseVisionCaption } from "../../ideogramCaption.js";
 import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID, VISION_CAPTION_MODEL_REPO } from "../../constants.js";
@@ -81,7 +82,7 @@ export function useStructuredPrompt({
     // The shared picker passes a single asset id (string) for one reference, or an ARRAY of ids for a
     // mood board (sc-8595). Normalize: >1 rides `sourceAssetIds` (worker synthesizes one prompt from the
     // shared style), exactly one collapses to the scalar `sourceAssetId` (the unchanged single path).
-    async (source, variant, promptExclusions = []) => {
+    async (source, variant, promptExclusions = [], utilitySource = {}) => {
       if (typeof imageDescribe !== "function") {
         throw new Error("Image description is unavailable.");
       }
@@ -97,13 +98,14 @@ export function useStructuredPrompt({
         model: VISION_CAPTION_MODEL_REPO,
         ...loopPromptSource(variant),
         captionStyle: describeCaptionStyle,
+        ...utilitySource,
         ...(promptExclusions.length ? { promptExclusions } : {}),
       });
       const trimmed = (text || "").trim();
       if (!trimmed) {
         throw new Error("The image did not produce a usable description.");
       }
-      setMagicPromptBackend(variant ? LOOP_UTILITY_ID : VISION_CAPTION_MODEL_ID);
+      setMagicPromptBackend(utilitySource.model === QWEN38_MODEL_REPO ? QWEN38_MODEL_ID : variant ? LOOP_UTILITY_ID : VISION_CAPTION_MODEL_ID);
       return trimmed;
     },
     [imageDescribe, activeProject?.id, describeCaptionStyle, setMagicPromptBackend],
