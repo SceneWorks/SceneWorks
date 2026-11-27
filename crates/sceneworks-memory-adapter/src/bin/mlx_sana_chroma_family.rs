@@ -29,11 +29,11 @@ pub(super) fn sana_chroma_arm(request: &Value) -> Result<SanaChromaArm, String> 
 pub(super) fn sana_chroma_calibration_fingerprint(arm: SanaChromaArm, tier: &str) -> String {
     match (arm.family, arm.provider, tier) {
         (SanaChromaFamily::Sana, SANA_PROVIDER, "q4") => {
-            runtime_macos::providers::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (SanaChromaFamily::Chroma, CHROMA1_BASE_PROVIDER, "q4") => {
-            runtime_macos::providers::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (SanaChromaFamily::Sana, _, tier) => {

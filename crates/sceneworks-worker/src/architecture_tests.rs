@@ -1037,19 +1037,12 @@ fn the_family_token_vocabulary_covers_every_family_the_live_tables_name() {
     // facts. Check the vocabulary against that typed source directly — every family a native
     // import route registers, and the derived import gate itself.
     let mut derived: BTreeSet<String> = BTreeSet::new();
-    for facts in [
-        include_str!("../../../config/engine-capabilities/capabilities.mlx.json"),
-        include_str!("../../../config/engine-capabilities/capabilities.candle.json"),
+    for export in [
+        sceneworks_core::sga_capabilities::macos_mlx(),
+        sceneworks_core::sga_capabilities::candle_cuda(),
     ] {
-        let facts: serde_json::Value =
-            serde_json::from_str(facts).expect("native import facts parse");
-        for route in facts["imports"].as_array().expect("native import routes") {
-            derived.insert(
-                route["family"]
-                    .as_str()
-                    .expect("import route names a family")
-                    .to_owned(),
-            );
+        for route in &export.imported_models {
+            derived.insert(route.family.clone());
         }
     }
     derived.extend(

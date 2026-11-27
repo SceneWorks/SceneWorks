@@ -118,13 +118,13 @@ fn native_cuda_wrapper_uses_same_headroom_and_requires_selected_context() {
         enabled: true,
         ..Default::default()
     };
-    let shape = gen_core::GenerationRequest {
+    let mut shape = gen_core::GenerationRequest {
         width: 1344,
         height: 768,
         frames: Some(345),
-        veda: Some(veda.clone()),
         ..Default::default()
     };
+    shape.extensions.h3_mut().veda = Some(veda.clone());
     let bound =
         gen_core_h3::veda::workspace::for_request(&shape, gen_core::veda::workspace::Backend::Cuda)
             .unwrap()

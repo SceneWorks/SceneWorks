@@ -57,7 +57,7 @@ pub(super) fn instantid_binding(tier: &str) -> Result<InstantIdBinding, String> 
     Ok(InstantIdBinding {
         repository,
         revision,
-        paths: mlx_gen_instantid::InstantIdPaths {
+        paths: runtime_macos::calibration::instantid::InstantIdPaths {
             sdxl_base: root,
             identitynet: WeightsSource::Dir(identitynet),
             ip_adapter: bundle.ip_adapter.clone(),
@@ -74,7 +74,7 @@ pub(super) fn instantid_binding(tier: &str) -> Result<InstantIdBinding, String> 
 pub(super) fn instantid_numeric_tier(tier: &str) -> MemoryNumericTier {
     MemoryNumericTier {
         quant: tier_precision_quant(tier).1,
-        ..mlx_gen_instantid::memory_strategy::dense_numeric_tier()
+        ..runtime_macos::calibration::instantid::memory_strategy::dense_numeric_tier()
     }
 }
 
@@ -117,7 +117,9 @@ pub(super) fn instantid_context(
         },
         predicted_peak_bytes,
         cache_state: MemoryCacheState::Cold,
-        evidence_revision: mlx_gen_instantid::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned(),
+        evidence_revision:
+            runtime_macos::calibration::instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
+                .to_owned(),
     }
 }
 
@@ -129,8 +131,8 @@ pub(super) fn instantid_request(
     width: u32,
     height: u32,
     seed: u64,
-) -> mlx_gen_instantid::InstantIdRequest {
-    mlx_gen_instantid::InstantIdRequest {
+) -> runtime_macos::calibration::instantid::InstantIdRequest {
+    runtime_macos::calibration::instantid::InstantIdRequest {
         prompt: "a studio portrait of a person, soft key light".to_owned(),
         negative: "low quality, blurry, distorted".to_owned(),
         width,
@@ -213,18 +215,20 @@ pub(super) fn run_instantid(request: &Value) -> Result<Value, String> {
             numeric_tier.quant, selection.tier.quant
         ));
     }
-    let identity = mlx_gen_instantid::memory_strategy::InstantIdMemoryIdentity {
-        route: mlx_gen_instantid::memory_strategy::InstantIdRoute::Identity,
-        adapter_count: 0,
-        use_pid: false,
-        face_restore: false,
-        artifact_fingerprint: binding.artifact_fingerprint.clone(),
-    };
+    let identity =
+        runtime_macos::calibration::instantid::memory_strategy::InstantIdMemoryIdentity {
+            route: runtime_macos::calibration::instantid::memory_strategy::InstantIdRoute::Identity,
+            adapter_count: 0,
+            use_pid: false,
+            face_restore: false,
+            artifact_fingerprint: binding.artifact_fingerprint.clone(),
+        };
     let overlay = identity.overlay_key();
-    let contract = mlx_gen_instantid::memory_strategy::provider_contract_for_paths(
-        &binding.paths,
-        numeric_tier,
-    );
+    let contract =
+        runtime_macos::calibration::instantid::memory_strategy::provider_contract_for_paths(
+            &binding.paths,
+            numeric_tier,
+        );
     contract.validate_selection(&selection).map_err(|error| {
         format!("pinned InstantID contract rejected planned selection: {error}")
     })?;
@@ -266,7 +270,7 @@ pub(super) fn run_instantid(request: &Value) -> Result<Value, String> {
     // refusals below are evidence rather than a blanket no), reject a zero budget, and reject a
     // mutated calibration fingerprint.
     let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        mlx_gen_instantid::memory_strategy::safety_check(
+        runtime_macos::calibration::instantid::memory_strategy::safety_check(
             &contract,
             numeric_tier,
             &identity,
@@ -320,7 +324,7 @@ pub(super) fn run_instantid(request: &Value) -> Result<Value, String> {
         1,
     );
     // THE production loader: the exact call `image_jobs/instantid.rs` makes.
-    let model = mlx_gen_instantid::InstantId::load_with_memory_context(
+    let model = runtime_macos::calibration::instantid::InstantId::load_with_memory_context(
         &binding.paths,
         numeric_tier,
         identity.clone(),

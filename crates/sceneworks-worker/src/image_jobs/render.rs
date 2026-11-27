@@ -200,6 +200,10 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// `caption_truncated`) are collected for the image's provenance. `None` discards them, as
     /// the lane always has for providers that report none.
     pub(crate) warnings: Option<&'a std::cell::RefCell<Vec<gen_core::GenerationWarning>>>,
+    /// Where the render's `GenerationReport::adapter_apply_reports` are collected for the image's
+    /// provenance (`SW-6981`). `None` discards them.
+    pub(crate) adapter_apply_reports:
+        Option<&'a std::cell::RefCell<Vec<gen_core::AdapterApplyReport>>>,
     /// Where the render's `GenerationReport::prefix_kv_cache` — the prefix-KV-cache path that
     /// actually RAN, its cache bytes and any shed-over-priced-bound overflow (epic 25899) — is
     /// collected for the image's provenance and the job record. `None` discards it; a provider
@@ -409,6 +413,9 @@ fn render_request_on_surface(
     if let Some(sink) = surface.warnings {
         sink.borrow_mut().extend(report.warnings);
     }
+    if let Some(sink) = surface.adapter_apply_reports {
+        *sink.borrow_mut() = report.adapter_apply_reports;
+    }
     if let Some(sink) = surface.prefix_kv_cache {
         *sink.borrow_mut() = report.prefix_kv_cache;
     }
@@ -503,27 +510,32 @@ pub(super) fn build_render_request(
         steps: Some(steps),
         guidance,
         true_cfg,
-        sampler: sampler.map(str::to_owned),
-        scheduler: scheduler.map(str::to_owned),
+        sampler: sampler.map(Into::into),
+        scheduler: scheduler.map(Into::into),
         scheduler_shift,
-        guidance_method: guidance_method.map(str::to_owned),
-        use_pid,
-        text_style_gain,
+        guidance_method: guidance_method.map(Into::into),
         memory,
         conditioning,
-        flux3_reference_output: None,
         output_channels: surface.output_channels,
         cfg_interval: surface.controls.cfg_interval,
         caption_overflow: surface.controls.caption_overflow,
-        h3_image_sampler: surface.controls.h3_image_sampler,
-        pag: surface.controls.pag.clone(),
-        low_res_start: surface.controls.low_res_start,
         source_image: surface.source_image.map(|(img, _)| img.clone()),
         strength: surface.source_image.map(|(_, s)| *s),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
+    if use_pid {
+        request.features.pid = Some(gen_core::PidParams::enabled());
+    }
+    request.features.pag = surface.controls.pag.clone();
+    request.features.low_res_start = surface.controls.low_res_start;
+    if let Some(gain) = text_style_gain {
+        request.extensions.krea_mut().text_style_gain = Some(gain);
+    }
+    if let Some(h3_sampler) = surface.controls.h3_image_sampler {
+        request.extensions.h3_mut().image_sampler = Some(h3_sampler);
+    }
     enhance.apply(&mut request, prompt_enhancement);
     if let Some(layout) = surface.flux3_layout {
         layout.apply(&mut request);
@@ -706,7 +718,7 @@ pub(super) fn build_hires_refinement_request(
         cancel,
     )?;
     // `low_res_start` and ordinary `source_image` apply once to base pass 0 only (`FEAT-1`, `PIPE-2`).
-    req.low_res_start = None;
+    req.features.low_res_start = None;
     req.source_image = None;
     req.strength = None;
     Ok(req)
@@ -1271,6 +1283,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         output_channels: gen_core::OutputChannels::Rgb,
         controls: surface.controls.clone(),
         warnings: surface.warnings,
+        adapter_apply_reports: surface.adapter_apply_reports,
         prefix_kv_cache: surface.prefix_kv_cache,
         pag_report: None,
         low_res_start_report: Some(&base_low_res_report),
@@ -1291,6 +1304,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         output_channels: surface.output_channels,
         controls: refine_controls,
         warnings: surface.warnings,
+        adapter_apply_reports: surface.adapter_apply_reports,
         prefix_kv_cache: surface.prefix_kv_cache,
         pag_report: surface.pag_report,
         low_res_start_report: None,
@@ -2137,7 +2151,7 @@ mod hires_report_tests {
                 req: &gen_core::GenerationRequest,
                 on_progress: &mut dyn FnMut(Progress),
             ) -> gen_core::Result<gen_core::GenerationReport> {
-                *self.seen_pag.lock().unwrap() = Some(req.pag.clone());
+                *self.seen_pag.lock().unwrap() = Some(req.features.pag.clone());
                 let total = req.steps.unwrap_or(4);
                 for current in 1..=total {
                     if self.cancel_at_step == Some(current) {
@@ -2155,15 +2169,19 @@ mod hires_report_tests {
                         pixels: vec![9; (req.width * req.height * 3) as usize],
                     }]),
                 );
-                report.pag = req.pag.as_ref().map(|pag| gen_core::PagExecutionReport {
-                    scale: pag.scale,
-                    adaptive_scale: pag.adaptive_scale.unwrap_or(0.0),
-                    layers: pag.layers.clone().unwrap_or_else(|| vec![2, 5]),
-                    start: pag.start.unwrap_or(0.05),
-                    stop: pag.stop.unwrap_or(0.85),
-                    active_steps: 3,
-                    total_steps: total,
-                });
+                report.pag = req
+                    .features
+                    .pag
+                    .as_ref()
+                    .map(|pag| gen_core::PagExecutionReport {
+                        scale: pag.scale,
+                        adaptive_scale: pag.adaptive_scale.unwrap_or(0.0),
+                        layers: pag.layers.clone().unwrap_or_else(|| vec![2, 5]),
+                        start: pag.start.unwrap_or(0.05),
+                        stop: pag.stop.unwrap_or(0.85),
+                        active_steps: 3,
+                        total_steps: total,
+                    });
                 Ok(report)
             }
         }
@@ -2356,7 +2374,7 @@ mod hires_report_tests {
                 self.seen_requests.lock().unwrap().push((
                     req.width,
                     req.height,
-                    req.low_res_start,
+                    req.features.low_res_start,
                     req.strength,
                     req.source_image.is_some(),
                 ));
@@ -2371,7 +2389,7 @@ mod hires_report_tests {
                         pixels: vec![7; (req.width * req.height * 3) as usize],
                     }]),
                 );
-                if let Some(spec) = req.low_res_start {
+                if let Some(spec) = req.features.low_res_start {
                     let total_usize = total as usize;
                     let resolved_plan = spec
                         .resolve_geometry(
@@ -2651,7 +2669,7 @@ mod hires_report_tests {
         };
         for &(route, sampler, scheduler, guidance, true_cfg) in single_pass_routes {
             let route_spec = spec_for_single_pass(route);
-            let req = gen_core::GenerationRequest {
+            let mut req = gen_core::GenerationRequest {
                 prompt: "a mountain lake at sunrise".to_owned(),
                 width: 1024,
                 height: 1024,
@@ -2660,11 +2678,11 @@ mod hires_report_tests {
                 steps: Some(6),
                 guidance,
                 true_cfg,
-                sampler: sampler.map(str::to_owned),
-                scheduler: scheduler.map(str::to_owned),
-                low_res_start: Some(low_res_spec),
+                sampler: sampler.map(Into::into),
+                scheduler: scheduler.map(Into::into),
                 ..Default::default()
             };
+            req.features.low_res_start = Some(low_res_spec);
             let prepared = compile_prepared_render(registry, route, &route_spec, &req, None)
                 .unwrap_or_else(|error| {
                     panic!("{route}: single-pass low_res_start render plan failed: {error}")
@@ -2791,7 +2809,7 @@ mod hires_report_tests {
                 pixels: vec![42; (hires_dim * hires_dim * 3) as usize],
             };
 
-            let first = gen_core::GenerationRequest {
+            let mut first = gen_core::GenerationRequest {
                 prompt: "a coastal lighthouse".to_owned(),
                 width: base_dim,
                 height: base_dim,
@@ -2800,19 +2818,19 @@ mod hires_report_tests {
                 steps: Some(6),
                 guidance,
                 true_cfg,
-                sampler: sampler.map(str::to_owned),
-                scheduler: scheduler.map(str::to_owned),
+                sampler: sampler.map(Into::into),
+                scheduler: scheduler.map(Into::into),
                 conditioning: if needs_pass0_ref {
                     vec![pass0_ref.clone()]
                 } else {
                     Vec::new()
                 },
-                low_res_start: if needs_pass0_ref {
-                    None
-                } else {
-                    Some(low_res_spec)
-                },
                 ..Default::default()
+            };
+            first.features.low_res_start = if needs_pass0_ref {
+                None
+            } else {
+                Some(low_res_spec)
             };
             let refine = gen_core::GenerationRequest {
                 prompt: "a coastal lighthouse".to_owned(),
@@ -2823,8 +2841,8 @@ mod hires_report_tests {
                 steps: Some(6),
                 guidance,
                 true_cfg,
-                sampler: sampler.map(str::to_owned),
-                scheduler: scheduler.map(str::to_owned),
+                sampler: sampler.map(Into::into),
+                scheduler: scheduler.map(Into::into),
                 enhance_prompt: route == "flux2_dev",
                 ..Default::default()
             };
@@ -2997,8 +3015,8 @@ mod hires_report_tests {
                 count: 1,
                 seed: Some(11),
                 steps: Some(6),
-                sampler: eng5_sampler.map(str::to_owned),
-                scheduler: eng5_scheduler.map(str::to_owned),
+                sampler: eng5_sampler.map(Into::into),
+                scheduler: eng5_scheduler.map(Into::into),
                 ..Default::default()
             };
             let refine = gen_core::GenerationRequest {
@@ -3008,8 +3026,8 @@ mod hires_report_tests {
                 count: 1,
                 seed: Some(11),
                 steps: Some(6),
-                sampler: eng5_sampler.map(str::to_owned),
-                scheduler: eng5_scheduler.map(str::to_owned),
+                sampler: eng5_sampler.map(Into::into),
+                scheduler: eng5_scheduler.map(Into::into),
                 ..Default::default()
             };
             let prepared = compile_prepared_render(
@@ -3082,7 +3100,7 @@ mod hires_report_tests {
                         pixels: vec![pixel_val; (req.width * req.height * 3) as usize],
                     }]),
                 );
-                if let Some(spec) = req.low_res_start {
+                if let Some(spec) = req.features.low_res_start {
                     let resolved = spec
                         .resolve_geometry(
                             self.descriptor.id,
@@ -3381,16 +3399,16 @@ mod hires_report_tests {
         assert!(!requests[0].enhance_prompt);
         assert!(!requests[0].prompt_enhancement.is_active());
         assert_eq!(requests[0].output_channels, gen_core::OutputChannels::Rgb);
-        assert_eq!(requests[0].low_res_start, Some(low_res_spec));
+        assert_eq!(requests[0].features.low_res_start, Some(low_res_spec));
 
         // Pass 1: target geometry, final-pass prompt enhancement active, single stretched replacement reference, low_res_start = None.
         assert_eq!((requests[1].width, requests[1].height), (1024, 1024));
         assert!(requests[1].enhance_prompt);
         assert!(requests[1].prompt_enhancement.is_active());
         assert_eq!(requests[1].output_channels, gen_core::OutputChannels::Rgba);
-        assert!(requests[1].low_res_start.is_none());
+        assert!(requests[1].features.low_res_start.is_none());
         assert!(requests[1].source_image.is_none());
-        assert!(!requests[1].use_pid);
+        assert!(!requests[1].use_pid());
         match requests[1].conditioning.as_slice() {
             [Conditioning::Reference { image, strength }] => {
                 assert_eq!((image.width, image.height), (1024, 1024));

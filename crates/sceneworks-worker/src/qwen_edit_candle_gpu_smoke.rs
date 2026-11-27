@@ -31,7 +31,7 @@
 //! ```
 
 use gen_core::{CancelFlag, Image, OffloadPolicy, PreviewFrame, PreviewSink, Progress};
-use runtime_cuda::providers::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
+use runtime_cuda::calibration::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 
 use super::smoke_support::{
     env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,

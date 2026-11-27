@@ -36,7 +36,7 @@ pub fn native_request(
     sceneworks_options::moss_validation::native_request(payload, entry)?
         .map(|request| {
             let policy = request.policy;
-            Ok(GenerationRequest {
+            let mut request = GenerationRequest {
                 prompt: request.prompt,
                 prompt_batch: request.prompt_batch,
                 width: policy.width,
@@ -44,21 +44,23 @@ pub fn native_request(
                 count: policy.count,
                 steps: policy.steps,
                 guidance: policy.guidance,
-                sampler: policy.sampler,
-                scheduler: policy.scheduler,
+                sampler: policy.sampler.map(Into::into),
+                scheduler: policy.scheduler.map(Into::into),
                 scheduler_shift: policy.scheduler_shift,
-                guidance_method: policy.guidance_method,
+                guidance_method: policy.guidance_method.map(Into::into),
                 negative_prompt: policy.negative_prompt,
-                moss_image: policy
-                    .moss_image
-                    .map(|options| {
-                        serde_json::from_value(serde_json::to_value(options).expect("MOSS options"))
-                            .map_err(|error| error.to_string())
-                    })
-                    .transpose()?,
-                pag: policy.pag,
                 ..Default::default()
-            })
+            };
+            request.extensions.moss_image = policy
+                .moss_image
+                .map(|options| {
+                    serde_json::from_value(serde_json::to_value(options).expect("MOSS options"))
+                        .map(gen_core::MossImageExtension::from_options)
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            request.features.pag = policy.pag;
+            Ok(request)
         })
         .transpose()
 }
@@ -176,7 +178,15 @@ mod tests {
             assert_eq!(resolved.shift, 5.0);
             assert!(resolved.uncond_skip_layers.is_empty());
             assert_eq!(
-                request_purpose(&p, request.moss_image.as_ref().unwrap()),
+                request_purpose(
+                    &p,
+                    request
+                        .extensions
+                        .moss_image
+                        .as_ref()
+                        .and_then(|ext| ext.options.as_ref())
+                        .unwrap(),
+                ),
                 Some(EDIT_PURPOSE)
             );
             let options = edit_options(p["advanced"].as_object().unwrap()).unwrap();
@@ -336,7 +346,15 @@ mod tests {
                     .steps,
                 8
             );
-            let selected = selected_components(&entry(), req.moss_image.as_ref().unwrap()).unwrap();
+            let selected = selected_components(
+                &entry(),
+                req.extensions
+                    .moss_image
+                    .as_ref()
+                    .and_then(|ext| ext.options.as_ref())
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(selected["downloads"].as_array().unwrap().len(), 1);
         }
         let req = native_request(

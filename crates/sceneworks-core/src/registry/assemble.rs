@@ -1,60 +1,224 @@
-//! Consume the current descriptor dumps. ENG-7 replaces this input adapter at its producer cutover.
+//! APP-1 static layer: assemble typed [`ModelSpec`] records from the v2 product manifest,
+//! measured evidence store, router policy, preview support, and canonical `sga.capabilities/2`
+//! hardware-free exports (`SW-6983`, `REG-3`, `HOOK-4`).
 use super::policy;
+use super::route_bindings;
 use super::spec::{
     BackendEvidence, GeneratorRoute, ModelSpec, PagRouteCapability, PagSpec, ProductModel,
     ProviderRoute, VideoRoute,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DescriptorDump {
-    schema_version: u32,
-    model_mappings: BTreeMap<String, String>,
-    video_model_mappings: Vec<VideoMapping>,
-    snapshot: Snapshot,
-}
+const SGA_SCHEMA_VERSION: &str = "sga.capabilities/2";
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VideoMapping {
-    model_id: String,
-    mode: String,
-    engine_ids: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct Snapshot {
+struct SgaCapabilitiesExport {
+    schema_version: String,
     backend: String,
-    generator_capabilities: Vec<GeneratorRoute>,
-    audio_generator_capabilities: Vec<GeneratorRoute>,
-    captioner_ids: Vec<String>,
-    image_embedder_ids: Vec<String>,
-    text_embedder_ids: Vec<String>,
-    text_llm_ids: Vec<String>,
-    audio_voice_embedder_ids: Vec<String>,
-    audio_transform_ids: Vec<String>,
-    audio_transcriber_ids: Vec<String>,
-    audio_embedder_ids: Vec<String>,
-    transform_ids: Vec<String>,
+    #[serde(default)]
+    routes: BTreeMap<String, SgaRoute>,
+    #[serde(default)]
+    audio_routes: BTreeMap<String, SgaRoute>,
+    #[serde(default)]
+    captioners: BTreeMap<String, Value>,
+    #[serde(default)]
+    embedders: SgaEmbedders,
+    #[serde(default)]
+    llm_models: BTreeMap<String, Value>,
+    #[serde(default)]
+    transcribers: BTreeMap<String, Value>,
+    #[serde(default)]
+    transforms: SgaTransforms,
 }
 
-impl Snapshot {
+#[derive(Default, Deserialize)]
+struct SgaEmbedders {
+    #[serde(default)]
+    image: BTreeMap<String, Value>,
+    #[serde(default)]
+    text: BTreeMap<String, Value>,
+    #[serde(default)]
+    voice: BTreeMap<String, Value>,
+    #[serde(default)]
+    audio: BTreeMap<String, Value>,
+}
+
+#[derive(Default, Deserialize)]
+struct SgaTransforms {
+    #[serde(default)]
+    image: BTreeMap<String, Value>,
+    #[serde(default)]
+    audio: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct SgaRoute {
+    route_id: String,
+    family: String,
+    backend: String,
+    modality: String,
+    #[serde(default)]
+    solvers: Vec<String>,
+    #[serde(default)]
+    schedules: Vec<String>,
+    guidance: SgaGuidance,
+    conditioning: SgaConditioning,
+    adapters: SgaAdapters,
+    quant: SgaQuant,
+    #[serde(default)]
+    features: Vec<SgaFeatureApplicability>,
+    capabilities: SgaCapabilities,
+}
+
+#[derive(Deserialize)]
+struct SgaGuidance {
+    #[serde(default)]
+    methods: Vec<String>,
+    #[serde(default)]
+    pag: Option<PagRouteCapability>,
+}
+
+#[derive(Deserialize)]
+struct SgaConditioning {
+    #[serde(default)]
+    kinds: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SgaAdapters {
+    #[serde(default)]
+    supports_lora: bool,
+    #[serde(default)]
+    supports_lokr: bool,
+}
+
+#[derive(Deserialize)]
+struct SgaQuant {
+    #[serde(default)]
+    supported_tiers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SgaCapabilities {
+    #[serde(default)]
+    supports_preview: bool,
+    #[serde(default)]
+    supports_prompt_enhancement: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct SgaFeatureApplicability {
+    feature_id: String,
+    version: u32,
+    class: String,
+    applicable: bool,
+    parameter_schema: Value,
+    relations: Value,
+    hook_points: Vec<String>,
+    memory_effect: Value,
+    reasons: Vec<Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    conditioned_routes: BTreeMap<String, Value>,
+}
+
+impl SgaRoute {
+    fn to_generator_route(&self) -> GeneratorRoute {
+        let mut features = BTreeMap::new();
+        for feature in &self.features {
+            if feature.feature_id == "low_res_start" && feature.applicable {
+                let value = serde_json::to_value(feature)
+                    .expect("serializable ExportedFeatureApplicabilityV2");
+                features.insert(feature.feature_id.clone(), value);
+            }
+        }
+        GeneratorRoute {
+            id: self.route_id.clone(),
+            family: self.family.clone(),
+            backend: self.backend.clone(),
+            modality: self.modality.clone(),
+            conditioning: self.conditioning.kinds.clone(),
+            supported_quants: self.quant.supported_tiers.clone(),
+            supports_lora: self.adapters.supports_lora,
+            supports_lokr: self.adapters.supports_lokr,
+            supports_preview: self.capabilities.supports_preview,
+            supports_prompt_enhancement: self.capabilities.supports_prompt_enhancement,
+            samplers: self.solvers.clone(),
+            schedulers: self.schedules.clone(),
+            supported_guidance_methods: self.guidance.methods.clone(),
+            pag: self.guidance.pag.clone(),
+            features,
+        }
+    }
+}
+
+struct ParsedExport {
+    backend: String,
+    routes: BTreeMap<String, GeneratorRoute>,
+    audio_routes: BTreeMap<String, GeneratorRoute>,
+    captioner_ids: BTreeSet<String>,
+    image_embedder_ids: BTreeSet<String>,
+    text_embedder_ids: BTreeSet<String>,
+    text_llm_ids: BTreeSet<String>,
+    audio_voice_embedder_ids: BTreeSet<String>,
+    audio_transform_ids: BTreeSet<String>,
+    audio_transcriber_ids: BTreeSet<String>,
+    audio_embedder_ids: BTreeSet<String>,
+    transform_ids: BTreeSet<String>,
+}
+
+impl ParsedExport {
+    fn from_sga(expected_backend: &str, raw: SgaCapabilitiesExport) -> Result<Self, String> {
+        if raw.schema_version != SGA_SCHEMA_VERSION || raw.backend != expected_backend {
+            return Err(format!(
+                "unsupported {expected_backend} sga.capabilities/2 export schema ({:?}) or backend ({:?})",
+                raw.schema_version, raw.backend
+            ));
+        }
+        let routes = raw
+            .routes
+            .into_iter()
+            .map(|(id, route)| (id, route.to_generator_route()))
+            .collect();
+        let audio_routes = raw
+            .audio_routes
+            .into_iter()
+            .map(|(id, route)| (id, route.to_generator_route()))
+            .collect();
+        Ok(Self {
+            backend: raw.backend,
+            routes,
+            audio_routes,
+            captioner_ids: raw.captioners.into_keys().collect(),
+            image_embedder_ids: raw.embedders.image.into_keys().collect(),
+            text_embedder_ids: raw.embedders.text.into_keys().collect(),
+            text_llm_ids: raw.llm_models.into_keys().collect(),
+            audio_voice_embedder_ids: raw.embedders.voice.into_keys().collect(),
+            audio_transform_ids: raw.transforms.audio.into_keys().collect(),
+            audio_transcriber_ids: raw.transcribers.into_keys().collect(),
+            audio_embedder_ids: raw.embedders.audio.into_keys().collect(),
+            transform_ids: raw.transforms.image.into_keys().collect(),
+        })
+    }
+
     fn generator(&self, id: &str, backend: &str) -> Option<&GeneratorRoute> {
-        self.generator_capabilities
-            .iter()
-            .chain(&self.audio_generator_capabilities)
-            .find(|route| route.id == id && route.backend == backend)
+        self.routes
+            .get(id)
+            .filter(|route| route.backend == backend)
+            .or_else(|| {
+                self.audio_routes
+                    .get(id)
+                    .filter(|route| route.backend == backend)
+            })
     }
 
     fn provider(&self, id: &str, backend: &str) -> Vec<ProviderRoute> {
         let mut routes = Vec::new();
         if let Some(generator) = self
-            .audio_generator_capabilities
-            .iter()
-            .find(|route| route.id == id && route.backend == backend)
+            .audio_routes
+            .get(id)
+            .filter(|route| route.backend == backend)
         {
             routes.push(ProviderRoute {
                 kind: "audio_generator".to_owned(),
@@ -73,7 +237,7 @@ impl Snapshot {
             ("audio_embedder", &self.audio_embedder_ids),
             ("transform", &self.transform_ids),
         ] {
-            if ids.iter().any(|candidate| candidate == id) {
+            if ids.contains(id) {
                 routes.push(ProviderRoute {
                     kind: kind.to_owned(),
                     id: id.to_owned(),
@@ -146,28 +310,11 @@ pub fn assemble(
         serde_json::from_str(evidence).map_err(|e| e.to_string())?;
     let mut exports = BTreeMap::new();
     for &(backend, contents) in dumps {
-        let mut dump: DescriptorDump = serde_json::from_str(contents).map_err(|e| e.to_string())?;
-        if dump.schema_version != 2 || dump.snapshot.backend != backend {
-            return Err(format!(
-                "unsupported {backend} descriptor schema or backend"
-            ));
-        }
-        for route in dump
-            .snapshot
-            .generator_capabilities
-            .iter_mut()
-            .chain(dump.snapshot.audio_generator_capabilities.iter_mut())
-        {
-            route.features.retain(|id, detail| {
-                id == "low_res_start"
-                    && detail
-                        .get("applicable")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-            });
-        }
-        if exports.insert(backend, dump).is_some() {
-            return Err(format!("duplicate {backend} descriptor"));
+        let raw: SgaCapabilitiesExport =
+            serde_json::from_str(contents).map_err(|e| e.to_string())?;
+        let parsed = ParsedExport::from_sga(backend, raw)?;
+        if exports.insert(backend, parsed).is_some() {
+            return Err(format!("duplicate {backend} sga.capabilities/2 export"));
         }
     }
     let mut specs = BTreeMap::new();
@@ -235,36 +382,41 @@ pub fn assemble(
         let mut routes = BTreeMap::new();
         let mut video_routes = BTreeMap::new();
         let mut provider_routes = BTreeMap::new();
-        for (&backend, dump) in &exports {
-            if let Some(provider) = dump.model_mappings.get(&id) {
-                if let Some(route) = dump.snapshot.generator(provider, backend) {
-                    routes.insert(backend.to_owned(), route.clone());
-                }
-            }
-            let mut video = Vec::new();
-            for mapping in dump
-                .video_model_mappings
-                .iter()
-                .filter(|mapping| mapping.model_id == id)
-            {
-                let mut engines = Vec::new();
-                for engine in &mapping.engine_ids {
-                    if let Some(route) = dump.snapshot.generator(engine, backend) {
-                        engines.push(route.clone());
+        for (&backend, export) in &exports {
+            if product.model_type == "image" {
+                if let Some(provider) = route_bindings::image_route_id(&id, |candidate| {
+                    export.routes.contains_key(candidate)
+                }) {
+                    if let Some(route) = export.generator(provider, backend) {
+                        routes.insert(backend.to_owned(), route.clone());
                     }
                 }
-                if !engines.is_empty() {
-                    video.push(VideoRoute {
-                        mode: mapping.mode.clone(),
-                        engines,
-                    });
+            }
+            if product.model_type == "video" {
+                let mut video = Vec::new();
+                for &mode in route_bindings::VIDEO_MODES {
+                    let engine_ids = route_bindings::video_route_ids(backend, &id, mode);
+                    if engine_ids.is_empty() {
+                        continue;
+                    }
+                    let mut engines = Vec::new();
+                    for &engine in engine_ids {
+                        if let Some(route) = export.generator(engine, backend) {
+                            engines.push(route.clone());
+                        }
+                    }
+                    if !engines.is_empty() {
+                        video.push(VideoRoute {
+                            mode: mode.to_owned(),
+                            engines,
+                        });
+                    }
+                }
+                if !video.is_empty() {
+                    video_routes.insert(backend.to_owned(), video);
                 }
             }
-            if !video.is_empty() {
-                video_routes.insert(backend.to_owned(), video);
-            }
-            let providers = dump.snapshot.provider(&id, backend);
-            let mut providers = providers;
+            let mut providers = export.provider(&id, backend);
             if let Some(vector) = product
                 .fields
                 .get("vector")
@@ -276,14 +428,12 @@ pub fn assemble(
                     .and_then(Value::as_str)
                     .ok_or_else(|| format!("invalid {id}/{backend} vector provider"))?;
                 if vector.get("available").and_then(Value::as_bool) == Some(true) {
-                    if !dump
-                        .snapshot
-                        .text_llm_ids
-                        .iter()
-                        .any(|candidate| candidate == provider)
-                    {
+                    let vector_route_registered = export.routes.get(&id).is_some_and(|route| {
+                        route.modality == "vector" && route.backend == export.backend
+                    });
+                    if !vector_route_registered || !export.text_llm_ids.contains(provider) {
                         return Err(format!(
-                            "unregistered {id}/{backend} vector provider {provider}"
+                            "unregistered {id}/{backend} vector route or backing LLM provider {provider}"
                         ));
                     }
                     providers.push(ProviderRoute {
@@ -332,8 +482,8 @@ pub fn assemble(
             } else if let Some(adapter) = product.fields.get("adapter").and_then(Value::as_str) {
                 exports
                     .iter()
-                    .filter_map(|(&backend, dump)| {
-                        dump.snapshot
+                    .filter_map(|(&backend, export)| {
+                        export
                             .generator(adapter, backend)
                             .map(|route| (backend, &route.pag))
                     })
@@ -414,7 +564,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn removing_a_routed_video_mapping_removes_its_typed_route() {
+    fn removing_a_routed_video_engine_removes_its_typed_route() {
         let products = crate::jsonc::strip_jsonc_comments(include_str!(
             "../../../../config/manifests/builtin.models.jsonc"
         ));
@@ -423,10 +573,8 @@ mod tests {
         let preview = crate::jsonc::strip_jsonc_comments(include_str!(
             "../../../../config/manifests/builtin.preview-support.jsonc"
         ));
-        let mlx =
-            include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
-        let candle =
-            include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json");
+        let mlx = include_str!("../../../../config/engine-capabilities/sga/macos-mlx.json");
+        let candle = include_str!("../../../../config/engine-capabilities/sga/candle-cuda.json");
         let original = assemble(
             &products,
             evidence,
@@ -435,42 +583,54 @@ mod tests {
             &[("mlx", mlx), ("candle", candle)],
         )
         .unwrap();
-        for (backend, dump) in [("mlx", mlx), ("candle", candle)] {
-            let parsed: Value = serde_json::from_str(dump).unwrap();
-            let mappings = parsed["videoModelMappings"].as_array().unwrap();
-            let mut checked = 0;
-            for (index, mapping) in mappings.iter().enumerate() {
-                let model = mapping["modelId"].as_str().unwrap();
-                let mode = mapping["mode"].as_str().unwrap();
-                if !original.get(model).is_some_and(|spec| {
-                    spec.video_routes
-                        .get(backend)
-                        .is_some_and(|routes| routes.iter().any(|route| route.mode == mode))
-                }) {
-                    continue;
-                }
-                let mut changed = parsed.clone();
-                changed["videoModelMappings"]
-                    .as_array_mut()
-                    .unwrap()
-                    .remove(index);
-                let changed = serde_json::to_string(&changed).unwrap();
-                let dumps = if backend == "mlx" {
-                    [("mlx", changed.as_str()), ("candle", candle)]
-                } else {
-                    [("mlx", mlx), ("candle", changed.as_str())]
-                };
-                let projected = assemble(&products, evidence, policy, &preview, &dumps).unwrap();
-                assert!(
-                    !projected[model]
-                        .video_routes
-                        .get(backend)
-                        .is_some_and(|routes| routes.iter().any(|route| route.mode == mode)),
-                    "{backend}/{model}/{mode} must disappear with its engine mapping"
-                );
-                checked += 1;
-            }
-            assert!(checked > 0, "{backend} must exercise routed video mappings");
+        for (backend, dump, model, route_id, mode) in [
+            ("mlx", mlx, "ltx_2_5", "ltx_2_5", "text_to_video"),
+            (
+                "candle",
+                candle,
+                "ltx_2_5",
+                "ltx_2_5_distilled",
+                "text_to_video",
+            ),
+            (
+                "mlx",
+                mlx,
+                "krea_realtime_14b",
+                "krea_realtime_14b",
+                "image_to_video",
+            ),
+            (
+                "candle",
+                candle,
+                "minimax_h3",
+                "minimax_h3",
+                "first_last_frame",
+            ),
+        ] {
+            assert!(original[model]
+                .video_routes
+                .get(backend)
+                .is_some_and(|routes| routes.iter().any(|route| route.mode == mode)));
+            let mut changed: Value = serde_json::from_str(dump).unwrap();
+            assert!(changed["routes"]
+                .as_object_mut()
+                .unwrap()
+                .remove(route_id)
+                .is_some());
+            let changed = serde_json::to_string(&changed).unwrap();
+            let dumps = if backend == "mlx" {
+                [("mlx", changed.as_str()), ("candle", candle)]
+            } else {
+                [("mlx", mlx), ("candle", changed.as_str())]
+            };
+            let projected = assemble(&products, evidence, policy, &preview, &dumps).unwrap();
+            assert!(
+                !projected[model]
+                    .video_routes
+                    .get(backend)
+                    .is_some_and(|routes| routes.iter().any(|route| route.mode == mode)),
+                "{backend}/{model}/{mode} must disappear when route {route_id} is removed from sga.capabilities/2"
+            );
         }
     }
 }

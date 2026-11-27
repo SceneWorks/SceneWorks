@@ -86,7 +86,11 @@ fn the_realtime_latent_derivation_matches_the_engines_own_arithmetic() {
 /// (e) Each geometry refusal fires with its OWN message, and the guard is not a blanket one.
 #[test]
 fn each_geometry_clause_refuses_with_its_own_message() {
-    let capabilities = mlx_gen_krea_realtime::descriptor().capabilities;
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
+    let capabilities = &registry
+        .generator_descriptor(KREA_REALTIME_PROVIDER)
+        .unwrap()
+        .capabilities;
     // Off the 4k+1 lattice.
     let error = validate_krea_realtime_geometry(PLANNED.0, PLANNED.1, 46).unwrap_err();
     assert!(error.contains("Wan lattice"), "{error}");
@@ -127,7 +131,12 @@ fn each_geometry_clause_refuses_with_its_own_message() {
 /// the shipped engine renders.
 #[test]
 fn a_large_area_geometry_is_not_refused_because_the_engine_has_no_area_cap() {
-    let max = mlx_gen_krea_realtime::descriptor().capabilities.max_size;
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
+    let max = registry
+        .generator_descriptor(KREA_REALTIME_PROVIDER)
+        .unwrap()
+        .capabilities
+        .max_size;
     assert!(max.is_multiple_of(16), "the advertised maximum is on-grid");
     let geometry = validate_krea_realtime_geometry(max, max, PLANNED.2)
         .expect("the maximum square canvas is inside the engine's own envelope");
@@ -248,7 +257,11 @@ fn the_realtime_fixture_binds_the_tier_geometry_cadence_and_seed() {
 /// The arm is reachable through `run`'s dispatch under exactly the plan's provider id.
 #[test]
 fn the_realtime_provider_id_is_the_engines_own() {
-    assert_eq!(KREA_REALTIME_PROVIDER, mlx_gen_krea_realtime::MODEL_ID);
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
+    let descriptor = registry
+        .generator_descriptor(KREA_REALTIME_PROVIDER)
+        .expect("krea_realtime_14b is registered in the MLX catalog");
+    assert_eq!(KREA_REALTIME_PROVIDER, descriptor.id);
     assert_eq!(KREA_REALTIME_PROVIDER, "krea_realtime_14b");
 }
 

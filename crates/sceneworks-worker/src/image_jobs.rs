@@ -94,9 +94,9 @@ pub(crate) fn read_weights(
     Weights::from_file(path).and_then(|weights| weights.materialize().map(|()| weights))
 }
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::instantid::{
-    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,
-};
+use runtime_macos::calibration::instantid::{InstantId, InstantIdPaths, InstantIdRequest};
+#[cfg(target_os = "macos")]
+use runtime_macos::utilities::instantid_geometry::{BodyPoint, FACE_RESTORE_PROMPT};
 // The Windows/CUDA sibling: the candle InstantID provider (sc-5491, epic 5480), retiring the Python
 // `_vendor/instantid` off-Mac. The same bespoke by-name reference (`InstantId::load`) is owned by
 // `runtime-cuda` rather than the general media registry. The SCRFD + ArcFace FaceEmbedder the model
@@ -109,18 +109,19 @@ use runtime_macos::providers::instantid::{
 // `gen_core` contract — the single-rev skew gate (sc-4482) is what makes the worker's `gen_core::Image`
 // the exact type `InstantId::generate` consumes.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::instantid::{
-    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, SdxlComponents,
-    COMPONENT_TOKENIZER_CLIP_BIGG, COMPONENT_TOKENIZER_CLIP_L, COMPONENT_VAE_FP16_FIX,
-    FACE_RESTORE_PROMPT,
+use runtime_cuda::calibration::instantid::{
+    InstantId, InstantIdPaths, InstantIdRequest, SdxlComponents, COMPONENT_TOKENIZER_CLIP_BIGG,
+    COMPONENT_TOKENIZER_CLIP_L, COMPONENT_VAE_FP16_FIX,
 };
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use runtime_cuda::utilities::instantid_geometry::{BodyPoint, FACE_RESTORE_PROMPT};
 // SDXL IP-Adapter-Plus reference provider (sc-5488, epic 5480) — the candle (Windows/CUDA) reference-
 // conditioning sibling of the InstantID lane, living in `candle-gen-sdxl` (it composes that crate's
 // IP-Adapter Resampler + the new CLIP ViT-H image encoder + a pure-IP denoise). Candle-only: macOS keeps
 // the MLX SDXL IP path (the registry `SdxlSubMode::Ip`), so these named types resolve only off-Mac.
 // The bespoke reference route (`image_jobs/sdxl_ipadapter.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::sdxl::{
+use runtime_cuda::calibration::sdxl::{
     IpAdapterSdxl, IpAdapterSdxlPaths, IpAdapterSdxlRequest, SdxlEdit, SdxlEditPaths,
     SdxlEditRequest,
 };
@@ -132,7 +133,7 @@ use runtime_cuda::providers::sdxl::{
 // (FLUX.2-dev Fun-Controlnet-Union strict-pose VACE branch, sc-7460) the candle pose route
 // (`image_jobs/flux2_control_candle.rs`, sc-7736) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::flux2::{
+use runtime_cuda::calibration::flux2::{
     Flux2Control, Flux2ControlPaths, Flux2ControlRequest, Flux2Edit, Flux2EditPaths,
     Flux2EditRequest,
 };
@@ -143,7 +144,7 @@ use runtime_cuda::providers::flux2::{
 // named types resolve only off-Mac. The bespoke reference route
 // (`image_jobs/kolors_ipadapter.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::kolors::{
+use runtime_cuda::calibration::kolors::{
     IpAdapterKolors, IpAdapterKolorsPaths, IpAdapterKolorsRequest,
 };
 // FLUX XLabs IP-Adapter reference provider (sc-5872, epic 5480) — the candle (Windows/CUDA) FLUX sibling
@@ -152,7 +153,7 @@ use runtime_cuda::providers::kolors::{
 // (epic 3621, the registry `Reference` route). The bespoke route
 // (`image_jobs/flux_ipadapter.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
+use runtime_cuda::calibration::flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapterFluxRequest};
 // FLUX.1-dev strict-control Fun-Controlnet-Union provider (sc-8412, epic 8236) — the candle (Windows/CUDA)
 // FLUX.1-dev sibling of the FLUX.2 / Z-Image / Qwen strict-control lanes, living in `candle-gen-flux` (the
 // Shakker Union-Pro-2.0 residual-emitter control branch overlaid on the FLUX.1-dev base via the
@@ -160,7 +161,7 @@ use runtime_cuda::providers::flux::{IpAdapterFlux, IpAdapterFluxPaths, IpAdapter
 // (flux1_control.rs). The bespoke control route (`image_jobs/flux1_control_candle.rs`) uses this
 // named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::flux::{Flux1ControlPaths, Flux1ControlRequest, Flux1DevControl};
+use runtime_cuda::calibration::flux::{Flux1ControlPaths, Flux1ControlRequest, Flux1DevControl};
 // Qwen-Image 2512-Fun-Controlnet-Union (strict control) provider (sc-5489 origin / sc-8350 repoint, epic
 // 8236) — the candle (Windows/CUDA) strict-control lane. As of sc-8350 this rides the input-agnostic
 // `QwenFunControl` VACE engine on the Qwen-Image-2512 base (the InstantX `QwenControl` is retired on the
@@ -168,7 +169,7 @@ use runtime_cuda::providers::flux::{Flux1ControlPaths, Flux1ControlRequest, Flux
 // `qwen_image_control` registry generator. The bespoke control route
 // (`image_jobs/qwen_control.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::qwen_image::{
+use runtime_cuda::calibration::qwen_image::{
     QwenFunControl, QwenFunControlPaths, QwenFunControlRequest,
 };
 // Qwen-Image-Edit provider (sc-5487, epic 5480) — the candle (Windows/CUDA) reference-edit lane (the
@@ -176,21 +177,21 @@ use runtime_cuda::providers::qwen_image::{
 // `qwen_image_edit` registry path. The bespoke edit route (`image_jobs/qwen_edit_candle.rs`) uses
 // this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
+use runtime_cuda::calibration::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 // Kolors ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA) Kolors
 // sibling of the Qwen strict-pose lane, living in `candle-gen-kolors` (it reuses candle-gen-sdxl's
 // vendored UNet + the SDXL `ControlNet`, with the Kolors ChatGLM3 conditioning + leading-Euler sampler).
 // Candle-only: macOS keeps the MLX Kolors ControlNet path. The bespoke pose route
 // (`image_jobs/kolors_control.rs`) uses this named utility export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest};
+use runtime_cuda::calibration::kolors::{KolorsControl, KolorsControlPaths, KolorsControlRequest};
 // Z-Image Fun-ControlNet (strict pose) provider (sc-5489, epic 5480) — the candle (Windows/CUDA)
 // Z-Image sibling of the Qwen/Kolors strict-pose lanes, living in `candle-gen-z-image` (the VACE-style
 // dual-injection control on the vendored DiT). Candle-only: macOS keeps the MLX `z_image_turbo_control`
 // registry generator. The bespoke pose route (`image_jobs/zimage_control.rs`) uses this named utility
 // export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
+use runtime_cuda::calibration::z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
 // PuLID-FLUX face-identity provider (sc-5492, epic 5480) — the candle (Windows/CUDA) sibling of the
 // macOS `pulid_flux` registry generator, living in `candle-gen-pulid` (the EVA02-CLIP tower + IDFormer
 // + the 20 PerceiverAttentionCA modules injected into the forked FLUX DiT via the post-block
@@ -199,7 +200,7 @@ use runtime_cuda::providers::z_image::{ZImageControl, ZImageControlPaths, ZImage
 // is a bespoke provider referenced BY NAME (like `InstantId`), so no `as _;` anchor is needed — this is
 // the named-type import the bespoke route (`image_jobs/pulid_candle.rs`) drives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::pulid::{PulidFlux, PulidFluxPaths, PulidFluxRequest};
+use runtime_cuda::calibration::pulid::{PulidFlux, PulidFluxPaths, PulidFluxRequest};
 
 /// The stub adapter id recorded on generated assets (matches the contract fixture
 /// `tests/fixtures/rust_migration_contracts/sidecars/asset-image.sceneworks.json`).

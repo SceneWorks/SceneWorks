@@ -2596,7 +2596,7 @@ const IMPORTED_MINIMAX_H3_TIER: &str = "imported";
 /// Validate shared components with the pinned provider's parsers before provider loading.
 #[cfg(native_lane)]
 fn validate_imported_minimax_h3_shared(root: &Path, encoder: &Path) -> WorkerResult<()> {
-    use platform_runtime::providers::minimax_h3 as engine;
+    use platform_runtime::memory_helpers::minimax_h3 as engine;
     let refuse = |reason: String| {
         WorkerError::InvalidPayload(format!("[checkpoint-plan:incompatible-component] {reason}"))
     };

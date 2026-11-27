@@ -408,7 +408,11 @@ impl Context {
             }
         }
         let quantization = self.quantization.install();
-        let runtime_weights = candle_gen::quantization_cache::install_runtime_cache_context();
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let runtime_weights =
+            runtime_cuda::media::quantization_cache::install_runtime_cache_context();
+        #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+        let runtime_weights = ();
         Guard {
             previous: THREAD_JOB.with(|slot| slot.replace(self.session.clone())),
             _observer: self.activity.install(),

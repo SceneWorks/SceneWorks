@@ -282,7 +282,7 @@ fn score_against_source(
 #[cfg_attr(test, allow(clippy::large_enum_variant))]
 enum FaceBackend {
     #[cfg(target_os = "macos")]
-    Mlx(runtime_macos::providers::face::FaceAnalysis),
+    Mlx(runtime_macos::utilities::face::FaceAnalysis),
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     Candle(Box<dyn gen_core::FaceEmbedder>),
     /// Weight-free deterministic backend for the wiring tests (sc-4409): keyed on the image's first
@@ -440,7 +440,7 @@ impl FaceLikenessScorer {
             weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE),
         )
         .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
-        let analysis = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
+        let analysis = runtime_macos::utilities::face::FaceAnalysis::load(&scrfd, &arcface)
             .map_err(|error| crate::generation_error("face stack load", error))?;
         Self::with_backend(FaceBackend::Mlx(analysis), source)
     }
@@ -450,7 +450,7 @@ impl FaceLikenessScorer {
 impl FaceLikenessScorer {
     /// Load the candle SCRFD + ArcFace stack from `weights_dir` and embed the source face once.
     pub(crate) fn load_candle(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
-        let analysis = runtime_cuda::providers::face::load(weights_dir)
+        let analysis = runtime_cuda::utilities::face::load(weights_dir)
             .map_err(|error| crate::generation_error("face stack load", error))?;
         Self::with_backend(FaceBackend::Candle(Box::new(analysis)), source)
     }

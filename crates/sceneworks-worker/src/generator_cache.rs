@@ -606,7 +606,7 @@ impl GeneratorCacheHandle {
         }
     }
 
-    #[cfg(all(test, native_lane))]
+    #[cfg(test)]
     pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
         let (worker, rx) = mpsc::channel();
         let join = thread::spawn(move || run_generator_cache_worker(rx, None));
@@ -617,6 +617,11 @@ impl GeneratorCacheHandle {
             },
             join,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn evict(&self) -> WorkerResult<bool> {
+        evict_cached_generator_on(&self.worker).await
     }
 }
 

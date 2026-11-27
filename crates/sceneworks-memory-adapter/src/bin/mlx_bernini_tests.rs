@@ -1,5 +1,5 @@
 use super::*;
-use runtime_macos::providers::bernini::memory_strategy as engine;
+use runtime_macos::calibration::bernini::memory_strategy as engine;
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -158,7 +158,7 @@ fn the_video_members_rendered_frame_count_is_the_engines_own_decoded_depth() {
         height,
         frames: BERNINI_VIDEO_FRAMES,
     };
-    let latent = mlx_gen_wan::pipeline::latent_shape(
+    let latent = runtime_macos::converters::wan::pipeline::latent_shape(
         geometry.frames as usize,
         geometry.height,
         geometry.width,

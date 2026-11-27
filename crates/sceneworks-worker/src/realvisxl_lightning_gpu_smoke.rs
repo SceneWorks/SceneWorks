@@ -65,7 +65,7 @@ fn render(
         seed: Some(42),
         steps: Some(steps),
         guidance: Some(guidance),
-        sampler: sampler.map(str::to_owned),
+        sampler: sampler.map(Into::into),
         ..Default::default()
     };
     let mut last = String::new();

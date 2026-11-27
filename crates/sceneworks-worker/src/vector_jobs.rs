@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use gen_core::core_llm::{
-    Content, ImageRef, LoadSpec as TextLoadSpec, Message, ModelRequirements, Role, Sampling,
-    StarVectorFinishReason, StarVectorOutput, StarVectorRequest, StarVectorStreamEvent,
-    StarVectorTier, TextLlmRequest,
+    Content, ImageRef, Message, Role, Sampling, StarVectorFinishReason, StarVectorOutput,
+    StarVectorRequest, StarVectorStreamEvent, TextLlmRequest,
 };
 use resvg::usvg;
 use serde::{Deserialize, Serialize};
@@ -162,7 +162,6 @@ struct StarVectorModelIdentity {
     model_id: &'static str,
     repository: &'static str,
     revision: &'static str,
-    tier: StarVectorTier,
     mlx_provider_id: &'static str,
     candle_provider_id: &'static str,
 }
@@ -172,7 +171,6 @@ const STARVECTOR_MODELS: &[StarVectorModelIdentity] = &[
         model_id: "starvector_1b",
         repository: "starvector/starvector-1b-im2svg",
         revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
-        tier: StarVectorTier::OneB,
         mlx_provider_id: "mlx-starvector-1b",
         candle_provider_id: "candle-starvector-1b",
     },
@@ -183,7 +181,6 @@ const STARVECTOR_MODELS: &[StarVectorModelIdentity] = &[
         model_id: "starvector_8b",
         repository: "starvector/starvector-8b-im2svg",
         revision: "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
-        tier: StarVectorTier::EightB,
         mlx_provider_id: "mlx-starvector-8b",
         candle_provider_id: "candle-starvector-8b",
     },
@@ -496,72 +493,47 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
         let source_path = request.source_path.as_deref().ok_or_else(|| {
             WorkerError::InvalidPayload("image_to_svg source path is missing".to_owned())
         })?;
-        let image = crate::prompt_refine_jobs::load_caption_image_ref(source_path)?;
-        let text_cancel = gen_core::core_llm::CancelFlag::new();
-        if cancel.is_cancelled() {
-            text_cancel.cancel();
-        }
-        let typed_request = native_starvector_request(request, image, text_cancel.clone())?;
-        let spec = TextLoadSpec::dense(self.weights_dir.to_string_lossy().into_owned());
-        let requirements = ModelRequirements::from_request(&typed_request.text_request);
-        let expected_provider_id = self.inference_provider_id.to_owned();
-        let identity = self.identity;
-        let expected_tier = identity.tier;
-        let backend = self.backend;
-        let cancel = cancel.clone();
-        let load_context = format!(
-            "{backend} StarVector provider {} load failed",
-            self.inference_provider_id
-        );
+        let image_ref = crate::prompt_refine_jobs::load_caption_image_ref(source_path)?;
+        let image = gen_core::Image {
+            width: image_ref.width,
+            height: image_ref.height,
+            pixels: image_ref.pixels,
+        };
+        let gen_request = starvector_generation_request(request, image, cancel.clone())?;
+        let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(self.weights_dir.clone()));
         let started = Instant::now();
+        let identity = self.identity;
+        let backend = self.backend;
+        let inference_provider_id = self.inference_provider_id;
         let kv_cache = self.kv_cache.clone();
-        let generation = mirror_vector_cancel(cancel, text_cancel, || {
-            tokio::runtime::Handle::current().block_on(crate::refine_model_cache::with_cached_refiner(
+        let load_context = format!(
+            "{} StarVector generator {} load failed",
+            self.backend, self.identity.model_id
+        );
+        let (source, terminal, execution) = tokio::runtime::Handle::current().block_on(
+            crate::generator_cache::with_cached_generator(
+                identity.model_id,
                 spec,
-                requirements,
                 load_context,
-                move |model| {
-                    if model.descriptor().id != expected_provider_id {
-                        return Err(WorkerError::Engine(format!(
-                            "StarVector model-first resolution selected {}, expected {expected_provider_id}",
-                            model.descriptor().id
-                        )));
-                    }
-                    let provider = model.as_starvector_provider().ok_or_else(|| {
-                        WorkerError::Engine(format!(
-                            "text provider {expected_provider_id} exposes no typed StarVector view"
-                        ))
-                    })?;
-                    if provider.starvector_descriptor().tier != expected_tier {
-                        return Err(WorkerError::Engine(format!(
-                            "text provider {expected_provider_id} exposes the wrong StarVector tier"
-                        )));
-                    }
-                    let (output, events, execution) = decode_native_starvector(
-                        provider, &typed_request, &progress, backend, &kv_cache,
-                    )?;
-                    let terminal = TerminalProviderOutcome {
-                        finish_reason: terminal_finish_reason(output.finish_reason),
-                        generated_tokens: output.generated_tokens,
-                        generated_bytes: output.generated_bytes,
-                        latency_seconds: started.elapsed().as_secs_f64(),
-                        provider_id: expected_provider_id.clone(),
-                        model_id: identity.model_id,
-                        model_repository: identity.repository,
-                        model_revision: identity.revision,
+                move |generator| {
+                    generate_via_registered_vector_route(
+                        generator,
+                        identity,
                         backend,
-                    };
-                    let source = validate_native_starvector_generation(output, events)?;
-                    Ok((source, terminal, execution))
+                        inference_provider_id,
+                        &gen_request,
+                        &progress,
+                        started,
+                        &kv_cache,
+                    )
                 },
-            ))
-        })?;
-        let (source, terminal, execution) = generation;
+            ),
+        )?;
         *self.terminal_outcome.lock().map_err(|_| {
             WorkerError::Engine("StarVector terminal outcome lock poisoned".to_owned())
         })? = Some(terminal);
-        for (text, index) in source {
-            on_source(&text, index)?;
+        if let Some(svg) = source {
+            on_source(&svg, 0)?;
         }
         Ok(execution)
     }
@@ -575,9 +547,201 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
     }
 }
 
+/// Build the typed [`gen_core::GenerationRequest`] for a registered `Modality::Vector` StarVector
+/// generator route (`SW-6983`, `REG-6`, `PIPE-12`), applying the worker's default KV-compression
+/// policy.
+fn starvector_generation_request(
+    request: &VectorProviderRequest,
+    image: gen_core::Image,
+    cancel: gen_core::CancelFlag,
+) -> WorkerResult<gen_core::GenerationRequest> {
+    starvector_generation_request_with_policy(
+        request,
+        image,
+        cancel,
+        crate::llm_kv_cache::worker_default_policy(),
+    )
+}
+
+fn starvector_generation_request_with_policy(
+    request: &VectorProviderRequest,
+    image: gen_core::Image,
+    cancel: gen_core::CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+) -> WorkerResult<gen_core::GenerationRequest> {
+    if request.mode != VectorMode::ImageToSvg || !request.prompt.trim().is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "native StarVector requires image-only conditioning".to_owned(),
+        ));
+    }
+    let max_svg_bytes = usize::try_from(request.detail_budget.max_svg_bytes)
+        .map_err(|_| WorkerError::InvalidPayload("maxSvgBytes does not fit usize".to_owned()))?;
+    if max_svg_bytes == 0 || max_svg_bytes > MAX_SVG_BYTES {
+        return Err(WorkerError::InvalidPayload(format!(
+            "native StarVector maxSvgBytes must be 1..={MAX_SVG_BYTES}"
+        )));
+    }
+    let mut gen_request = gen_core::GenerationRequest {
+        prompt: String::new(),
+        conditioning: vec![gen_core::Conditioning::Reference {
+            image,
+            strength: None,
+        }],
+        seed: request.sampling.seed,
+        cancel,
+        ..Default::default()
+    };
+    gen_request.extensions.vector = Some(gen_core::VectorExtension {
+        max_new_tokens: Some(request.detail_budget.max_new_tokens),
+        max_svg_bytes: Some(max_svg_bytes),
+        max_wall_time_ms: Some(request.detail_budget.max_wall_time_ms),
+        temperature: Some(request.sampling.temperature),
+        top_p: Some(request.sampling.top_p),
+        top_k: Some(request.sampling.top_k),
+        repetition_penalty: Some(request.sampling.repetition_penalty),
+        repetition_context: Some(request.sampling.repetition_context),
+        // Worker renders and atomically publishes intrinsic + comparison PNG previews.
+        render_preview: false,
+        preview_max_dimension: None,
+        // Preserve bounded-limit outcomes as typed VectorOutput so normal jobs fail closed while
+        // terminal campaigns can record bounded evidence without publishing partial SVG.
+        allow_non_publishable: true,
+        // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator enabled it).
+        kv_compression: Some(kv_compression),
+    });
+    Ok(gen_request)
+}
+
+fn map_vector_output_finish_reason(output: &gen_core::VectorOutput) -> WorkerResult<&'static str> {
+    match output.terminal.provider_finish_reason.as_deref() {
+        Some("complete_root") => Ok("complete_root"),
+        Some("eos") => Ok("eos"),
+        Some("token_limit") => Ok("token_limit"),
+        Some("byte_limit") => Ok("byte_limit"),
+        Some("wall_time_limit") => Ok("wall_time_limit"),
+        Some("cancelled") => Ok("cancelled"),
+        None => Ok(match output.finish_reason {
+            gen_core::VectorFinishReason::Stop => "complete_root",
+            gen_core::VectorFinishReason::Length => "token_limit",
+            gen_core::VectorFinishReason::Canceled => "cancelled",
+        }),
+        Some(other) => Err(WorkerError::Engine(format!(
+            "unknown StarVector terminal finish reason `{other}`"
+        ))),
+    }
+}
+
+/// Drive a registered `Modality::Vector` [`gen_core::Generator`] route (`starvector_1b` /
+/// `starvector_8b`), mapping progress ticks, MLX decode cache bounds, typed
+/// [`gen_core::GenerationOutput::Vector`] metadata, and KV-cache telemetry into worker vector job
+/// state (`REG-6`).
+#[allow(clippy::too_many_arguments)]
+fn generate_via_registered_vector_route(
+    generator: &dyn gen_core::Generator,
+    identity: StarVectorModelIdentity,
+    backend: &'static str,
+    inference_provider_id: &'static str,
+    gen_request: &gen_core::GenerationRequest,
+    progress: &tokio::sync::watch::Sender<u32>,
+    started: Instant,
+    kv_cache: &Mutex<Option<crate::llm_kv_cache::KvCacheRecord>>,
+) -> WorkerResult<(
+    Option<String>,
+    TerminalProviderOutcome,
+    gen_core::core_llm::ExecutionIdentity,
+)> {
+    let descriptor = generator.descriptor();
+    if descriptor.id != identity.model_id {
+        return Err(WorkerError::Engine(format!(
+            "StarVector registry resolution selected {}, expected {}",
+            descriptor.id, identity.model_id
+        )));
+    }
+    if descriptor.modality != gen_core::Modality::Vector {
+        return Err(WorkerError::Engine(format!(
+            "StarVector route {} declared non-vector modality {:?}",
+            descriptor.id, descriptor.modality
+        )));
+    }
+    let policy = gen_request
+        .extensions
+        .vector
+        .as_ref()
+        .and_then(|ext| ext.kv_compression)
+        .unwrap_or_default();
+    let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
+    let generation = generator.generate_with_execution_report(gen_request, &mut |event| {
+        if let gen_core::Progress::Step { current, total } = event {
+            cache_bound.note_event();
+            record_vector_token_progress(progress, current, total);
+        }
+    });
+    let record = crate::llm_kv_cache::KvCacheRecord::of_gen_core(
+        backend,
+        policy,
+        &generation,
+        |completed| match completed.generation.output.as_ref() {
+            Some(gen_core::GenerationOutput::Vector(vector_out)) => {
+                vector_out.terminal.kv_cache.as_ref()
+            }
+            _ => None,
+        },
+    );
+    *kv_cache.lock().map_err(|_| {
+        WorkerError::Engine("StarVector KV-cache record lock poisoned".to_owned())
+    })? = Some(record);
+    let completed = generation.map_err(|error| match error {
+        gen_core::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+        other => WorkerError::Engine(format!("native StarVector generation failed: {other}")),
+    })?;
+    let vector_out = match completed.generation.output {
+        Some(gen_core::GenerationOutput::Vector(vector_out)) => vector_out,
+        other => {
+            return Err(WorkerError::Engine(format!(
+                "StarVector generator {} returned non-vector output: {other:?}",
+                descriptor.id
+            )));
+        }
+    };
+    let finish_reason = map_vector_output_finish_reason(&vector_out)?;
+    let generated_tokens = u32::try_from(vector_out.generated_tokens).unwrap_or(u32::MAX);
+    let generated_bytes = vector_out
+        .terminal
+        .generated_bytes
+        .unwrap_or(vector_out.svg.len());
+    let provider_id = vector_out
+        .terminal
+        .provider_id
+        .clone()
+        .unwrap_or_else(|| inference_provider_id.to_owned());
+    let terminal = TerminalProviderOutcome {
+        finish_reason,
+        generated_tokens,
+        generated_bytes,
+        latency_seconds: started.elapsed().as_secs_f64(),
+        provider_id,
+        model_id: identity.model_id,
+        model_repository: identity.repository,
+        model_revision: identity.revision,
+        backend,
+    };
+    let source = if terminal.publishable() {
+        if vector_out.svg.trim().is_empty() {
+            return Err(WorkerError::Engine(
+                "native StarVector completed without a publishable SVG".to_owned(),
+            ));
+        }
+        Some(vector_out.svg)
+    } else {
+        None
+    };
+    Ok((source, terminal, completed.execution))
+}
+
 /// Decode one SVG on the typed StarVector `provider`, publishing its token progress, and keep the
 /// decode's KV-cache record in `kv_cache` whichever way it ends — completed, or refused, canceled
 /// or failed by the engine (sc-20682, sc-20688).
+#[cfg(test)]
 fn decode_native_starvector(
     provider: &dyn gen_core::core_llm::StarVectorProvider,
     typed_request: &StarVectorRequest,
@@ -628,6 +792,7 @@ fn decode_native_starvector(
     Ok((completed.output, events, completed.execution))
 }
 
+#[cfg(test)]
 const fn terminal_finish_reason(reason: StarVectorFinishReason) -> &'static str {
     match reason {
         StarVectorFinishReason::CompleteRoot => "complete_root",
@@ -711,6 +876,7 @@ fn active_starvector_backend(settings: &Settings) -> WorkerResult<&'static str> 
     }
 }
 
+#[cfg(test)]
 fn native_starvector_request(
     request: &VectorProviderRequest,
     image: ImageRef,
@@ -767,36 +933,7 @@ fn native_starvector_request(
     ))
 }
 
-/// Mirror the worker queue's established generation cancel flag into core-llm's independent flag
-/// while a cached text provider loads and decodes. The monitor owns no model and is joined before
-/// return; it exists only because the two tensor-free contracts intentionally use distinct flag
-/// types.
-fn mirror_vector_cancel<R>(
-    source: gen_core::CancelFlag,
-    target: gen_core::core_llm::CancelFlag,
-    run: impl FnOnce() -> WorkerResult<R>,
-) -> WorkerResult<R> {
-    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    std::thread::scope(|scope| {
-        let finished_for_monitor = finished.clone();
-        let target_for_monitor = target.clone();
-        let monitor = scope.spawn(move || {
-            while !finished_for_monitor.load(std::sync::atomic::Ordering::Acquire) {
-                if source.is_cancelled() {
-                    target_for_monitor.cancel();
-                    break;
-                }
-                std::thread::park_timeout(Duration::from_millis(10));
-            }
-        });
-        let result = run();
-        finished.store(true, std::sync::atomic::Ordering::Release);
-        monitor.thread().unpark();
-        let _ = monitor.join();
-        result
-    })
-}
-
+#[cfg(test)]
 fn classify_starvector_error(error: gen_core::core_llm::Error) -> WorkerError {
     if matches!(error, gen_core::core_llm::Error::Canceled) {
         WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
@@ -805,6 +942,7 @@ fn classify_starvector_error(error: gen_core::core_llm::Error) -> WorkerError {
     }
 }
 
+#[cfg(test)]
 fn validate_native_starvector_generation(
     output: StarVectorOutput,
     events: Vec<StarVectorStreamEvent>,

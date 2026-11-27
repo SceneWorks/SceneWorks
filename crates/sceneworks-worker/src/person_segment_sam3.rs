@@ -29,7 +29,7 @@ use std::sync::{Mutex, OnceLock};
 use gen_core::CancelFlag;
 use mlx_rs::Array;
 use runtime_macos::media::weights::Weights;
-use runtime_macos::providers::sam3::{
+use runtime_macos::utilities::sam3::{
     Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3Tracker, Sam3VideoModel,
     VideoFrameOutput,
 };

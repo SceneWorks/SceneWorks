@@ -1300,6 +1300,7 @@ pub(super) async fn generate_stream_using(
                             .process_limit_bytes
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let adapter_apply_reports = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
                         let pag_report = std::cell::RefCell::new(None);
@@ -1335,6 +1336,7 @@ pub(super) async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
+                                adapter_apply_reports: Some(&adapter_apply_reports),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
@@ -1352,7 +1354,7 @@ pub(super) async fn generate_stream_using(
                         let mut facts = lane_controls::image_facts(
                             &warnings.take(),
                             &adapter_identities,
-                            &generator.adapter_apply_reports(),
+                            &adapter_apply_reports.take(),
                             crate::execution_planner::prefix_kv_cache_record(
                                 memory_evaluation.prefix_kv_cache,
                                 prefix_kv_cache_report.take().as_ref(),
@@ -1409,6 +1411,7 @@ pub(super) async fn generate_stream_using(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                     let warnings = std::cell::RefCell::new(Vec::new());
+                    let adapter_apply_reports = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
@@ -1449,6 +1452,7 @@ pub(super) async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
+                                adapter_apply_reports: Some(&adapter_apply_reports),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
@@ -1503,7 +1507,7 @@ pub(super) async fn generate_stream_using(
                     let mut facts = lane_controls::image_facts(
                         &warnings.take(),
                         &adapter_identities,
-                        &generator.adapter_apply_reports(),
+                        &adapter_apply_reports.take(),
                         crate::execution_planner::prefix_kv_cache_record(
                             memory_evaluation.prefix_kv_cache,
                             prefix_kv_cache_report.take().as_ref(),

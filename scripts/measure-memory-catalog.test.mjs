@@ -3068,13 +3068,14 @@ async function unpinnedProviderGaps() {
   return (await measurabilityGapsPromise).unpinned;
 }
 
-/** Every engine id the checked-in capability dumps record for `backend`, or `null` if unreadable. */
+/** Every engine id the checked-in sga.capabilities/2 exports record for `backend`, or `null` if unreadable. */
 async function pinnedEngineIds(backend) {
   try {
+    const file = backend === "mlx" ? "macos-mlx.json" : "candle-cuda.json";
     const dump = JSON.parse(
-      await readFile(path.join(ROOT, "config", "engine-capabilities", `capabilities.${backend}.json`), "utf8"),
+      await readFile(path.join(ROOT, "config", "engine-capabilities", "sga", file), "utf8"),
     );
-    return new Set((dump.engines ?? []).map((engine) => engine.id));
+    return new Set(Object.keys(dump.routes ?? {}));
   } catch {
     return null;
   }
@@ -4033,20 +4034,29 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   // that declaration depends on a concrete surface. Absence from either is not support evidence.
   const dumps = new Map();
   for (const backend of ["mlx", "candle"]) {
+    const file = backend === "mlx" ? "macos-mlx.json" : "candle-cuda.json";
     const dump = JSON.parse(
-      await readFile(path.join(ROOT, `config/engine-capabilities/capabilities.${backend}.json`), "utf8"),
+      await readFile(path.join(ROOT, `config/engine-capabilities/sga/${file}`), "utf8"),
     );
-    dumps.set(backend, new Map(dump.memoryContracts.map((contract) => [contract.id, contract])));
+    dumps.set(backend, dump.routes ?? {});
   }
-  const dumpRefusesDefault = (backend, anchor, tier, fallbackRung) => {
-    const contract = dumps.get(backend).get(anchor.provider);
-    if (!contract) return null;
-    const loadShape = anchor.loadShape;
-    const surfaces = contract.surfaces.filter(
-      (surface) => surface.selector.tier === tier && surface.selector.loadShape === loadShape,
-    );
-    if (surfaces.length === 0) return null;
-    return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
+  const dumpRefusesDefault = (backend, anchor, _tier, fallbackRung) => {
+    const route = dumps.get(backend)?.[anchor.provider];
+    if (!route?.memory) return null;
+    if (fallbackRung === "staged_residency") {
+      if (
+        route.memory.staged_residency_availability === "selectable" ||
+        route.memory.staged_residency_availability === "unconditionally_engaged"
+      ) {
+        return false;
+      }
+      // `sga.capabilities/2` reports `staged_residency_availability: "absent"` when staged
+      // residency is not statically declared at the route-record level; per-tier / per-loadShape
+      // contract support is resolved from the pinned inference source (`declaredRefusesDefault` /
+      // `readCompatibilityDefaultSupport`) rather than assumed refused here.
+      return null;
+    }
+    return null;
   };
   // sc-22736, pin 8a65db2a: the pinned declaration also covers providers with no dump surface.
   // `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
@@ -4118,8 +4128,8 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
       assert.notEqual(
         contractRefusesDefault,
         null,
-        `${key}: overrides the lane default, but config/engine-capabilities/capabilities.${backend}.json ` +
-          `records no ${anchor.provider} contract surface at ${tier}/${anchor.loadShape} AND the engine's own ` +
+        `${key}: overrides the lane default, but config/engine-capabilities/sga/${backend === "mlx" ? "macos-mlx" : "candle-cuda"}.json ` +
+          `records no refusal for ${anchor.provider} at ${tier}/${anchor.loadShape} AND the engine's own ` +
           `memory-strategy entry point for ${modelId}:${backend} (config/anchor-loader-closures.json) declares ` +
           "no per-rung support that can be read at the pinned inference checkout. Set $INFERENCE_REPO to a " +
           "checkout of the pin (check.yml's parity-scaffold job does), or drop the override: an override with " +

@@ -569,16 +569,17 @@ pub(super) fn explicit_sampling_request(request: &ImageRequest) -> gen_core::Gen
     let guidance = request
         .advanced_f64("guidanceScale")
         .map(|value| value as f32);
-    gen_core::GenerationRequest {
-        sampler,
-        scheduler,
+    let mut req = gen_core::GenerationRequest {
+        sampler: sampler.map(Into::into),
+        scheduler: scheduler.map(Into::into),
         scheduler_shift,
         guidance,
-        pag: request.resolved_pag().ok().flatten(),
         negative_prompt: (!request.negative_prompt.trim().is_empty())
             .then(|| request.negative_prompt.clone()),
         ..Default::default()
-    }
+    };
+    req.features.pag = request.resolved_pag().ok().flatten();
+    req
 }
 
 /// Validate `advanced.pag` for a bespoke worker lane before weight loading, returning the resolved

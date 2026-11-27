@@ -242,18 +242,18 @@ fn krea_edit_candle_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
-        sampler: sampling.sampler.clone(),
-        scheduler: sampling.scheduler.clone(),
-        scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
         conditioning,
-        use_pid,
-        text_style_gain,
         memory,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling.clone()
     };
+    if use_pid {
+        request.features.pid = Some(gen_core::PidParams::enabled());
+    }
+    if let Some(gain) = text_style_gain {
+        request.extensions.krea_mut().text_style_gain = Some(gain);
+    }
     let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,

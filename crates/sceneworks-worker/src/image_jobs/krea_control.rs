@@ -507,11 +507,13 @@ pub(super) fn krea_control_generate_one(
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
         conditioning,
-        text_style_gain,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
+    if let Some(gain) = text_style_gain {
+        request.extensions.krea_mut().text_style_gain = Some(gain);
+    }
     let output = crate::memory_strategy::generate_with_scope(
         generator,
         &mut request,

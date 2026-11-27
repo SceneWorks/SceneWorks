@@ -30,9 +30,15 @@ pub(super) fn validate_krea_realtime_geometry(
     height: u32,
     frames: u32,
 ) -> Result<KreaRealtimeGeometry, String> {
-    let capabilities = mlx_gen_krea_realtime::descriptor().capabilities;
+    let registry = runtime_macos::memory_contract_surface_registry()
+        .map_err(|error| format!("build MLX memory-contract surface registry: {error}"))?;
+    let capabilities = registry
+        .generator_descriptor(KREA_REALTIME_PROVIDER)
+        .ok_or_else(|| format!("{KREA_REALTIME_LABEL} descriptor is missing from MLX catalog"))?
+        .capabilities
+        .clone();
     let multiple = match capabilities.size_floor {
-        mlx_gen::gen_core::SizeFloor::RangeCheckedOnGrid { multiple } => multiple,
+        runtime_macos::gen_core::SizeFloor::RangeCheckedOnGrid { multiple } => multiple,
         other => {
             return Err(format!(
                 "{KREA_REALTIME_LABEL} expects the pinned engine to advertise a grid size floor, \
@@ -88,7 +94,13 @@ pub(super) fn krea_realtime_target_geometry(
 ) -> Result<KreaRealtimeGeometry, String> {
     let geometry = protocol::planned_object(request, "/target/geometry")?;
     let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
-    let max_count = mlx_gen_krea_realtime::descriptor().capabilities.max_count;
+    let registry = runtime_macos::memory_contract_surface_registry()
+        .map_err(|error| format!("build MLX memory-contract surface registry: {error}"))?;
+    let max_count = registry
+        .generator_descriptor(KREA_REALTIME_PROVIDER)
+        .ok_or_else(|| format!("{KREA_REALTIME_LABEL} descriptor is missing from MLX catalog"))?
+        .capabilities
+        .max_count;
     let batch = axis("batch")?;
     if batch != max_count {
         return Err(format!(
@@ -379,8 +391,9 @@ pub(super) fn run_krea_realtime(request: &Value) -> Result<Value, String> {
     // corrupt, and a mis-staged tier fails here rather than after three full renders.
     let staged_tier_bytes = safetensors_bytes(&artifact.root)?;
 
-    let registry = mlx_gen_krea_realtime::provider_registry()
-        .map_err(|error| format!("build Krea Realtime registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(KREA_REALTIME_PROVIDER, spec)
         .map_err(|error| {

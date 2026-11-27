@@ -163,8 +163,9 @@ pub(super) fn run_krea_control(request: &Value) -> Result<Value, String> {
         // canonicalization above has proved that the HF snapshot symlink resolves to a real file.
         .with_control(WeightsSource::File(requested_overlay_path))
         .with_offload_policy(OffloadPolicy::Resident);
-    let generator = mlx_gen_krea::provider_registry()
-        .map_err(|error| format!("build Krea registry: {error}"))?
+    let generator = runtime_macos::catalog()
+        .map_err(|error| format!("build MLX catalog: {error}"))?
+        .media()
         .load(KREA_PROVIDER, &spec)
         .map_err(|error| format!("load real Krea q4 control provider: {error}"))?;
     let contract = generator
@@ -304,7 +305,7 @@ pub(super) fn run_krea_control(request: &Value) -> Result<Value, String> {
         MemoryPhase::Denoise,
         MemoryPhase::Decode,
     ] {
-        let cancel = mlx_gen::CancelFlag::new();
+        let cancel = runtime_macos::gen_core::CancelFlag::new();
         if phase == MemoryPhase::Conditioning {
             cancel.cancel();
         }

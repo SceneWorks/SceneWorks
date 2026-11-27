@@ -14,6 +14,9 @@ mod jsonc;
 mod memory_route_policy;
 #[path = "src/registry/policy.rs"]
 mod policy;
+#[path = "src/registry/route_bindings.rs"]
+#[allow(dead_code)]
+mod route_bindings;
 #[path = "src/registry/spec.rs"]
 #[allow(dead_code)]
 mod spec;
@@ -29,6 +32,7 @@ fn build_registry() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/hf_repo_id.rs");
     println!("cargo:rerun-if-changed=src/registry/assemble.rs");
+    println!("cargo:rerun-if-changed=src/registry/route_bindings.rs");
     println!("cargo:rerun-if-changed=src/registry/spec.rs");
     println!("cargo:rerun-if-changed=src/registry/policy.rs");
     let product_manifest = read("manifests/builtin.models.jsonc");
@@ -75,14 +79,8 @@ fn build_registry() {
         &route_policy_json,
         &preview_json,
         &[
-            (
-                "mlx",
-                &read("engine-capabilities/runtime/capabilities.mlx.json"),
-            ),
-            (
-                "candle",
-                &read("engine-capabilities/runtime/capabilities.candle.json"),
-            ),
+            ("mlx", &read("engine-capabilities/sga/macos-mlx.json")),
+            ("candle", &read("engine-capabilities/sga/candle-cuda.json")),
         ],
     )
     .expect("invalid static model registry");

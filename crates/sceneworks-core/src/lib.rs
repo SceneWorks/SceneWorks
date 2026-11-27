@@ -96,6 +96,7 @@ pub mod options_context;
 pub mod safe_path;
 pub mod safetensors;
 pub mod session_log;
+pub mod sga_capabilities;
 pub mod slug;
 pub mod store_util;
 pub mod style_composer;

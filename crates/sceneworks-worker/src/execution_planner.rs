@@ -980,7 +980,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
     }
     #[cfg(target_os = "macos")]
     {
-        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
         let tier = match tier_quant {
             None => provider::quant::Tier::Bf16,
             Some(gen_core::Quant::Q8) => provider::quant::Tier::Q8,
@@ -1002,7 +1002,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
     {
         let _ = tier_quant;
         Some(
-            runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+            runtime_cuda::memory_helpers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
                 width,
                 height,
                 reference_count,
@@ -2944,7 +2944,7 @@ mod tests {
         );
         #[cfg(target_os = "macos")]
         {
-            use runtime_macos::providers::qwen_image_2_1 as provider;
+            use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
             for (quant, tier) in [
                 (None, provider::quant::Tier::Bf16),
                 (Some(gen_core::Quant::Q8), provider::quant::Tier::Q8),
@@ -3742,15 +3742,15 @@ mod corpus_replay_tests {
             encoder_contract: None,
             required_components: &[],
         };
-        let req = gen_core::GenerationRequest {
+        let mut req = gen_core::GenerationRequest {
             prompt: "test".into(),
             width: 1024,
             height: 1024,
             count: 1,
             steps: Some(8),
-            low_res_start: Some(spec),
             ..Default::default()
         };
+        req.features.low_res_start = Some(spec);
         let plan = gen_core::RenderPlan::base_image(
             &descriptor,
             &req,

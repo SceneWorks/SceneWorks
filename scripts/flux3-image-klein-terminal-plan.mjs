@@ -16,7 +16,10 @@ export async function loadProductTargets(root = ROOT) {
     JSON.parse(stripJsoncComments(await readFile(path.join(root, 'config/manifests/builtin.models.jsonc'), 'utf8'))),
     await readBuiltinMemoryEvidence(root),
   );
-  const capabilities = Object.fromEntries(await Promise.all(['mlx', 'candle'].map(async backend => [backend, JSON.parse(await readFile(path.join(root, `config/engine-capabilities/runtime/capabilities.${backend}.json`), 'utf8'))])));
+  const capabilities = Object.fromEntries(await Promise.all([
+    ['mlx', 'config/engine-capabilities/sga/macos-mlx.json'],
+    ['candle', 'config/engine-capabilities/sga/candle-cuda.json'],
+  ].map(async ([backend, relPath]) => [backend, JSON.parse(await readFile(path.join(root, relPath), 'utf8'))])));
   const allModels = Array.isArray(manifest) ? manifest : manifest.models;
   const models = allModels.filter(m => ['flux3_klein', 'flux3_klein_base'].includes(m.id));
   assert.equal(models.length, 2);
@@ -26,20 +29,19 @@ export async function loadProductTargets(root = ROOT) {
   const classification = validateFlux3AnchorPrerequisites({ models, calibrationPlan, artifactPrerequisites });
   return { models, capabilities, upsampler, artifactPrerequisites: { ...artifactPrerequisites, classification } };
 }
-function generators(value) {
-  if (Array.isArray(value?.generator_capabilities)) return value.generator_capabilities;
-  for (const child of Object.values(value ?? {})) if (child && typeof child === 'object' && !Array.isArray(child)) { const found = generators(child); if (found.length) return found; }
-  return [];
+function routeFor(exportDoc, modelId) {
+  return exportDoc?.routes?.[modelId] ?? null;
 }
 export function targetRegistry({ models, capabilities }) {
   return ['mlx', 'candle'].flatMap(backend => models.map(model => {
     const platform = backend === 'mlx' ? 'macos' : 'windows';
-    const engine = generators(capabilities[backend]).find(e => e.id === model.id);
+    const engine = routeFor(capabilities[backend], model.id);
     assert(engine, `missing shipped ${backend}/${model.id} capability`);
     const downloads = model.downloads.filter(d => !d.coRequisite && (!d.platforms || d.platforms.includes(platform)));
     for (const d of model.downloads) assert.deepEqual(d.files, [], 'whole pinned repository only');
+    const supportedQuants = engine.quant?.supported_tiers ?? engine.capabilities?.supported_quants ?? [];
     return { backend, modelId: model.id, checkpoint: model.id.endsWith('_base') ? 'base' : 'distilled', model,
-      engine, downloads, tiers: ['bf16', ...engine.supported_quants], artifactKey: tier => `${model.id}:${backend}:${tier}` };
+      engine, downloads, tiers: ['bf16', ...supportedQuants], artifactKey: tier => `${model.id}:${backend}:${tier}` };
   }));
 }
 const placement = { version: 1, boxes: [{ id: 'teapot', desc: 'teal ceramic teapot', bbox: [0.125, 0.25, 0.75, 0.875], bbox_space: 'normalized' }] };

@@ -92,14 +92,11 @@ pub(super) fn validate_sdxl_selection_parameters(
     if matches!(
         selection.strategy,
         MemoryStrategy::BoundedDecode | MemoryStrategy::BoundedTransformerResidency
-    ) && (!selection
-        .parameters
-        .decode_tile_edge
-        .is_some_and(|edge| mlx_gen_sdxl::memory_strategy::DECODE_TILE_EDGES.contains(&edge))
-        || !selection.parameters.decode_overlap.is_some_and(|overlap| {
-            mlx_gen_sdxl::memory_strategy::DECODE_OVERLAPS.contains(&overlap)
-        }))
-    {
+    ) && (!selection.parameters.decode_tile_edge.is_some_and(|edge| {
+        runtime_macos::calibration::sdxl::memory_strategy::DECODE_TILE_EDGES.contains(&edge)
+    }) || !selection.parameters.decode_overlap.is_some_and(|overlap| {
+        runtime_macos::calibration::sdxl::memory_strategy::DECODE_OVERLAPS.contains(&overlap)
+    })) {
         return Err(
             "MLX SDXL bounded decode requires a published native VAE tile and overlap".to_owned(),
         );
@@ -302,8 +299,9 @@ pub(super) fn run_sdxl(request: &Value) -> Result<Value, String> {
         ));
     }
     let (repository, revision, spec) = sdxl_load_spec(arm, tier, &selection)?;
-    let registry = mlx_gen_sdxl::provider_registry()
-        .map_err(|error| format!("build SDXL registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(SDXL_PROVIDER, &spec)
         .map_err(|error| format!("read {SDXL_PROVIDER} memory-strategy contract: {error}"))?

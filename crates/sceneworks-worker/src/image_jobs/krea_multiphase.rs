@@ -441,8 +441,8 @@ fn krea_multiphase_raw_settings(
 pub(super) async fn candle_phase_adapter_memory(
     spec: &gen_core::LoadSpec,
     phases: &[gen_core::GenerationPhase],
-) -> WorkerResult<runtime_cuda::providers::krea::PhaseAdapterMemory> {
-    let bound = runtime_cuda::providers::krea::phase_adapter_memory(spec, phases)
+) -> WorkerResult<runtime_cuda::converters::krea::PhaseAdapterMemory> {
+    let bound = runtime_cuda::converters::krea::phase_adapter_memory(spec, phases)
         .map_err(|error| super::render::preload_plan_error(KREA_RAW_MODEL_ID, error))?;
     if bound.host_bytes > 0 {
         check_candle_phase_host_memory(
@@ -522,7 +522,7 @@ pub(super) fn mlx_phase_adapter_workspace(
     spec: &gen_core::LoadSpec,
     request: &GenerationRequest,
 ) -> WorkerResult<u64> {
-    runtime_macos::providers::krea::multiphase::adapter_phase_additional_bytes(spec, request)
+    runtime_macos::converters::krea::multiphase::adapter_phase_additional_bytes(spec, request)
         .map_err(|error| super::render::preload_plan_error(KREA_RAW_MODEL_ID, error))
 }
 
@@ -578,7 +578,7 @@ pub(super) fn multiphase_pag_workspace(
                 item.plan.executed_steps() as u32,
                 (item.plan.sigmas().len() - 1) as u32,
                 capability,
-                item.request.pag.as_ref(),
+                item.request.features.pag.as_ref(),
             )
         })
         .max()
@@ -845,15 +845,17 @@ pub(super) async fn generate_krea_multiphase_stream(
         .await?
         .device_bytes;
 
-    let phase_request = GenerationRequest {
+    let mut phase_request = GenerationRequest {
         negative_prompt,
         width,
         height,
         guidance,
-        text_style_gain,
-        phases: Some(phases),
         ..sampling_controls
     };
+    if let Some(gain) = text_style_gain {
+        phase_request.extensions.krea_mut().text_style_gain = Some(gain);
+    }
+    phase_request.features.phases = Some(phases);
     #[cfg(target_os = "macos")]
     let phase_adapter_workspace = mlx_phase_adapter_workspace(&spec, &phase_request)?;
     let work = prepare_multiphase_work(engine_id, &spec, phase_request, work)?;

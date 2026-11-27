@@ -2593,32 +2593,28 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             .map(|index| (42 + index as i64, format!("{} prompt {index}", case.name)))
             .collect();
         let work = if let Some(steps) = case.phase_steps {
-            prepare_multiphase_work(
-                engine_id,
-                &spec,
-                GenerationRequest {
-                    width: req.width,
-                    height: req.height,
-                    phases: Some(vec![
-                        gen_core::GenerationPhase {
-                            steps: 1,
-                            guidance: Some(0.0),
-                            adapters: vec![],
-                        },
-                        gen_core::GenerationPhase {
-                            steps: steps - 1,
-                            guidance: Some(3.0),
-                            adapters: vec![],
-                        },
-                    ]),
-                    ..Default::default()
+            let mut phase_req = GenerationRequest {
+                width: req.width,
+                height: req.height,
+                ..Default::default()
+            };
+            phase_req.features.phases = Some(vec![
+                gen_core::GenerationPhase {
+                    steps: 1,
+                    guidance: Some(0.0),
+                    adapters: vec![],
                 },
-                work,
-            )
-            .expect("compile imported Krea phases without loading its file")
-            .into_iter()
-            .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
-            .collect()
+                gen_core::GenerationPhase {
+                    steps: steps - 1,
+                    guidance: Some(3.0),
+                    adapters: vec![],
+                },
+            ]);
+            prepare_multiphase_work(engine_id, &spec, phase_req, work)
+                .expect("compile imported Krea phases without loading its file")
+                .into_iter()
+                .map(|(seed, render)| (seed, KreaImportedItem::Multiphase(Box::new(render))))
+                .collect()
         } else if let Some(hires) = case.hires_fix {
             let work: Vec<(i64, String)> = work;
             work.into_iter()
@@ -2630,7 +2626,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                         count: 1,
                         seed: Some(seed as u64),
                         steps: Some(2),
-                        sampler: Some("euler".to_owned()),
+                        sampler: Some("euler".into()),
                         ..Default::default()
                     };
                     let prepared = PreparedKreaHires::prepare(
@@ -2786,7 +2782,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 case.name,
                 pass + 1
             );
-            assert_eq!(context.has_phases, request.phases.is_some());
+            assert_eq!(context.has_phases, request.features.phases.is_some());
             assert!(
                 request.memory.is_some(),
                 "{} pass {} must carry admitted memory",
@@ -2928,7 +2924,7 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
     let mut loaded_policy = crate::generator_cache::ExecutionPolicy::from_load_spec(&spec);
     loaded_policy.offload_policy = gen_core::OffloadPolicy::Sequential;
     let first_use_pid = cfg!(target_os = "macos");
-    let first = GenerationRequest {
+    let mut first = GenerationRequest {
         prompt: "a stormy lighthouse".into(),
         negative_prompt: Some("blurry".into()),
         width: 512,
@@ -2939,10 +2935,12 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
         guidance: Some(7.0),
         sampler: Some("euler".into()),
         scheduler: Some("karras".into()),
-        use_pid: first_use_pid,
         enhance_prompt: true,
         ..Default::default()
     };
+    if first_use_pid {
+        first.features.pid = Some(gen_core::PidParams::enabled());
+    }
     // Enabling prompt enhancement on SDXL fails pre-load compilation because SDXL does not
     // advertise prompt enhancement; pass 0 is always stripped to unenhanced regardless.
     let enhance_refusal = PreparedSdxlHires::prepare(
@@ -3040,14 +3038,14 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
         !requests[0].enhance_prompt,
         "base pass must stay unenhanced even if the input request had enhance_prompt set"
     );
-    assert_eq!(requests[0].use_pid, first_use_pid);
+    assert_eq!(requests[0].use_pid(), first_use_pid);
     assert!(requests[0].conditioning.is_empty());
     assert!(
         !requests[1].enhance_prompt,
         "SDXL refinement preserves PromptEnhance::default() (unenhanced)"
     );
     assert!(
-        !requests[1].use_pid,
+        !requests[1].use_pid(),
         "refinement pass always uses native VAE"
     );
     assert_eq!(requests[1].guidance, Some(6.5));
@@ -3468,7 +3466,7 @@ fn imported_sdxl_mlx_driver_evaluates_every_shape_and_scopes_every_pass() {
         req.mode = case.mode.to_owned();
         let fixture = tempfile::tempdir().unwrap();
         let spec = prepared_sdxl_imported_test_spec(&fixture);
-        let prototype = GenerationRequest {
+        let mut prototype = GenerationRequest {
             width: req.width,
             height: req.height,
             count: 1,
@@ -3476,9 +3474,11 @@ fn imported_sdxl_mlx_driver_evaluates_every_shape_and_scopes_every_pass() {
             guidance: Some(7.0),
             sampler: Some("euler".into()),
             scheduler: Some("karras".into()),
-            use_pid: case.use_pid,
             ..Default::default()
         };
+        if case.use_pid {
+            prototype.features.pid = Some(gen_core::PidParams::enabled());
+        }
         let mut hires_memory = None;
         let work = (0..case.item_count)
             .map(|index| (42 + index as i64, format!("{} prompt {index}", case.name)))
@@ -3637,7 +3637,7 @@ fn imported_sdxl_mlx_driver_evaluates_every_shape_and_scopes_every_pass() {
             );
             assert_eq!(
                 context.use_pid,
-                request.use_pid,
+                request.use_pid(),
                 "{} pass {} PiD identity",
                 case.name,
                 pass + 1
@@ -3770,7 +3770,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         &[edit.context]
     );
     let edit_request = edit_generator.requests.lock().unwrap();
-    assert!(edit_request[0].use_pid);
+    assert!(edit_request[0].use_pid());
     assert_eq!(edit_request[0].scheduler_shift, Some(33.375));
     assert_eq!(edit_request[0].sampler.as_deref(), Some("heun"));
     assert_eq!(edit_request[0].scheduler.as_deref(), Some("karras"));
@@ -3784,19 +3784,20 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     let mut phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
     phase.context.geometry.width = 512;
     phase.context.geometry.height = 512;
+    let mut phase_req = GenerationRequest {
+        width: 512,
+        height: 512,
+        ..sampling_controls
+    };
+    phase_req.features.phases = Some(vec![gen_core::GenerationPhase {
+        steps: 2,
+        guidance: None,
+        adapters: vec![],
+    }]);
     let (_, render) = prepare_multiphase_work(
         "krea_2_raw",
         &LoadSpec::new(WeightsSource::Dir("krea-test".into())),
-        GenerationRequest {
-            width: 512,
-            height: 512,
-            phases: Some(vec![gen_core::GenerationPhase {
-                steps: 2,
-                guidance: None,
-                adapters: vec![],
-            }]),
-            ..sampling_controls
-        },
+        phase_req,
         vec![(9, "phases".into())],
     )
     .unwrap()
@@ -3818,7 +3819,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         &[phase.context]
     );
     let phase_request = phase_generator.requests.lock().unwrap();
-    assert!(phase_request[0].phases.is_some());
+    assert!(phase_request[0].features.phases.is_some());
     assert_eq!(phase_request[0].scheduler_shift, Some(33.375));
     assert_eq!(phase_request[0].sampler.as_deref(), Some("heun"));
     assert_eq!(phase_request[0].scheduler.as_deref(), Some("karras"));
@@ -7246,7 +7247,7 @@ fn bernini_t2v_candle_real_weights_generates_a_clip() {
         guidance: Some(4.0),
         frames: Some(frames),
         fps: Some(16),
-        video_mode: Some("t2v".to_owned()),
+        video_mode: Some("t2v".into()),
         cancel: gen_core::CancelFlag::new(),
         ..Default::default()
     };
@@ -7409,7 +7410,7 @@ fn pulid_flux_real_weights_holds_identity() {
     };
 
     // Reference ArcFace embedding (native face stack — detection + embedder only, no parser).
-    let face = runtime_macos::providers::face::FaceAnalysis::load(
+    let face = runtime_macos::utilities::face::FaceAnalysis::load(
         &Weights::from_file(&scrfd).unwrap(),
         &Weights::from_file(&arcface).unwrap(),
     )
@@ -7441,7 +7442,7 @@ fn pulid_flux_real_weights_holds_identity() {
     });
     let generator = load_control_engine("pulid_flux", &spec).unwrap();
     let cancel = gen_core::CancelFlag::new();
-    let req = gen_core::GenerationRequest {
+    let mut req = gen_core::GenerationRequest {
         prompt: "a portrait photo of a person, headshot, looking at the camera".to_owned(),
         width: 512,
         height: 512,
@@ -7450,7 +7451,6 @@ fn pulid_flux_real_weights_holds_identity() {
         steps: Some(20),
         guidance: Some(4.0),
         true_cfg: None,
-        timestep_to_start_cfg: Some(4),
         conditioning: vec![gen_core::Conditioning::Reference {
             image: reference.clone(),
             strength: Some(1.0),
@@ -7458,6 +7458,7 @@ fn pulid_flux_real_weights_holds_identity() {
         cancel: cancel.clone(),
         ..Default::default()
     };
+    req.extensions.pulid_mut().timestep_to_start_cfg = Some(4);
     let out = generator.generate(&req, &mut |_| {}).unwrap();
     let image = match out {
         gen_core::GenerationOutput::Images(mut v) => v.remove(0),
@@ -23061,15 +23062,15 @@ fn krea_imported_mlx_gpu_smoke() {
         steps,
         seed,
     );
-    runtime_macos::providers::krea::reset_block_stream_diagnostics();
+    runtime_macos::converters::krea::reset_block_stream_diagnostics();
 
     // ---- 4A. LEGACY SHIM: the pre-registry entrypoint retained as a compatibility control. ----
     let legacy = render_real_krea("imported_legacy_shim", &out_dir, (w, h), make_req(), || {
-        Ok(runtime_macos::providers::krea::load_from_native_dit_file(
+        Ok(runtime_macos::converters::krea::load_from_native_dit_file(
             &dit,
             &base,
             &[],
-            runtime_macos::providers::krea::descriptor(),
+            runtime_macos::converters::krea::descriptor(),
         )?)
     });
 
@@ -23111,8 +23112,8 @@ fn krea_imported_mlx_gpu_smoke() {
         "registry-vs-shim pixel hashes must match"
     );
     assert_eq!(
-        runtime_macos::providers::krea::block_stream_diagnostics(),
-        runtime_macos::providers::krea::BlockStreamDiagnostics::default(),
+        runtime_macos::converters::krea::block_stream_diagnostics(),
+        runtime_macos::converters::krea::BlockStreamDiagnostics::default(),
         "resident legacy/registry controls must not materialize block windows"
     );
 
@@ -23132,7 +23133,7 @@ fn krea_imported_mlx_gpu_smoke() {
         transformer_window_component: Some(gen_core::TransformerComponent::Dit),
         ..Default::default()
     });
-    runtime_macos::providers::krea::reset_block_stream_diagnostics();
+    runtime_macos::converters::krea::reset_block_stream_diagnostics();
     let streamed = render_real_krea(
         "imported_registry_streamed_window1",
         &out_dir,
@@ -23141,9 +23142,9 @@ fn krea_imported_mlx_gpu_smoke() {
         || crate::inference_runtime::load("krea_2_turbo", &streamed_spec),
     );
     let stream_delta = mean_abs_frame_delta(&resident.image, &streamed.image);
-    let stream_diagnostics = runtime_macos::providers::krea::block_stream_diagnostics();
+    let stream_diagnostics = runtime_macos::converters::krea::block_stream_diagnostics();
     let expected_windows =
-        runtime_macos::providers::krea::Krea2Config::turbo().num_layers as u64 * u64::from(steps);
+        runtime_macos::converters::krea::Krea2Config::turbo().num_layers as u64 * u64::from(steps);
     let stream_byte_delta = resident
         .image
         .pixels
@@ -23413,7 +23414,7 @@ fn krea_imported_control_mlx_gpu_smoke() {
 
     // ---- 4. Load the branch onto the IMPORTED DiT, then render three variants ----
     let t0 = std::time::Instant::now();
-    let model = runtime_macos::providers::krea::load_control_from_native_dit_file(
+    let model = runtime_macos::converters::krea::load_control_from_native_dit_file(
         &dit,
         &base,
         &overlay,
@@ -23966,8 +23967,8 @@ fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
     let dir = tempfile::tempdir().unwrap();
     let (_settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
 
-    let error = runtime_macos::providers::mage::load_finetuned(
-        runtime_macos::providers::mage::MageVariant::Base,
+    let error = runtime_macos::converters::mage::load_finetuned(
+        runtime_macos::converters::mage::MageVariant::Base,
         &LoadSpec::new(WeightsSource::Dir(checkpoint.clone())),
     )
     .err()
@@ -23975,7 +23976,7 @@ fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
     .expect("no components are staged, so this must refuse");
 
     assert!(
-        error.contains(runtime_macos::providers::mage::COMPONENT_TEXT_ENCODER),
+        error.contains(runtime_macos::converters::mage::COMPONENT_TEXT_ENCODER),
         "the refusal must name the component the caller has to stage, which is the fine-tuned \
          entrypoint's own contract; got: {error}"
     );

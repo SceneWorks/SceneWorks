@@ -29,7 +29,7 @@ const REMOVED_SOURCES = [
   "config/inference-provider-closures.json",
   "config/rung4-applicability-survey.json",
   "config/rung4-contract-prerequisites.json",
-  "config/engine-capabilities/capabilities.mlx.json",
+  "config/engine-capabilities/sga/macos-mlx.json",
   "docs/generated/video-memory-curves.json",
 ];
 

@@ -26,8 +26,9 @@
 use super::*;
 use gen_core_iris::depth::{plan_depth_input, IrisDepthEstimator};
 use gen_core_iris::TEXT_ENCODER_COMPONENT;
+use runtime_cuda::calibration::iris::{memory_strategy as iris_memory_strategy, IrisRestorer};
 use runtime_cuda::gen_core::{MemoryCalibrationIdentity, MemoryProviderContract, Transform};
-use runtime_cuda::providers::iris as engine;
+use runtime_cuda::utilities::iris_depth;
 
 /// The label the depth and restoration fixtures carry in their name. Neither request takes a
 /// seed: both routes are deterministic, and the restorer refuses one by name. Generation renders
@@ -158,8 +159,8 @@ enum Boundary {
 /// A loaded Iris route, driven the way its own task is driven.
 enum Loaded {
     Generation(Box<dyn Generator>),
-    Depth(Box<engine::depth::IrisDepth>),
-    Restore(Box<engine::IrisRestorer>),
+    Depth(Box<iris_depth::IrisDepth>),
+    Restore(Box<IrisRestorer>),
 }
 
 impl Loaded {
@@ -174,10 +175,10 @@ impl Loaded {
                 .load(route.provider, spec)
                 .map(Self::Generation)
                 .map_err(|error| failed(&error)),
-            "depth" => engine::depth::load_depth(spec)
+            "depth" => iris_depth::load_depth(spec)
                 .map(|model| Self::Depth(Box::new(model)))
                 .map_err(|error| failed(&error)),
-            _ => engine::IrisRestorer::load(spec)
+            _ => IrisRestorer::load(spec)
                 .map(|model| Self::Restore(Box::new(model)))
                 .map_err(|error| failed(&error)),
         }
@@ -240,7 +241,7 @@ fn plan_request(
             .map_err(|error| format!("plan the depth input: {error}"))?;
             Ok((
                 Planned::Depth(request),
-                engine::memory_strategy::depth_memory_geometry(&plan),
+                iris_memory_strategy::depth_memory_geometry(&plan),
             ))
         }
         Loaded::Restore(model) => {
@@ -263,7 +264,7 @@ fn plan_request(
             }
             Ok((
                 Planned::Restore(request),
-                engine::memory_strategy::restoration_memory_geometry(&plan),
+                iris_memory_strategy::restoration_memory_geometry(&plan),
             ))
         }
     }
@@ -701,18 +702,18 @@ mod tests {
     fn the_iris_candle_identities_are_the_engine_constants() {
         assert_eq!(
             GENERATION_FINGERPRINT,
-            engine::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            iris_memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
         );
         assert_eq!(
             DEPTH_FINGERPRINT,
-            engine::memory_strategy::DEPTH_MEMORY_CALIBRATION_FINGERPRINT
+            iris_memory_strategy::DEPTH_MEMORY_CALIBRATION_FINGERPRINT
         );
         assert_eq!(
             RESTORE_FINGERPRINT,
-            engine::memory_strategy::RESTORE_MEMORY_CALIBRATION_FINGERPRINT
+            iris_memory_strategy::RESTORE_MEMORY_CALIBRATION_FINGERPRINT
         );
-        assert_eq!(DEPTH.mode, engine::memory_strategy::DEPTH_MEMORY_MODE);
-        assert_eq!(RESTORE.mode, engine::memory_strategy::RESTORE_MEMORY_MODE);
+        assert_eq!(DEPTH.mode, iris_memory_strategy::DEPTH_MEMORY_MODE);
+        assert_eq!(RESTORE.mode, iris_memory_strategy::RESTORE_MEMORY_MODE);
     }
 
     /// The bespoke pre-gate in `run` names exactly the providers this module serves.

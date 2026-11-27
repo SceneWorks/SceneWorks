@@ -315,12 +315,12 @@ impl FluxIpRequests {
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
-            sampler: self.sampling.sampler.clone(),
-            scheduler: self.sampling.scheduler.clone(),
+            sampler: self.sampling.sampler.as_deref().map(str::to_owned),
+            scheduler: self.sampling.scheduler.as_deref().map(str::to_owned),
             scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             ip_adapter_scale: self.ip_scale,
-            pag: self.sampling.pag.clone(),
+            pag: self.sampling.features.pag.clone(),
             seed: seed as u64,
             memory: self.memory,
             preview: preview.clone(),
@@ -345,7 +345,7 @@ fn plan_flux_ip_outputs(
         .map(|(seed, prompt)| {
             // Preview never shapes the trajectory; the live sink is bound at generation time.
             let req = requests.request(seed, prompt, &gen_core::PreviewSink::default(), cancel);
-            runtime_cuda::providers::flux::ip_provider::compile_ip_plan(
+            runtime_cuda::calibration::flux::ip_provider::compile_ip_plan(
                 paths, spec, &req, reference,
             )
             .map_err(|error| super::render::preload_plan_error("FLUX IP-Adapter", error))

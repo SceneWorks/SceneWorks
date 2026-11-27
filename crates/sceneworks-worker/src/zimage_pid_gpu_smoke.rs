@@ -36,7 +36,7 @@ fn env_path(key: &str) -> PathBuf {
 fn render(spec: &LoadSpec, w: u32, h: u32, steps: u32, use_pid: bool) -> Image {
     let generator = crate::inference_runtime::load("z_image_turbo", spec)
         .expect("load candle z_image_turbo provider");
-    let req = GenerationRequest {
+    let mut req = GenerationRequest {
         prompt: env_or(
             "ZIMAGE_PID_PROMPT",
             "a serene mountain lake at golden hour, crisp reflections, highly detailed",
@@ -46,9 +46,11 @@ fn render(spec: &LoadSpec, w: u32, h: u32, steps: u32, use_pid: bool) -> Image {
         count: 1,
         seed: Some(42),
         steps: Some(steps),
-        use_pid,
         ..Default::default()
     };
+    if use_pid {
+        req.features.pid = Some(gen_core::PidParams::enabled());
+    }
     let output = generator
         .generate(&req, &mut |_| {})
         .unwrap_or_else(|e| panic!("z_image_turbo generate (use_pid={use_pid}): {e}"));

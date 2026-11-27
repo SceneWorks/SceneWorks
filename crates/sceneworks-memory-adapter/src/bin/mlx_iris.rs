@@ -29,8 +29,9 @@
 use super::*;
 use gen_core_iris::depth::{plan_depth_input, IrisDepthEstimator};
 use gen_core_iris::TEXT_ENCODER_COMPONENT;
-use mlx_gen::gen_core::Transform;
-use runtime_macos::providers::iris as engine;
+use runtime_macos::calibration::iris::{memory_strategy as iris_memory_strategy, IrisRestorer};
+use runtime_macos::gen_core::Transform;
+use runtime_macos::utilities::iris_depth;
 
 /// The label the depth and restoration fixtures carry in their name. Neither request takes a
 /// seed: both routes are deterministic, and the restorer refuses one by name. Generation renders
@@ -83,9 +84,9 @@ pub(super) fn route(provider: &str) -> Result<protocol::IrisRoute, String> {
 /// The production calibration identity the loaded route publishes — the engine's own constant.
 pub(super) fn calibration_fingerprint(route: protocol::IrisRoute) -> &'static str {
     match route.mode {
-        "text_to_image" => engine::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
-        "depth" => engine::memory_strategy::DEPTH_MEMORY_CALIBRATION_FINGERPRINT,
-        _ => engine::memory_strategy::RESTORE_MEMORY_CALIBRATION_FINGERPRINT,
+        "text_to_image" => iris_memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        "depth" => iris_memory_strategy::DEPTH_MEMORY_CALIBRATION_FINGERPRINT,
+        _ => iris_memory_strategy::RESTORE_MEMORY_CALIBRATION_FINGERPRINT,
     }
 }
 
@@ -137,8 +138,8 @@ enum Boundary {
 /// A loaded Iris route, driven the way its own task is driven.
 enum Loaded {
     Generation(Box<dyn Generator>),
-    Depth(Box<engine::depth::IrisDepth>),
-    Restore(Box<engine::IrisRestorer>),
+    Depth(Box<iris_depth::IrisDepth>),
+    Restore(Box<IrisRestorer>),
 }
 
 impl Loaded {
@@ -153,10 +154,10 @@ impl Loaded {
                 .load(route.provider, spec)
                 .map(Self::Generation)
                 .map_err(|error| failed(&error)),
-            "depth" => engine::depth::load_depth(spec)
+            "depth" => iris_depth::load_depth(spec)
                 .map(|model| Self::Depth(Box::new(model)))
                 .map_err(|error| failed(&error)),
-            _ => engine::IrisRestorer::load(spec)
+            _ => IrisRestorer::load(spec)
                 .map(|model| Self::Restore(Box::new(model)))
                 .map_err(|error| failed(&error)),
         }
@@ -219,7 +220,7 @@ fn plan_request(
             .map_err(|error| format!("plan the depth input: {error}"))?;
             Ok((
                 Planned::Depth(request),
-                engine::memory_strategy::depth_memory_geometry(&plan),
+                iris_memory_strategy::depth_memory_geometry(&plan),
             ))
         }
         Loaded::Restore(model) => {
@@ -242,7 +243,7 @@ fn plan_request(
             }
             Ok((
                 Planned::Restore(request),
-                engine::memory_strategy::restoration_memory_geometry(&plan),
+                iris_memory_strategy::restoration_memory_geometry(&plan),
             ))
         }
     }
@@ -297,7 +298,7 @@ fn generation_boundary(
     progress: &Progress,
 ) -> Option<Boundary> {
     let reference = match progress {
-        Progress::Loading(mlx_gen::gen_core::LoadPhase::Renderer) => {
+        Progress::Loading(runtime_macos::gen_core::LoadPhase::Renderer) => {
             protocol::ReferenceBoundary::RendererLoad
         }
         Progress::Step { current: 1, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
@@ -740,8 +741,8 @@ mod tests {
         };
         let step = |current| Progress::Step { current, total: 2 };
         let staged = [
-            Progress::Loading(mlx_gen::gen_core::LoadPhase::TextEncoder),
-            Progress::Loading(mlx_gen::gen_core::LoadPhase::Renderer),
+            Progress::Loading(runtime_macos::gen_core::LoadPhase::TextEncoder),
+            Progress::Loading(runtime_macos::gen_core::LoadPhase::Renderer),
             step(1),
             step(2),
             Progress::Decoding,

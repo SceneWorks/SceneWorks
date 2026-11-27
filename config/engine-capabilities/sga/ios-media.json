@@ -1,0 +1,5747 @@
+{
+  "advanced_quant_tiers": [],
+  "audio_backend": null,
+  "audio_routes": {},
+  "audio_snapshot_preparer_backends": [],
+  "backend": "mlx",
+  "bespoke_waivers": {
+    "crate_api_providers": [],
+    "memory_route_waivers": [],
+    "utility_crates": []
+  },
+  "captioners": {},
+  "checkpoint_adapters": {
+    "sdxl-fused-v1": {
+      "adapter_id": "sdxl-fused-v1",
+      "backend_bindings": [
+        {
+          "backend": "mlx",
+          "inherit_adapters": true,
+          "operation": "generate",
+          "provider_id": "sdxl",
+          "required_components": [
+            "ldm_tokenizer"
+          ],
+          "source": "fused_checkpoint"
+        },
+        {
+          "backend": "mlx",
+          "inherit_adapters": true,
+          "operation": "edit",
+          "provider_id": "sdxl",
+          "required_components": [
+            "ldm_tokenizer"
+          ],
+          "source": "fused_checkpoint"
+        }
+      ],
+      "compatibility_family": "sdxl",
+      "dialects": [
+        {
+          "id": "ldm",
+          "source": "fused_checkpoint"
+        }
+      ],
+      "eligible_backends": [
+        "mlx",
+        "candle"
+      ],
+      "family": "sdxl",
+      "has_loader_reuse": false,
+      "operations": [
+        "generate",
+        "edit"
+      ]
+    }
+  },
+  "embedders": {
+    "audio": {},
+    "image": {},
+    "text": {},
+    "voice": {}
+  },
+  "feature_routes": {
+    "z_image_turbo_control": {
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": false,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [
+          "control",
+          "reference"
+        ],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 2048,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 256,
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "pass0_requirement": "requires_control",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_low_res_start": false,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "family": "z-image",
+      "features": [
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'z_image_turbo_control' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
+              "code": "conflicts_with_pass0_control_conditioning",
+              "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'z_image_turbo_control' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "has_render_plan": true,
+      "modality": "image",
+      "parent_provider_id": "z_image_turbo",
+      "route_id": "z_image_turbo_control"
+    }
+  },
+  "feature_set": "ios-media",
+  "imported_models": [
+    {
+      "family": "sdxl",
+      "inherit_adapters": true,
+      "operation": "edit",
+      "provider_id": "sdxl",
+      "required_components": [
+        "ldm_tokenizer"
+      ],
+      "source": "fused_checkpoint"
+    },
+    {
+      "family": "sdxl",
+      "inherit_adapters": true,
+      "operation": "generate",
+      "provider_id": "sdxl",
+      "required_components": [
+        "ldm_tokenizer"
+      ],
+      "source": "fused_checkpoint"
+    }
+  ],
+  "llm_models": {
+    "mlx-joycaption": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 0,
+        "max_new_tokens": 0,
+        "mtp": null,
+        "prefix_checkpoints": null,
+        "reasoning_efforts": [],
+        "speculative": [],
+        "supported_constraints": [],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": true,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": true,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "text_llm",
+      "family": "joycaption",
+      "id": "mlx-joycaption",
+      "modality": "vision_language"
+    },
+    "mlx-llama": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 0,
+        "max_new_tokens": 0,
+        "mtp": null,
+        "prefix_checkpoints": {
+          "max_checkpoints_per_request": 4,
+          "supports_document_span": true,
+          "supports_hybrid_boundaries": true
+        },
+        "reasoning_efforts": [],
+        "speculative": [
+          {
+            "max_depth": 7,
+            "proposer": "prompt_lookup",
+            "recommended_depth": 4
+          }
+        ],
+        "supported_constraints": [
+          "json",
+          "json_schema"
+        ],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": true,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": false,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "text_llm",
+      "family": "llama",
+      "id": "mlx-llama",
+      "modality": "text"
+    },
+    "mlx-starvector-1b": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 8192,
+        "max_new_tokens": 7933,
+        "mtp": null,
+        "prefix_checkpoints": null,
+        "reasoning_efforts": [],
+        "speculative": [],
+        "supported_constraints": [],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": false,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": true,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "vector",
+      "family": "starvector",
+      "id": "mlx-starvector-1b",
+      "modality": "image_to_svg"
+    },
+    "mlx-starvector-8b": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 16000,
+        "max_new_tokens": 15422,
+        "mtp": null,
+        "prefix_checkpoints": null,
+        "reasoning_efforts": [],
+        "speculative": [],
+        "supported_constraints": [],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": false,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": true,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "vector",
+      "family": "starvector",
+      "id": "mlx-starvector-8b",
+      "modality": "image_to_svg"
+    }
+  },
+  "platform": "ios",
+  "rejected_quants": {},
+  "routes": {
+    "anima_turbo": {
+      "adapters": {
+        "install_policy": "forward_residual",
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": false,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 1536,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 512,
+        "pag": null,
+        "pass0_requirement": "noise_start_supported",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": true,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_low_res_start": true,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "geometry_free",
+        "control_kinds": null,
+        "kinds": [],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [],
+        "pass0_requirement": "noise_start_supported",
+        "supports_negative_prompt": true
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": "qwen_image_vae",
+        "output_latent_space": {
+          "channels": 16,
+          "normalization": "per_channel:qwen-wan-z16-v1:ch=16",
+          "patch_layout": "unpacked",
+          "spatial_compression_height": 8,
+          "spatial_compression_width": 8,
+          "temporal_law": "none"
+        },
+        "pixel_stride": 16,
+        "supports_diffusion_decoder": false,
+        "token_width": 64
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 1.0,
+        "sampler": "er_sde",
+        "schedule": null,
+        "shift": 3.0,
+        "steps": 10,
+        "strength": null
+      },
+      "denoiser": {
+        "kind": "family_model",
+        "name": "cosmos_dit",
+        "pag": null,
+        "supports_expert_switching": false,
+        "supports_geometry_change": true,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": true,
+        "supports_renoise_from_clean": true
+      },
+      "family": "anima",
+      "features": [
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_produced_reference_support",
+              "message": "route 'anima_turbo' does not accept a ProducedReference pass-1 input"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 10,
+              "max": 9,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'anima_turbo' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 10,
+              "max": 9,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_pag_capability",
+              "message": "route 'anima_turbo' does not advertise Perturbed-Attention Guidance (PAG)"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 10,
+              "max": 9,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'anima_turbo' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [],
+        "pag": null,
+        "requires_sigma_shift": true,
+        "supports_cfg_interval": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": false
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 1536,
+        "min_size": 512,
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": true,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": true,
+        "has_video_plan": false,
+        "render_plan_scope": "single_and_multi_pass",
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "qwen3_0_6b"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "anima_text_conditioner",
+              "cosmos_dit"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          },
+          {
+            "components": [
+              "qwen_image_vae"
+            ],
+            "droppable_after_phase": false,
+            "phase": "decode"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "text_to_image"
+      ],
+      "preview": "latent_projection",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q4",
+          "q8"
+        ]
+      },
+      "route_id": "anima_turbo",
+      "schedules": [
+        "normal",
+        "simple",
+        "karras",
+        "exponential",
+        "sgm_uniform",
+        "beta",
+        "ddim_uniform",
+        "beta57"
+      ],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": false
+      },
+      "solvers": [
+        "euler",
+        "euler_ancestral",
+        "heun",
+        "dpmpp_2m",
+        "dpmpp_sde",
+        "uni_pc",
+        "lcm",
+        "ddim",
+        "er_sde",
+        "dpmpp_2m_sde"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": false,
+        "required_components": [],
+        "requires_control_overlay": false,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "snapshot_directory",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": null,
+            "name": "qwen3_0_6b"
+          },
+          {
+            "max_sequence_length": 512,
+            "name": "anima_text_conditioner"
+          }
+        ],
+        "upsamplers": []
+      }
+    },
+    "iris_3b": {
+      "adapters": {
+        "install_policy": "forward_residual",
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": false,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 2048,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 16,
+        "pag": null,
+        "pass0_requirement": "noise_start_supported",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "dpmpp_2m",
+          "euler"
+        ],
+        "schedulers": [],
+        "size_floor": {
+          "kind": "range_checked_on_grid",
+          "multiple": 16
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q8",
+          "q4"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": true,
+        "supports_cfg_interval": true,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_low_res_start": false,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": true,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "geometry_free",
+        "control_kinds": null,
+        "kinds": [],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [],
+        "pass0_requirement": "noise_start_supported",
+        "supports_negative_prompt": true
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": null,
+        "output_latent_space": null,
+        "pixel_stride": 16,
+        "supports_diffusion_decoder": false,
+        "token_width": null
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 3.0,
+        "sampler": "dpmpp_2m",
+        "schedule": null,
+        "shift": null,
+        "steps": 100,
+        "strength": null
+      },
+      "denoiser": {
+        "kind": "family_driver",
+        "name": "iris_flow_dpm",
+        "pag": null,
+        "supports_expert_switching": false,
+        "supports_geometry_change": false,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": true,
+        "supports_renoise_from_clean": false
+      },
+      "family": "iris",
+      "features": [
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'iris_3b' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_produced_reference_support",
+              "message": "route 'iris_3b' does not accept a ProducedReference pass-1 input"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 100,
+              "max": 99,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'iris_3b' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_packed_image_trajectory",
+              "message": "route 'iris_3b' does not compile a packed image trajectory"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'iris_3b' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'iris_3b' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 100,
+              "max": 99,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'iris_3b' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_packed_image_trajectory",
+              "message": "route 'iris_3b' does not compile a pass-0 packed image trajectory"
+            },
+            {
+              "code": "missing_spatial_unpack_repack",
+              "message": "route 'iris_3b' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
+            },
+            {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'iris_3b' does not support clean-estimate spatial resize and re-noise phase transitions"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_pag_capability",
+              "message": "route 'iris_3b' does not advertise Perturbed-Attention Guidance (PAG)"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'iris_3b' does not register a pre-load RenderPlan"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 100,
+              "max": 99,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'iris_3b' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [],
+        "pag": null,
+        "requires_sigma_shift": false,
+        "supports_cfg_interval": true,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": false
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 2048,
+        "min_size": 16,
+        "size_floor": {
+          "kind": "range_checked_on_grid",
+          "multiple": 16
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": true,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": false,
+        "has_video_plan": false,
+        "render_plan_scope": null,
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "qwen3_vl_4b"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "iris_3b_dit"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "text_to_image"
+      ],
+      "preview": "pixel_space",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q8",
+          "q4"
+        ]
+      },
+      "route_id": "iris_3b",
+      "schedules": [],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": true
+      },
+      "solvers": [
+        "dpmpp_2m",
+        "euler"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": false,
+        "required_components": [
+          "text_encoder"
+        ],
+        "requires_control_overlay": false,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "snapshot_directory",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": null,
+            "name": "qwen3_vl_4b"
+          }
+        ],
+        "upsamplers": []
+      }
+    },
+    "sana_1600m": {
+      "adapters": {
+        "install_policy": "unsupported",
+        "supports_lokr": false,
+        "supports_lora": false,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": true,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [
+          "reference"
+        ],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 1024,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 256,
+        "pag": null,
+        "pass0_requirement": "noise_start_supported",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "default"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "default"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": false,
+        "supports_lora": false,
+        "supports_low_res_start": true,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "geometry_free",
+        "control_kinds": null,
+        "kinds": [
+          "reference"
+        ],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [],
+        "pass0_requirement": "noise_start_supported",
+        "supports_negative_prompt": true
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": "dc_ae_f32c32",
+        "output_latent_space": {
+          "channels": 32,
+          "normalization": "affine:3ed400fc:00000000",
+          "patch_layout": "unpacked",
+          "spatial_compression_height": 32,
+          "spatial_compression_width": 32,
+          "temporal_law": "none"
+        },
+        "pixel_stride": 32,
+        "supports_diffusion_decoder": false,
+        "token_width": 32
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 4.5,
+        "sampler": "default",
+        "schedule": "default",
+        "shift": 3.0,
+        "steps": 20,
+        "strength": null
+      },
+      "denoiser": {
+        "kind": "family_model",
+        "name": "sana_linear_dit",
+        "pag": null,
+        "supports_expert_switching": false,
+        "supports_geometry_change": true,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": true,
+        "supports_renoise_from_clean": true
+      },
+      "family": "sana",
+      "features": [
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 20,
+              "max": 19,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'sana_1600m' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 20,
+              "max": 19,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_pag_capability",
+              "message": "route 'sana_1600m' does not advertise Perturbed-Attention Guidance (PAG)"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 20,
+              "max": 19,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'sana_1600m' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [],
+        "pag": null,
+        "requires_sigma_shift": false,
+        "supports_cfg_interval": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": true
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 1024,
+        "min_size": 256,
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": true,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": true,
+        "has_video_plan": false,
+        "render_plan_scope": "single_and_multi_pass",
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "gemma2_2b_it"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "sana_linear_dit"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          },
+          {
+            "components": [
+              "dc_ae_f32c32"
+            ],
+            "droppable_after_phase": false,
+            "phase": "decode"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "preview": "latent_projection",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q4",
+          "q8"
+        ]
+      },
+      "route_id": "sana_1600m",
+      "schedules": [
+        "normal",
+        "simple",
+        "karras",
+        "exponential",
+        "sgm_uniform",
+        "beta",
+        "ddim_uniform",
+        "beta57",
+        "default"
+      ],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": false
+      },
+      "solvers": [
+        "euler",
+        "euler_ancestral",
+        "heun",
+        "dpmpp_2m",
+        "dpmpp_sde",
+        "uni_pc",
+        "lcm",
+        "ddim",
+        "er_sde",
+        "dpmpp_2m_sde",
+        "default"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": false,
+        "required_components": [],
+        "requires_control_overlay": false,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "snapshot_directory",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": 300,
+            "name": "gemma2_2b_it"
+          }
+        ],
+        "upsamplers": []
+      }
+    },
+    "sana_sprint_1600m": {
+      "adapters": {
+        "install_policy": "unsupported",
+        "supports_lokr": false,
+        "supports_lora": false,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": false,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [
+          "reference"
+        ],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 1024,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 256,
+        "pag": null,
+        "pass0_requirement": "noise_start_supported",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "default"
+        ],
+        "schedulers": [
+          "default"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": false,
+        "supports_lora": false,
+        "supports_low_res_start": false,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": false,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "geometry_free",
+        "control_kinds": null,
+        "kinds": [
+          "reference"
+        ],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [],
+        "pass0_requirement": "noise_start_supported",
+        "supports_negative_prompt": false
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": "dc_ae_f32c32",
+        "output_latent_space": {
+          "channels": 32,
+          "normalization": "affine:3ed400fc:00000000",
+          "patch_layout": "unpacked",
+          "spatial_compression_height": 32,
+          "spatial_compression_width": 32,
+          "temporal_law": "none"
+        },
+        "pixel_stride": 32,
+        "supports_diffusion_decoder": false,
+        "token_width": 32
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 4.5,
+        "sampler": "default",
+        "schedule": "default",
+        "shift": null,
+        "steps": 2,
+        "strength": null
+      },
+      "denoiser": {
+        "kind": "family_model",
+        "name": "sana_sprint_linear_dit",
+        "pag": null,
+        "supports_expert_switching": false,
+        "supports_geometry_change": false,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": false,
+        "supports_renoise_from_clean": false
+      },
+      "family": "sana",
+      "features": [
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'sana_sprint_1600m' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_produced_reference_support",
+              "message": "route 'sana_sprint_1600m' does not accept a ProducedReference pass-1 input"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 2,
+              "max": 1,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'sana_sprint_1600m' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_packed_image_trajectory",
+              "message": "route 'sana_sprint_1600m' does not compile a packed image trajectory"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'sana_sprint_1600m' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'sana_sprint_1600m' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 2,
+              "max": 1,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'sana_sprint_1600m' does not register a pre-load RenderPlan"
+            },
+            {
+              "code": "missing_packed_image_trajectory",
+              "message": "route 'sana_sprint_1600m' does not compile a pass-0 packed image trajectory"
+            },
+            {
+              "code": "missing_spatial_unpack_repack",
+              "message": "route 'sana_sprint_1600m' does not declare a 2x2-packed spatial latent space supporting unpack/repack"
+            },
+            {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'sana_sprint_1600m' does not support clean-estimate spatial resize and re-noise phase transitions"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_pag_capability",
+              "message": "route 'sana_sprint_1600m' does not advertise Perturbed-Attention Guidance (PAG)"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_render_plan",
+              "message": "route 'sana_sprint_1600m' does not register a pre-load RenderPlan"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 2,
+              "max": 1,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'sana_sprint_1600m' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [],
+        "pag": null,
+        "requires_sigma_shift": false,
+        "supports_cfg_interval": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": false
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 1024,
+        "min_size": 256,
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": true,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": false,
+        "has_video_plan": false,
+        "render_plan_scope": null,
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "gemma2_2b_it"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "sana_linear_dit"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          },
+          {
+            "components": [
+              "dc_ae_f32c32"
+            ],
+            "droppable_after_phase": false,
+            "phase": "decode"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "preview": "latent_projection",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q4",
+          "q8"
+        ]
+      },
+      "route_id": "sana_sprint_1600m",
+      "schedules": [
+        "default"
+      ],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": false
+      },
+      "solvers": [
+        "default"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": false,
+        "required_components": [],
+        "requires_control_overlay": false,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "snapshot_directory",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": 300,
+            "name": "gemma2_2b_it"
+          }
+        ],
+        "upsamplers": []
+      }
+    },
+    "sdxl": {
+      "adapters": {
+        "install_policy": "forward_residual",
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": true,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [
+          "reference",
+          "mask",
+          "control"
+        ],
+        "execution": {
+          "cfg_batching": {
+            "kind": "modes",
+            "modes": [
+              "batched",
+              "sequential"
+            ]
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": false,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 2048,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 512,
+        "pag": null,
+        "pass0_requirement": "noise_start_supported",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "euler_ancestral",
+          "lcm",
+          "lightning",
+          "hyper",
+          "euler",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "ddim"
+        ],
+        "schedulers": [
+          "discrete",
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [
+          "cfg",
+          "cfg_pp"
+        ],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_low_res_start": true,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "grid_aligned",
+        "control_kinds": null,
+        "kinds": [
+          "reference",
+          "mask",
+          "control"
+        ],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [
+          "sdxl_ip_adapter",
+          "sdxl_controlnet"
+        ],
+        "pass0_requirement": "noise_start_supported",
+        "supports_negative_prompt": true
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": "sdxl_vae",
+        "output_latent_space": {
+          "channels": 4,
+          "normalization": "affine:3e056042:00000000",
+          "patch_layout": "unpacked",
+          "spatial_compression_height": 8,
+          "spatial_compression_width": 8,
+          "temporal_law": "none"
+        },
+        "pixel_stride": 32,
+        "supports_diffusion_decoder": false,
+        "token_width": 4
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 7.0,
+        "sampler": "euler_ancestral",
+        "schedule": "discrete",
+        "shift": null,
+        "steps": 30,
+        "strength": 0.800000011920929
+      },
+      "denoiser": {
+        "kind": "family_model",
+        "name": "sdxl_unet",
+        "pag": null,
+        "supports_expert_switching": false,
+        "supports_geometry_change": true,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": true,
+        "supports_renoise_from_clean": true
+      },
+      "family": "sdxl",
+      "features": [
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 30,
+              "max": 29,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'sdxl' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 30,
+              "max": 29,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_pag_capability",
+              "message": "route 'sdxl' does not advertise Perturbed-Attention Guidance (PAG)"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 30,
+              "max": 29,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'sdxl' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [
+          "cfg",
+          "cfg_pp"
+        ],
+        "pag": null,
+        "requires_sigma_shift": false,
+        "supports_cfg_interval": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": false
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 2048,
+        "min_size": 512,
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": false,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": true,
+        "has_video_plan": false,
+        "render_plan_scope": "single_and_multi_pass",
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "clip_l",
+              "clip_g"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "sdxl_unet"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          },
+          {
+            "components": [
+              "sdxl_vae"
+            ],
+            "droppable_after_phase": false,
+            "phase": "decode"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "text_to_image",
+        "image_to_image",
+        "inpaint",
+        "control"
+      ],
+      "preview": "latent_projection",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q4",
+          "q8"
+        ]
+      },
+      "route_id": "sdxl",
+      "schedules": [
+        "discrete",
+        "normal",
+        "simple",
+        "karras",
+        "exponential",
+        "sgm_uniform",
+        "beta",
+        "ddim_uniform",
+        "beta57"
+      ],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": false
+      },
+      "solvers": [
+        "euler_ancestral",
+        "lcm",
+        "lightning",
+        "hyper",
+        "euler",
+        "heun",
+        "dpmpp_2m",
+        "dpmpp_sde",
+        "uni_pc",
+        "ddim"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": false,
+        "required_components": [],
+        "requires_control_overlay": false,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "directory_or_file",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": 77,
+            "name": "clip_l"
+          },
+          {
+            "max_sequence_length": 77,
+            "name": "clip_g"
+          }
+        ],
+        "upsamplers": [
+          "pid_decoder"
+        ]
+      }
+    },
+    "z_image_turbo": {
+      "adapters": {
+        "install_policy": "forward_residual",
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": true,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [
+          "reference"
+        ],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 2048,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 256,
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "pass0_requirement": "noise_start_supported",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_low_res_start": true,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "geometry_free",
+        "control_kinds": null,
+        "kinds": [
+          "reference"
+        ],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [],
+        "pass0_requirement": "noise_start_supported",
+        "supports_negative_prompt": true
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": "flux1_ae",
+        "output_latent_space": {
+          "channels": 16,
+          "normalization": "affine:3eb8e219:3ded5cfb",
+          "patch_layout": "unpacked",
+          "spatial_compression_height": 8,
+          "spatial_compression_width": 8,
+          "temporal_law": "none"
+        },
+        "pixel_stride": 16,
+        "supports_diffusion_decoder": false,
+        "token_width": 16
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 1.0,
+        "sampler": "euler",
+        "schedule": "normal",
+        "shift": 3.0,
+        "steps": 4,
+        "strength": null
+      },
+      "denoiser": {
+        "kind": "family_model",
+        "name": "z_image_dit",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "supports_expert_switching": false,
+        "supports_geometry_change": true,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": true,
+        "supports_renoise_from_clean": true
+      },
+      "family": "z-image",
+      "features": [
+        {
+          "applicable": true,
+          "class": "recipe",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": true,
+              "class": "recipe",
+              "feature_id": "hires_fix",
+              "hook_points": [
+                "conditioning_slot",
+                "phase_transition"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": false,
+                "introduces_pass_boundary": true,
+                "retains_single_pass_schedule": false,
+                "transition_residency": "pixel_round_trip_produced_reference"
+              },
+              "parameter_schema": {
+                "steps": {
+                  "default": 12,
+                  "max": 1000,
+                  "min": 1,
+                  "required": true,
+                  "type": "integer_range"
+                },
+                "strength": {
+                  "default": 0.3,
+                  "inclusive": true,
+                  "max": 1.0,
+                  "min": 0.0,
+                  "required": false,
+                  "type": "float_range"
+                },
+                "version": 1
+              },
+              "reasons": [],
+              "relations": {
+                "after": [
+                  "low_res_start",
+                  "wan_expert_switch"
+                ],
+                "before": [
+                  "trajectory_observer"
+                ],
+                "conflicts_with_axes": [],
+                "conflicts_with_features": [],
+                "requires_capabilities": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "produced_reference_multipass"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "equivalent",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": true,
+              "class": "equivalent",
+              "feature_id": "inert_phase_split",
+              "hook_points": [
+                "phase_transition"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": true,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "none"
+              },
+              "parameter_schema": {
+                "step": {
+                  "default_executed_steps": 4,
+                  "max": 3,
+                  "max_exclusive": "executed_steps",
+                  "min": 1,
+                  "range": "1..executed_steps",
+                  "required": true,
+                  "type": "step_index"
+                },
+                "version": 1
+              },
+              "reasons": [],
+              "relations": {
+                "after": [
+                  "low_res_start",
+                  "wan_expert_switch"
+                ],
+                "before": [
+                  "hires_fix",
+                  "trajectory_observer"
+                ],
+                "conflicts_with_axes": [],
+                "conflicts_with_features": [
+                  "krea_multiphase"
+                ],
+                "requires_capabilities": [
+                  "render_plan",
+                  "packed_image_trajectory"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": false,
+              "class": "recipe",
+              "feature_id": "krea_multiphase",
+              "hook_points": [
+                "schedule_transform",
+                "phase_transition",
+                "guidance_predictor"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": true,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "none"
+              },
+              "parameter_schema": {
+                "phases": {
+                  "min_phases": 1,
+                  "min_steps_per_phase": 1,
+                  "required": true,
+                  "type": "phase_list"
+                },
+                "version": 1
+              },
+              "reasons": [
+                {
+                  "code": "missing_multiphase_denoise_support",
+                  "message": "route 'z_image_turbo_control' does not support multi-phase denoise (phases)"
+                }
+              ],
+              "relations": {
+                "after": [],
+                "before": [
+                  "trajectory_observer"
+                ],
+                "conflicts_with_axes": [
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning"
+                ],
+                "conflicts_with_features": [
+                  "low_res_start",
+                  "hires_fix",
+                  "inert_phase_split"
+                ],
+                "requires_capabilities": [
+                  "render_plan",
+                  "multiphase_denoise"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'z_image_turbo' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": false,
+              "class": "recipe",
+              "feature_id": "low_res_start",
+              "hook_points": [
+                "schedule_transform",
+                "phase_transition"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": true,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "in_device_latent_unpack_resize_repack"
+              },
+              "parameter_schema": {
+                "k": {
+                  "default_executed_steps": 4,
+                  "max": 3,
+                  "max_exclusive": "executed_steps",
+                  "min": 1,
+                  "range": "1..executed_steps",
+                  "required": true,
+                  "type": "step_index"
+                },
+                "scale": {
+                  "default": 0.5,
+                  "inclusive": true,
+                  "max": 0.9,
+                  "min": 0.25,
+                  "required": false,
+                  "type": "float_range"
+                },
+                "version": 1
+              },
+              "reasons": [
+                {
+                  "code": "missing_clean_estimate_renoise_transition",
+                  "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+                },
+                {
+                  "code": "conflicts_with_pass0_control_conditioning",
+                  "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+                }
+              ],
+              "relations": {
+                "after": [],
+                "before": [
+                  "wan_expert_switch",
+                  "hires_fix",
+                  "pag",
+                  "trajectory_observer"
+                ],
+                "conflicts_with_axes": [
+                  "phases",
+                  "pass0_reference_conditioning",
+                  "pass0_control_conditioning",
+                  "pass0_edit_conditioning"
+                ],
+                "conflicts_with_features": [
+                  "krea_multiphase"
+                ],
+                "requires_capabilities": [
+                  "render_plan",
+                  "packed_image_trajectory",
+                  "spatial_unpack_repack",
+                  "clean_estimate_renoise_transition",
+                  "noise_start_pass0"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": true,
+              "class": "recipe",
+              "feature_id": "pag",
+              "hook_points": [
+                "attention_block",
+                "guidance_predictor"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": false,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "none"
+              },
+              "parameter_schema": {
+                "scale": {
+                  "default": 1.5,
+                  "inclusive": true,
+                  "max": 15.0,
+                  "min": 0.0,
+                  "required": true,
+                  "type": "float_range"
+                },
+                "version": 1
+              },
+              "reasons": [],
+              "relations": {
+                "after": [
+                  "low_res_start"
+                ],
+                "before": [
+                  "trajectory_observer"
+                ],
+                "conflicts_with_axes": [],
+                "conflicts_with_features": [],
+                "requires_capabilities": [
+                  "pag"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "diagnostic",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": true,
+              "class": "diagnostic",
+              "feature_id": "trajectory_observer",
+              "hook_points": [
+                "attention_block",
+                "phase_transition"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": false,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "none"
+              },
+              "parameter_schema": {
+                "version": 1
+              },
+              "reasons": [],
+              "relations": {
+                "after": [
+                  "low_res_start",
+                  "wan_expert_switch",
+                  "krea_multiphase",
+                  "hires_fix",
+                  "pag",
+                  "inert_phase_split"
+                ],
+                "before": [],
+                "conflicts_with_axes": [],
+                "conflicts_with_features": [],
+                "requires_capabilities": [
+                  "render_plan"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "conditioned_routes": {
+            "z_image_turbo_control": {
+              "applicable": false,
+              "class": "recipe",
+              "feature_id": "wan_expert_switch",
+              "hook_points": [
+                "phase_transition"
+              ],
+              "memory_effect": {
+                "extra_resident_weight_bytes": 0,
+                "introduces_denoise_phase_boundary": true,
+                "introduces_pass_boundary": false,
+                "retains_single_pass_schedule": true,
+                "transition_residency": "staged_expert_weight_handoff"
+              },
+              "parameter_schema": {
+                "boundary_step": {
+                  "default_executed_steps": 4,
+                  "max": 3,
+                  "max_exclusive": "executed_steps",
+                  "min": 1,
+                  "range": "1..executed_steps",
+                  "required": true,
+                  "type": "step_index"
+                },
+                "version": 1
+              },
+              "reasons": [
+                {
+                  "code": "missing_expert_switching_support",
+                  "message": "route 'z_image_turbo_control' does not use dual-expert MoE boundary switching"
+                }
+              ],
+              "relations": {
+                "after": [
+                  "low_res_start"
+                ],
+                "before": [
+                  "hires_fix",
+                  "trajectory_observer"
+                ],
+                "conflicts_with_axes": [],
+                "conflicts_with_features": [],
+                "requires_capabilities": [
+                  "expert_switching"
+                ],
+                "requires_features": []
+              },
+              "version": 1
+            }
+          },
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'z_image_turbo' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [],
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "requires_sigma_shift": false,
+        "supports_cfg_interval": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": false
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 2048,
+        "min_size": 256,
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": true,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": true,
+        "has_video_plan": false,
+        "render_plan_scope": "single_and_multi_pass",
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "qwen3"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "z_image_dit"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          },
+          {
+            "components": [
+              "flux1_ae"
+            ],
+            "droppable_after_phase": false,
+            "phase": "decode"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "preview": "latent_projection",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q4",
+          "q8"
+        ]
+      },
+      "route_id": "z_image_turbo",
+      "schedules": [
+        "normal",
+        "simple",
+        "karras",
+        "exponential",
+        "sgm_uniform",
+        "beta",
+        "ddim_uniform",
+        "beta57"
+      ],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": false
+      },
+      "solvers": [
+        "euler",
+        "euler_ancestral",
+        "heun",
+        "dpmpp_2m",
+        "dpmpp_sde",
+        "uni_pc",
+        "lcm",
+        "ddim",
+        "er_sde",
+        "dpmpp_2m_sde"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": true,
+        "required_components": [],
+        "requires_control_overlay": false,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "snapshot_directory",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": 512,
+            "name": "qwen3"
+          }
+        ],
+        "upsamplers": [
+          "pid_decoder"
+        ]
+      }
+    },
+    "z_image_turbo_control": {
+      "adapters": {
+        "install_policy": "base_denoiser_only",
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_per_phase": false
+      },
+      "backend": "mlx",
+      "capabilities": {
+        "allows_low_res_start_single_ref_img2img": false,
+        "approximation": {
+          "characterization_bound": false,
+          "denoise_feature_cache": {
+            "kind": "unsupported"
+          },
+          "token_pruning": {
+            "kind": "unsupported"
+          }
+        },
+        "audio_edit_modes": [],
+        "audio_languages": [],
+        "audio_sample_rates": [],
+        "audio_voices": [],
+        "component_precision_floors": [],
+        "conditioning": [
+          "control",
+          "reference"
+        ],
+        "execution": {
+          "cfg_batching": {
+            "kind": "unsupported"
+          },
+          "ffn_chunk_rows": {
+            "kind": "unsupported"
+          },
+          "graph_eval_cadence_blocks": {
+            "kind": "unsupported"
+          },
+          "prefix_kv_cache": {
+            "kind": "unsupported"
+          }
+        },
+        "mac_only": true,
+        "max_audio_duration_secs": null,
+        "max_count": 8,
+        "max_enhance_tokens": null,
+        "max_prompt_tokens": null,
+        "max_size": 2048,
+        "max_speakers": null,
+        "max_temporal_upsample_rounds": 0,
+        "min_size": 256,
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "pass0_requirement": "requires_control",
+        "request_memory_strategies": [],
+        "requires_sigma_shift": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_family_extensions": [],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supported_steps": {
+          "kind": "unconstrained"
+        },
+        "supports_alpha_output": false,
+        "supports_ar_load_controls": false,
+        "supports_audio_artifacts": false,
+        "supports_auto_duration": false,
+        "supports_caption_overflow_policy": false,
+        "supports_cfg_interval": false,
+        "supports_conversation_history": false,
+        "supports_conversation_session": false,
+        "supports_diffusion_decoder": false,
+        "supports_generated_keyframes": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_hdr": false,
+        "supports_kv_cache": false,
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_low_res_start": false,
+        "supports_multi_speaker": false,
+        "supports_negative_prompt": true,
+        "supports_output_limiter": false,
+        "supports_phases": false,
+        "supports_preview": true,
+        "supports_prompt_batch": false,
+        "supports_prompt_enhancement": false,
+        "supports_reference_region": false,
+        "supports_repetition_penalty": false,
+        "supports_segmented_lyrics": false,
+        "supports_sequential_offload": true,
+        "supports_song_cover": false,
+        "supports_song_plan_only": false,
+        "supports_streaming": false,
+        "supports_symbolic_song": false,
+        "supports_true_cfg": false,
+        "unconditionally_engages_staged_residency": false
+      },
+      "conditioning": {
+        "aligned": "grid_aligned",
+        "control_kinds": {
+          "kind": "only",
+          "kinds": [
+            "pose",
+            "canny",
+            "depth"
+          ]
+        },
+        "kinds": [
+          "control",
+          "reference"
+        ],
+        "low_res_start_forbids_reference_conditioning": false,
+        "modules": [
+          "z_image_fun_controlnet_union"
+        ],
+        "pass0_requirement": "requires_control",
+        "supports_negative_prompt": true
+      },
+      "decoders": {
+        "alternate_decoder_ids": [],
+        "codec_id": "flux1_ae",
+        "output_latent_space": {
+          "channels": 16,
+          "normalization": "affine:3eb8e219:3ded5cfb",
+          "patch_layout": "unpacked",
+          "spatial_compression_height": 8,
+          "spatial_compression_width": 8,
+          "temporal_law": "none"
+        },
+        "pixel_stride": 16,
+        "supports_diffusion_decoder": false,
+        "token_width": 16
+      },
+      "defaults": {
+        "audio_language": null,
+        "audio_sample_rate": null,
+        "audio_voice": null,
+        "dimensions": [
+          1024,
+          1024
+        ],
+        "guidance": 1.0,
+        "sampler": "euler",
+        "schedule": "normal",
+        "shift": 3.0,
+        "steps": 4,
+        "strength": null
+      },
+      "denoiser": {
+        "kind": "family_model",
+        "name": "z_image_dit_control",
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "supports_expert_switching": false,
+        "supports_geometry_change": false,
+        "supports_multiphase_denoise": false,
+        "supports_read_only_boundary_estimate": false,
+        "supports_renoise_from_clean": false
+      },
+      "family": "z-image",
+      "features": [
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "hires_fix",
+          "hook_points": [
+            "conditioning_slot",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": true,
+            "retains_single_pass_schedule": false,
+            "transition_residency": "pixel_round_trip_produced_reference"
+          },
+          "parameter_schema": {
+            "steps": {
+              "default": 12,
+              "max": 1000,
+              "min": 1,
+              "required": true,
+              "type": "integer_range"
+            },
+            "strength": {
+              "default": 0.3,
+              "inclusive": true,
+              "max": 1.0,
+              "min": 0.0,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "produced_reference_multipass"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "equivalent",
+          "feature_id": "inert_phase_split",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "step": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "krea_multiphase",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "phases": {
+              "min_phases": 1,
+              "min_steps_per_phase": 1,
+              "required": true,
+              "type": "phase_list"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_multiphase_denoise_support",
+              "message": "route 'z_image_turbo_control' does not support multi-phase denoise (phases)"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "low_res_start",
+              "hires_fix",
+              "inert_phase_split"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "multiphase_denoise"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "low_res_start",
+          "hook_points": [
+            "schedule_transform",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "in_device_latent_unpack_resize_repack"
+          },
+          "parameter_schema": {
+            "k": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "scale": {
+              "default": 0.5,
+              "inclusive": true,
+              "max": 0.9,
+              "min": 0.25,
+              "required": false,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_clean_estimate_renoise_transition",
+              "message": "route 'z_image_turbo_control' does not support clean-estimate spatial resize and re-noise phase transitions"
+            },
+            {
+              "code": "conflicts_with_pass0_control_conditioning",
+              "message": "route 'z_image_turbo_control' requires pass-0 control conditioning, which conflicts with noise-start low_res_start"
+            }
+          ],
+          "relations": {
+            "after": [],
+            "before": [
+              "wan_expert_switch",
+              "hires_fix",
+              "pag",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [
+              "phases",
+              "pass0_reference_conditioning",
+              "pass0_control_conditioning",
+              "pass0_edit_conditioning"
+            ],
+            "conflicts_with_features": [
+              "krea_multiphase"
+            ],
+            "requires_capabilities": [
+              "render_plan",
+              "packed_image_trajectory",
+              "spatial_unpack_repack",
+              "clean_estimate_renoise_transition",
+              "noise_start_pass0"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "recipe",
+          "feature_id": "pag",
+          "hook_points": [
+            "attention_block",
+            "guidance_predictor"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "scale": {
+              "default": 1.5,
+              "inclusive": true,
+              "max": 15.0,
+              "min": 0.0,
+              "required": true,
+              "type": "float_range"
+            },
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "pag"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": true,
+          "class": "diagnostic",
+          "feature_id": "trajectory_observer",
+          "hook_points": [
+            "attention_block",
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": false,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "none"
+          },
+          "parameter_schema": {
+            "version": 1
+          },
+          "reasons": [],
+          "relations": {
+            "after": [
+              "low_res_start",
+              "wan_expert_switch",
+              "krea_multiphase",
+              "hires_fix",
+              "pag",
+              "inert_phase_split"
+            ],
+            "before": [],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "render_plan"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        },
+        {
+          "applicable": false,
+          "class": "recipe",
+          "feature_id": "wan_expert_switch",
+          "hook_points": [
+            "phase_transition"
+          ],
+          "memory_effect": {
+            "extra_resident_weight_bytes": 0,
+            "introduces_denoise_phase_boundary": true,
+            "introduces_pass_boundary": false,
+            "retains_single_pass_schedule": true,
+            "transition_residency": "staged_expert_weight_handoff"
+          },
+          "parameter_schema": {
+            "boundary_step": {
+              "default_executed_steps": 4,
+              "max": 3,
+              "max_exclusive": "executed_steps",
+              "min": 1,
+              "range": "1..executed_steps",
+              "required": true,
+              "type": "step_index"
+            },
+            "version": 1
+          },
+          "reasons": [
+            {
+              "code": "missing_expert_switching_support",
+              "message": "route 'z_image_turbo_control' does not use dual-expert MoE boundary switching"
+            }
+          ],
+          "relations": {
+            "after": [
+              "low_res_start"
+            ],
+            "before": [
+              "hires_fix",
+              "trajectory_observer"
+            ],
+            "conflicts_with_axes": [],
+            "conflicts_with_features": [],
+            "requires_capabilities": [
+              "expert_switching"
+            ],
+            "requires_features": []
+          },
+          "version": 1
+        }
+      ],
+      "guidance": {
+        "methods": [],
+        "pag": {
+          "block_domain": "layers",
+          "default_layers": [
+            15
+          ],
+          "default_start": 0.0,
+          "default_stop": 0.75,
+          "max_scale": 15.0,
+          "num_blocks": 30,
+          "recommended_scale": 1.2000000476837158
+        },
+        "requires_sigma_shift": false,
+        "supports_cfg_interval": false,
+        "supports_guidance": true,
+        "supports_h3_image_sampler": false,
+        "supports_true_cfg": false
+      },
+      "limits": {
+        "max_audio_duration_secs": null,
+        "max_size": 2048,
+        "min_size": 256,
+        "size_floor": {
+          "kind": "range_checked"
+        },
+        "supported_steps": {
+          "kind": "unconstrained"
+        }
+      },
+      "mac_only": true,
+      "memory": {
+        "has_memory_behavior": true,
+        "has_memory_contract": true,
+        "has_memory_fixture": true,
+        "has_render_plan": true,
+        "has_video_plan": false,
+        "render_plan_scope": "single_and_multi_pass",
+        "request_memory_strategies": [],
+        "residency_phases": [
+          {
+            "components": [
+              "qwen3"
+            ],
+            "droppable_after_phase": true,
+            "phase": "prompt_encode"
+          },
+          {
+            "components": [
+              "z_image_dit"
+            ],
+            "droppable_after_phase": false,
+            "phase": "denoise"
+          },
+          {
+            "components": [
+              "flux1_ae"
+            ],
+            "droppable_after_phase": false,
+            "phase": "decode"
+          }
+        ],
+        "staged_residency_availability": "selectable",
+        "supports_kv_cache": false,
+        "supports_sequential_offload": true,
+        "unconditionally_engages_staged_residency": false
+      },
+      "modality": "image",
+      "modes": [
+        "image_to_image",
+        "control"
+      ],
+      "preview": "latent_projection",
+      "quant": {
+        "component_precision_floors": [],
+        "supported_tiers": [
+          "q4",
+          "q8"
+        ]
+      },
+      "route_id": "z_image_turbo_control",
+      "schedules": [
+        "normal",
+        "simple",
+        "karras",
+        "exponential",
+        "sgm_uniform",
+        "beta",
+        "ddim_uniform",
+        "beta57"
+      ],
+      "seed_and_batch": {
+        "image_index_seed_relation": "sequential_backend_rng",
+        "max_count": 8,
+        "seed_scheme": "backend_global_seeded",
+        "supports_prompt_batch": false
+      },
+      "solvers": [
+        "euler",
+        "euler_ancestral",
+        "heun",
+        "dpmpp_2m",
+        "dpmpp_sde",
+        "uni_pc",
+        "lcm",
+        "ddim",
+        "er_sde",
+        "dpmpp_2m_sde"
+      ],
+      "weight_plan": {
+        "has_encoder_contract": true,
+        "required_components": [],
+        "requires_control_overlay": true,
+        "requires_identity_overlay": false,
+        "requires_ip_adapter_overlay": false,
+        "source_kind": "snapshot_directory",
+        "supports_ar_load_controls": false,
+        "text_encoders": [
+          {
+            "max_sequence_length": 512,
+            "name": "qwen3"
+          }
+        ],
+        "upsamplers": []
+      }
+    }
+  },
+  "schema_version": "sga.capabilities/2",
+  "snapshot_preparer_backends": [
+    "mlx"
+  ],
+  "trainers": {},
+  "transcribers": {},
+  "transforms": {
+    "audio": {},
+    "image": {
+      "iris_3b_restore": {
+        "backend": "mlx",
+        "default_scale": 4.0,
+        "family": "iris",
+        "id": "iris_3b_restore",
+        "input_budget": {
+          "long_side": 1024,
+          "short_side": 512
+        },
+        "is_diffusion": false,
+        "mac_only": true,
+        "max_scale": 3.4028234663852886e+38,
+        "min_edge": false,
+        "resolution": false,
+        "scale": true,
+        "supports_color_fix": true,
+        "supports_strength": false
+      }
+    }
+  }
+}

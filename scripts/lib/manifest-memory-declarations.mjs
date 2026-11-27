@@ -649,7 +649,8 @@ export function projectProviderRows({
       row.modes = scoped.modes;
       row.overlays = scoped.overlays;
       row.loadProfiles = scoped.loadProfiles;
-      row.source = `config/engine-capabilities/capabilities.${backend}.json#memoryContracts/${provider}`;
+      const profile = backend === "mlx" ? "macos-mlx" : "candle-cuda";
+      row.source = `config/engine-capabilities/sga/${profile}.json#routes/${provider}`;
       rows.push(row);
     }
   }

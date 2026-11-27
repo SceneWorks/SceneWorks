@@ -105,7 +105,7 @@ pub(super) fn qwen_edit_request(
         steps: Some(arm.steps),
         sampler: arm
             .lightning
-            .then(|| QWEN_EDIT_LIGHTNING_SAMPLER.to_owned()),
+            .then(|| SolverId::from_name(QWEN_EDIT_LIGHTNING_SAMPLER)),
         conditioning: vec![Conditioning::Reference {
             image: Image {
                 width,
