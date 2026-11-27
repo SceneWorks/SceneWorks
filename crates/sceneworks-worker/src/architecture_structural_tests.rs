@@ -2533,6 +2533,10 @@ const RETIRED_LEGACY_HIRES_SYMBOLS: &[&str] = &[
     "hires_first_pass_context",
     "generate_one_with_hires",
     "generate_one_with_hires_on_surface",
+    "build_hires_refinement_request",
+    "compile_hires_render_plans",
+    "compile_optional_hires_render_plans",
+    "hires_render_plan",
 ];
 
 fn has_cfg_test_attr(attrs: &[syn::Attribute]) -> bool {
@@ -2559,9 +2563,10 @@ fn scan_tokens_for_retired_hires_symbols(
     for token in tokens {
         match token {
             TokenTree::Ident(ident) => {
-                let name = ident.to_string();
-                if RETIRED_LEGACY_HIRES_SYMBOLS.contains(&name.as_str()) {
-                    offenders.insert(name);
+                let raw = ident.to_string();
+                let name = raw.strip_prefix("r#").unwrap_or(&raw);
+                if RETIRED_LEGACY_HIRES_SYMBOLS.contains(&name) {
+                    offenders.insert(name.to_owned());
                 }
             }
             TokenTree::Group(group) => {
@@ -2576,7 +2581,7 @@ fn retired_legacy_hires_symbols_in_production_items(source: &str) -> Vec<String>
     let file = parse(source);
     let mut offenders = BTreeSet::new();
     for item in file.items {
-        let attrs = match &item {
+        let attrs: &[syn::Attribute] = match &item {
             syn::Item::Const(i) => &i.attrs,
             syn::Item::Enum(i) => &i.attrs,
             syn::Item::ExternCrate(i) => &i.attrs,
@@ -2592,7 +2597,7 @@ fn retired_legacy_hires_symbols_in_production_items(source: &str) -> Vec<String>
             syn::Item::Type(i) => &i.attrs,
             syn::Item::Union(i) => &i.attrs,
             syn::Item::Use(i) => &i.attrs,
-            _ => continue,
+            _ => &[],
         };
         if has_cfg_test_attr(attrs) {
             continue;
@@ -2618,6 +2623,12 @@ fn b5_legacy_hires_symbol_guard_rejects_retired_symbols_and_accepts_shared_multi
             vec![(*symbol).to_owned()],
             "B5 guard must catch retired symbol `{symbol}`"
         );
+        let raw_snippet = format!("fn helper() {{ let _ = r#{symbol}; }}");
+        assert_eq!(
+            retired_legacy_hires_symbols_in_production_items(&raw_snippet),
+            vec![(*symbol).to_owned()],
+            "B5 guard must catch raw-ident retired symbol `r#{symbol}`"
+        );
     }
 
     let clean = r#"
@@ -2629,8 +2640,8 @@ fn b5_legacy_hires_symbol_guard_rejects_retired_symbols_and_accepts_shared_multi
         }
         #[cfg(test)]
         mod tests {
-            fn guard_list() -> &'static [&'static str] {
-                &["HiresFixPlan"]
+            fn uses_retired_only_in_tests() {
+                let _ = HiresFixPlan;
             }
         }
     "#;
