@@ -275,10 +275,15 @@ fn full_prepared_consumer_config_reaches_native_shared_preparation_without_ordin
         MossImageVariant::Sft,
         &spec,
         &GenerationRequest {
-            moss_image: Some(MossImageOptions {
-                acceleration: mode,
+            extensions: gen_core::FamilyExtensions {
+                moss_image: Some(gen_core::MossImageExtension::from_options(
+                    MossImageOptions {
+                        acceleration: mode,
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
-            }),
+            },
             ..Default::default()
         },
         MossImageAdvancedInputs::default(),
@@ -1018,13 +1023,7 @@ impl Generator for Probe {
             .and_then(|ext| ext.edit.as_ref())
         {
             let output = self.run_edit(req, edit_req.as_inputs(), progress)?;
-            let MossImageAdvancedOutput::Images(images) = output else {
-                return Err(gen_core::Error::Unsupported(
-                    "generic MOSS generation requires image output".into(),
-                ));
-            };
-            let mut report =
-                gen_core::GenerationReport::from_output(GenerationOutput::Images(images));
+            let mut report = gen_core::GenerationReport::from_output(output.into());
             if !req.cancel.is_cancelled() {
                 report.family_report = self
                     .take_edit_report()

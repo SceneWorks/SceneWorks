@@ -455,7 +455,7 @@ impl CandleStrictControl for Flux1StrictControl {
     ) -> WorkerResult<gen_core::RenderPlan> {
         // Preview never shapes the trajectory; the live sink is bound at generation time.
         let req = self.request_for(seed, cancel, &gen_core::PreviewSink::default());
-        runtime_cuda::providers::flux::control_provider::compile_control_plan(
+        runtime_cuda::calibration::flux::control_provider::compile_control_plan(
             &self.paths(),
             &self.planning_spec,
             &req,

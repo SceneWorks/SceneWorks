@@ -980,7 +980,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
     }
     #[cfg(target_os = "macos")]
     {
-        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
         let tier = match tier_quant {
             None => provider::quant::Tier::Bf16,
             Some(gen_core::Quant::Q8) => provider::quant::Tier::Q8,
@@ -2944,7 +2944,7 @@ mod tests {
         );
         #[cfg(target_os = "macos")]
         {
-            use runtime_macos::providers::qwen_image_2_1 as provider;
+            use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
             for (quant, tier) in [
                 (None, provider::quant::Tier::Bf16),
                 (Some(gen_core::Quant::Q8), provider::quant::Tier::Q8),

@@ -7247,7 +7247,7 @@ fn bernini_t2v_candle_real_weights_generates_a_clip() {
         guidance: Some(4.0),
         frames: Some(frames),
         fps: Some(16),
-        video_mode: Some("t2v".to_owned()),
+        video_mode: Some("t2v".into()),
         cancel: gen_core::CancelFlag::new(),
         ..Default::default()
     };

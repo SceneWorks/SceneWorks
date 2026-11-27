@@ -377,12 +377,7 @@ impl Generator for TransactionProbe {
             }
             _ => {}
         }
-        let MossImageAdvancedOutput::Images(images) = output else {
-            return Err(gen_core::Error::Unsupported(
-                "generic MOSS generation requires image output".into(),
-            ));
-        };
-        let mut report = gen_core::GenerationReport::from_output(GenerationOutput::Images(images));
+        let mut report = gen_core::GenerationReport::from_output(output.into());
         if !request.cancel.is_cancelled() {
             self.control.reads.fetch_add(1, Ordering::SeqCst);
             report.family_report = self

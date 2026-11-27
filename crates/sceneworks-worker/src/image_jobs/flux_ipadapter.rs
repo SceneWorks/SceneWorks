@@ -345,7 +345,7 @@ fn plan_flux_ip_outputs(
         .map(|(seed, prompt)| {
             // Preview never shapes the trajectory; the live sink is bound at generation time.
             let req = requests.request(seed, prompt, &gen_core::PreviewSink::default(), cancel);
-            runtime_cuda::providers::flux::ip_provider::compile_ip_plan(
+            runtime_cuda::calibration::flux::ip_provider::compile_ip_plan(
                 paths, spec, &req, reference,
             )
             .map_err(|error| super::render::preload_plan_error("FLUX IP-Adapter", error))

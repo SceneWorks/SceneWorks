@@ -888,6 +888,12 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 arm.provider
             ))
         }
+        GenerationOutput::Latents { .. } => {
+            return Err(format!(
+                "{} returned latent output, not a video clip",
+                arm.provider
+            ))
+        }
     };
     if fps != arm.fps {
         return Err(format!(

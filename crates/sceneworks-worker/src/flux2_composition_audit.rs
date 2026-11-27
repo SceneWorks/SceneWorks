@@ -72,7 +72,7 @@ fn memory_strategy<'a>(registry: &'a ProviderRegistry, id: &str) -> Option<&'a M
 /// `flux2_dev` is this one" is decided by identity, not by a transcribed copy of the descriptor
 /// that would go stale the first time an unrelated field moved.
 fn provider_only_registry() -> ProviderRegistry {
-    runtime_cuda::providers::flux2::register_providers(ProviderRegistryBuilder::new())
+    runtime_cuda::calibration::flux2::register_providers(ProviderRegistryBuilder::new())
         .build()
         .expect("candle-gen-flux2's own registrations must form a valid registry")
 }
@@ -80,8 +80,8 @@ fn provider_only_registry() -> ProviderRegistry {
 /// Where the `register_providers` above is actually DEFINED, re-exports notwithstanding.
 ///
 /// The one hole an identity comparison alone leaves open, and it is not a small one: the control is
-/// reached through `runtime_cuda::providers::flux2`, which is `candle-gen-catalog`'s own
-/// `pub use candle_gen_flux2 as flux2` — the crate this module exists to police owns the alias on
+/// reached through `runtime_cuda::calibration::flux2`, which re-exports `candle-gen-catalog`'s
+/// `candle_gen_flux2` — the crate this module exists to police owns the alias on
 /// BOTH sides of every comparison. Re-point it at a wrapper that registers `flux2_dev` and the two
 /// sides move together and stay green.
 ///
@@ -91,7 +91,7 @@ fn provider_only_registry() -> ProviderRegistry {
 /// cannot rewrite it (verified: a `pub use inner as aliased` renders `krate::inner::f` through
 /// both spellings). So this names the crate the control genuinely came from.
 fn control_registrar_definition() -> &'static str {
-    std::any::type_name_of_val(&runtime_cuda::providers::flux2::register_providers)
+    std::any::type_name_of_val(&runtime_cuda::calibration::flux2::register_providers)
 }
 
 /// The shipped CUDA bundle still routes `flux2_dev` to `candle-gen-flux2`, unwrapped.

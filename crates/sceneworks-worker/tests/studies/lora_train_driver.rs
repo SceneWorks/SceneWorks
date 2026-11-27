@@ -541,7 +541,8 @@ mod driver {
                     | GenerationOutput::Video { .. }
                     | GenerationOutput::Audio(_)
                     | GenerationOutput::Interleaved { .. }
-                    | GenerationOutput::Vector(_) => {
+                    | GenerationOutput::Vector(_)
+                    | GenerationOutput::Latents { .. } => {
                         panic!("expected an image")
                     }
                 };

@@ -41,7 +41,7 @@ pub(crate) fn clip_windows_for_spec(
     negative: &str,
 ) -> u32 {
     if engine_id == "sdxl" {
-        use runtime_macos::providers::sdxl::{load_tokenizer, LDM_TOKENIZER_COMPONENT};
+        use runtime_macos::utilities::sdxl::{load_tokenizer, LDM_TOKENIZER_COMPONENT};
         let root = match &spec.weights {
             WeightsSource::Dir(root) => Some(root),
             WeightsSource::File(_) => match spec.components.get(LDM_TOKENIZER_COMPONENT) {
@@ -619,7 +619,7 @@ pub(super) fn mlx_prefix_kv_cache_shed_transient_bytes(
     }
     #[cfg(target_os = "macos")]
     {
-        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
         let tier = match tier_quant {
             None => provider::quant::Tier::Bf16,
             Some(gen_core::Quant::Q8) => provider::quant::Tier::Q8,

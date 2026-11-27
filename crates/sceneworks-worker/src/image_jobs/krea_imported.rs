@@ -1390,7 +1390,7 @@ pub(super) async fn generate_krea_imported_control_stream(
             // installs the job adapters, sources the shared TE/VAE/tokenizer from the base tier, and
             // folds the pose control branch onto the file-loaded DiT — the builtin assembly with
             // only the DiT swapped.
-            let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
+            let paths = runtime_cuda::calibration::krea::Krea2ControlPaths {
                 root: base_dir,
                 native_dit: Some(dit),
                 convrot_dit: None,
@@ -1400,7 +1400,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                 chunk_attention: false,
                 offload_policy: gen_core::OffloadPolicy::Resident,
             };
-            runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
+            runtime_cuda::calibration::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
                 |error| {
                     crate::generation_error(
                         "Krea 2 imported checkpoint pose-control load failed",
@@ -1435,7 +1435,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                     stickwidth,
                     None,
                 )?;
-                let control_request = runtime_cuda::providers::krea::Krea2ControlRequest {
+                let control_request = runtime_cuda::calibration::krea::Krea2ControlRequest {
                     prompt: prompt.clone(),
                     guidance: sampling.guidance,
                     negative_prompt: sampling.negative_prompt.clone(),

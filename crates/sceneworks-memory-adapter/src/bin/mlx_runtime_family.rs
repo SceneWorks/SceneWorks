@@ -667,6 +667,9 @@ pub(super) fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32,
         GenerationOutput::Vector(_) => {
             Err("MLX LTX-2.3 render returned vector output, not a video clip".to_owned())
         }
+        GenerationOutput::Latents { .. } => {
+            Err("MLX LTX-2.3 render returned latent output, not a video clip".to_owned())
+        }
     }
 }
 
@@ -710,6 +713,9 @@ pub(super) fn diagnostic_video_frames(
         )),
         GenerationOutput::Vector(_) => Err(format!(
             "{label} render returned vector output, not a video clip"
+        )),
+        GenerationOutput::Latents { .. } => Err(format!(
+            "{label} render returned latent output, not a video clip"
         )),
     }
 }

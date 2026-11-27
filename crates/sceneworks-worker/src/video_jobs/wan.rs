@@ -2623,6 +2623,9 @@ fn run_prepared_video_generation_with_receipts(
         GenerationOutput::Vector(_) => Err(WorkerError::Engine(
             "video model returned vector output, expected video frames".to_owned(),
         )),
+        GenerationOutput::Latents { .. } => Err(WorkerError::Engine(
+            "video model returned latent output, expected video frames".to_owned(),
+        )),
     }
 }
 

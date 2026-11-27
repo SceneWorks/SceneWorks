@@ -1,6 +1,6 @@
 //! Manual proof observation on the production blocking training thread.
 use super::*;
-pub use runtime_cuda::media::testkit::PeakSampler;
+pub use runtime_cuda::test_support::PeakSampler;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -60,7 +60,7 @@ impl gen_core::Trainer for Observed {
         // Retain the original native error instead of turning cancellation into a
         // blocking-task panic; a genuinely panicking native trainer still unwinds.
         let proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime_cuda::media::train::profile::with_bounded_cohort_for(
+            runtime_cuda::test_support::with_bounded_cohort_for(
                 &self.metrics,
                 &[
                     "moss:geometry-storage-hit",

@@ -49,7 +49,7 @@ use runtime_macos::media::tokenizer::TextTokenizer;
 #[cfg(target_os = "macos")]
 use runtime_macos::media::Image;
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::sensenova::{
+use runtime_macos::utilities::sensenova::{
     load_runtime, smart_resize, Sampler, T2iOptions, INTERLEAVE_RESOLUTIONS,
     INTERLEAVE_SYSTEM_MESSAGE,
 };
@@ -67,7 +67,7 @@ use gen_core::Image;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda::media::candle_core::{DType, Device, Tensor};
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::sensenova::{
+use runtime_cuda::utilities::sensenova::{
     load_understanding_with_spec, smart_resize, tensor_to_image, Sampler, T2iOptions,
     INTERLEAVE_RESOLUTIONS, INTERLEAVE_SYSTEM_MESSAGE,
 };

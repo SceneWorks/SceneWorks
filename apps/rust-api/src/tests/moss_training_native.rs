@@ -869,8 +869,8 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 assert_eq!(zero, before, "zero-strength negative control must reproduce the baseline");
                 let generator = fixture.generator(variant, vec![adapter]).unwrap();
                 let report = generator.generate_with_report(&generation, &mut |_| {}).unwrap();
-                match report.output {
-                    GenerationOutput::Images(images) => {
+                match &report.output {
+                    Some(GenerationOutput::Images(images)) => {
                         assert_eq!(images.len(), 1);
                         assert_eq!((images[0].width, images[0].height), (32, 32));
                         assert_eq!(images[0].pixels.len(), 32 * 32 * 3);

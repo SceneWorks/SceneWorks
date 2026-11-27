@@ -591,8 +591,8 @@ pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictContr
 impl KreaStrictControl {
     /// Exact artifact set handed to the pinned inference provider. Factoring this out keeps the
     /// ConvRot identity and its additive adapter stack inseparable at the final load boundary.
-    fn provider_paths(&self) -> runtime_cuda::providers::krea::Krea2ControlPaths {
-        runtime_cuda::providers::krea::Krea2ControlPaths {
+    fn provider_paths(&self) -> runtime_cuda::calibration::krea::Krea2ControlPaths {
+        runtime_cuda::calibration::krea::Krea2ControlPaths {
             root: self.base.clone(),
             convrot_dit: self.convrot_dit.clone(),
             native_dit: None,
@@ -622,8 +622,8 @@ impl KreaStrictControl {
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
-    ) -> runtime_cuda::providers::krea::Krea2ControlRequest {
-        runtime_cuda::providers::krea::Krea2ControlRequest {
+    ) -> runtime_cuda::calibration::krea::Krea2ControlRequest {
+        runtime_cuda::calibration::krea::Krea2ControlRequest {
             prompt: self.prompt.clone(),
             guidance: self.sampling.guidance,
             negative_prompt: self.sampling.negative_prompt.clone(),
@@ -645,7 +645,7 @@ impl KreaStrictControl {
 }
 
 impl CandleStrictControl for KreaStrictControl {
-    type Model = runtime_cuda::providers::krea::Krea2Control;
+    type Model = runtime_cuda::calibration::krea::Krea2Control;
 
     fn engine_id(&self) -> &'static str {
         KREA_CONTROL_ENGINE_ID
@@ -691,7 +691,7 @@ impl CandleStrictControl for KreaStrictControl {
 
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = self.provider_paths();
-        runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
+        runtime_cuda::calibration::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
             .map_err(|error| {
                 crate::generation_error("Krea 2 strict-pose control load failed", error)
             })

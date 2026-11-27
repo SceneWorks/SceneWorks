@@ -695,6 +695,9 @@ fn full_av_video(output: GenerationOutput) -> Result<(Vec<Image>, u32, AudioTrac
         GenerationOutput::Vector(_) => {
             Err(format!("{LABEL} returned vector output, not a video clip"))
         }
+        GenerationOutput::Latents { .. } => {
+            Err(format!("{LABEL} returned latent output, not a video clip"))
+        }
     }
 }
 

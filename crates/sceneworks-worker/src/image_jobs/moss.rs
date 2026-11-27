@@ -432,6 +432,11 @@ fn moss_edit_render(
         {
             gen_core::moss_image::MossImageAdvancedOutput::Images(images)
         }
+        Some(GenerationOutput::Latents { values, shape })
+            if advanced.output == gen_core::moss_image::MossImageOutputKind::Latents =>
+        {
+            gen_core::moss_image::MossImageAdvancedOutput::Latents { values, shape }
+        }
         _ => {
             return Err(WorkerError::Engine(
                 "MOSS native output kind differs from authored output".into(),

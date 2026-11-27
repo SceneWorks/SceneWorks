@@ -1783,6 +1783,9 @@ async fn run_audio_synthesis_with_completed(
                 GenerationOutput::Vector(_) => Err(WorkerError::Engine(
                     "audio model returned vector output, expected an audio track".to_owned(),
                 )),
+                GenerationOutput::Latents { .. } => Err(WorkerError::Engine(
+                    "audio model returned latent output, expected an audio track".to_owned(),
+                )),
             }
         })
     };
@@ -2273,6 +2276,9 @@ async fn run_native_voice_clone_synthesis_using_completed(
                 )),
                 Some(GenerationOutput::Vector(_)) => Err(WorkerError::Engine(
                     "clone-TTS model returned vector output, expected an audio track".to_owned(),
+                )),
+                Some(GenerationOutput::Latents { .. }) => Err(WorkerError::Engine(
+                    "clone-TTS model returned latent output, expected an audio track".to_owned(),
                 )),
                 None => Err(WorkerError::Engine("clone-TTS model returned no output".to_owned())),
             }

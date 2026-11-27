@@ -14,14 +14,14 @@ pub use acceptance_progress::{
     request_acceptance_api_cancel, AcceptanceProgressLedger, AcceptanceProgressObservation,
 };
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub use candle_gen_moss_image::test_support::{generation_request, Fixture};
 pub use gen_core;
 pub use gen_core_moss_image;
 pub use gen_core_telemetry::host_process_rss_bytes;
 pub use gen_core_testkit::moss_training_probe::{EvaluationManifest, TrainingProbe};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub use runtime_cuda::test_support::{generation_request, Fixture};
 #[cfg(target_os = "macos")]
-pub use mlx_gen_moss_image::test_support::{generation_request, Fixture};
+pub use runtime_macos::test_support::{generation_request, Fixture};
 
 /// Exact production adapter selection with its source tokens retained for the
 /// full fixture load/generate scope. No parallel path, kind or scale mapper.
@@ -457,10 +457,7 @@ pub fn real_moss_trainer_with_probe(
             request.config.memory_limit_bytes,
             request.config.memory_limit_fraction,
         )?;
-        let mut trainer =
-            runtime_macos::memory_helpers::moss_image::training::MossImageTrainer::load(
-                variant, spec,
-            )
+        let mut trainer = runtime_macos::test_support::MossImageTrainer::load(variant, spec)
             .map_err(|error| unsupported(&error))?;
         trainer.set_test_probe(Some(probe));
         let plan = trainer
@@ -480,10 +477,8 @@ pub fn real_moss_trainer_with_probe(
             request.config.memory_limit_fraction,
         )?;
         let mut trainer =
-            runtime_cuda::memory_helpers::moss_image::training::MossImageTrainer::load_on_device(
-                variant, spec, device,
-            )
-            .map_err(|error| unsupported(&error))?;
+            runtime_cuda::test_support::MossImageTrainer::load_on_device(variant, spec, device)
+                .map_err(|error| unsupported(&error))?;
         trainer.set_test_probe(Some(probe));
         let plan = trainer
             .test_memory_plan(request)

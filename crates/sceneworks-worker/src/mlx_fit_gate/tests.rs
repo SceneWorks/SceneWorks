@@ -11657,7 +11657,7 @@ fn mlx_prefix_kv_cache_keeps_the_shed_rung_and_never_refuses_an_admissible_reque
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_production_pricing_site_prices_the_linked_turbo_cache_only_for_an_eligible_request() {
-    use runtime_macos::providers::qwen_image_2_1::{memory_strategy::derived, quant::Tier};
+    use runtime_macos::memory_helpers::qwen_image_2_1::{memory_strategy::derived, quant::Tier};
     let descriptor = crate::inference_runtime::media_descriptor("qwen_image_2_1_turbo")
         .expect("the linked MLX registry carries qwen_image_2_1_turbo");
     assert!(
