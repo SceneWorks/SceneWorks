@@ -1547,6 +1547,29 @@ pub(super) fn resolve_krea_w4a8(
     Some((base_dir, dit))
 }
 
+/// The W4A8 inputs for every Krea route that can run the tier (SW-6135): `Ok(None)` when the request
+/// did not select W4A8, the (bf16 base DIR, W4A8 transformer FILE) pair when it did and both are
+/// installed, and a typed refusal otherwise — a W4A8 pick is never rendered at another installed
+/// tier. Callers fetch the base on demand first ([`ensure_krea_dense_base_present`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn require_krea_w4a8(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<(PathBuf, PathBuf)>> {
+    if !wants_krea_w4a8(request) {
+        return Ok(None);
+    }
+    resolve_krea_w4a8(request, settings)
+        .map(Some)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Krea 2 Turbo W4A8 tier is not installed: download the W4A8 variant \
+             (SceneWorks/krea-2-turbo-w4a8) and its bf16 base, or pick another tier"
+                    .to_owned(),
+            )
+        })
+}
+
 /// Resolve only the immutable W4A8 transformer single-file.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn resolve_krea_w4a8_dit(settings: &Settings) -> Option<PathBuf> {

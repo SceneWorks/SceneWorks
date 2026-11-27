@@ -189,6 +189,13 @@ pub(super) fn gate_tier_key_resolved(
     if convrot_resolved {
         return INT8_CONVROT_TIER;
     }
+    // SW-6135: a W4A8 request is named by its tier identity. Every route that serves it resolves
+    // the tier or refuses the job first (`require_krea_w4a8`), so reaching here means W4A8 is what
+    // loads, and `weights_dir` is the dense bf16 base surface whose basename would otherwise size
+    // the render as the 47 GB bf16 tier.
+    if super::artifact_resolution::wants_krea_w4a8(request) {
+        return super::W4A8_TIER;
+    }
     if let Some(tier) = tier_key_for_resolved_dir(&request.model_manifest_entry, weights_dir) {
         return tier;
     }
