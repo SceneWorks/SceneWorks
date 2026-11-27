@@ -1184,6 +1184,10 @@ mod tests {
     }
 
     struct EncoderLibrary {
+        // Discovery's root set includes the Hugging Face hub cache, which otherwise follows the
+        // process-wide HF_HOME/HF_HUB_CACHE that concurrent tests set. A changed root set clears
+        // the memo, so pin this fixture's hub root to make memo hits deterministic.
+        _hub: sceneworks_core::hf_home::test_support::CacheRootGuard,
         _temp: tempfile::TempDir,
         data_dir: PathBuf,
         alternates: PathBuf,
@@ -1230,7 +1234,12 @@ mod tests {
             }),
             serde_json::json!({ "id": "a_two", "catalogScope": "imported" }),
         ];
+        let hub = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.clone(),
+            data_dir.join("cache").join("huggingface").join("hub"),
+        );
         EncoderLibrary {
+            _hub: hub,
             _temp: temp,
             data_dir,
             alternates,
