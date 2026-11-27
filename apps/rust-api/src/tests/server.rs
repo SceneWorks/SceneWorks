@@ -77,6 +77,217 @@ fn successful_worker_heartbeat_never_emits_request_duration() {
     );
 }
 
+#[test]
+fn successful_fast_background_polls_do_not_emit_request_duration_noise() {
+    // The worker's portable-source-challenge poll (~70% of a 1 GB api.log) and per-step
+    // progress reports are background traffic: silent on fast success, visible otherwise.
+    for route in [
+        "/api/v1/workers/:worker_id/portable-source-challenges",
+        "/api/v1/jobs/:job_id/progress",
+    ] {
+        assert!(
+            !should_log_api_request_duration(route, StatusCode::OK, 6.0),
+            "{route}"
+        );
+        assert!(
+            should_log_api_request_duration(route, StatusCode::OK, 1_000.0),
+            "a slow {route} remains observable"
+        );
+        assert!(
+            should_log_api_request_duration(route, StatusCode::FORBIDDEN, 6.0),
+            "a failed {route} remains observable"
+        );
+    }
+    // Neighbouring routes of the same families keep their per-request timing line.
+    for route in [
+        "/api/v1/jobs/:job_id",
+        "/api/v1/workers/:worker_id/portable-source-proof",
+        "/api/v1/workers/register",
+    ] {
+        assert!(
+            should_log_api_request_duration(route, StatusCode::OK, 0.5),
+            "{route}"
+        );
+    }
+}
+
+/// Captures the formatted tracing output of the current thread for the request-log tests.
+#[derive(Clone, Default)]
+struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl CapturedLog {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("capture lock")).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+    type Writer = CapturedLog;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn capture_request_logs() -> (CapturedLog, tracing::subscriber::DefaultGuard) {
+    let capture = CapturedLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(capture.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (capture, guard)
+}
+
+fn duration_lines(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|line| line.contains("api_request_duration"))
+        .collect()
+}
+
+/// Drives the real timing middleware over routes registered under the production route
+/// labels: fast successes of the challenge poll are silent, a slow quiet-route success and a
+/// liveness failure are logged at WARN, and an ordinary route still logs every request at INFO.
+#[tokio::test]
+async fn request_timing_middleware_quiets_only_fast_successful_background_polls() {
+    use axum::routing::{get, post};
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/portable-source-challenges",
+            post(|| async { StatusCode::OK }),
+        )
+        .route(
+            "/api/v1/jobs/:job_id/progress",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(1_050)).await;
+                StatusCode::OK
+            }),
+        )
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        )
+        .route("/api/v1/jobs/:job_id", get(|| async { StatusCode::OK }))
+        .layer(axum::middleware::from_fn(crate::api_request_timing));
+    let (capture, _guard) = capture_request_logs();
+
+    for _ in 0..3 {
+        let (status, headers, _) = request_raw(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/worker-1/portable-source-challenges",
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            headers.contains_key("server-timing"),
+            "quiet routes still carry Server-Timing"
+        );
+    }
+    assert!(
+        duration_lines(&capture.text()).is_empty(),
+        "fast successful challenge polls log nothing: {}",
+        capture.text()
+    );
+
+    // Slow success on a quiet route, failure on a liveness route: both surface at WARN.
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/job-1/progress",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = request_raw(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/worker-1/heartbeat",
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // An ordinary route keeps its INFO line for every successful request.
+    for _ in 0..2 {
+        let (status, _, _) =
+            request_raw(app.clone(), "GET", "/api/v1/jobs/job-1", Body::empty(), &[]).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let log = capture.text();
+    let lines = duration_lines(&log);
+    assert_eq!(lines.len(), 4, "{log}");
+    assert!(
+        lines[0].contains("WARN") && lines[0].contains("/api/v1/jobs/:job_id/progress"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("WARN")
+            && lines[1].contains("/api/v1/workers/:worker_id/heartbeat")
+            && lines[1].contains("503"),
+        "{}",
+        lines[1]
+    );
+    for line in &lines[2..] {
+        assert!(
+            line.contains("INFO") && line.contains("\"/api/v1/jobs/:job_id\""),
+            "{line}"
+        );
+    }
+    assert!(
+        !log.contains("worker-1") && !log.contains("job-1"),
+        "route labels, never ids: {log}"
+    );
+}
+
+/// The quiet list keys on Axum's matched route label; pin that the production router really
+/// labels the challenge poll with exactly that string (a renamed route would silently resume
+/// logging every poll). A poll for an unknown worker fails, so it is logged.
+#[tokio::test]
+async fn production_router_labels_the_challenge_poll_with_the_quiet_route_label() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (capture, _guard) = capture_request_logs();
+    let (status, _, _) = request_raw(
+        app,
+        "POST",
+        "/api/v1/workers/unknown-worker/portable-source-challenges",
+        Body::from(r#"{"capability":"not-a-real-capability"}"#),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "an unknown worker's poll is refused: {status}"
+    );
+    let log = capture.text();
+    let lines = duration_lines(&log);
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(
+        lines[0].contains("WARN")
+            && lines[0].contains("\"/api/v1/workers/:worker_id/portable-source-challenges\""),
+        "{}",
+        lines[0]
+    );
+}
+
 #[tokio::test]
 async fn api_timing_adds_numeric_server_timing_to_success_and_error_responses() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
