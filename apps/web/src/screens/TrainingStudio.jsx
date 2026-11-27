@@ -57,6 +57,7 @@ import {
   defaultOptimizerOptions,
   defaultPresetForTarget,
   isFullFinetuneNetworkType,
+  loraTargetModulesDraft,
   lrSchedulerOptions,
   mergeCustomizedConfigDraft,
   presetForQualityTier,
@@ -302,6 +303,20 @@ function savedRunTargetId(job) {
 
 function savedRunDatasetId(job) {
   return job?.payload?.plan?.dataset?.datasetId ?? job?.payload?.datasetId ?? "";
+}
+
+// A resume continues the SAME adapter: the API refuses a different network type, and the
+// checkpoint's factors fix the rank, alpha, LoKr factor and target modules. Carry them from the
+// saved plan into the freshly seeded draft (which holds the target's defaults).
+function savedRunAdapterDraft(job) {
+  const config = job?.payload?.plan?.config ?? {};
+  const advanced = config.advanced ?? {};
+  const fields = { networkType: String(advanced.networkType ?? "").trim() || "lora" };
+  if (Number.isFinite(config.rank)) fields.rank = String(config.rank);
+  if (Number.isFinite(config.alpha)) fields.alpha = String(config.alpha);
+  if (Number.isFinite(advanced.decomposeFactor)) fields.decomposeFactor = String(advanced.decomposeFactor);
+  if (Array.isArray(advanced.loraTargetModules)) fields.loraTargetModules = loraTargetModulesDraft(advanced.loraTargetModules);
+  return fields;
 }
 
 function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRetry, onResumeIris, canResumeIris, onRemove, removing, removeDisabled = false, onPreview, token, completed = false }) {
@@ -1195,8 +1210,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     const datasetId = savedRunDatasetId(job);
     if (datasetId && activeDataset?.id !== datasetId && datasets.some((dataset) => dataset.id === datasetId)) return;
     setPendingIrisResume(null);
-    setCustomizedConfigFields((current) => new Set([...current, "resumeFromJobId"]));
-    setConfigDraft((current) => ({ ...current, resumeFromJobId: job.id, loadFromJobId: "" }));
+    const adapter = savedRunAdapterDraft(job);
+    setCustomizedConfigFields((current) => new Set([...current, "resumeFromJobId", ...Object.keys(adapter)]));
+    setConfigDraft((current) => ({ ...current, ...adapter, resumeFromJobId: job.id, loadFromJobId: "" }));
     setConfigSnapshot(null);
   }, [pendingIrisResume, selectedTarget?.id, activeDataset?.id, datasets]);
 

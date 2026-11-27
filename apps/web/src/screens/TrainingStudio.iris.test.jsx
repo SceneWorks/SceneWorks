@@ -144,6 +144,42 @@ describe("TrainingStudio — Iris", () => {
     expect(resume.value).toBe("job_stopped");
   });
 
+  // A resume continues the same adapter: the API refuses another network type, and the
+  // checkpoint fixes the factor shapes. A LoKr run resumed from the default (LoRA) draft must
+  // submit as LoKr with its own rank, alpha and decomposition factor.
+  it("resumes a queue-cleared Iris LoKr run with its own adapter shape", async () => {
+    const lokr = { ...irisJob({ id: "job_lokr", status: "canceled", outputName: "Mira LoKr", networkType: "lokr" }), irisResumable: true };
+    lokr.payload.plan.config = { ...lokr.payload.plan.config, rank: 8, alpha: 4,
+      advanced: { ...lokr.payload.plan.config.advanced, decomposeFactor: 4 } };
+    lokr.payload.plan.dataset = { datasetId: "dataset-1" };
+    fetchMock.mockImplementation(async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes("/training/runs") ? { jobs: [lokr], nextOffset: null } : null),
+    }));
+    const ctx = context({ jobs: [] });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={ctx}>{<TrainingStudio />}</AppContext.Provider>);
+    });
+    await settle({ microtasks: 10 });
+    const button = (label) => [...container.querySelectorAll("button")].find((item) => item.textContent === label);
+    await act(async () => button("Continue training").click());
+    await settle({ microtasks: 10 });
+    await act(async () => button("Resume in New training").click());
+    await settle({ microtasks: 10 });
+    expect(button("Start training").disabled).toBe(false);
+    await act(async () => button("Start training").dispatchEvent(new window.MouseEvent("click", { bubbles: true })));
+    await settle({ microtasks: 10 });
+    expect(ctx.createTrainingJob).toHaveBeenCalledTimes(1);
+    const { config } = ctx.createTrainingJob.mock.calls[0][0];
+    expect(config.advanced.resumeFromJobId).toBe("job_lokr");
+    expect(config.advanced.networkType).toBe("lokr");
+    expect(config.advanced.decomposeFactor).toBe(4);
+    expect(config.rank).toBe(8);
+    expect(config.alpha).toBe(4);
+  });
+
   // Stopped before its first checkpoint, an Iris run can only restart: the Iris resume would be
   // refused (no checkpoint), while the rerun guard allows a retry.
   it("keeps restart for a queue-cleared Iris run stopped before its first checkpoint", async () => {
