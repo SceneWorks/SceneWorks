@@ -7,24 +7,55 @@ pub(crate) struct TrainingRunsQuery {
     limit: Option<u32>,
 }
 
-/// This history includes queue-cleared runs; it never adds them back to the queue.
-pub(crate) async fn list_completed_training_runs(
+/// Saved LoRA runs: completed runs to continue and canceled/interrupted runs to resume. This
+/// history includes queue-cleared runs; it never adds them back to the queue. A stopped Iris run
+/// carries `irisResumable`: whether it left a complete checkpoint, which decides between its
+/// Training Studio resume and a restart from step 0.
+pub(crate) async fn list_saved_training_runs(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
     Query(query): Query<TrainingRunsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
-    let mut jobs = store_call(state, move |store, _| {
-        store.list_completed_lora_runs(&project_id, offset, limit + 1)
+    let mut jobs = store_call(state.clone(), move |store, _| {
+        store.list_saved_lora_runs(&project_id, offset, limit + 1)
     })
     .await?;
     let has_more = jobs.len() > limit as usize;
     jobs.truncate(limit as usize);
+    // Read from the private snapshot (redaction drops the output locators it needs).
+    let mut resumable = Vec::with_capacity(jobs.len());
+    for job in &jobs {
+        resumable.push(crate::iris_training::stopped_iris_run_resumable(&state, job).await);
+    }
+    let mut jobs = public_job_snapshots(jobs);
+    for (job, resumable) in jobs.iter_mut().zip(resumable) {
+        if let Some(resumable) = resumable {
+            job.extra.insert("irisResumable".into(), json!(resumable));
+        }
+    }
     Ok(Json(json!({
-        "jobs": public_job_snapshots(jobs),
+        "jobs": jobs,
         "nextOffset": has_more.then_some(offset.saturating_add(limit)),
     })))
+}
+
+/// Permanently remove a saved run from the project's saved runs (and the queue). Files are kept:
+/// an exported LoRA stays in the library and recovery checkpoints stay on disk.
+pub(crate) async fn remove_saved_training_run(
+    State(state): State<AppState>,
+    Path((project_id, job_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let id = job_id.clone();
+    store_call(state.clone(), move |store, _| {
+        store.remove_saved_lora_run(&project_id, &id)
+    })
+    .await?;
+    // The run also leaves the queue: every subscriber prunes it, as after a per-job clear.
+    publish(&state, "jobs.cleared", &json!({ "ids": [job_id] }));
+    publish_queue(&state).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]

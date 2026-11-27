@@ -57,6 +57,7 @@ import {
   defaultOptimizerOptions,
   defaultPresetForTarget,
   isFullFinetuneNetworkType,
+  loraTargetModulesDraft,
   lrSchedulerOptions,
   mergeCustomizedConfigDraft,
   presetForQualityTier,
@@ -84,6 +85,7 @@ import { useValidation } from "../validation/useValidation.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
 import {
+  IRIS_TRAINING_KERNEL,
   irisCaptionFieldOptions,
   irisObjective,
   irisPreviousRuns,
@@ -286,7 +288,38 @@ function LiveIrisMetrics({ job, token, live = true }) {
   return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onPreview, token, completed = false }) {
+// A stopped Iris run that left a complete checkpoint resumes only through New training's Iris
+// resume picker (`resumeFromJobId`): the generic retry refuses a checkpointed Iris run, and Iris
+// never takes a retry's `resume`. One stopped before its first checkpoint can only restart from
+// step 0, which the retry allows. The saved-runs API reports which (`irisResumable`, from disk).
+function isResumableStoppedIrisRun(job) {
+  return job.payload?.plan?.target?.kernel === IRIS_TRAINING_KERNEL &&
+    ["canceled", "interrupted"].includes(job.status) && job.irisResumable === true;
+}
+
+function savedRunTargetId(job) {
+  return job?.payload?.plan?.target?.targetId ?? job?.payload?.targetId ?? "";
+}
+
+function savedRunDatasetId(job) {
+  return job?.payload?.plan?.dataset?.datasetId ?? job?.payload?.datasetId ?? "";
+}
+
+// A resume continues the SAME adapter: the API refuses a different network type, and the
+// checkpoint's factors fix the rank, alpha, LoKr factor and target modules. Carry them from the
+// saved plan into the freshly seeded draft (which holds the target's defaults).
+function savedRunAdapterDraft(job) {
+  const config = job?.payload?.plan?.config ?? {};
+  const advanced = config.advanced ?? {};
+  const fields = { networkType: String(advanced.networkType ?? "").trim() || "lora" };
+  if (Number.isFinite(config.rank)) fields.rank = String(config.rank);
+  if (Number.isFinite(config.alpha)) fields.alpha = String(config.alpha);
+  if (Number.isFinite(advanced.decomposeFactor)) fields.decomposeFactor = String(advanced.decomposeFactor);
+  if (Array.isArray(advanced.loraTargetModules)) fields.loraTargetModules = loraTargetModulesDraft(advanced.loraTargetModules);
+  return fields;
+}
+
+function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRetry, onResumeIris, canResumeIris, onRemove, removing, removeDisabled = false, onPreview, token, completed = false }) {
   return (
       <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => {
@@ -303,6 +336,22 @@ function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onPre
                 expectedThumbnailCount={4}
                 onCancel={onCancel}
                 onContinueTraining={onContinueTraining}
+                onRetry={isResumableStoppedIrisRun(job) ? undefined : onRetry}
+                extraActions={(
+                  <>
+                    {onResumeIris && isResumableStoppedIrisRun(job) ? (
+                      canResumeIris?.(job) === false ? (
+                        <span className="training-field-hint">This run's training target is no longer available.</span>
+                      ) : (
+                        <button className="secondary-action" type="button" onClick={() => onResumeIris(job)}>Resume in New training</button>
+                      )
+                    ) : null}
+                    {onRemove ? (
+                      <button className="secondary-action danger" type="button" disabled={removeDisabled || removing?.has(job.id)}
+                        onClick={() => onRemove(job)}>{removing?.has(job.id) ? "Removing…" : "Remove"}</button>
+                    ) : null}
+                  </>
+                )}
                 onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
               />
               {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} live={!completed} /> : null}
@@ -363,6 +412,11 @@ export function TrainingDataSetsLibrary() {
 export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLibraryMode = mode === "datasets";
   const [trainingAction, setTrainingAction] = useState("new");
+  // A stopped Iris run picked from Continue training, waiting for its target (and dataset) to be
+  // selected before it becomes the draft's `resumeFromJobId`. The picked runs also join the
+  // resume picker's choices: a queue-cleared run is no longer in the live `jobs`.
+  const [pendingIrisResume, setPendingIrisResume] = useState(null);
+  const [irisResumeSources, setIrisResumeSources] = useState([]);
   const {
     activeProject,
     token,
@@ -741,8 +795,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
         .slice(0, 3),
     [activeProject?.id, jobs],
   );
-  const completedTrainingRefreshKey = useMemo(
-    () => jobs.filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && job.status === "completed").map((job) => `${job.id}:${job.updatedAt}`).join("|"),
+  // Saved-run history reloads when a run finishes or stops, and when a resume queues a new
+  // run (which supersedes the stopped one). A running job's progress ticks change only its
+  // updatedAt, so a live run is keyed by status alone.
+  const savedTrainingRefreshKey = useMemo(
+    () => jobs
+      .filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id)
+      .map((job) => (terminalStatuses.has(job.status) ? `${job.id}:${job.status}:${job.updatedAt}` : `${job.id}:${job.status}`))
+      .join("|"),
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
@@ -870,11 +930,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget, macCapabilities]);
   const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
   const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
+  const irisRunPool = useMemo(
+    () => [...jobs, ...irisResumeSources.filter((saved) => !jobs.some((job) => job.id === saved.id))],
+    [jobs, irisResumeSources],
+  );
   const irisContext = useMemo(() => {
     if (irisSelected) {
       return {
-        previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id }),
-        fullRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, fullOnly: true }),
+        previousRuns: irisPreviousRuns(irisRunPool, { projectId: activeProject?.id }),
+        fullRuns: irisPreviousRuns(irisRunPool, { projectId: activeProject?.id, fullOnly: true }),
         captionFieldOptions: irisCaptionFieldOptions(activeDataset),
         trainingLane: trainingLaneFromCapabilities(macCapabilities),
         dataWalk: irisDataWalk,
@@ -892,7 +956,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // training-only resources still to install, and the pre-launch dataset check of THIS config.
     if (!irisObjectiveSelected) return {};
     return {
-      previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, baseModel: selectedTarget.baseModel }),
+      previousRuns: irisPreviousRuns(irisRunPool, { projectId: activeProject?.id, baseModel: selectedTarget.baseModel }),
       trainingLane: trainingLaneFromCapabilities(macCapabilities),
       missingResources: missingRequiredModels(models, irisTrainingResourceIds(selectedTarget)),
       checkDataset: () =>
@@ -907,7 +971,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
         ),
     };
   }, [
-    irisSelected, irisObjectiveSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk,
+    irisSelected, irisObjectiveSelected, irisRunPool, activeProject?.id, activeDataset, macCapabilities, irisDataWalk,
     models, selectedTarget, selectedPreset, configDraft, token,
     irisPresets, irisPlanCheck, irisResumeMetrics, gpuOptions,
   ]);
@@ -1137,6 +1201,37 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // Dataset/target identities own hydration; background object refreshes must preserve edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataset?.id, selectedTarget?.id, trainingPresets]);
+
+  // Declared after the reseed above so, in the commit that selects the run's target or dataset,
+  // the resume choice lands on top of the freshly seeded draft rather than being wiped by it.
+  useEffect(() => {
+    const job = pendingIrisResume;
+    if (!job || selectedTarget?.id !== savedRunTargetId(job)) return;
+    const datasetId = savedRunDatasetId(job);
+    if (datasetId && activeDataset?.id !== datasetId && datasets.some((dataset) => dataset.id === datasetId)) return;
+    setPendingIrisResume(null);
+    const adapter = savedRunAdapterDraft(job);
+    setCustomizedConfigFields((current) => new Set([...current, "resumeFromJobId", ...Object.keys(adapter)]));
+    setConfigDraft((current) => ({ ...current, ...adapter, resumeFromJobId: job.id, loadFromJobId: "" }));
+    setConfigSnapshot(null);
+  }, [pendingIrisResume, selectedTarget?.id, activeDataset?.id, datasets]);
+
+  function canResumeIrisRun(job) {
+    return trainingTargets.some((target) => target.id === savedRunTargetId(job));
+  }
+
+  function resumeIrisRunInNewTraining(job) {
+    const targetId = savedRunTargetId(job);
+    if (!canResumeIrisRun(job)) return;
+    setIrisResumeSources((current) => [job, ...current.filter((saved) => saved.id !== job.id)]);
+    setPendingIrisResume(job);
+    setTrainingAction("new");
+    setSelectedTargetId(targetId);
+    const datasetId = savedRunDatasetId(job);
+    if (datasetId && datasetId !== activeDataset?.id && datasets.some((dataset) => dataset.id === datasetId)) {
+      openDatasetRef.current?.(datasetId);
+    }
+  }
 
   useEffect(() => {
     if (!configTriggerFollowsCaptions) {
@@ -2452,11 +2547,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
               />
             ) : trainingAction === "continue" ? (
               <TrainingRunHistory key={activeProject.id} projectId={activeProject.id} token={token}
-                refreshKey={completedTrainingRefreshKey}
-                renderRuns={(savedJobs) => (
+                refreshKey={savedTrainingRefreshKey}
+                renderRuns={(savedJobs, { onRemove, removing, removeDisabled }) => (
                   <TrainingRunCards jobs={savedJobs} projectId={activeProject.id} token={token} completed
+                    onRemove={onRemove} removing={removing} removeDisabled={removeDisabled}
+                    onResumeIris={resumeIrisRunInNewTraining} canResumeIris={canResumeIrisRun}
                     onPreview={setPreviewAsset}
-                    onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined} />
+                    onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined}
+                    onRetry={jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined} />
                 )} />
             ) : (
               <>

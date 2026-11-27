@@ -20,10 +20,16 @@ describe("domain route contracts", () => {
   it("loads saved training history with encoded workspace identity and an abortable page", async () => {
     const fetch = jsonFetch();
     const controller = new AbortController();
-    await trainingApi.completedRuns(hostile, "token", { offset: 25, limit: 25 }, { signal: controller.signal });
+    await trainingApi.savedRuns(hostile, "token", { offset: 25, limit: 25 }, { signal: controller.signal });
     expect(fetch.mock.calls[0][0]).toBe(`${API_BASE_URL}/api/v1/projects/${segment}/training/runs?offset=25&limit=25`);
     expect(fetch.mock.calls[0][1].signal).toBe(controller.signal);
     expect(fetch.mock.calls[0][1].headers.get("X-SceneWorks-Token")).toBe("token");
+  });
+  it("removes a saved training run with encoded workspace and job identity", async () => {
+    const fetch = jsonFetch();
+    await trainingApi.removeSavedRun(hostile, hostile, "token");
+    expect(fetch.mock.calls[0][0]).toBe(`${API_BASE_URL}/api/v1/projects/${segment}/training/runs/${segment}`);
+    expect(fetch.mock.calls[0][1].method).toBe("DELETE");
   });
   it("encodes every nested identifier without altering payload fields, token or abort", async () => {
     const fetch = jsonFetch();

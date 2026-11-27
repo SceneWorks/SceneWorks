@@ -161,6 +161,29 @@ pub(crate) async fn trusted_previous_output_dir(
     )
 }
 
+/// Whether a canceled or interrupted Iris run left a complete checkpoint (`None` for any other
+/// job). The disk is the authority — an interrupted run reports none — and it decides the run's
+/// only working recovery: with a checkpoint it resumes from the Training Studio
+/// (`resumeFromJobId`, which [`guard_iris_training_rerun`] demands); without one it can only be
+/// retried from step 0 (which `resolve_iris_run_sources` demands).
+pub(crate) async fn stopped_iris_run_resumable(
+    state: &AppState,
+    job: &JobSnapshot,
+) -> Option<bool> {
+    if !matches!(job.status, JobStatus::Canceled | JobStatus::Interrupted) {
+        return None;
+    }
+    let plan = iris_training_plan(job)?;
+    let Ok(output_dir) = trusted_previous_output_dir(state, job).await else {
+        return Some(false);
+    };
+    let root = sceneworks_worker::iris_checkpoint_root(&output_dir, &plan.output.file_name);
+    Some(matches!(
+        newest_complete_checkpoint(&root).await,
+        Ok(Some(_))
+    ))
+}
+
 /// The Iris training plan of a `LoraTrain` job (`None` for every other job).
 fn iris_training_plan(job: &JobSnapshot) -> Option<TrainingPlan> {
     if !matches!(job.job_type, JobType::LoraTrain) {
