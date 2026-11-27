@@ -2591,6 +2591,9 @@ fn run_prepared_video_generation_with_receipts(
         GenerationOutput::Audio(_) => Err(WorkerError::Engine(
             "video model returned audio, expected video frames".to_owned(),
         )),
+        GenerationOutput::Interleaved { .. } => Err(WorkerError::Engine(
+            "video model returned interleaved output, expected video frames".to_owned(),
+        )),
     }
 }
 

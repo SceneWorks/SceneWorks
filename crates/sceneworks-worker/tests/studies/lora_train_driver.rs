@@ -540,7 +540,8 @@ mod driver {
                     // four-channel return would mean the engine ignored the request (sc-24111).
                     GenerationOutput::ImagesRgba(_)
                     | GenerationOutput::Video { .. }
-                    | GenerationOutput::Audio(_) => {
+                    | GenerationOutput::Audio(_)
+                    | GenerationOutput::Interleaved { .. } => {
                         panic!("expected an image")
                     }
                 };

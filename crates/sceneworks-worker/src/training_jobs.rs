@@ -1683,7 +1683,8 @@ fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerErro
         }),
         gen_core::Error::Backend(_)
         | gen_core::Error::MissingTensor(_)
-        | gen_core::Error::Io(_) => {
+        | gen_core::Error::Io(_)
+        | gen_core::Error::ProviderPoisoned(_) => {
             crate::generation_error(&format!("{engine_id} trainer load failed"), error)
         }
         gen_core::Error::ProcessPoisoned(detail) => WorkerError::ProcessPoisoned(detail),

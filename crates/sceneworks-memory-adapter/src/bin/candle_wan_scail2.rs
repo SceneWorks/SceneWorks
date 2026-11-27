@@ -865,6 +865,12 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 arm.provider
             ))
         }
+        GenerationOutput::Interleaved { .. } => {
+            return Err(format!(
+                "{} returned interleaved output, not a video clip",
+                arm.provider
+            ))
+        }
     };
     if fps != arm.fps {
         return Err(format!(
