@@ -522,7 +522,11 @@ fn known_fine_hand_details(text: &str) -> Vec<String> {
                         .take(12)
                         .copied()
                         .take_while(|word| {
-                            !["hand", "hands", "arm", "arms", "elbow", "elbows"].contains(word)
+                            ![
+                                "hand", "hands", "arm", "arms", "elbow", "elbows", "leg", "legs",
+                                "foot", "feet", "knee", "knees",
+                            ]
+                            .contains(word)
                         })
                         .collect();
                     for offset in 0..tail.len().saturating_sub(1) {
@@ -1114,7 +1118,7 @@ mod tests {
             "Medium shot with an inset close-up of a hand. A hand on the table near the other hand.",
             "A hand rests on the bed near the hip.",
             "Medium shot. The arm is raised farther back in a wave.",
-            "Medium shot. The arm is planted on the bed; a foot is farther back.",
+            "Medium shot. The arm is planted on the bed while a foot is farther back.",
             "Close-up of the hands. One hand is placed a little farther back.",
         ] {
             assert!(known_fine_hand_details(allowed).is_empty(), "{allowed}");
