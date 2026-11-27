@@ -253,9 +253,11 @@ async fn wait_for_utility_source_proof(
         registered_digest_member_claim_id(model, member, &Value::Object(payload.clone()))
             .map_err(|error| incomplete(error.to_string()))?;
     let challenge_id = uuid::Uuid::new_v4().to_string();
-    let initial_sets = state
+    // Ids only: the proof below matches against this process's authenticated in-memory claims,
+    // so parsing every eligible worker's stored claim JSON here would be thrown away.
+    let initial_ids = state
         .jobs_store
-        .portable_source_claim_sets_for_job_route_with_ids(
+        .portable_source_claim_worker_ids_for_job_route(
             &route.backend,
             &route.platform,
             requested_gpu,
@@ -265,9 +267,8 @@ async fn wait_for_utility_source_proof(
         )
         .map_err(|error| incomplete(format!("worker source claims are unavailable: {error}")))?;
     let authenticated = state.authenticated_worker_claims.lock().await;
-    let allowed_worker_ids = initial_sets
+    let allowed_worker_ids = initial_ids
         .into_iter()
-        .map(|(id, _)| id)
         .filter(|id| authenticated.contains_key(id))
         .collect::<BTreeSet<_>>();
     drop(authenticated);
@@ -294,9 +295,9 @@ async fn wait_for_utility_source_proof(
             .get(&challenge_id)
             .map(|challenge| challenge.proved_worker_ids.clone())
             .unwrap_or_default();
-        let sets = state
+        let eligible_ids = state
             .jobs_store
-            .portable_source_claim_sets_for_job_route_with_ids(
+            .portable_source_claim_worker_ids_for_job_route(
                 &route.backend,
                 &route.platform,
                 requested_gpu,
@@ -308,7 +309,7 @@ async fn wait_for_utility_source_proof(
                 incomplete(format!("worker source claims are unavailable: {error}"))
             })?;
         let authenticated = state.authenticated_worker_claims.lock().await;
-        let proof_matches = sets.iter().any(|(worker_id, _)| {
+        let proof_matches = eligible_ids.iter().any(|worker_id| {
             proved_workers.contains(worker_id)
                 && authenticated.get(worker_id).is_some_and(|record| {
                     record.seen_at.elapsed().as_secs() <= state.settings.worker_timeout_seconds
@@ -398,7 +399,7 @@ async fn record_source_proof_request(
     }
     let eligible = state
         .jobs_store
-        .portable_source_claim_sets_for_job_route_with_ids(
+        .portable_source_claim_worker_ids_for_job_route(
             backend,
             platform,
             requested_gpu,
@@ -410,7 +411,6 @@ async fn record_source_proof_request(
     let authenticated = state.authenticated_worker_claims.lock().await;
     let workers = eligible
         .into_iter()
-        .map(|(id, _)| id)
         .filter(|id| authenticated.contains_key(id))
         .collect::<Vec<_>>();
     drop(authenticated);

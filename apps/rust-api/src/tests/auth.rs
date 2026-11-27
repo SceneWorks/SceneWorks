@@ -234,6 +234,85 @@ async fn keyed_heartbeat_after_api_restart_requires_a_full_claim_republication()
     );
 }
 
+/// A worker row's claims are dropped when it goes offline. A worker that this same process swept
+/// as stale (it was alive but its heartbeats stalled) still holds its acknowledgment, so its next
+/// heartbeat omits claims; reviving the row with none would hide its local sources from every
+/// portable route. The heartbeat is refused with the republication code instead, and the
+/// worker's republication restores the stored claims.
+#[tokio::test]
+async fn heartbeat_reviving_a_swept_worker_requires_a_claim_republication() {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableArtifactFile, PortableSourceClaim, PortableSourceProvenance,
+        PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let master =
+        sceneworks_core::worker_proof::load_or_create_master(&settings.credentials_dir).unwrap();
+    let key = sceneworks_core::worker_proof::derive_worker_key(&master, "swept-worker").unwrap();
+    let claim = PortableSourceClaim::new(
+        "registered_digest:model:swept",
+        PortableSourceProvenance::OperatorOverride,
+        vec![PortableArtifactFile {
+            relative_path: "weights.safetensors".into(),
+            size_bytes: 3,
+            sha256: format!("sha256:{}", "d".repeat(64)),
+        }],
+    )
+    .unwrap();
+    let claims = serde_json::to_value(vec![claim.clone()]).unwrap();
+    let (app, state) = crate::create_app_with_state(settings).unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"swept-worker","gpuId":"cpu","platform":std::env::consts::OS,
+            "capabilities":["cpu"],"loadedModels":[],"portableProofKey":key,
+            "portableSourceClaims":claims}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    rusqlite::Connection::open(state.jobs_store.db_path())
+        .unwrap()
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = 'swept-worker'",
+            [],
+        )
+        .unwrap();
+    state.jobs_store.mark_stale_workers_interrupted(90).unwrap();
+    let route_claims = || {
+        state
+            .jobs_store
+            .portable_source_claims_for_route("cpu", std::env::consts::OS, "auto", 90)
+            .unwrap()
+    };
+    assert!(route_claims().is_empty());
+
+    let heartbeat = "/api/v1/workers/swept-worker/heartbeat";
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        heartbeat,
+        json!({"status":"idle","currentJobId":null,"loadedModels":[],"portableProofKey":key}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE, "{body}");
+
+    let (status, body) = request(
+        app,
+        "POST",
+        heartbeat,
+        json!({"status":"idle","currentJobId":null,"loadedModels":[],"portableProofKey":key,
+            "portableSourceClaims":claims}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "idle", "{body}");
+    assert_eq!(route_claims(), vec![claim]);
+}
+
 #[tokio::test]
 async fn worker_source_challenges_require_a_distinct_worker_key_and_route_scope() {
     use crate::portable_admission::PortableSourceChallenge;

@@ -201,6 +201,14 @@ impl From<JobsStoreError> for ApiError {
                 context: None,
                 code: None,
             },
+            // The worker's row went offline and dropped its claims; it answers this code by
+            // republishing its whole inventory in the same heartbeat.
+            error @ JobsStoreError::PortableSourceClaimsRequired { .. } => {
+                Self::model_artifact_conflict(
+                    error.to_string(),
+                    sceneworks_core::model_artifacts::portable_binding::PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE,
+                )
+            }
             other => Self::internal(other.to_string()),
         }
     }
