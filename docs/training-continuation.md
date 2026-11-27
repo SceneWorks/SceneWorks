@@ -4,9 +4,11 @@ In Training Studio, choose **New training** to configure a fresh run, or
 **Continue training** to browse saved LoRA runs in the current workspace: completed
 runs, which can be continued with more steps, and canceled or interrupted runs, which
 offer **Resume from step N** (the Queue's checkpoint resume, training on to the run's
-planned total) or **Restart from step 0**. A stopped Iris run instead offers **Resume in
-New training**, which selects its target and dataset and preselects it in the Iris
-resume picker (Iris checkpoints never resume through a retry). Once a stopped run is resumed or restarted,
+planned total) or **Restart from step 0**. A stopped Iris run that left a complete
+checkpoint instead offers **Resume in New training**, which selects its target and
+dataset and preselects it in the Iris resume picker (Iris checkpoints never resume
+through a retry); one stopped before its first checkpoint keeps **Restart from step 0**.
+The saved-runs API reports which from disk as `irisResumable`. Once a stopped run is resumed or restarted,
 the new run supersedes it and it leaves the list. Failed runs are not listed; retry
 them from the Queue. The saved run history is paged and remains available after
 clearing the Queue or automatic queue retention. **Remove** on a saved run (after a

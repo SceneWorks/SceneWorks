@@ -485,6 +485,69 @@ pub(super) async fn complete(
     body
 }
 
+/// Training Studio's saved runs flag each stopped Iris run with `irisResumable` from disk: a run
+/// with a complete checkpoint resumes from the Training Studio, one stopped before its first
+/// complete checkpoint (an incomplete step directory does not count) restarts by retry.
+#[tokio::test]
+async fn saved_runs_report_whether_a_stopped_iris_run_left_a_complete_checkpoint() {
+    let _env = iris_env("256");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp_dir);
+    let app = create_training_fixture_app(settings.clone()).unwrap();
+    seed_iris_install(&settings);
+    let project_id = project(&app).await;
+    let dataset_id = dataset(&app, &project_id, one_item()).await;
+    let config = iris_target(&app).await["defaults"].clone();
+    let checkpoints = |job: &Value| {
+        let stem = job["payload"]["plan"]["output"]["fileName"]
+            .as_str()
+            .unwrap()
+            .trim_end_matches(".safetensors")
+            .to_owned();
+        private_training_output_dir(&settings.data_dir, job["id"].as_str().unwrap())
+            .join(format!("{stem}.checkpoints"))
+    };
+    let mut ids = Vec::new();
+    for (status, complete_checkpoint) in [("canceled", true), ("canceled", false)] {
+        let (_, job) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+        let job_id = job["id"].as_str().unwrap().to_owned();
+        claim_training_job_as_mlx_worker(&app, &job_id).await;
+        let step = checkpoints(&job).join("step_00000002");
+        std::fs::create_dir_all(&step).unwrap();
+        if complete_checkpoint {
+            std::fs::write(step.join("state.json"), b"{}").unwrap();
+        }
+        complete(&app, &job_id, status, json!({})).await;
+        ids.push(job_id);
+    }
+    // A completed run is continued, not resumed: it carries no flag.
+    let (_, finished) = submit(&app, &project_id, &dataset_id, config.clone(), false).await;
+    let finished_id = finished["id"].as_str().unwrap().to_owned();
+    claim_training_job_as_mlx_worker(&app, &finished_id).await;
+    complete(&app, &finished_id, "completed", json!({})).await;
+    let (status, runs) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/runs"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{runs}");
+    let flag = |id: &str| {
+        runs["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is listed: {runs:#}"))
+            .get("irisResumable")
+            .cloned()
+    };
+    assert_eq!(flag(&ids[0]), Some(json!(true)));
+    assert_eq!(flag(&ids[1]), Some(json!(false)));
+    assert_eq!(flag(&finished_id), None);
+}
+
 /// S9a: one output id is one run. Every fresh submit mints its own output folder; a DUPLICATE
 /// (which copies the payload) is a new run under its own fresh output id and folder — also of a
 /// queued job, and twice over; a RETRY keeps the run's output id, so it is refused while another job

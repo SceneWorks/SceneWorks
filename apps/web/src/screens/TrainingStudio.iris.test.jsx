@@ -104,8 +104,8 @@ describe("TrainingStudio — Iris", () => {
   // run), so Continue training routes it to New training's Iris resume picker — including a run
   // already cleared from the Queue, which the live `jobs` no longer carry.
   it("resumes a queue-cleared stopped Iris run through New training's resume picker", async () => {
-    const stopped = irisJob({ id: "job_stopped", status: "canceled", outputName: "Mira stopped",
-      result: { resumeCheckpointStep: 500, stepsCompleted: 500 } });
+    const stopped = { ...irisJob({ id: "job_stopped", status: "canceled", outputName: "Mira stopped",
+      result: { stepsCompleted: 500 } }), irisResumable: true };
     stopped.payload.plan.dataset = { datasetId: "dataset-1" };
     fetchMock.mockImplementation(async (url) => ({
       ok: true,
@@ -142,6 +142,31 @@ describe("TrainingStudio — Iris", () => {
       ?.querySelector("select");
     expect([...resume.options].map((option) => option.value)).toEqual(["", "job_stopped"]);
     expect(resume.value).toBe("job_stopped");
+  });
+
+  // Stopped before its first checkpoint, an Iris run can only restart: the Iris resume would be
+  // refused (no checkpoint), while the rerun guard allows a retry.
+  it("keeps restart for a queue-cleared Iris run stopped before its first checkpoint", async () => {
+    const stopped = { ...irisJob({ id: "job_early", status: "interrupted", outputName: "Mira early" }), irisResumable: false };
+    fetchMock.mockImplementation(async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes("/training/runs") ? { jobs: [stopped], nextOffset: null } : { id: "job_retry" }),
+    }));
+    const ctx = context({ jobs: [], jobAction: vi.fn(async () => ({ id: "job_retry" })) });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={ctx}>{<TrainingStudio />}</AppContext.Provider>);
+    });
+    await settle({ microtasks: 10 });
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Continue training").click());
+    await settle({ microtasks: 10 });
+    const history = container.querySelector('[aria-label="Saved training runs"]');
+    expect(history.textContent).toContain("Mira early");
+    const labels = [...history.querySelectorAll("button")].map((button) => button.textContent);
+    expect(labels).not.toContain("Resume in New training");
+    await act(async () => [...history.querySelectorAll("button")].find((button) => button.textContent === "Restart from step 0").click());
+    expect(ctx.jobAction).toHaveBeenCalledExactlyOnceWith(stopped, "retry", { body: { resume: false } });
   });
 
   it("shows the data-walk warning for the picked dataset and submits advanced.iris", async () => {

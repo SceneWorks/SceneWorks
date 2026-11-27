@@ -287,11 +287,13 @@ function LiveIrisMetrics({ job, token, live = true }) {
   return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-// A stopped Iris run resumes only through New training's Iris resume picker
-// (`resumeFromJobId`): the generic retry refuses a checkpointed Iris run, and Iris never takes
-// a retry's `resume`.
-function isStoppedIrisRun(job) {
-  return job.payload?.plan?.target?.kernel === IRIS_TRAINING_KERNEL && ["canceled", "interrupted"].includes(job.status);
+// A stopped Iris run that left a complete checkpoint resumes only through New training's Iris
+// resume picker (`resumeFromJobId`): the generic retry refuses a checkpointed Iris run, and Iris
+// never takes a retry's `resume`. One stopped before its first checkpoint can only restart from
+// step 0, which the retry allows. The saved-runs API reports which (`irisResumable`, from disk).
+function isResumableStoppedIrisRun(job) {
+  return job.payload?.plan?.target?.kernel === IRIS_TRAINING_KERNEL &&
+    ["canceled", "interrupted"].includes(job.status) && job.irisResumable === true;
 }
 
 function savedRunTargetId(job) {
@@ -319,10 +321,10 @@ function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRet
                 expectedThumbnailCount={4}
                 onCancel={onCancel}
                 onContinueTraining={onContinueTraining}
-                onRetry={isStoppedIrisRun(job) ? undefined : onRetry}
+                onRetry={isResumableStoppedIrisRun(job) ? undefined : onRetry}
                 extraActions={(
                   <>
-                    {onResumeIris && isStoppedIrisRun(job) ? (
+                    {onResumeIris && isResumableStoppedIrisRun(job) ? (
                       canResumeIris?.(job) === false ? (
                         <span className="training-field-hint">This run's training target is no longer available.</span>
                       ) : (
