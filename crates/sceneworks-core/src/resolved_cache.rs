@@ -881,6 +881,14 @@ impl ResolvedCacheStore {
                     continue;
                 }
             };
+            // A derived entry (saved weight quantizations, checkpoint derivatives) is a flat bundle
+            // its own producer leases and reads by path; it is never a local-tier candidate. It is
+            // skipped before verification and NOT reported: its layout is by design, so reporting
+            // it would emit one `resolved_cache_local_tier_unsupported` warning per derivative on
+            // every job, and verifying it would cost every job the whole derivative set.
+            if metadata.production.is_derived() {
+                continue;
+            }
             if metadata.state != ResolvedCacheEntryState::Complete {
                 tracing::debug!(
                     %digest,

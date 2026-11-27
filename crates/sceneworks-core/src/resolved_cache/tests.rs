@@ -765,6 +765,21 @@ fn valid_local_artifacts_offers_only_loadable_published_entries() {
         MaterializationOutcome::Published(_) => {}
         other => panic!("legacy fixture was not published: {other:?}"),
     }
+    // A published DERIVED entry is flat by design (its producer leases it and reads it by path),
+    // so it is neither offered nor reported: reporting it emitted one local-tier-unsupported
+    // warning per saved quantization on every job. Failing mutation: drop the derived skip in the
+    // scan and the rejection count below becomes 2.
+    let derived_input = scratch.path().join("derived-input");
+    std::fs::create_dir(&derived_input).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let derived = derived_reservation(&store, &derived_input, &plan);
+    std::fs::write(derived.staging_path().join("index.json"), b"{}").unwrap();
+    derived.publish_produced(&plan).unwrap();
+    assert!(store
+        .lookup_complete(&plan.cache_key().unwrap())
+        .unwrap()
+        .is_some());
+
     let scanned = ResolvedCacheStore::valid_local_artifacts(&data);
     assert_eq!(scanned.artifacts, vec![published.artifact]);
     assert_eq!(scanned.rejections.len(), 1, "{:?}", scanned.rejections);
