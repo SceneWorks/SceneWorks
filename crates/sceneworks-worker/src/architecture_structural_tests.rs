@@ -2521,3 +2521,159 @@ fn reg6_zero_runtime_providers_imports_in_sceneworks() {
          {offenders:#?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TOOL-4 / B5 narrow structural guard (`SW-6984`, `ENG-7-6`, `PLAN §6.6`)
+// ---------------------------------------------------------------------------
+
+const RETIRED_LEGACY_HIRES_SYMBOLS: &[&str] = &[
+    "HiresFixPlan",
+    "resolve_hires_fix_plan",
+    "hires_fix_reference_count",
+    "hires_first_pass_context",
+    "generate_one_with_hires",
+    "generate_one_with_hires_on_surface",
+    "build_hires_refinement_request",
+    "compile_hires_render_plans",
+    "compile_optional_hires_render_plans",
+    "hires_render_plan",
+];
+
+fn has_cfg_test_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let mut is_test = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                is_test = true;
+            }
+            Ok(())
+        });
+        is_test
+    })
+}
+
+fn scan_tokens_for_retired_hires_symbols(
+    tokens: proc_macro2::TokenStream,
+    offenders: &mut BTreeSet<String>,
+) {
+    use proc_macro2::TokenTree;
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                let raw = ident.to_string();
+                let name = raw.strip_prefix("r#").unwrap_or(&raw);
+                if RETIRED_LEGACY_HIRES_SYMBOLS.contains(&name) {
+                    offenders.insert(name.to_owned());
+                }
+            }
+            TokenTree::Group(group) => {
+                scan_tokens_for_retired_hires_symbols(group.stream(), offenders);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn retired_legacy_hires_symbols_in_production_items(source: &str) -> Vec<String> {
+    let file = parse(source);
+    let mut offenders = BTreeSet::new();
+    for item in file.items {
+        let attrs: &[syn::Attribute] = match &item {
+            syn::Item::Const(i) => &i.attrs,
+            syn::Item::Enum(i) => &i.attrs,
+            syn::Item::ExternCrate(i) => &i.attrs,
+            syn::Item::Fn(i) => &i.attrs,
+            syn::Item::ForeignMod(i) => &i.attrs,
+            syn::Item::Impl(i) => &i.attrs,
+            syn::Item::Macro(i) => &i.attrs,
+            syn::Item::Mod(i) => &i.attrs,
+            syn::Item::Static(i) => &i.attrs,
+            syn::Item::Struct(i) => &i.attrs,
+            syn::Item::Trait(i) => &i.attrs,
+            syn::Item::TraitAlias(i) => &i.attrs,
+            syn::Item::Type(i) => &i.attrs,
+            syn::Item::Union(i) => &i.attrs,
+            syn::Item::Use(i) => &i.attrs,
+            _ => &[],
+        };
+        if has_cfg_test_attr(attrs) {
+            continue;
+        }
+        scan_tokens_for_retired_hires_symbols(item.into_token_stream(), &mut offenders);
+    }
+    offenders.into_iter().collect()
+}
+
+fn is_test_only_rust_path(rel: &str) -> bool {
+    rel.ends_with("/tests.rs")
+        || rel.ends_with("_tests.rs")
+        || rel.contains("/tests/")
+        || rel.ends_with("/test_support.rs")
+}
+
+#[test]
+fn b5_legacy_hires_symbol_guard_rejects_retired_symbols_and_accepts_shared_multipass() {
+    for symbol in RETIRED_LEGACY_HIRES_SYMBOLS {
+        let snippet = format!("fn helper() {{ let _ = {symbol}; }}");
+        assert_eq!(
+            retired_legacy_hires_symbols_in_production_items(&snippet),
+            vec![(*symbol).to_owned()],
+            "B5 guard must catch retired symbol `{symbol}`"
+        );
+        let raw_snippet = format!("fn helper() {{ let _ = r#{symbol}; }}");
+        assert_eq!(
+            retired_legacy_hires_symbols_in_production_items(&raw_snippet),
+            vec![(*symbol).to_owned()],
+            "B5 guard must catch raw-ident retired symbol `r#{symbol}`"
+        );
+    }
+
+    let clean = r#"
+        fn execute(refinement: HiresRefinement) {
+            let _ = compile_hires_multi_pass_plan();
+            let _ = render_hires_multi_pass_on_surface();
+            let _ = drive_hires_passes();
+            let _ = derive_base_pass_memory_context();
+        }
+        #[cfg(test)]
+        mod tests {
+            fn uses_retired_only_in_tests() {
+                let _ = HiresFixPlan;
+            }
+        }
+    "#;
+    assert!(
+        retired_legacy_hires_symbols_in_production_items(clean).is_empty(),
+        "B5 guard must accept shared planned multi-pass symbols and ignore #[cfg(test)] items"
+    );
+}
+
+#[test]
+fn b5_zero_retired_legacy_hires_symbols_in_worker_production_code() {
+    let repo_root = root();
+    let worker_src = repo_root.join("crates/sceneworks-worker/src");
+    let mut offenders = Vec::new();
+    for path in rust_sources_excluding_build_dirs(&worker_src) {
+        let rel = path
+            .strip_prefix(&repo_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_test_only_rust_path(&rel) {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        let hits = retired_legacy_hires_symbols_in_production_items(&source);
+        if !hits.is_empty() {
+            offenders.push(format!("{rel}: {}", hits.join(", ")));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "B5 / SW-6984 violation: retired legacy Hires.fix production symbols remain in \
+         crates/sceneworks-worker/src: {offenders:#?}"
+    );
+}

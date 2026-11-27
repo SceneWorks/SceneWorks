@@ -329,33 +329,41 @@ fn mlx_ip_hires_fix_compiles_both_passes_before_load() {
         },
         strength: Some(0.7),
     };
-    let hires = super::HiresFixPlan {
-        width: 1024,
-        height: 1024,
+    let hires = super::HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 1024,
+            height: 1024,
+            strength: Some(0.45),
+        },
         steps: 6,
         guidance: Some(3.5),
         true_cfg: None,
-        provider_reference_strength: 0.45,
     };
     let first = request(512, 4, vec![reference]);
     let refine = request(1024, 6, Vec::new());
     let registry = crate::inference_runtime::media();
 
-    let (first_plan, refine_plan) =
-        super::compile_hires_render_plans(registry, "flux1_dev", &ip_spec, &first, &refine, &hires)
-            .expect("an IP-Adapter Hires.fix request compiles both passes before load");
+    let multi_plan = super::compile_hires_multi_pass_plan(
+        registry,
+        "flux1_dev",
+        &ip_spec,
+        &first,
+        &refine,
+        hires.produced_reference,
+    )
+    .expect("an IP-Adapter Hires.fix request compiles both passes before load")
+    .expect("two-pass MultiPassRenderPlan present");
+    let [first_plan, refine_plan] = multi_plan.passes() else {
+        panic!("expected 2 passes");
+    };
     assert_eq!(first_plan.pass_index(), 0);
     assert_eq!(first_plan.output_size(), (512, 512));
     assert_eq!(refine_plan.pass_index(), 1);
     assert_eq!(refine_plan.output_size(), (1024, 1024));
     assert_eq!(
         refine_plan.produced_reference(),
-        Some(gen_core::ProducedReference {
-            from_pass: 0,
-            width: 1024,
-            height: 1024,
-            strength: Some(0.45),
-        })
+        Some(hires.produced_reference)
     );
 
     let stretched = |side: u32| gen_core::Image {
@@ -363,9 +371,9 @@ fn mlx_ip_hires_fix_compiles_both_passes_before_load() {
         height: side,
         pixels: vec![0; (side * side * 3) as usize],
     };
-    super::check_produced_reference(&refine_plan, &stretched(1024))
+    super::check_produced_reference(refine_plan, &stretched(1024))
         .expect("the declared first-pass size is accepted");
-    match super::check_produced_reference(&refine_plan, &stretched(768)) {
+    match super::check_produced_reference(refine_plan, &stretched(768)) {
         Err(crate::WorkerError::InvalidPayload(message)) => {
             assert!(message.contains("expects a 1024x1024"), "{message}")
         }
@@ -373,19 +381,19 @@ fn mlx_ip_hires_fix_compiles_both_passes_before_load() {
     }
     assert!(
         matches!(
-            super::check_produced_reference(&first_plan, &stretched(1024)),
+            super::check_produced_reference(first_plan, &stretched(1024)),
             Err(crate::WorkerError::InvalidPayload(_))
         ),
         "a plan that consumes no produced reference cannot take one"
     );
 
-    match super::compile_hires_render_plans(
+    match super::compile_hires_multi_pass_plan(
         registry,
         "flux1_dev",
         &base_spec,
         &request(512, 4, Vec::new()),
         &refine,
-        &hires,
+        hires.produced_reference,
     ) {
         Err(crate::WorkerError::InvalidPayload(message)) => assert!(
             message.contains("cannot compile render plan before load"),
@@ -436,36 +444,26 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
         ..Default::default()
     };
     first.features.pid = Some(gen_core::PidParams::enabled());
-    let hires = super::HiresFixPlan {
-        width: 1024,
-        height: 1024,
+    let hires = super::HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 1024,
+            height: 1024,
+            strength: Some(0.45),
+        },
         steps: 6,
         guidance: Some(3.5),
         true_cfg: None,
-        provider_reference_strength: 0.45,
     };
-    let cancel = gen_core::CancelFlag::new();
-    let surface = super::LaneRgbaSurface::default();
-    let refinement = |reference: Option<&(gen_core::Image, f32)>| {
-        super::build_hires_refinement_request(
-            "a portrait",
-            7,
-            &hires,
-            None,
-            reference,
-            None,
-            None,
-            None,
-            None,
-            None,
+    let refinement = |reference: Option<gen_core::Image>| {
+        hires.refinement_request(
+            &first,
+            gen_core::OutputChannels::Rgb,
             None,
             &super::super::PromptEnhance::default(),
             gen_core::PromptEnhancementSink::default(),
-            gen_core::PreviewSink::default(),
-            &surface,
-            &cancel,
+            reference,
         )
-        .expect("refinement request")
     };
     let planned_refinement = refinement(None);
     assert!(
@@ -473,15 +471,19 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
         "the refinement decodes without PiD"
     );
 
-    let (first_plan, refine_plan) = super::compile_hires_render_plans(
+    let multi_plan = super::compile_hires_multi_pass_plan(
         crate::inference_runtime::media(),
         "flux1_dev",
         &spec,
         &first,
         &planned_refinement,
-        &hires,
+        hires.produced_reference,
     )
-    .expect("a PiD IP-Adapter Hires.fix request compiles both passes before load");
+    .expect("a PiD IP-Adapter Hires.fix request compiles both passes before load")
+    .expect("two-pass MultiPassRenderPlan present");
+    let [first_plan, refine_plan] = multi_plan.passes() else {
+        panic!("expected 2 passes");
+    };
 
     let descriptor = crate::engines::mlx_model("flux_dev")
         .expect("linked FLUX.1-dev descriptor")
@@ -489,8 +491,7 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
     first_plan
         .check_request(&descriptor, &first)
         .expect("the first pass runs the request its plan was compiled from");
-    let stretched = (image(1024), hires.provider_reference_strength);
-    let executed_refinement = refinement(Some(&stretched));
+    let executed_refinement = refinement(Some(image(1024)));
     refine_plan
         .check_request(&descriptor, &executed_refinement)
         .expect("the refinement runs the request its plan was compiled from");

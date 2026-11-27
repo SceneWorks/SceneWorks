@@ -15,10 +15,8 @@ use super::quantization::gate_tier_key_resolved;
 #[cfg(not(target_os = "macos"))]
 use super::quantization::resolve_quant;
 use super::quantization::resolve_tier_dir;
-#[cfg(not(target_os = "macos"))]
-use super::render::hires_fix_reference_count;
-#[cfg(not(target_os = "macos"))]
 use super::render::lane_reference_count;
+use super::render::HiresRefinement;
 use super::tier_quality_rank;
 use super::ImageRequest;
 #[cfg(not(target_os = "macos"))]
@@ -92,7 +90,6 @@ pub(super) fn candle_base_memory_request_mode<'a>(
     }
 }
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn shared_image_reference_count(
     edit_reference_count: usize,
     has_single_reference: bool,
@@ -100,7 +97,7 @@ pub(super) fn shared_image_reference_count(
     has_hires_fix: bool,
 ) -> u32 {
     if has_hires_fix {
-        hires_fix_reference_count()
+        HiresRefinement::REFERENCE_COUNT
     } else {
         lane_reference_count(has_single_reference, edit_reference_count, has_edit_mask)
     }
