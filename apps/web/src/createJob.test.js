@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "./api.js";
-import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
+import { CREATE_JOB_DEFINITIONS, createJobSubmissionGroup, makeCreateJob } from "./createJob.js";
 import {
   createModelLibraryGate,
   setModelLibraryHandler,
@@ -219,6 +219,55 @@ describe("makeCreateJob", () => {
     expect(setError).toHaveBeenLastCalledWith("network down");
   });
 
+  it("holds 15 grouped requests behind one generation confirmation", async () => {
+    let decide;
+    const beforeCreate = vi.fn(() => new Promise((resolve) => { decide = resolve; }));
+    apiFetch.mockImplementation(async (_path, _token, { body }) => ({ id: JSON.parse(body).prompt }));
+    const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+      requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn(), beforeCreate });
+    const submissionGroup = createJobSubmissionGroup();
+    const pending = Array.from({ length: 15 }, (_, index) => creator.withResult([{ prompt: String(index) }], { submissionGroup }));
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    expect(apiFetch).not.toHaveBeenCalled();
+    decide(true);
+    expect((await Promise.all(pending)).map((result) => result.job.id)).toEqual(Array.from({ length: 15 }, (_, index) => String(index)));
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    expect(apiFetch).toHaveBeenCalledTimes(15);
+  });
+
+  it("cancels grouped submissions when generation confirmation is declined", async () => {
+    const beforeCreate = vi.fn(async () => false);
+    const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+      requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn(), beforeCreate });
+    const submissionGroup = createJobSubmissionGroup();
+    const results = await Promise.all(["first", "second"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup })));
+    expect(results.every((result) => result.cancelled && !result.job)).toBe(true);
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("cancels all grouped requests while generation confirmation remains open", async () => {
+    const controller = new AbortController();
+    const beforeCreate = vi.fn(() => new Promise(() => {}));
+    const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+      requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn(), beforeCreate });
+    const submissionGroup = createJobSubmissionGroup();
+    const pending = ["first", "second"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup, signal: controller.signal }));
+    controller.abort();
+    expect((await Promise.all(pending)).every((result) => result.cancelled)).toBe(true);
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not POST an already-aborted detailed request without a confirmation callback", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+      requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+    expect(await creator.withResult([{ prompt: "stopped" }], { signal: controller.signal })).toEqual({ cancelled: true });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   // sc-19709. The end-to-end shape of the recovery, at the one choke point every generation
   // submission passes through: a typed unavailable-library rejection becomes a prompt (not an
   // error banner), and resuming it re-POSTs the SAME submission exactly once.
@@ -238,6 +287,125 @@ describe("makeCreateJob", () => {
         },
       };
     }
+
+    it("shares one recovery dialog and retries every concurrent submission with its own payload", async () => {
+      let available = false;
+      apiFetch.mockImplementation(async (_path, _token, { body }) => {
+        if (!available) throw unavailableRejection();
+        return { id: JSON.parse(body).prompt, status: "queued" };
+      });
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const pending = ["first", "second", "third"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup }));
+        await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+        available = true;
+        await gate.retry();
+        const results = await Promise.all(pending);
+        expect(results.map((result) => result.job.id)).toEqual(["first", "second", "third"]);
+        expect(apiFetch).toHaveBeenCalledTimes(6);
+        expect(block).toHaveBeenCalledTimes(1);
+        expect(submissionGroup.recovery).toBeNull();
+      } finally { unregister(); }
+    });
+
+    it("stops all grouped requests when the shared recovery dialog is cancelled", async () => {
+      apiFetch.mockRejectedValue(unavailableRejection());
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const pending = ["first", "second"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup }));
+        await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+        gate.cancel();
+        const results = await Promise.all(pending);
+        expect(results.every((result) => result.stop && !result.job)).toBe(true);
+        expect(apiFetch).toHaveBeenCalledTimes(2);
+        expect(submissionGroup.recovery).toBeNull();
+      } finally { unregister(); }
+    });
+
+    it("keeps recovery cancellation terminal when another POST fails later", async () => {
+      const rejections = [];
+      apiFetch.mockImplementation(() => new Promise((_resolve, reject) => rejections.push(reject)));
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const first = creator.withResult([{ prompt: "first" }], { submissionGroup });
+        const late = creator.withResult([{ prompt: "late" }], { submissionGroup });
+        rejections[0](unavailableRejection());
+        await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+        gate.cancel();
+        expect((await first).stop).toBe(true);
+        expect(submissionGroup.recovery).toBeNull();
+        rejections[1](unavailableRejection());
+        expect((await late).stop).toBe(true);
+        expect(gate.getState().status).toBe("idle");
+        await gate.retry();
+        expect((await creator.withResult([{ prompt: "tail" }], { submissionGroup })).stop).toBe(true);
+        expect(apiFetch).toHaveBeenCalledTimes(2);
+        expect(block).toHaveBeenCalledTimes(1);
+        // A new user-owned batch gets a new decision, rather than inheriting abandonment.
+        apiFetch.mockResolvedValueOnce({ id: "fresh", status: "queued" });
+        expect((await creator.withResult([{ prompt: "fresh" }], { submissionGroup: createJobSubmissionGroup() })).job.id).toBe("fresh");
+      } finally { unregister(); }
+    });
+
+    it("opens no recovery dialog for POST failures delivered after batch cancellation", async () => {
+      const rejections = [];
+      apiFetch.mockImplementation(() => new Promise((_resolve, reject) => rejections.push(reject)));
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const controller = new AbortController();
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const pending = ["first", "second"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup, signal: controller.signal }));
+        controller.abort();
+        rejections.forEach((reject) => reject(unavailableRejection()));
+        expect((await Promise.all(pending)).every((result) => result.cancelled)).toBe(true);
+        expect(block).not.toHaveBeenCalled();
+        expect(apiFetch).toHaveBeenCalledTimes(2);
+      } finally { unregister(); }
+    });
+
+    it("can reopen shared recovery after a retry is refused without waiting on itself", async () => {
+      let available = false;
+      apiFetch.mockImplementation(async (_path, _token, { body }) => {
+        if (!available) throw unavailableRejection();
+        return { id: JSON.parse(body).prompt, status: "queued" };
+      });
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const pending = ["first", "second"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup }));
+        await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+        const firstRetry = gate.retry();
+        await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(2));
+        available = true;
+        await gate.retry();
+        await firstRetry;
+        expect((await Promise.all(pending)).map((result) => result.job.id)).toEqual(["first", "second"]);
+        expect(apiFetch).toHaveBeenCalledTimes(5);
+      } finally { unregister(); }
+    });
 
     it("hands the blocked submission to the prompt and resumes it exactly once", async () => {
       const job = { id: "job-image", status: "queued", createdAt: "2026-07-25T12:00:00Z" };

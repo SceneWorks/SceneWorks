@@ -1,6 +1,6 @@
 import { JOB_PATHS, submitJobRequest } from "./api/jobs.js";
 
-import { handleModelLibraryRejection } from "./modelLibrary.js";
+import { handleModelLibraryRejection, modelLibraryContext } from "./modelLibrary.js";
 import { upsertJobNewest } from "./sorters.js";
 
 function generationBody([payload], project, requestedGpu) {
@@ -60,6 +60,12 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
   },
 });
 
+// One batch owns one confirmation decision and one model-library recovery at a time.
+// Keep these scoped to the run; unrelated creators retain their independent lifecycle.
+export function createJobSubmissionGroup() {
+  return { confirmation: null, recovery: null, terminalResult: null };
+}
+
 // Canonical project-scoped POST-job wrapper. Each definition owns only its route
 // and body shape; project gating, error handling, and newest-first job insertion
 // stay identical for every creator.
@@ -73,9 +79,10 @@ export function makeCreateJob({
   beforeCreate,
   afterCreate,
 }) {
-  async function execute(args, options = {}) {
-    const { shouldContinue = () => true, detailed = false, signal } = options;
-    if (!shouldContinue()) return { cancelled: true };
+  async function execute(args, options = {}, operation = Symbol("submission")) {
+    const { shouldContinue = () => true, detailed = false, signal, submissionGroup } = options;
+    if (signal?.aborted || !shouldContinue()) return { cancelled: true };
+    if (submissionGroup?.terminalResult) return submissionGroup.terminalResult;
     if (!project) {
       const message = "Create or open a project first.";
       setError(message);
@@ -84,7 +91,8 @@ export function makeCreateJob({
     try {
       if (beforeCreate) {
         let abort;
-        const confirmation = Promise.resolve(beforeCreate(...args));
+        const confirmation = submissionGroup?.confirmation ?? Promise.resolve(beforeCreate(...args));
+        if (submissionGroup) submissionGroup.confirmation = confirmation;
         const cancelled = Symbol("cancelled");
         const decision = signal
           ? await Promise.race([confirmation, new Promise((resolve) => {
@@ -94,12 +102,14 @@ export function makeCreateJob({
             })]).finally(() => signal.removeEventListener("abort", abort))
           : await confirmation;
         if (decision === cancelled) return { cancelled: true };
-        if (decision === false) return { error: "Job creation was canceled before submission." };
+        if (decision === false) return submissionGroup
+          ? { cancelled: true }
+          : { error: "Job creation was canceled before submission." };
       }
       // A batch may be stopped while its shared confirmation is open.
-      if (!shouldContinue()) return { cancelled: true };
+      if (signal?.aborted || !shouldContinue()) return { cancelled: true };
       const body = definition.buildBody(args, project, requestedGpu);
-      if (!shouldContinue()) return { cancelled: true };
+      if (signal?.aborted || !shouldContinue()) return { cancelled: true };
       const job = await submitJobRequest(definition.path, token, {
         method: "POST",
         body: JSON.stringify(body),
@@ -109,8 +119,17 @@ export function makeCreateJob({
       setError("");
       return { job };
     } catch (err) {
+      if (detailed && (signal?.aborted || !shouldContinue())) return { cancelled: true };
       const message = err?.message || (typeof err === "string" ? err : "Could not create job.");
       if (detailed) {
+        const libraryFailure = modelLibraryContext(err);
+        if (libraryFailure && submissionGroup?.terminalResult) return submissionGroup.terminalResult;
+        const sharedRecovery = submissionGroup?.recovery;
+        if (sharedRecovery && sharedRecovery.owner !== operation && libraryFailure) {
+          const result = await sharedRecovery.promise;
+          if (result.cancelled || result.stop) return { ...result, job: undefined };
+          return execute(args, options, operation);
+        }
         // Keep the failed chunk owned by its batch while the recovery dialog is open.
         // Cancel, relocation, a competing dialog, and batch teardown release the wait.
         let resolveRecovery;
@@ -119,6 +138,7 @@ export function makeCreateJob({
         const finish = (result) => {
           if (!waiting) return;
           waiting = false;
+          if (submissionGroup && (result.cancelled || result.stop)) submissionGroup.terminalResult = result;
           signal?.removeEventListener("abort", abort);
           resolveRecovery(result);
         };
@@ -127,15 +147,19 @@ export function makeCreateJob({
           if (!waiting) return null;
           waiting = false;
           signal?.removeEventListener("abort", abort);
-          const result = await execute(args, options);
+          const result = await execute(args, options, operation);
           resolveRecovery(result);
           return result.job ?? null;
         };
         resume.onAbandon = () => finish({ error: message, stop: true });
         if (handleModelLibraryRejection(err, resume)) {
+          const shared = { owner: operation, promise: recovery };
+          if (submissionGroup) submissionGroup.recovery = shared;
           if (signal?.aborted || !shouldContinue()) abort();
           else if (waiting) signal?.addEventListener("abort", abort, { once: true });
-          return recovery;
+          return recovery.finally(() => {
+            if (submissionGroup?.recovery === shared) submissionGroup.recovery = null;
+          });
         }
       } else if (handleModelLibraryRejection(err, () => createJob(...args))) {
         return {};

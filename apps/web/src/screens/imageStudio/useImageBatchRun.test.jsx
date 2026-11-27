@@ -4,6 +4,10 @@ import { mountRoot, unmountRoot } from "../../testUtils/dom.js";
 import { createImageBatchRuntime, useImageBatchController, useImageBatchRun } from "./useImageBatchRun.js";
 import { validatePortableBatch } from "../../portableValidation.js";
 import { emptyCaption, serializeCaption } from "../../ideogramCaption.js";
+import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../../createJob.js";
+import { submitJobRequest } from "../../api/jobs.js";
+import { createModelLibraryGate, MODEL_LIBRARY_UNAVAILABLE_CODE, setModelLibraryHandler } from "../../modelLibrary.js";
+vi.mock("../../api/jobs.js", async (original) => ({ ...await original(), submitJobRequest: vi.fn() }));
 vi.mock("../../portableValidation.js", () => ({
   MAX_VALIDATION_BATCH: 32,
   validatePortableBatch: vi.fn(),
@@ -14,6 +18,7 @@ beforeEach(() => {
   ({ root, container } = mountRoot());
   vi.mocked(validatePortableBatch).mockReset();
   vi.mocked(validatePortableBatch).mockImplementation(async ({ requests }) => requests.map(() => ({ state: "valid" })));
+  vi.mocked(submitJobRequest).mockReset();
 });
 afterEach(() => unmountRoot(root, container));
 
@@ -81,7 +86,7 @@ it("continues the committed project's batch while a different project render sus
   }
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector("button").click());
-  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(2));
   expect(validatePortableBatch).toHaveBeenCalledWith(expect.objectContaining({
     kind: "image", requests: [
       { prompt: "one", count: 1, projectId: "A" },
@@ -96,7 +101,7 @@ it("continues the committed project's batch while a different project render sus
   expect(cancelA).not.toHaveBeenCalled();
   expect(cancelB).not.toHaveBeenCalled();
   await act(async () => release());
-  expect(cancelB.mock.calls.map(([job]) => job.id)).toEqual(["first", "second"]);
+  expect(cancelB.mock.calls.map(([job]) => job.id).sort()).toEqual(["first", "second"]);
 });
 
 it("stops before enqueue when request 257 receives a typed refusal", async () => {
@@ -161,6 +166,203 @@ it.each(["krea_2", "flux_dev", "sdxl"])("validates 148 direct prompts in five ca
   expect(plan.createImageJob.mock.calls.map(([request]) => request.prompt)).toEqual(prompts.map((prompt) => `Styled ${prompt}`));
   expect(plan.onMagicExpand).not.toHaveBeenCalled();
   expect(state()).toMatchObject({ total: 148, submitted: 148, failed: 0, submitting: false });
+});
+
+it.each(["krea_2", "flux_dev", "sdxl"])("pipelines 15 submissions before the first response for %s", async (model) => {
+  const prompts = Array.from({ length: 40 }, (_, index) => `prompt ${index}`);
+  const pending = new Map();
+  let active = 0, peak = 0;
+  const createImageJob = vi.fn((request) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    return new Promise((resolve) => pending.set(request.prompt, () => {
+      active -= 1;
+      pending.delete(request.prompt);
+      resolve({ id: `job-${request.prompt}`, status: "queued" });
+    }));
+  });
+  const { runtime, plan, state } = runtimeBatch({
+    selectedModel: { id: model }, batchPrompts: prompts, batchJobCount: 40, createImageJob,
+  });
+  const running = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(15));
+  expect(state()).toMatchObject({ submitted: 0, submitting: true });
+  // Refill a single freed slot while all 14 earlier requests remain unresolved.
+  pending.get("prompt 7")();
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(16));
+  expect(pending.has("prompt 0")).toBe(true);
+  while (createImageJob.mock.calls.length < prompts.length) {
+    const before = createImageJob.mock.calls.length;
+    [...pending.values()].forEach((finish) => finish());
+    await vi.waitFor(() => expect(createImageJob.mock.calls.length).toBeGreaterThan(before));
+  }
+  [...pending.values()].forEach((finish) => finish());
+  await running;
+  expect(peak).toBe(15);
+  expect(createImageJob.mock.calls.map(([request]) => request.prompt)).toEqual(prompts);
+  expect(state()).toMatchObject({ submitted: 40, failed: 0, submitting: false });
+});
+
+it("sends 15 actual job POSTs through the shared creator after one confirmation", async () => {
+  let decide;
+  const beforeCreate = vi.fn(() => new Promise((resolve) => { decide = resolve; }));
+  const pending = [];
+  vi.mocked(submitJobRequest).mockImplementation((_path, _token, { body }) => new Promise((resolve) => {
+    pending.push(() => resolve({ id: JSON.parse(body).prompt, status: "queued" }));
+  }));
+  const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "token",
+    project: { id: "project", name: "Project" }, requestedGpu: "auto", beforeCreate,
+    setJobs: vi.fn(), setError: vi.fn() });
+  const { runtime, plan, state } = runtimeBatch({
+    batchPrompts: Array.from({ length: 20 }, (_, index) => String(index)), batchJobCount: 20, createImageJob,
+  });
+  const running = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(beforeCreate).toHaveBeenCalledTimes(1));
+  expect(submitJobRequest).not.toHaveBeenCalled();
+  decide(true);
+  await vi.waitFor(() => expect(submitJobRequest).toHaveBeenCalledTimes(15));
+  expect(beforeCreate).toHaveBeenCalledTimes(1);
+  expect(state()).toMatchObject({ submitted: 0, submitting: true });
+  for (const [path, token, { body }] of vi.mocked(submitJobRequest).mock.calls) {
+    expect(path).toBe("/api/v1/image/jobs");
+    expect(token).toBe("token");
+    expect(JSON.parse(body)).toMatchObject({ projectId: "project", requestedGpu: "auto" });
+  }
+  runtime.cancelBatchRun();
+  pending.forEach((finish) => finish());
+  await running;
+  expect(submitJobRequest).toHaveBeenCalledTimes(15);
+  expect(state()).toMatchObject({ submitted: 15, failed: 0, submitting: false });
+});
+
+it("finishes draining late failures without reopening cancelled library recovery", async () => {
+  const rejections = [];
+  vi.mocked(submitJobRequest).mockImplementation(() => new Promise((_resolve, reject) => rejections.push(reject)));
+  const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+  const block = vi.fn(gate.block);
+  const unregister = setModelLibraryHandler(block);
+  try {
+    const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "token",
+      project: { id: "project", name: "Project" }, requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+    const { runtime, plan, state } = runtimeBatch({
+      batchPrompts: Array.from({ length: 20 }, (_, index) => String(index)), batchJobCount: 20, createImageJob,
+    });
+    const running = runtime.runBatch(plan);
+    await vi.waitFor(() => expect(submitJobRequest).toHaveBeenCalledTimes(15));
+    const failure = { code: MODEL_LIBRARY_UNAVAILABLE_CODE, message: "Library disconnected",
+      context: { availability: "installed_external_unavailable", modelId: "model" } };
+    rejections.shift()(failure);
+    await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+    gate.cancel();
+    await vi.waitFor(() => expect(state().failed).toBe(1));
+    rejections.forEach((reject) => reject(failure));
+    await running;
+    await gate.retry();
+    expect(submitJobRequest).toHaveBeenCalledTimes(15);
+    expect(block).toHaveBeenCalledTimes(1);
+    expect(gate.getState().status).toBe("idle");
+    expect(state()).toMatchObject({ submitted: 15, failed: 15, submitting: false });
+  } finally { unregister(); }
+});
+
+it("reserves queue capacity for POSTs still awaiting a job id", async () => {
+  const pending = [];
+  const createImageJob = vi.fn((request) => new Promise((resolve) => {
+    pending.push(() => resolve({ id: `job-${request.prompt}`, status: "queued" }));
+  }));
+  const { runtime, plan, state } = runtimeBatch({
+    BATCH_ACTIVE_JOB_LIMIT: 3, batchPrompts: ["a", "b", "c", "d", "e"], batchJobCount: 5, createImageJob,
+  });
+  const running = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(3));
+  pending.splice(0).forEach((finish) => finish());
+  await vi.waitFor(() => expect(state()?.submitted).toBe(3));
+  expect(createImageJob).toHaveBeenCalledTimes(3);
+  runtime.observeJobs([{ id: "job-a", status: "completed" }, { id: "job-b", status: "queued" }, { id: "job-c", status: "queued" }]);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(4));
+  expect(state().activeJobIds).toHaveLength(2);
+  runtime.cancelBatchRun();
+  pending.splice(0).forEach((finish) => finish());
+  await running;
+  expect(createImageJob).toHaveBeenCalledTimes(4);
+  expect(state()).toMatchObject({ submitted: 4, completed: 1, failed: 0, submitting: false });
+});
+
+it("drains and cancels every late-created job after stopping 15 pending submissions", async () => {
+  const pending = [];
+  const jobAction = vi.fn();
+  const createImageJob = vi.fn((request) => new Promise((resolve) => {
+    pending.push(() => resolve({ id: `job-${request.prompt}`, status: "queued" }));
+  }));
+  const { runtime, plan, state } = runtimeBatch({
+    batchPrompts: Array.from({ length: 20 }, (_, index) => String(index)), batchJobCount: 20, createImageJob,
+  });
+  runtime.commit("project", [], jobAction);
+  const running = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(15));
+  runtime.cancelBatchRun();
+  expect(state().submitting).toBe(true);
+  pending.reverse().forEach((finish) => finish());
+  await running;
+  expect(createImageJob).toHaveBeenCalledTimes(15);
+  expect(jobAction).toHaveBeenCalledTimes(15);
+  expect(new Set(jobAction.mock.calls.map(([job]) => job.id)).size).toBe(15);
+  expect(jobAction.mock.calls.every(([, action]) => action === "cancel")).toBe(true);
+  expect(state()).toMatchObject({ submitted: 15, failed: 0, submitting: false });
+});
+
+it("keeps late responses from a prior project's 15 submissions out of the new run", async () => {
+  const pending = [];
+  const jobAction = vi.fn();
+  const createImageJob = vi.fn((request) => request.prompt === "new prompt"
+    ? Promise.resolve({ id: "new-job", status: "queued" })
+    : new Promise((resolve) => pending.push(() => resolve({ id: `old-${request.prompt}`, status: "queued" }))));
+  const { runtime, plan, state } = runtimeBatch({
+    batchPrompts: Array.from({ length: 20 }, (_, index) => String(index)), batchJobCount: 20, createImageJob,
+  });
+  const previous = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(15));
+  runtime.commit("other-project", [], jobAction);
+  runtime.attachProject();
+  await runtime.runBatch({ ...plan, batchPrompts: ["new prompt"], batchJobCount: 1 });
+  pending.forEach((finish) => finish());
+  await previous;
+  expect(createImageJob).toHaveBeenCalledTimes(16);
+  expect(jobAction).toHaveBeenCalledTimes(15);
+  expect(state()).toMatchObject({ total: 1, submitted: 1, failed: 0, activeJobIds: ["new-job"], submitting: false });
+});
+
+it("stops the valid prefix at a refusal and still drains submissions already started", async () => {
+  let finish;
+  vi.mocked(validatePortableBatch).mockResolvedValue([
+    { state: "valid" }, { state: "invalid", refusal: { detail: "Invalid second prompt" } }, { state: "valid" },
+  ]);
+  const { runtime, plan, state } = runtimeBatch({
+    createImageJob: vi.fn(() => new Promise((resolve) => { finish = resolve; })),
+  });
+  const running = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(state()?.failed).toBe(1));
+  expect(plan.createImageJob).toHaveBeenCalledTimes(1);
+  expect(state().submitting).toBe(true);
+  finish({ id: "first", status: "queued" });
+  await running;
+  expect(state()).toMatchObject({ submitted: 2, failed: 1, submitting: false });
+});
+
+it("keeps structured rewriting serial while a submitted job awaits its response", async () => {
+  let finish;
+  const { runtime, plan } = runtimeBatch({
+    structuredPromptModel: true,
+    onMagicExpand: vi.fn(async () => ({ ...emptyCaption(), high_level_description: "A fox in a forest" })),
+    createImageJob: vi.fn().mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockResolvedValue({ id: "later", status: "queued" }),
+  });
+  const running = runtime.runBatch(plan);
+  await vi.waitFor(() => expect(plan.createImageJob).toHaveBeenCalledTimes(1));
+  expect(plan.onMagicExpand).toHaveBeenCalledTimes(1);
+  finish({ id: "first", status: "queued" });
+  await running;
+  expect(plan.onMagicExpand).toHaveBeenCalledTimes(3);
 });
 
 it("finishes submitting an exact validation window even when every queue slot is occupied", async () => {

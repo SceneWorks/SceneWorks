@@ -20,6 +20,7 @@ vi.mock("../portableValidation.js", async (importOriginal) => ({
 import { AppContext } from "../context/AppContext.js";
 import { apiFetch } from "../api.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
+import { BATCH_SUBMISSION_CONCURRENCY } from "../batchOps.js";
 import { createModelLibraryGate, setModelLibraryHandler, MODEL_LIBRARY_UNAVAILABLE_CODE } from "../modelLibrary.js";
 import {
   buildStructuredPromptRecipe,
@@ -336,8 +337,7 @@ describe("Image Studio batch cardinality admission", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
-  // A job that stays pending until the test releases it, so a ten-million-item run sits on its
-  // first enqueue instead of walking the whole product.
+  // Hold the first submission window so a ten-million-item run cannot walk the whole product.
   function heldJobs() {
     const pending = [];
     const createImageJob = vi.fn(() => new Promise((resolve) => pending.push(resolve)));
@@ -370,12 +370,12 @@ describe("Image Studio batch cardinality admission", () => {
     expect(container.querySelector(".batch-confirm")?.textContent).toContain("Queue 10000000 images");
     await click(container.querySelector(".batch-confirm .prompt-cta"));
 
-    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
-    expect([...createImageJob.mock.calls[0][0].prompt].length).toBeLessThanOrEqual(4000);
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(BATCH_SUBMISSION_CONCURRENCY));
+    expect(createImageJob.mock.calls.every(([request]) => [...request.prompt].length <= 4000)).toBe(true);
     await click(container.querySelector(".batch-run-progress button"));
     await act(async () => release());
     await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("/10000000 done"));
-    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob).toHaveBeenCalledTimes(BATCH_SUBMISSION_CONCURRENCY);
   });
 
   it("keeps a confirmed styled Cartesian run cancelable", async () => {
@@ -403,7 +403,7 @@ describe("Image Studio batch cardinality admission", () => {
     await click(container.querySelector(".batch-run-progress button"));
     await act(async () => release());
     await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("/10000000 done"));
-    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(BATCH_SUBMISSION_CONCURRENCY);
   });
 
   it("abandons a confirmed run on project switch", async () => {
@@ -422,7 +422,7 @@ describe("Image Studio batch cardinality admission", () => {
     await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
     await act(async () => release());
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
-    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(createImageJob.mock.calls.length).toBeLessThanOrEqual(BATCH_SUBMISSION_CONCURRENCY);
     expect(container.querySelector(".batch-run-progress")).toBeNull();
   });
 
@@ -558,34 +558,42 @@ describe("Image Studio batch cardinality admission", () => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
     }));
-    let resolvePost;
-    const createImageJob = vi.fn(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const pending = [];
+    const createImageJob = vi.fn((request) => new Promise((resolve) => {
+      pending.push(() => resolve({ id: `late-${request.prompt}`, status: "queued" }));
+    }));
     const jobAction = vi.fn();
     await render(baseContext({ createImageJob, jobAction }));
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     await click(container.querySelector(".batch-run-progress button"));
-    await act(async () => { resolvePost({ id: "late", status: "queued" }); });
-    expect(createImageJob).toHaveBeenCalledTimes(1);
-    expect(jobAction).toHaveBeenCalledWith({ id: "late", status: "queued" }, "cancel");
-    expect(container.querySelector(".batch-run-progress").textContent).toContain("1 not queued");
+    await act(async () => { pending.forEach((finish) => finish()); });
+    expect(createImageJob).toHaveBeenCalledTimes(2);
+    expect(jobAction).toHaveBeenCalledTimes(2);
+    expect(jobAction.mock.calls.map(([job]) => job.id).sort()).toEqual(["late-one", "late-two"]);
+    expect(jobAction.mock.calls.every(([, action]) => action === "cancel")).toBe(true);
+    expect(container.querySelector(".batch-run-progress").textContent).not.toContain("not queued");
   });
 
   it.each(["unmount", "project switch"])("stops an outstanding post on %s and cancels the returned job", async (action) => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
     }));
-    let resolvePost;
-    const createImageJob = vi.fn(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const pending = [];
+    const createImageJob = vi.fn((request) => new Promise((resolve) => {
+      pending.push(() => resolve({ id: `late-${request.prompt}`, status: "queued" }));
+    }));
     const jobAction = vi.fn();
     const context = baseContext({ createImageJob, jobAction });
     await render(context);
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
-    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob).toHaveBeenCalledTimes(2);
     if (action === "unmount") await act(async () => root.render(null));
     else await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
-    await act(async () => { resolvePost({ id: "late", status: "queued" }); });
-    expect(createImageJob).toHaveBeenCalledTimes(1);
-    expect(jobAction).toHaveBeenCalledWith({ id: "late", status: "queued" }, "cancel");
+    await act(async () => { pending.forEach((finish) => finish()); });
+    expect(createImageJob).toHaveBeenCalledTimes(2);
+    expect(jobAction).toHaveBeenCalledTimes(2);
+    expect(jobAction.mock.calls.map(([job]) => job.id).sort()).toEqual(["late-one", "late-two"]);
+    expect(jobAction.mock.calls.every(([, action]) => action === "cancel")).toBe(true);
   });
 
   it("releases a slot waiter on project switch without posting the tail", async () => {

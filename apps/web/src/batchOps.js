@@ -10,6 +10,8 @@ import { terminalStatuses } from "./constants.js";
 import { buildDetailJobBody, buildEditJobBody, buildUpscaleJobBody } from "./imageJobs.js";
 import { buildDepthJobBody, DEPTH_ENDPOINT } from "./depthJobs.js";
 
+export const BATCH_SUBMISSION_CONCURRENCY = 15;
+
 // The three batch-capable ops + the endpoint each posts to (mirrors the editor:
 // upscale/detail are generic jobs, edit is the image-jobs route). `needsPrompt`
 // flags the op whose shared params include a text prompt.
