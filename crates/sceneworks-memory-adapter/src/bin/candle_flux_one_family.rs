@@ -63,7 +63,7 @@ pub(super) fn validate_flux_one_snapshot_tier(
     tier: &str,
 ) -> Result<(), String> {
     let resolved =
-        runtime_cuda::providers::flux::memory_strategy::resolved_numeric_tier(spec, provider_id)
+        runtime_cuda::calibration::flux::memory_strategy::resolved_numeric_tier(spec, provider_id)
             .map_err(|error| format!("resolve {provider_id} numeric tier: {error}"))?;
     let expected = numeric_tier(tier)?;
     if (resolved.precision, resolved.quant) != (expected.precision, expected.quant) {

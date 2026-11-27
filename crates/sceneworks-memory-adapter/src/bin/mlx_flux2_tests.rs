@@ -1,5 +1,5 @@
 use super::*;
-use mlx_gen::gen_core::MemoryStrategySupport;
+use runtime_macos::gen_core::MemoryStrategySupport;
 
 /// sc-22738: a warm-repeat retention over the clean warm bound is RECORDED, not refused — and
 /// the recording has to survive into the blocker list, because that list is the only place the
@@ -678,9 +678,9 @@ fn flux2_snapshot_root(
 
 #[test]
 fn flux2_admission_context_is_reference_free_text_to_image() {
-    let contract = mlx_gen_flux2::memory_strategy::registered_dev_t2i_contract(&weights_free_spec(
-        Some(Quant::Q4),
-    ))
+    let contract = runtime_macos::calibration::flux2::memory_strategy::registered_dev_t2i_contract(
+        &weights_free_spec(Some(Quant::Q4)),
+    )
     .unwrap();
     let calibration = contract.calibration.as_ref().unwrap();
     let context = flux2_admission_context(
@@ -772,7 +772,7 @@ fn resident_selection(quant: Option<Quant>) -> MemorySelection {
 /// than silently measuring under a different contract.
 #[test]
 fn the_pinned_flux2_t2i_contract_supports_staging_and_preserves_the_resident_plan() {
-    let registry = mlx_gen_flux2::provider_registry().unwrap();
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let spec = weights_free_spec(Some(Quant::Q4));
     let contract = registry
         .memory_strategy_contract(FLUX2_PROVIDER, &spec)
@@ -828,7 +828,7 @@ fn the_pinned_flux2_t2i_contract_supports_staging_and_preserves_the_resident_pla
 /// costs no GPU and no snapshot, and it covers every member the arm serves.
 #[test]
 fn the_production_catalog_resolves_the_same_flux2_contracts_as_the_provider_crate() {
-    let crate_registry = mlx_gen_flux2::provider_registry().unwrap();
+    let crate_registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let catalog = runtime_macos::catalog().expect("the production MLX catalog builds");
     for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
         let spec = weights_free_spec(if arm.tier_quant_reaches_the_loader {
@@ -869,7 +869,7 @@ fn the_production_catalog_resolves_the_same_flux2_contracts_as_the_provider_crat
 /// route-gate leg proves the accept is not a blanket accept.
 #[test]
 fn flux2_admission_scenarios_accept_exact_fit_and_reject_unknown_stale_and_foreign_routes() {
-    let registry = mlx_gen_flux2::provider_registry().unwrap();
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let spec = weights_free_spec(Some(Quant::Q4));
     let contract = registry
         .memory_strategy_contract(FLUX2_PROVIDER, &spec)
@@ -878,7 +878,9 @@ fn flux2_admission_scenarios_accept_exact_fit_and_reject_unknown_stale_and_forei
     let calibration = contract.calibration.as_ref().unwrap();
     let selection = resident_selection(Some(Quant::Q4));
     let check = |context: &MemoryRunContext| {
-        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(&spec, &contract, context)
+        runtime_macos::calibration::flux2::memory_strategy::registered_dev_t2i_safety_check(
+            &spec, &contract, context,
+        )
     };
 
     let exact = flux2_admission_context(
@@ -962,10 +964,10 @@ fn flux2_admission_scenarios_accept_exact_fit_and_reject_unknown_stale_and_forei
         },
     );
     assert!(matches!(
-        mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+        runtime_macos::calibration::flux2::memory_strategy::registered_dev_t2i_safety_check(
             &nvfp4_spec,
             &contract,
-            &nvfp4
+            &nvfp4,
         ),
         MemorySafetyDecision::Reject { .. }
     ));

@@ -216,8 +216,8 @@ fn the_recovery_measurements_name_both_faults_both_references_and_all_three_metr
     );
 }
 
-fn ltx_fixture_contract(quant: Option<Quant>) -> mlx_gen::gen_core::MemoryProviderContract {
-    let registry = mlx_gen_ltx::provider_registry().unwrap();
+fn ltx_fixture_contract(quant: Option<Quant>) -> runtime_macos::gen_core::MemoryProviderContract {
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let fixture = registry
         .memory_contract_fixture_registrations()
         .find(|fixture| fixture.provider_id == LTX_PROVIDER)
@@ -551,7 +551,7 @@ fn sc_20318_admits_only_the_exact_two_render_bounded_campaign_row() {
     for mutate in [
         |value: &mut GenerationRequest| value.seed = Some(LTX_SEED + 1),
         |value: &mut GenerationRequest| value.fps = Some(LTX_CAMPAIGN_ENTRY_FPS - 1),
-        |value: &mut GenerationRequest| value.video_mode = Some("no_audio".to_owned()),
+        |value: &mut GenerationRequest| value.video_mode = Some(VideoMode::NoAudio),
     ] {
         let mut changed = generation_request.clone();
         mutate(&mut changed);
@@ -718,7 +718,7 @@ fn sc_20254_admits_only_the_exact_single_render_bounded_carrier() {
         |value: &mut GenerationRequest| value.seed = Some(LTX_SEED + 1),
         |value: &mut GenerationRequest| value.fps = Some(LTX_CAMPAIGN_ENTRY_FPS + 1),
         |value: &mut GenerationRequest| value.frames = Some(LTX_CAMPAIGN_ENTRY_FRAMES - 1),
-        |value: &mut GenerationRequest| value.video_mode = Some("no_audio".to_owned()),
+        |value: &mut GenerationRequest| value.video_mode = Some(VideoMode::NoAudio),
     ] {
         let mut mutated = generation_request.clone();
         mutate(&mut mutated);
@@ -1171,10 +1171,10 @@ fn the_ltx_safety_canary_is_an_exact_non_promotable_multi_tile_tuple() {
     assert_eq!(admitted.video_mode.as_deref(), Some("no_audio"));
 
     let mut production_default = ltx_canary_generation_request();
-    production_default.video_mode = Some("default".to_owned());
+    production_default.video_mode = Some(VideoMode::from_name("default"));
     assert!(ltx_canary_request_for_provider_admission(production_default).is_err());
     let mut provider_override = ltx_canary_generation_request();
-    provider_override.video_mode = Some("default".to_owned());
+    provider_override.video_mode = Some(VideoMode::from_name("default"));
     assert!(restore_ltx_canary_no_audio_after_configuration(&mut provider_override).is_err());
 }
 
@@ -1677,10 +1677,10 @@ fn the_ltx_arm_refuses_a_single_frame_capture() {
 /// the calibrated tier is the engine's `CALIBRATED_TIER`, not a local spelling.
 #[test]
 fn the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token() {
-    let retained = mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT;
+    let retained = runtime_macos::calibration::ltx::memory_strategy::CALIBRATION_FINGERPRINT;
     assert_eq!(
         LTX_CALIBRATED_TIER,
-        mlx_gen_ltx::memory_strategy::CALIBRATED_TIER,
+        runtime_macos::calibration::ltx::memory_strategy::CALIBRATED_TIER,
         "the calibrated tier is read off the engine, never spelled"
     );
     assert!(
@@ -1708,11 +1708,13 @@ fn the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token() {
             _ => None,
         };
         let engine =
-            mlx_gen_ltx::memory_strategy::production_calibration_fingerprint(&MemoryNumericTier {
-                precision: Precision::Bf16,
-                quant,
-                component_precision_floors: &[],
-            })
+            runtime_macos::calibration::ltx::memory_strategy::production_calibration_fingerprint(
+                &MemoryNumericTier {
+                    precision: Precision::Bf16,
+                    quant,
+                    component_precision_floors: &[],
+                },
+            )
             .unwrap_or_else(|| panic!("the engine mints no identity for shipped tier {tier}"));
         assert_eq!(
             minted, engine,
@@ -2131,7 +2133,9 @@ fn the_exact_fit_probe_presents_the_boundary_host_not_a_nameplate_total() {
         );
         assert!(
             matches!(
-                mlx_gen::gen_core::default_memory_strategy_safety_check(&contract, &nameplate),
+                runtime_macos::gen_core::default_memory_strategy_safety_check(
+                    &contract, &nameplate
+                ),
                 MemorySafetyDecision::Reject { .. }
             ),
             "{key}: the pre-sc-22738 exact-fit shape must still be refused; if it is admitted \
@@ -2156,7 +2160,7 @@ fn the_exact_fit_probe_presents_the_boundary_host_not_a_nameplate_total() {
         );
         assert!(
             matches!(
-                mlx_gen::gen_core::default_memory_strategy_safety_check(&contract, &exact),
+                runtime_macos::gen_core::default_memory_strategy_safety_check(&contract, &exact),
                 MemorySafetyDecision::Accept
             ),
             "{key}: the boundary host must be admitted"
@@ -2263,7 +2267,7 @@ fn an_ltx_request_beyond_the_host_budget_is_refused_by_the_budget_in_its_own_wor
     // conservative decode working set for this geometry — the figure the worker's
     // `packaged_video_decode_profile` resolves for a non-bounded MLX candidate.
     let engine_decode =
-        mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+        runtime_macos::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
             .expect("the pinned provider profiles the anchor geometry")
             .working_set_bytes();
     let small_host = 8 * 1024 * 1024 * 1024;
@@ -2349,7 +2353,7 @@ fn a_rung_4_ltx_composition_is_refused_explicitly_rather_than_priced() {
                 .capability(MemoryStrategy::BoundedTransformerResidency)
                 .expect("every rung is declared")
                 .support,
-            mlx_gen::gen_core::MemoryStrategySupport::Missing
+            runtime_macos::gen_core::MemoryStrategySupport::Missing
         ),
         "the pinned LTX-2.3 provider declares bounded_transformer_residency unimplemented"
     );
@@ -2392,7 +2396,7 @@ fn the_ltx_projection_never_falls_below_the_workers_generic_floor_at_any_shipped
     for duration in LTX_DURATIONS_SECONDS {
         for fps in LTX_FPS {
             let frames = ltx_snapped_frame_count(duration * fps);
-            let profile = mlx_gen_ltx::conservative_video_decode_memory_profile(
+            let profile = runtime_macos::conservative_video_decode_memory_profile(
                 LTX_PROVIDER,
                 768,
                 512,
@@ -2427,10 +2431,10 @@ fn the_ltx_projection_never_falls_below_the_workers_generic_floor_at_any_shipped
     // anchor geometry) and everything longer is profile-bound.
     assert_eq!(floor_bound, vec![97, 97], "4s at 24/25 fps");
     assert!(profile_bound.contains(&121) && !floor_bound.contains(&121));
-    let f97 = mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 97)
+    let f97 = runtime_macos::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 97)
         .unwrap()
         .working_set_bytes();
-    let f121 = mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+    let f121 = runtime_macos::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
         .unwrap()
         .working_set_bytes();
     assert_eq!(
@@ -2459,7 +2463,7 @@ fn the_ltx_projection_never_falls_below_the_workers_generic_floor_at_any_shipped
 fn the_planned_ltx_tiers_project_below_the_incident_footprint_from_declared_inventories_alone() {
     let decode = 19_476_906_240_u64;
     assert_eq!(
-        mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+        runtime_macos::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
             .unwrap()
             .working_set_bytes(),
         decode
@@ -2493,7 +2497,7 @@ fn the_planned_ltx_tiers_project_below_the_incident_footprint_from_declared_inve
         let weights = ltx_floor_weights_bytes(&contract, &engaged).unwrap();
         assert_eq!(weights, inventory, "{tier}: resident floor = the inventory");
         let profile =
-            mlx_gen_ltx::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
+            runtime_macos::conservative_video_decode_memory_profile(LTX_PROVIDER, 768, 512, 121)
                 .unwrap();
         let predicted = ltx_projected_peak_bytes(&contract, weights, profile).unwrap();
         assert_eq!(predicted, composed, "{tier}: composed = inventory + decode");

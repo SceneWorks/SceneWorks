@@ -179,23 +179,23 @@ pub(super) fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Op
     }
     Some(match (arm.provider, tier) {
         (KOLORS_PROVIDER, "q4") => {
-            runtime_macos::providers::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (LENS_PROVIDER, "q4") => {
-            runtime_macos::providers::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         // sc-24112: `mlx-gen-qwen-image-2-1` publishes ONE derived identity for every tier (the
         // load shape is its separate typed axis), read off the engine constant.
         (QWEN_IMAGE_2_1_PROVIDER, _) => {
-            runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         // sc-25907: the Turbo id publishes its OWN single identity (it prices a different
         // checkpoint), so a base record can never satisfy a Turbo cell's handshake.
         (QWEN_IMAGE_2_1_TURBO_PROVIDER, _) => {
-            runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (KOLORS_PROVIDER, tier) => format!("kolors-{tier}-mlx-shared-ladder-v1"),
@@ -218,15 +218,15 @@ pub(super) fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Op
 #[cfg(test)]
 pub(super) fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
     fingerprint
-        .starts_with(runtime_macos::providers::lens::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        .starts_with(runtime_macos::calibration::lens::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
         || fingerprint.starts_with(
-            runtime_macos::providers::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
+            runtime_macos::calibration::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
         )
         || fingerprint.starts_with(
-            runtime_macos::providers::ideogram::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
+            runtime_macos::calibration::ideogram::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
         )
         || fingerprint
-            == runtime_macos::providers::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT
+            == runtime_macos::calibration::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT
 }
 
 /// The admission context for the turnkey safety scenarios, in the shape the worker admits each

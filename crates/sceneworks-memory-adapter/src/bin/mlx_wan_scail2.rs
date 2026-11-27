@@ -14,14 +14,14 @@
 //!
 //! * the three Wan routes go through `gen_core_memory_wan::WanI2vRoute` —
 //!   `public_geometries()` and `accepts_rate()`, the shared authority both Wan lanes seal against;
-//! * SCAIL-2 goes through `mlx_gen_scail2::memory_strategy::{PUBLIC_BUCKETS, PUBLIC_FRAMES}`.
+//! * SCAIL-2 goes through `runtime_macos::calibration::scail2::memory_strategy::{PUBLIC_BUCKETS, PUBLIC_FRAMES}`.
 //!
 //! A plan row naming a bucket or a rate the engine stopped admitting therefore fails HERE, before
 //! any weights are opened, instead of deep inside a multi-gigabyte load.
 
 use super::*;
 use gen_core_memory_wan::WanI2vRoute;
-use mlx_gen::gen_core::ReplacementMode;
+use runtime_macos::gen_core::ReplacementMode;
 
 const SEED: u64 = 22_736;
 const LABEL: &str = "MLX Wan2.2/SCAIL-2";
@@ -248,18 +248,21 @@ fn validate_geometry(arm: Arm, geometry: Geometry) -> Result<(), String> {
             }
         }
         None => {
-            if !mlx_gen_scail2::memory_strategy::PUBLIC_BUCKETS.contains(&(width, height)) {
+            if !runtime_macos::calibration::scail2::memory_strategy::PUBLIC_BUCKETS
+                .contains(&(width, height))
+            {
                 return Err(format!(
                     "{} admits only the buckets {:?}, got {width}x{height}",
                     arm.provider,
-                    mlx_gen_scail2::memory_strategy::PUBLIC_BUCKETS
+                    runtime_macos::calibration::scail2::memory_strategy::PUBLIC_BUCKETS
                 ));
             }
-            if !mlx_gen_scail2::memory_strategy::PUBLIC_FRAMES.contains(&frames) {
+            if !runtime_macos::calibration::scail2::memory_strategy::PUBLIC_FRAMES.contains(&frames)
+            {
                 return Err(format!(
                     "{} admits only the frame counts {:?}, got {frames}",
                     arm.provider,
-                    mlx_gen_scail2::memory_strategy::PUBLIC_FRAMES
+                    runtime_macos::calibration::scail2::memory_strategy::PUBLIC_FRAMES
                 ));
             }
         }
@@ -286,8 +289,8 @@ fn rendered_frame_count(arm: Arm, geometry: Geometry) -> Result<u32, String> {
 /// engine for its buckets and rates. It carries the two facts the decoded-frame rule needs: the
 /// temporal scale and whether the temporal decode is causal.
 fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
-    mlx_gen_wan::vae_tiling(arm.provider)
-        .or_else(|| mlx_gen_scail2::vae_tiling(arm.provider))
+    runtime_macos::calibration::wan::vae_tiling(arm.provider)
+        .or_else(|| runtime_macos::calibration::scail2::vae_tiling(arm.provider))
         .ok_or_else(|| {
             format!(
                 "{} publishes no VAE geometry; its decoded frame count cannot be derived",
@@ -513,7 +516,7 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
         fps: Some(arm.fps),
         // The two carrier-free Wan routes publish their mode either way; the I2V and SCAIL-2 routes
         // require it, and every engine here keys its request receipt on the exact spelling.
-        video_mode: Some(arm.mode.to_owned()),
+        video_mode: Some(VideoMode::from_name(arm.mode)),
         conditioning,
         ..Default::default()
     }
@@ -761,8 +764,11 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // route. Production (`video_jobs/wan.rs::video_load_spec`) prepares nothing, so neither does
     // this cell. SCAIL-2 seals its own shared-tier pins inside `PreparedMemory::prepare`.
     if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {
-        mlx_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut artifact.spec, arm.provider)
-            .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
+        runtime_macos::calibration::wan::i2v_memory_strategy::prepare_load_spec(
+            &mut artifact.spec,
+            arm.provider,
+        )
+        .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
     }
     let staged_bytes = safetensors_bytes(&artifact.root)?;
 
@@ -1053,11 +1059,11 @@ mod tests {
             .find("if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {")
             .expect("the pre-pass is guarded by the receipt authority");
         let prepass = body
-            .find("mlx_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut artifact.spec")
+            .find("runtime_macos::calibration::wan::i2v_memory_strategy::prepare_load_spec(")
             .expect("the pre-pass still exists");
         assert!(guard < prepass, "the guard precedes the pre-pass");
         assert!(
-            !body.contains("if arm.route.is_some() {\n        mlx_gen_wan::i2v_memory_strategy"),
+            !body.contains("if arm.route.is_some() {\n        runtime_macos::calibration::wan::i2v_memory_strategy"),
             "the pre-pass must not run for every Wan route"
         );
     }
@@ -1166,7 +1172,7 @@ mod tests {
                     frames: 121,
                 },
             ] {
-                let latent = mlx_gen_wan::pipeline::latent_shape(
+                let latent = runtime_macos::converters::wan::pipeline::latent_shape(
                     geometry.frames as usize,
                     geometry.height,
                     geometry.width,
@@ -1337,7 +1343,7 @@ mod tests {
     /// A weights-free A14B contract from the pinned engine's own authority, for the request-shape
     /// assertions below. `weights_free_contract` serves exactly the two A14B routes and touches no
     /// filesystem, so these run on any host.
-    fn weights_free_a14b_contract(arm: Arm) -> mlx_gen::gen_core::MemoryProviderContract {
+    fn weights_free_a14b_contract(arm: Arm) -> runtime_macos::gen_core::MemoryProviderContract {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/nonexistent/wan-a14b")));
         gen_core_memory_wan::weights_free_contract(
             arm.provider,

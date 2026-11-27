@@ -11,7 +11,7 @@ use super::*;
 /// than spelling `image` keeps the token from drifting from the crate that mints it.
 ///
 /// The calibrated tier reproduces
-/// [`MEMORY_CALIBRATION_FINGERPRINT`](runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT)
+/// [`MEMORY_CALIBRATION_FINGERPRINT`](runtime_macos::calibration::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT)
 /// byte-for-byte, which is what keeps the retained key of the family's existing record valid.
 ///
 /// Written here as well as in the engine so the plan/arm binding is weights-free and provable on a
@@ -21,7 +21,7 @@ use super::*;
 /// A tier outside [`BERNINI_TIERS`] is refused BY NAME rather than interpolated into a plausible
 /// identity no production load can return.
 pub(super) fn bernini_calibration_fingerprint(tier: &str) -> Result<String, String> {
-    use runtime_macos::providers::bernini::memory_strategy as engine;
+    use runtime_macos::calibration::bernini::memory_strategy as engine;
     if !BERNINI_TIERS.contains(&tier) {
         return Err(format!(
             "the MLX Bernini calibration family ships {BERNINI_TIERS:?}; tier {tier:?} has no \
@@ -42,7 +42,7 @@ pub(super) fn bernini_calibration_fingerprint(tier: &str) -> Result<String, Stri
 /// Bernini's own geometry envelope, replacing the image arms' blanket `frames == 1` refusal.
 ///
 /// The canvas half is the engine's `validate_geometry` — an exact membership test against
-/// [`ADVERTISED_GEOMETRIES`](runtime_macos::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES),
+/// [`ADVERTISED_GEOMETRIES`](runtime_macos::calibration::bernini::memory_strategy::ADVERTISED_GEOMETRIES),
 /// read off the crate rather than transcribed — and it is PROVIDER-WIDE: `memory_strategy` applies
 /// it to the still route and the video route alike, so a `bernini_image` anchor may not use one of
 /// that entry's wider manifest resolutions (512², 768², 1024²) either. The temporal half is the
@@ -54,7 +54,7 @@ pub(super) fn validate_bernini_geometry(
     height: u32,
     frames: u32,
 ) -> Result<BerniniGeometry, String> {
-    let advertised = runtime_macos::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
+    let advertised = runtime_macos::calibration::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
     if !advertised.contains(&(width, height)) {
         return Err(format!(
             "{BERNINI_VIDEO_LABEL} memory evidence requires one of the advertised geometries \
@@ -76,12 +76,12 @@ pub(super) fn validate_bernini_geometry(
 
 /// The concrete VAE geometry the pinned Bernini provider decodes through, resolved BY PROVIDER ID
 /// from the engine's OWN registry-facing resolver
-/// ([`mlx_gen_bernini::vae_tiling`](runtime_macos::providers::bernini::vae_tiling)) rather than
+/// ([`runtime_macos::calibration::bernini::vae_tiling`]) rather than
 /// tabled here — the same way this arm reads [`ADVERTISED_GEOMETRIES`] and the retained calibration
 /// key off the crate. It carries the two facts the decoded-frame rule needs: the temporal scale and
 /// whether the temporal decode is causal.
 pub(super) fn bernini_engine_vae() -> Result<VaeTiling, String> {
-    runtime_macos::providers::bernini::vae_tiling(BERNINI_PROVIDER).ok_or_else(|| {
+    runtime_macos::calibration::bernini::vae_tiling(BERNINI_PROVIDER).ok_or_else(|| {
         format!(
             "{BERNINI_PROVIDER} publishes no VAE geometry; its decoded frame count cannot be \
              derived"
@@ -453,8 +453,9 @@ pub(super) fn run_bernini(request: &Value) -> Result<Value, String> {
     // three full dual-expert renders.
     let staged_tier_bytes = safetensors_bytes(&artifact.tier_root)?;
 
-    let registry = runtime_macos::providers::bernini::provider_registry()
-        .map_err(|error| format!("build Bernini registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(BERNINI_PROVIDER, spec)
         .map_err(|error| format!("read {BERNINI_PROVIDER} memory-strategy contract: {error}"))?

@@ -243,7 +243,7 @@ pub(super) fn verify_krea_base_lifecycle(
         MemoryPhase::Denoise,
         MemoryPhase::Decode,
     ] {
-        let cancel = mlx_gen::CancelFlag::new();
+        let cancel = runtime_macos::gen_core::CancelFlag::new();
         if phase == MemoryPhase::Conditioning {
             cancel.cancel();
         }
@@ -433,8 +433,9 @@ pub(super) fn run_krea_base(request: &Value) -> Result<Value, String> {
         ));
     }
     let (repository, revision, spec) = krea_base_load_spec(request, arm, tier, &selection)?;
-    let registry = mlx_gen_krea::provider_registry()
-        .map_err(|error| format!("build Krea registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(arm.provider, &spec)
         .map_err(|error| format!("read {} memory-strategy contract: {error}", arm.provider))?

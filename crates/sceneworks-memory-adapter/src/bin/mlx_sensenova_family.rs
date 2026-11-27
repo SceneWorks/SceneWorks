@@ -36,16 +36,16 @@ pub(super) fn sensenova_arm(request: &Value) -> Result<SenseNovaArm, String> {
 pub(super) fn sensenova_calibration_fingerprint(arm: SenseNovaArm, tier: &str) -> String {
     match (arm.model_id, tier) {
         ("sensenova_u1_8b", "q8") => {
-            runtime_macos::providers::sensenova::memory_strategy::QUALITY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::sensenova::memory_strategy::QUALITY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         ("sensenova_u1_8b_fast", "q8") => {
-            runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (_, tier) => format!(
             "sensenova-u1-{}-{tier}-mlx-shared-ladder-v1",
-            runtime_macos::providers::sensenova::memory_strategy::route_label(arm.model_id)
+            runtime_macos::calibration::sensenova::memory_strategy::route_label(arm.model_id)
                 .expect("registered SenseNova route")
         ),
     }
@@ -235,7 +235,7 @@ pub(super) fn sensenova_identity_preflight(
     spec: &LoadSpec,
     expected_fingerprint: &str,
 ) -> Result<(), String> {
-    use runtime_macos::providers::sensenova::memory_strategy as engine;
+    use runtime_macos::calibration::sensenova::memory_strategy as engine;
     let WeightsSource::Dir(root) = &spec.weights else {
         return Err(format!(
             "{} loads a snapshot directory, not a single weights file",

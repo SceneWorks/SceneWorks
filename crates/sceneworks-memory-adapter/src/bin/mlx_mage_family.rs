@@ -952,7 +952,8 @@ pub(super) fn mage_admission_budget(
     height: u32,
 ) -> (u64, u64) {
     let required_total_peak_bytes =
-        ((mlx_gen_mage::memory::generation_peak_gb(tier, width, height, 1) * 1_000_000_000.0)
+        ((runtime_macos::calibration::mage::memory::generation_peak_gb(tier, width, height, 1)
+            * 1_000_000_000.0)
             .round() as u64)
             .saturating_add(contract.auxiliary_resident_bytes());
     (required_total_peak_bytes, contract.total_resident_bytes())
@@ -998,7 +999,7 @@ pub(super) fn mage_model_shortfall_blocker(
         "the pinned {} provider's own fit model UNDER-PREDICTS this cell: measured peak \
          {measured_peak_bytes} bytes exceeds its modelled total {modelled_total_bytes} bytes by \
          {delta} bytes at {width}x{height} on the {} route at {tier}. Recorded as measured \
-         evidence rather than discarding the capture: `mlx_gen_mage::memory::generation_peak_gb` \
+         evidence rather than discarding the capture: `runtime_macos::calibration::mage::memory::generation_peak_gb` \
          scales only its linear VAE decode term with geometry and carries no reference-image term \
          at all, and the worker admits this route on that same model \
          (`mlx_fit_gate.rs::request_total_peak_bytes`), so the measured peak is what production \

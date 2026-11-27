@@ -322,6 +322,11 @@ pub(super) fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
                 "{LTX25_ID} returned interleaved output, not a video clip"
             ))
         }
+        GenerationOutput::Vector(_) => {
+            return Err(format!(
+                "{LTX25_ID} returned vector output, not a video clip"
+            ))
+        }
     };
     if fps != target.fps || audio.is_none() {
         return Err(format!(

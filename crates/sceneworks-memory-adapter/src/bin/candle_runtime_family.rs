@@ -1014,7 +1014,7 @@ pub(super) fn pulid_flux_binding_at(
         tier,
         protocol::FLUX1_DEV_REPOSITORY,
     )?;
-    let paths = runtime_cuda::providers::pulid::PulidFluxPaths {
+    let paths = runtime_cuda::calibration::pulid::PulidFluxPaths {
         flux_base: root,
         pulid_weights: bundle.adapter.clone(),
         eva_weights: bundle.eva.clone(),
@@ -1111,7 +1111,7 @@ pub(super) fn pulid_flux_context(
 /// memory contract is likewise path-shaped rather than spec-shaped
 /// (`memory_strategy::provider_contract(&paths)`).
 pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
-    use runtime_cuda::providers::pulid::{memory_strategy as pulid_memory, PulidFlux};
+    use runtime_cuda::calibration::pulid::{memory_strategy as pulid_memory, PulidFlux};
 
     // Before any environment or weight work, under this route's own label.
     protocol::validate_still_geometry(request, PULID_FLUX_STILL_CALIBRATION)?;
@@ -1235,7 +1235,7 @@ pub(super) fn run_pulid_flux_capture(request: &Value) -> Result<Value, String> {
             binding.paths.face_dir.clone(),
         )),
     });
-    let plan = runtime_cuda::providers::pulid::pulid_flux::compile_pulid_plan(
+    let plan = runtime_cuda::calibration::pulid::pulid_flux::compile_pulid_plan(
         &binding.paths,
         &spec,
         &generation,
@@ -1620,7 +1620,7 @@ pub(super) fn sc22737_generation_request(
             pixels: protocol::synthetic_reference_rgb(target.width, target.height),
         };
         request.conditioning = vec![if arm.engine_id == BERNINI_CANDLE_ID {
-            request.video_mode = Some("r2v".to_owned());
+            request.video_mode = Some(VideoMode::R2v);
             Conditioning::MultiReference {
                 images: vec![image],
             }
@@ -1643,7 +1643,7 @@ pub(super) fn sc22737_conditioning_overlay(
 ) -> Result<Option<String>, String> {
     match arm.engine_id {
         BERNINI_CANDLE_ID => {
-            use runtime_cuda::providers::bernini::memory_strategy;
+            use runtime_cuda::calibration::bernini::memory_strategy;
             let receipt = memory_strategy::r2v_reference_receipt(arm.engine_id, generation)
                 .map_err(|error| format!("Bernini capture reference receipt: {error}"))?;
             let mut overlay = format!("provider_video_mode:r2v+{receipt}");
@@ -1897,6 +1897,12 @@ pub(super) fn run_sc22737_video_capture(
         GenerationOutput::Interleaved { .. } => {
             return Err(format!(
                 "{} returned interleaved output, not a video clip",
+                arm.model_id
+            ))
+        }
+        GenerationOutput::Vector(_) => {
+            return Err(format!(
+                "{} returned vector output, not a video clip",
                 arm.model_id
             ))
         }

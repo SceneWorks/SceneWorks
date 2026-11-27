@@ -61,7 +61,7 @@ fn context(
         },
         calibration_abi: calibration
             .map(|identity| identity.abi)
-            .unwrap_or(mlx_gen::gen_core::MEMORY_CALIBRATION_ABI),
+            .unwrap_or(runtime_macos::gen_core::MEMORY_CALIBRATION_ABI),
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: LoadShape::EagerMaterialization,
         mode: MemoryMode::TextToImage,
@@ -557,7 +557,7 @@ mod tests {
             contract
                 .capability(MemoryStrategy::Resident)
                 .map(|capability| &capability.support),
-            Some(mlx_gen::gen_core::MemoryStrategySupport::Implemented)
+            Some(runtime_macos::gen_core::MemoryStrategySupport::Implemented)
         ));
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use mlx_gen::gen_core::MemoryStrategySupport;
+use runtime_macos::gen_core::MemoryStrategySupport;
 
 fn minimal_request(provider: &str) -> Value {
     json!({
@@ -245,7 +245,7 @@ fn pinned_sdxl_contract_exposes_the_four_implemented_rungs() {
     let root = fixtures.path("pinned-sdxl-contract-exposes-the-four-implemented-rungs");
     std::fs::create_dir_all(&root).unwrap();
     let spec = fixture_spec(&root);
-    let contract = mlx_gen_sdxl::provider_registry()
+    let contract = runtime_macos::memory_contract_surface_registry()
         .unwrap()
         .memory_strategy_contract(SDXL_PROVIDER, &spec)
         .unwrap()
@@ -340,8 +340,8 @@ fn pinned_sdxl_contract_exposes_the_four_implemented_rungs() {
     );
     assert!(matches!(
         &contract.formula,
-        mlx_gen::gen_core::MemoryFormulaKind::PhaseEnvelope { variables, .. }
-            if variables.contains(&mlx_gen::gen_core::MemoryFormulaVariable::DecodeTileArea)
+        runtime_macos::gen_core::MemoryFormulaKind::PhaseEnvelope { variables, .. }
+            if variables.contains(&runtime_macos::gen_core::MemoryFormulaVariable::DecodeTileArea)
     ));
     request["planned"]["strategy"] = json!({
         "rung": "bounded_transformer_residency",
@@ -377,18 +377,15 @@ fn pinned_sdxl_contract_exposes_the_four_implemented_rungs() {
         root.join("vae/diffusion_pytorch_model.safetensors"),
     )
     .unwrap();
-    let fixed_spec = spec.with_component(
-        mlx_gen_sdxl::loader::VAE_FP16_FIX_COMPONENT,
-        WeightsSource::Dir(root.join("vae")),
-    );
-    let fixed = mlx_gen_sdxl::provider_registry()
+    let fixed_spec = spec.with_component("vae_fp16_fix", WeightsSource::Dir(root.join("vae")));
+    let fixed = runtime_macos::memory_contract_surface_registry()
         .unwrap()
         .memory_strategy_contract(SDXL_PROVIDER, &fixed_spec)
         .unwrap()
         .unwrap();
     assert_eq!(
         fixed.calibration.as_ref().unwrap().fingerprint,
-        mlx_gen_sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT_VAE_FP16
+        runtime_macos::calibration::sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT_VAE_FP16
     );
     assert_ne!(fixed.calibration, contract.calibration);
 }
