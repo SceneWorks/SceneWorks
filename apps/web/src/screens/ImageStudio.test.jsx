@@ -1101,8 +1101,12 @@ describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
 
   const openAdvanced = async () =>
     click(document.body.querySelector(".advanced-section-toggle"));
-  const generate = async () =>
-    click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+  const generateButton = () =>
+    [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+  const generate = async () => {
+    await vi.waitFor(() => expect(generateButton()?.disabled).toBe(false));
+    await click(generateButton());
+  };
 
   it("hides the picker for a model that advertises no alternate methods", async () => {
     await render(baseContext({ imageModels: [Z_IMAGE] }));
@@ -1160,6 +1164,7 @@ describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
     expect(field(container, "Guidance method").value).toBe("cfg_pp");
 
     await generate();
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
     expect(createImageJob.mock.calls[0][0].advanced.guidanceMethod).toBe("cfg_pp");
   });
 });
