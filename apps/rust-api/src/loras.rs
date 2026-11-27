@@ -1528,6 +1528,12 @@ pub(crate) async fn validate_job_lora_compatibility_with(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("Model is required for LoRA compatibility"))?;
     let model_id = model_id.to_owned();
+    let mode = job_payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(str::to_owned);
     let models = match snapshot {
         Some(snapshot) => Arc::new(snapshot.models(state).await?.to_vec()),
         None => Arc::new(model_catalog(state).await?),
@@ -1540,18 +1546,20 @@ pub(crate) async fn validate_job_lora_compatibility_with(
     // disk (validate_lora_safetensors_header) inline. Run it on the blocking pool so a
     // slow/network volume can't stall a tokio worker thread on the job-creation path.
     let normalized = tokio::task::spawn_blocking(move || {
-        let mut normalized = validate_lora_specs_for_model(
+        let mut normalized = validate_lora_specs_for_model_in_mode(
             models.as_slice(),
             catalog_loras.as_slice(),
             &model_id,
             &loras,
             allow_inline_loras,
             "LoRA",
+            mode.as_deref(),
         )?;
         prompt_directives::append_resolved(
             models.as_slice(),
             catalog_loras.as_slice(),
             &model_id,
+            mode.as_deref(),
             &directives,
             &mut normalized,
         );
@@ -1572,6 +1580,30 @@ pub(crate) fn validate_lora_specs_for_model(
     attached_loras: &[Value],
     allow_inline_loras: bool,
     lora_label: &str,
+) -> Result<Vec<Value>, ApiError> {
+    validate_lora_specs_for_model_in_mode(
+        models,
+        catalog_loras,
+        model_id,
+        attached_loras,
+        allow_inline_loras,
+        lora_label,
+        None,
+    )
+}
+
+/// [`validate_lora_specs_for_model`] for a request whose generation `mode` is known. The mode only
+/// matters to the declared-partition gate on a `hybrid` MiniMax-H3 import, which serves both
+/// partitions and so must be narrowed to the one this request will run (see
+/// `sceneworks_core::minimax_h3_import::entry_adapter_partition_models`).
+pub(crate) fn validate_lora_specs_for_model_in_mode(
+    models: &[Value],
+    catalog_loras: &[Value],
+    model_id: &str,
+    attached_loras: &[Value],
+    allow_inline_loras: bool,
+    lora_label: &str,
+    mode: Option<&str>,
 ) -> Result<Vec<Value>, ApiError> {
     if attached_loras.is_empty() {
         return Ok(Vec::new());
@@ -1777,7 +1809,20 @@ pub(crate) fn validate_lora_specs_for_model(
             normalized_lora["weight"] = json!(weight);
         }
         let declared_model_ids = lora_model_ids(lora);
-        if !declared_model_ids.is_empty() && !declared_model_ids.iter().any(|id| id == model_id) {
+        // An imported MiniMax-H3 finetune keeps its own id but renders as the partition it
+        // declares, so it answers for that partition's adapters too — without this every turbo
+        // file is refused on every finetune.
+        let partition_models = model
+            .as_object()
+            .map(|entry| {
+                sceneworks_core::minimax_h3_import::entry_adapter_partition_models(entry, mode)
+            })
+            .unwrap_or_default();
+        if !declared_model_ids.is_empty()
+            && !declared_model_ids
+                .iter()
+                .any(|id| id == model_id || partition_models.contains(&id.as_str()))
+        {
             return Err(ApiError::bad_request(format!(
                 "LoRA {lora_id} is declared for model {}, not {model_id}. These are separate \
                  partitions of the same model family, so the adapter would attach and fold \
@@ -4166,6 +4211,79 @@ mod base_model_gating_tests {
                 "LoRA",
             )
             .unwrap_or_else(|error| panic!("must be accepted on its own partition: {error:?}"));
+        }
+    }
+
+    /// An imported MiniMax-H3 finetune keeps its own model id, so the exact-id gate above refused
+    /// every turbo adapter on it. It now answers for the partition it declares — and a `hybrid`
+    /// narrows to the partition the request's mode runs, so the cross-partition refusal still holds.
+    #[test]
+    fn an_imported_h3_finetune_accepts_its_declared_partition_adapters() {
+        use sceneworks_core::minimax_h3_import::{
+            MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, MINIMAX_H3_IMPORT_FAMILY,
+            MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimax_h3_turbo_lora(
+            tmp.path(),
+            "minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors",
+        );
+        let import = |id: &str, base: &str, partition: &str| {
+            json!({
+                "id": id, "family": MINIMAX_H3_IMPORT_FAMILY,
+                "importSourceShape": MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+                "baseModel": base, "minimaxH3Partition": partition,
+                "loraCompatibility": { "families": ["minimax-h3"] },
+                "importPlan": {"checkpointId": format!("managed/{id}"), "assembly": {
+                    "schemaVersion": MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, "partition": partition
+                }}
+            })
+        };
+        let models = vec![
+            import("ft_fl2va", "minimax_h3", "fl2va"),
+            import("ft_ref2va", "minimax_h3_ref", "ref2va"),
+            import("ft_hybrid", "minimax_h3", "hybrid"),
+        ];
+        let lora = |id: &str, partition: &str| {
+            json!({
+                "id": id,
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": ["minimax-h3"],
+                "modelIds": [partition],
+            })
+        };
+        let fl2v = lora("minimax_h3_turbo_8step", "minimax_h3");
+        let ref2v = lora("minimax_h3_ref2v_turbo_4step", "minimax_h3_ref");
+        for (lora, model_id, mode, accepted) in [
+            (&fl2v, "ft_fl2va", None, true),
+            (&fl2v, "ft_fl2va", Some("text_to_video"), true),
+            (&ref2v, "ft_fl2va", None, false),
+            (&ref2v, "ft_ref2va", Some("reference_to_video"), true),
+            (&fl2v, "ft_ref2va", None, false),
+            // A hybrid serves both partitions; the request's mode decides which one it runs.
+            (&fl2v, "ft_hybrid", None, true),
+            (&ref2v, "ft_hybrid", None, true),
+            (&fl2v, "ft_hybrid", Some("first_last_frame"), true),
+            (&ref2v, "ft_hybrid", Some("first_last_frame"), false),
+            (&ref2v, "ft_hybrid", Some("reference_to_video"), true),
+            (&fl2v, "ft_hybrid", Some("reference_to_video"), false),
+        ] {
+            let result = validate_lora_specs_for_model_in_mode(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+                mode,
+            );
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "{} on {model_id} ({mode:?}): {result:?}",
+                lora["id"]
+            );
         }
     }
 

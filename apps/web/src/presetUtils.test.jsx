@@ -213,6 +213,27 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel({ id: "l", family: "minimax-h3", model_ids: ["minimax_h3_ref"] }, h3)).toBe(false);
   });
 
+  it("offers an imported H3 finetune the adapters of the partition it declares", () => {
+    // A finetune keeps its own id, so the exact-id gate alone hid every turbo adapter on it. The API
+    // serves `adapterPartitionModels` — the partitions the finetune renders as — and the gate honours it.
+    const finetune = (adapterPartitionModels) => ({
+      id: "my_h3_finetune",
+      family: "minimax-h3",
+      loraCompatibility: { families: ["minimax-h3"] },
+      adapterPartitionModels,
+    });
+    const fl2v = { id: "minimax_h3_turbo_8step", family: "minimax-h3", modelIds: ["minimax_h3"] };
+    const ref2v = { id: "minimax_h3_ref2v_turbo_4step", family: "minimax-h3", modelIds: ["minimax_h3_ref"] };
+    expect(loraMatchesModel(fl2v, finetune(["minimax_h3"]))).toBe(true);
+    expect(loraMatchesModel(ref2v, finetune(["minimax_h3"]))).toBe(false);
+    expect(loraMatchesModel(ref2v, finetune(["minimax_h3_ref"]))).toBe(true);
+    expect(loraMatchesModel(fl2v, finetune(["minimax_h3_ref"]))).toBe(false);
+    expect(loraMatchesModel(fl2v, finetune(["minimax_h3", "minimax_h3_ref"]))).toBe(true);
+    expect(loraMatchesModel(ref2v, finetune(["minimax_h3", "minimax_h3_ref"]))).toBe(true);
+    // Without the served field the finetune keeps exact-id gating.
+    expect(loraMatchesModel(fl2v, finetune(undefined))).toBe(false);
+  });
+
   it("partitions trained LTX-2.3 and LTX-2.5 outputs while preserving the 2.3 Eros sibling", () => {
     const model23 = { id: "ltx_2_3", family: "ltx-video", loraCompatibility: { families: ["ltx-video"] } };
     const eros23 = { id: "ltx_2_3_eros", family: "ltx-video", loraCompatibility: { families: ["ltx-video"] } };

@@ -297,9 +297,15 @@ export function loraMatchesModel(lora, model) {
     const engineId = model?.trainedCheckpoint?.engineModel ?? model?.id;
     if (base && engineId && base !== engineId) return false;
   }
+  // An imported MiniMax-H3 finetune keeps its own id but renders as the partition it declares, so
+  // the API serves `adapterPartitionModels` — the partition ids it also answers for — and the gate
+  // accepts a LoRA declared for any of them (the turbo adapters on a finetune).
   const declaredModelIds = loraModelIds(lora);
-  if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
-    return false;
+  if (declaredModelIds.length && model?.id) {
+    const answersFor = [model.id, ...(Array.isArray(model.adapterPartitionModels) ? model.adapterPartitionModels : [])];
+    if (!declaredModelIds.some((id) => answersFor.includes(id))) {
+      return false;
+    }
   }
   // MOSS Base and SFT share the `moss-image` family AND accept each other's adapters
   // (epic 27933, 2026-10-29): the two checkpoints are one transformer architecture, so a
