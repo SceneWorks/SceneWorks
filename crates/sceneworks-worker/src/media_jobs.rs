@@ -6100,6 +6100,11 @@ mod timeline_audio_mix_tests {
 
     const SAMPLE_RATE: f64 = 48_000.0;
 
+    /// Hang guard for real ffmpeg fixture runs. These bounds catch a graph that never reaches EOF
+    /// (an infinite-pad regression hangs forever), not slowness: a loaded CI runner encoding a
+    /// 248-frame crossfade has exceeded ten seconds, so the bound must not double as a speed test.
+    const FIXTURE_FFMPEG_BOUND: Duration = Duration::from_secs(120);
+
     fn scratch(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix(prefix)
@@ -6723,7 +6728,7 @@ mod timeline_audio_mix_tests {
             ],
             path,
         );
-        run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+        run_ffmpeg_capture_stderr_inner(args, None, None, FIXTURE_FFMPEG_BOUND)
             .await
             .unwrap();
         assert!(std::fs::metadata(path).unwrap().len() < 16 * 1024 * 1024);
@@ -6828,7 +6833,7 @@ mod timeline_audio_mix_tests {
                 output.display().to_string(),
             ];
             assert!(!args.iter().any(|arg| arg == "-shortest"));
-            run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+            run_ffmpeg_capture_stderr_inner(args, None, None, FIXTURE_FFMPEG_BOUND)
                 .await
                 .expect("the graph must terminate intrinsically, even without -shortest");
             assert_eq!(
@@ -6894,7 +6899,7 @@ mod timeline_audio_mix_tests {
         let output = dir.path().join("must-not-exist.mp4");
         std::fs::write(&picture, b"not a rendered picture").unwrap();
         let error = tokio::time::timeout(
-            Duration::from_secs(10),
+            FIXTURE_FFMPEG_BOUND,
             mux_audio("ffmpeg", &picture, &[], 24, &output, None),
         )
         .await
@@ -6939,7 +6944,7 @@ mod timeline_audio_mix_tests {
             let timing = PictureTiming::from_segments(&segments);
             let picture = root.join(format!("picture_{crossfade}.mp4"));
             tokio::time::timeout(
-                Duration::from_secs(10),
+                FIXTURE_FFMPEG_BOUND,
                 mux_segments("ffmpeg", &segments, root, &picture, None),
             )
             .await
@@ -7000,7 +7005,7 @@ mod timeline_audio_mix_tests {
             let mut args = audio_mix_args("ffmpeg", &picture, &sources, samples, &output).unwrap();
             // Prove intrinsic graph EOF: do not let -shortest hide an infinite-pad regression.
             args.retain(|arg| arg != "-shortest");
-            run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+            run_ffmpeg_capture_stderr_inner(args, None, None, FIXTURE_FFMPEG_BOUND)
                 .await
                 .unwrap();
             assert_eq!(
