@@ -4564,7 +4564,8 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
             crate::tests::support::TestPortableRoute::MlxMacos,
         );
         crate::publish(state, "job.updated", &job);
-        crate::publish_queue(state).await.unwrap();
+        crate::request_queue_publish(state);
+        crate::flush_queue_publishes(state).await.unwrap();
         serde_json::to_value(crate::public_job_snapshot(job)).unwrap()
     }
     let assert_public = |surface: &str, value: &Value| {

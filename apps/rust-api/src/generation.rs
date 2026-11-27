@@ -133,7 +133,7 @@ pub(crate) async fn create_generation_job_with_binding_once(
     })
     .await?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok(job)
 }
 
@@ -1129,7 +1129,7 @@ async fn enqueue_replayed_vector_raster_child(
     })
     .await?;
     publish(state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(state).await?;
+    request_queue_publish(state);
     Ok(job)
 }
 
@@ -1515,7 +1515,7 @@ async fn create_vector_prompt_workflow_internal(
     })
     .await?;
     publish(&state, "job.updated", &public_job_snapshot(parent.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
 
     let mut child_request = raster_request;
     child_request.workflow_parent_id = Some(parent_id.clone());
@@ -1736,7 +1736,7 @@ async fn terminate_vector_prompt_parent(
     .await?;
     if transition.changed {
         publish(state, "job.updated", &transition.job);
-        publish_queue(state).await?;
+        request_queue_publish(state);
     }
     Ok(transition.job)
 }
@@ -1905,7 +1905,7 @@ async fn run_vector_prompt_workflow_coordinator(
                         .await?;
                         if transition.changed {
                             publish(state, "job.updated", &transition.job);
-                            publish_queue(state).await?;
+                            request_queue_publish(state);
                         } else {
                             let _ = cleanup_named_vector_prompt_intermediate(
                                 state,

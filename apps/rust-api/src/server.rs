@@ -408,6 +408,9 @@ pub struct AppState {
     /// represented either in the initial snapshot or by a later live event,
     /// never by a buffered event that can be replayed behind a newer snapshot.
     pub(crate) queue_snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Coalesces `queue.updated` rebuilds into one background publish per interval
+    /// (see `queue_publisher`); mutations request, they never rebuild inline.
+    pub(crate) queue_publisher: Arc<crate::queue_publisher::QueuePublisher>,
     pub(crate) event_tickets: Arc<TicketStore>,
     pub(crate) media_tickets: Arc<TicketStore>,
     /// Bounds CPU and memory consumed by on-demand Library thumbnail backfills.

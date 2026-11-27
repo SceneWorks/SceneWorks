@@ -281,7 +281,7 @@ pub(crate) async fn create_job(
     })
     .await?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -459,10 +459,10 @@ pub(crate) async fn claim_job(
     {
         // claim_job already ran mark_stale_workers_interrupted above (its own
         // transaction), so refresh the queue WITHOUT sweeping a second time
-        // (sc-8889 / F-087). The old publish_queue path swept again on every
+        // (sc-8889 / F-087). The old sweeping publish path swept again on every
         // claim; that second sweep found nothing (the first already interrupted
         // the stale jobs) yet still cost a blocking round-trip.
-        publish_queue_skip_sweep(&state).await?;
+        request_queue_publish_skip_sweep(&state);
     }
     Ok(Json(ClaimResponse {
         job: response,
@@ -904,7 +904,7 @@ pub(crate) async fn exact_replay_job(
         }
     })?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1003,7 +1003,7 @@ pub(crate) async fn cancel_job(
     .await?;
     crate::generation::cascade_cancel_vector_prompt_workflow(&state, &job).await?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok(Json(public_job_snapshot(job)))
 }
 
@@ -1055,7 +1055,7 @@ pub(crate) async fn retry_job(
     })
     .await?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1355,7 +1355,7 @@ pub(crate) async fn duplicate_job(
     })
     .await?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -3128,7 +3128,7 @@ pub(crate) async fn clear_jobs(
     }
     // Republish the queue so every subscriber's status counts drop the cleared
     // jobs; the acting client also prunes them locally from the returned ids.
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok(Json(ClearJobsResponse {
         cleared: cleared_ids.len(),
         cleared_ids,
@@ -3166,7 +3166,7 @@ pub(crate) async fn cancel_pending_jobs(
         }
         publish(&state, "job.updated", job);
     }
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     if let Some(error) = cascade_error {
         return Err(error);
     }
@@ -3212,7 +3212,7 @@ pub(crate) async fn prioritize_jobs(
         publish(&state, "job.updated", job);
     }
     if !jobs.is_empty() {
-        publish_queue(&state).await?;
+        request_queue_publish(&state);
     }
     Ok(Json(PrioritizeJobsResponse {
         prioritized: jobs.len(),
@@ -3235,7 +3235,7 @@ pub(crate) async fn clear_job(
     })
     .await?;
     publish(&state, "jobs.cleared", &json!({ "ids": [job.id.clone()] }));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok(Json(public_job_snapshot(job)))
 }
 
@@ -3357,15 +3357,7 @@ pub(crate) async fn update_job_progress(
                 // so it publishes only the augmented job snapshot below.
                 if status_changed {
                     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
-                    if let Err(queue_error) = publish_queue(&state).await {
-                        tracing::error!(
-                            event = "terminal_progress_queue_publish_failed",
-                            job_id,
-                            status = queue_error.status.as_u16(),
-                            detail = %queue_error.detail,
-                            "terminal progress committed but its queue refresh failed"
-                        );
-                    }
+                    request_queue_publish(&state);
                 }
                 return Err(error);
             }
@@ -3384,7 +3376,7 @@ pub(crate) async fn update_job_progress(
     // Skip the refresh on pure ticks; the stale sweep still runs on worker heartbeats
     // and on every status transition.
     if status_changed {
-        publish_queue(&state).await?;
+        request_queue_publish(&state);
     }
     Ok(Json(public_job_snapshot(job)))
 }

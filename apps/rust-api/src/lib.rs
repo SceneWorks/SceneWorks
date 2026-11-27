@@ -107,6 +107,7 @@ use job_redaction::*;
 use project_files::*;
 use validators::*;
 mod catalog_scan_supervisor;
+mod queue_publisher;
 mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
@@ -1523,6 +1524,7 @@ fn create_app_with_state_mode(
         project_store,
         events: Arc::new(EventHub::default()),
         queue_snapshot_lock: Arc::new(AsyncMutex::new(())),
+        queue_publisher: Arc::new(queue_publisher::QueuePublisher::default()),
         event_tickets: Arc::new(TicketStore::with_max_outstanding(
             EVENT_TICKET_TTL_SECONDS,
             MAX_OUTSTANDING_EVENT_TICKETS,
@@ -1591,9 +1593,17 @@ fn create_app_with_state_mode(
         state.settings.cors_origins.clone(),
     );
 
+    let routes = router::routes();
+    // Route tests observe `queue.updated` (and the stale sweep it runs) as part of
+    // the request that asked for it; see `queue_publisher::flush_after_test_request`.
+    #[cfg(test)]
+    let routes = routes.layer(middleware::from_fn_with_state(
+        state.clone(),
+        queue_publisher::flush_after_test_request,
+    ));
     let router = Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(router::routes())
+        .merge(routes)
         .fallback(app_fallback)
         .with_state(state.clone())
         // sc-8812 (F-010): small router-wide default so JSON routes can't buffer
@@ -1976,22 +1986,30 @@ pub(crate) fn spawn_jobs_wal_checkpoints(state: AppState) -> tokio::task::JoinHa
     })
 }
 
-async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
-    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
-    let queue = queue_summary_snapshot(state.clone()).await?;
-    publish(state, "queue.updated", &queue);
-    Ok(())
+/// Request a `queue.updated` publish covering everything this request committed.
+/// Returns immediately: the rebuild runs on the coalescing publisher (see
+/// [`queue_publisher`]), at most every `QUEUE_PUBLISH_MIN_INTERVAL`, and runs the
+/// stale-worker sweep before reading the summary.
+fn request_queue_publish(state: &AppState) {
+    state.queue_publisher.request(state, true);
 }
 
-/// Like [`publish_queue`], but skips the stale-worker sweep because the caller
-/// already ran one in its own transaction this request (sc-8889 / F-087). Use
-/// only right after a `mark_stale_workers_interrupted` call — otherwise stale
-/// workers won't be reaped on this refresh.
-async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
-    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
-    let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
-    publish(state, "queue.updated", &queue);
-    Ok(())
+/// Like [`request_queue_publish`], but does not ask for the stale-worker sweep
+/// because the caller already ran one in its own transaction this request
+/// (sc-8889 / F-087). The coalesced round still sweeps if any other request it
+/// covers asked for one. Use only right after a `mark_stale_workers_interrupted`
+/// call.
+fn request_queue_publish_skip_sweep(state: &AppState) {
+    state.queue_publisher.request(state, false);
+}
+
+/// Wait until every queue publish requested so far has gone out, skipping the
+/// coalescing interval. Production handlers never need this (no response depends
+/// on the published snapshot); tests use it to observe `queue.updated`
+/// deterministically.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn flush_queue_publishes(state: &AppState) -> Result<(), ApiError> {
+    state.queue_publisher.flush(state).await
 }
 
 fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {

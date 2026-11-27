@@ -54,7 +54,7 @@ pub(crate) async fn remove_saved_training_run(
     .await?;
     // The run also leaves the queue: every subscriber prunes it, as after a per-job clear.
     publish(&state, "jobs.cleared", &json!({ "ids": [job_id] }));
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok(StatusCode::NO_CONTENT)
 }
 
