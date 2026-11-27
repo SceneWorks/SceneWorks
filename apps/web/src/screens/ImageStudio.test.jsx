@@ -167,7 +167,10 @@ describe("ImageStudio Save as Preset", () => {
     expect(container.textContent).not.toContain("4 prompts");
   });
 
-  it("previews and submits ratio batches at the largest closest model bucket", async () => {
+  // A [W:H] directive takes that exact shape at the model's largest size (the ratio + megapixel
+  // picker's ceiling: here the 1408x2048 preset's 2.75 MP, inside the 768..2048 preset sides), not
+  // the nearest preset bucket. [16:9] is bound by the 2048 edge; an exact [WxH] stays exact.
+  it("previews and submits ratio batches at the model's largest size for that ratio", async () => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true,
       batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt\n[3:4] large portrait",
@@ -177,12 +180,12 @@ describe("ImageStudio Save as Preset", () => {
     await render(baseContext({ createImageJob, imageModels: [{ ...Z_IMAGE, limits: {
       resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080", "768x1024", "896x1152", "1408x2048"],
     } }] }));
-    expect(container.querySelector(".batch-preview-res")?.textContent).toBe("1600×1280");
+    expect(container.querySelector(".batch-preview-res")?.textContent).toBe("1896×1520");
     expect(container.querySelector(".batch-preview-text")?.textContent).toBe("first prompt");
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     expect(createImageJob).toHaveBeenCalledTimes(4);
     expect(createImageJob.mock.calls.map(([payload]) => [payload.prompt, payload.width, payload.height]))
-      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216], ["large portrait", 1408, 2048]]);
+      .toEqual([["first prompt", 1896, 1520], ["second prompt", 2048, 1152], ["exact prompt", 832, 1216], ["large portrait", 1464, 1960]]);
   });
 
   // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:

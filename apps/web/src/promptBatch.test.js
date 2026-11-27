@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
+import { resolutionEnvelope } from "./aspectResolution.js";
 
 import {
   cardinality,
@@ -445,6 +446,47 @@ describe("parsePromptResolution", () => {
       expect(parsePromptResolution("[4:3] landscape", ordered).resolution)
         .toEqual({ width: 2048, height: 1408 });
     }
+  });
+
+  // With Image Studio's size envelope, a ratio is the picker's ceiling for that shape: the exact
+  // shape at the model's maximum megapixels, inside its sides and on its grid — not a preset.
+  describe("with the Studio's size envelope", () => {
+    const manifest = JSON5.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../config/manifests/builtin.models.jsonc"), "utf8"));
+    const shipped = (id) => (Array.isArray(manifest) ? manifest : manifest.models).find((entry) => entry.id === id);
+    const envelopeOf = (model) => resolutionEnvelope(model, model.limits.resolutions);
+
+    it("gives Krea 2 every shape at its 4 MP ceiling", () => {
+      const krea = shipped("krea_2_turbo");
+      const envelope = envelopeOf(krea);
+      const at = (ratio) => parsePromptResolution(`[${ratio}] scene`, krea.limits.resolutions, envelope).resolution;
+      expect(at("21:9")).toEqual({ width: 3120, height: 1344 });
+      expect(at("16:9")).toEqual({ width: 2720, height: 1536 });
+      expect(at("3:4")).toEqual({ width: 1776, height: 2352 });
+      expect(at("1:1")).toEqual({ width: 2048, height: 2048 });
+      // Any ratio, not only the picker's menu: 5:4 lands on its own shape too.
+      const fiveFour = at("5:4");
+      expect(fiveFour.width / fiveFour.height).toBeCloseTo(1.25, 2);
+      expect(fiveFour.width * fiveFour.height).toBeLessThanOrEqual(2048 * 2048);
+    });
+
+    it("gives MiniMax-H3-Image its 24 MP ceiling, never the old 16 MP preset", () => {
+      const h3 = shipped("minimax_h3_image");
+      const at = (ratio) => parsePromptResolution(`[${ratio}] scene`, h3.limits.resolutions, envelopeOf(h3)).resolution;
+      expect(at("2:3")).toEqual({ width: 4096, height: 6144 });
+      expect(at("21:9")).toEqual({ width: 7648, height: 3264 });
+    });
+
+    it("gives a fixed-size model its one size", () => {
+      const supra = shipped("supra2_img");
+      expect(parsePromptResolution("[16:9] wide", supra.limits.resolutions, envelopeOf(supra)).resolution)
+        .toEqual({ width: 256, height: 256 });
+    });
+
+    it("keeps exact [WxH] directives exact", () => {
+      const krea = shipped("krea_2_turbo");
+      expect(parsePromptResolution("[768x1024] portrait", krea.limits.resolutions, envelopeOf(krea)).resolution)
+        .toEqual({ width: 768, height: 1024 });
+    });
   });
 
   it("uses only available buckets after device filtering", () => {

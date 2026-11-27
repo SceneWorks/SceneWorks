@@ -1,4 +1,5 @@
 import React, { act, useState } from "react";
+import { resolutionEnvelope } from "../aspectResolution.js";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -77,6 +78,14 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(container.querySelector(".batch-preview-res").textContent).toBe("1408×2048");
     await mount({ initialPrompts: "[3:4] a portrait", extra: { resolutionOptions: ["768x1024", "896x1152", "2048x2048"] } });
     expect(container.querySelector(".batch-preview-res").textContent).toBe("896×1152");
+  });
+
+  it("previews a ratio at the size envelope's ceiling when Image Studio passes one", async () => {
+    const resolutionOptions = ["768x768", "1024x1024", "1280x720", "2048x2048"];
+    const sizeEnvelope = resolutionEnvelope({ limits: { resolutions: resolutionOptions, minDimension: 256, maxDimension: 4096 } }, resolutionOptions);
+    await mount({ initialPrompts: "[21:9] a panorama", extra: { resolutionOptions, sizeEnvelope } });
+    expect(container.querySelector(".batch-preview-res").textContent).toBe("3120×1344");
+    expect(container.querySelector(".batch-preview-text").textContent).toBe("a panorama");
   });
 
   it("renders a chip editor per unique {{key}} referenced in the prompts", () => {

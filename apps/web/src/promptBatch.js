@@ -1,4 +1,5 @@
 import { parseResolution } from "./resolutionMatch.js";
+import { resolutionFor } from "./aspectResolution.js";
 
 // Prompt-batch template engine (sc-9953 / sc-9958, epic 9952 — Batch Prompt Processing).
 // Pure, mode-agnostic logic: parse a prompt line into text + {{placeholder}} tokens and
@@ -281,10 +282,16 @@ export function leadingResolutionTemplate(prompt) {
 }
 
 // A leading `[WxH]` renders a prompt at an exact size, overriding the Studio Aspect
-// (sc-10063); `[W:H]` instead selects the largest available size near the requested
-// aspect ratio. Non-numeric brackets stay literal. Returns the stripped prompt and {width,height}
-// (or null for no directive / no numeric options). The caller validates exact dimensions
-// against the selected model's range and stride.
+// (sc-10063); `[W:H]` instead selects the largest size the model renders at that aspect ratio.
+// Non-numeric brackets stay literal. Returns the stripped prompt and {width,height} (or null for
+// no directive / no numeric options). The caller validates exact dimensions against the selected
+// model's range and stride.
+//
+// Given the Studio's size `envelope` (aspectResolution.js `resolutionEnvelope`), a ratio resolves
+// exactly as the ratio + megapixel picker does at its ceiling: that shape, at the model's maximum
+// megapixels, on its grid and inside its side and area bounds — Krea 2's [21:9] is 3120x1344, not
+// the 2048x1152 (16:9) the preset ladder's nearest bucket gave. Without one (callers outside Image
+// Studio), the largest preset near the ratio is used, as before.
 const RESOLUTION_DIRECTIVE = /^\s*\[\s*(\d{2,5})\s*[x×X]\s*(\d{2,5})\s*\]\s*/;
 const RATIO_DIRECTIVE = /^\s*\[\s*([1-9]\d{0,4})\s*:\s*([1-9]\d{0,4})\s*\]\s*/;
 
@@ -316,15 +323,26 @@ function resolutionForRatio(width, height, options) {
   return best;
 }
 
-export function parsePromptResolution(text, resolutionOptions = []) {
+// The largest size the envelope draws at `width:height`, or null when there is no envelope.
+function envelopeResolutionForRatio(width, height, envelope) {
+  if (!envelope) return null;
+  const value = envelope.fixed
+    ? envelope.fixedResolution
+    : resolutionFor({ width, height }, envelope.maxMegapixels, envelope);
+  return parseResolution(value);
+}
+
+export function parsePromptResolution(text, resolutionOptions = [], envelope = null) {
   if (typeof text !== "string") return { prompt: "", resolution: null };
   const match = RESOLUTION_DIRECTIVE.exec(text);
   if (!match) {
     const ratio = RATIO_DIRECTIVE.exec(text);
     if (!ratio) return { prompt: text, resolution: null };
+    const [width, height] = [Number(ratio[1]), Number(ratio[2])];
     return {
       prompt: text.slice(ratio[0].length),
-      resolution: resolutionForRatio(Number(ratio[1]), Number(ratio[2]), resolutionOptions),
+      resolution: envelopeResolutionForRatio(width, height, envelope)
+        ?? resolutionForRatio(width, height, resolutionOptions),
     };
   }
   return {
