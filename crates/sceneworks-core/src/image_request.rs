@@ -1465,6 +1465,11 @@ pub use sceneworks_options::image_request::{
     FLUX3_TIERED_MODEL_IDS, FP8R_QUANT_TIER,
 };
 
+pub use sceneworks_options::image_request::{
+    is_w4a8_tier, requests_w4a8_tier, w4a8_tier_refusal, BLOCK_STREAMING_RUNG, W4A8_QUANT_TIER,
+    W4A8_TIER_MODEL_ID,
+};
+
 pub fn flux3_requested_tier_resolved(options: &ImageAdvanced) -> Result<Flux3Tier, String> {
     let named = options
         .quant_tier
@@ -1521,6 +1526,24 @@ pub fn image_quant_tier_refusal_resolved(model: &str, options: &ImageAdvanced) -
         return flux3_requested_tier_resolved(options)
             .err()
             .map(|reason| format!("{model}: {reason}"));
+    }
+    // SW-6135: the W4A8 tier, judged by the same rule the raw API validation applies. The
+    // routing probe carries only precision fields, so pose and memory-rung shape stay with that
+    // validation and the worker's own load-time refusals.
+    if options
+        .quant_tier
+        .as_ref()
+        .is_some_and(|tier| is_w4a8_tier(&tier.value))
+    {
+        let has_bits = options
+            .mlx_quantize
+            .as_ref()
+            .is_some_and(|bound| bound.value.is_some());
+        let has_poses = options
+            .poses
+            .as_ref()
+            .is_some_and(|poses| !poses.value.is_empty());
+        return w4a8_tier_refusal(model, has_bits, has_poses, None);
     }
     options
         .quant_tier
@@ -2482,6 +2505,38 @@ mod tests {
         assert!(
             flux3_catalog_tier_refusal("flux3_klein_base", Some(" "), &dense, &dense_only)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn resolved_w4a8_refusal_matches_the_raw_request_rule() {
+        let resolve = |model: &str, fields: Value| {
+            let payload = payload(json!({"projectId": "p", "model": model, "advanced": fields}));
+            let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+            image_quant_tier_refusal_resolved(model, request.resolved_advanced.as_ref().unwrap())
+        };
+        assert_eq!(resolve("krea_2_turbo", json!({"quantTier": "w4a8"})), None);
+        assert!(resolve(
+            "krea_2_turbo",
+            json!({"quantTier": "w4a8", "mlxQuantize": 8})
+        )
+        .unwrap()
+        .contains("requantized"));
+        assert!(resolve("z_image", json!({"quantTier": "w4a8"}))
+            .unwrap()
+            .contains("z_image"));
+        // A top-level variant clears the bits carrier, so it names the tier cleanly.
+        let payload = payload(
+            json!({"projectId": "p", "model": "krea_2_turbo", "variant": "w4a8",
+            "advanced": {"mlxQuantize": 8}}),
+        );
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        assert_eq!(
+            image_quant_tier_refusal_resolved(
+                "krea_2_turbo",
+                request.resolved_advanced.as_ref().unwrap()
+            ),
+            None
         );
     }
 

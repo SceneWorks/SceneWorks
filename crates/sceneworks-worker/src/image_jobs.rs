@@ -3848,6 +3848,8 @@ use tier_resolver::standard_tier_subdir_gated;
 pub(crate) use tier_resolver::INT8_CONVROT_TIER;
 #[cfg(native_lane)]
 pub(crate) use tier_resolver::NVFP4_TIER;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use tier_resolver::W4A8_TIER;
 #[cfg(native_lane)]
 use tier_resolver::{
     is_dense_te_tier, min_quality_floor, nvfp4_host_eligible, nvfp4_requested, nvfp4_selected,

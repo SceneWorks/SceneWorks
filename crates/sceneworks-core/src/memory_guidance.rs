@@ -60,7 +60,7 @@ pub const HIGHRES_TRANSIENT_GB_PER_MP: f64 = 13.0;
 /// Quant tiers in fidelity order, HIGHEST first. The suggestion walks this order.
 const TIER_FIDELITY: [&str; 3] = ["bf16", "q8", "q4"];
 /// Candle-only selectable tiers with no bits-based `mlxQuantize` value.
-const CANDLE_ONLY_TIERS: [&str; 3] = ["int8-convrot", "nvfp4", "fp8r"];
+const CANDLE_ONLY_TIERS: [&str; 4] = ["int8-convrot", "nvfp4", "fp8r", "w4a8"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lane {

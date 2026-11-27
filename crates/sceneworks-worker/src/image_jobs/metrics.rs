@@ -132,6 +132,12 @@ pub(super) fn effective_quant_label_gated(
     if request.advanced_bool("convRot").unwrap_or(false) {
         return (Some("int8-convrot".to_owned()), None);
     }
+    // SW-6135: the Krea W4A8 tier, by identity (no honest bit width). A W4A8 pick that cannot
+    // resolve its artifacts is refused before load, so the label always names what ran.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if super::artifact_resolution::wants_krea_w4a8(request) {
+        return (Some(super::W4A8_TIER.to_owned()), None);
+    }
     #[cfg(target_os = "macos")]
     if is_dense_te_tier(request) {
         return match dense_te_requested_tier_bits(request) {

@@ -17,6 +17,9 @@ import {
 } from "./lib/manifest-memory-declarations.mjs";
 import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
 
+/** Prebuilt transformer-only tiers that are measured directly, never estimated on the matrix grid. */
+export const PREBUILT_DIT_TIERS = new Set(["int8-convrot", "w4a8"]);
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
@@ -1387,11 +1390,10 @@ function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
   // `["bf16"]` on candle, because their three packed tiers are `platforms: ["macos"]` and
   // `servesLane` — not this short-circuit — is what keeps them off the off-Mac axis.
   const advertised = [...backendTiers, ...downloadTiers, ...inferred];
-  return sortedUnique(advertised).filter(
-    (tier) => tier !== "int8-convrot",
-  ).length
-    ? sortedUnique(advertised).filter((tier) => tier !== "int8-convrot")
-    : ["default"];
+  // The prebuilt transformer-only Krea tiers (INT8-ConvRot, and SW-6135's W4A8) are sized by their
+  // own measured `vramGbByTier` rows and never enter the matrix's estimated coordinate grid.
+  const matrixTiers = sortedUnique(advertised).filter((tier) => !PREBUILT_DIT_TIERS.has(tier));
+  return matrixTiers.length ? matrixTiers : ["default"];
 }
 
 /**

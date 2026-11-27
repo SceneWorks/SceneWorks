@@ -84,10 +84,16 @@ fn image_request_mlx_eligible_with_context(
     // so an `advanced.quantTier: "fp8r"` request is `mlx_unsupported` for EVERY model rather than
     // reaching a per-family predicate that might not read `quantTier` and render dense instead. A
     // malformed named-tier request is refused here too, before any family predicate sees it.
+    // SW-6135: the Krea W4A8 tier is a CUDA (sm_80+) int8-tensor-core format with no MLX form, so
+    // an MLX worker never claims it and renders some other tier in its place.
     if crate::jobs_store::routing::probe_image_precision_options_from_facts(context.options).map_or(
         true,
         |options| {
             crate::image_request::image_quant_tier_refusal_resolved(model, &options).is_some()
+                || options
+                    .quant_tier
+                    .as_ref()
+                    .is_some_and(|tier| crate::image_request::is_w4a8_tier(&tier.value))
         },
     ) {
         return false;
