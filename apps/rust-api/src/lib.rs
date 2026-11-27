@@ -1237,10 +1237,6 @@ const QUIET_ON_FAST_SUCCESS_ROUTES: &[&str] = &[
 /// Liveness routes whose successes are never logged, however slow.
 const QUIET_ON_SUCCESS_ROUTES: &[&str] = &["/api/v1/workers/:worker_id/heartbeat"];
 
-fn is_quiet_background_route(route: &str) -> bool {
-    QUIET_ON_FAST_SUCCESS_ROUTES.contains(&route) || QUIET_ON_SUCCESS_ROUTES.contains(&route)
-}
-
 fn should_log_api_request_duration(route: &str, status: StatusCode, elapsed_ms: f64) -> bool {
     if !status.is_success() {
         return true;
@@ -1277,7 +1273,9 @@ async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
         if should_log_api_request_duration(&route, response.status(), elapsed_ms) {
             // A quiet background route only reaches here when it failed or was slow, which is
             // the anomaly worth surfacing; every other route keeps its ordinary info line.
-            if is_quiet_background_route(&route) {
+            if QUIET_ON_FAST_SUCCESS_ROUTES.contains(&route.as_str())
+                || QUIET_ON_SUCCESS_ROUTES.contains(&route.as_str())
+            {
                 tracing::warn!(
                     event = "api_request_duration",
                     method = %method,
