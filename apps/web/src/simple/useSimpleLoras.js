@@ -204,6 +204,10 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
   );
 
   return {
+    // The model as the LoRA gate sees it in this mode (`loraModelForMode`). The "Add LoRA" sheet
+    // filters against THIS, not the raw model, so it can never offer an adapter `compatibleLoras`
+    // would then silently drop from the request (a hybrid H3 import's other-partition turbo file).
+    loraModel,
     selectedLoraIds,
     selectedLoras,
     compatibleLoras,

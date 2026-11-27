@@ -159,7 +159,7 @@ export function SimpleVideoStudio() {
             closeSheet();
           }}
           onImportQueued={lora.noteImportJob}
-          selectedModel={selectedModel}
+          selectedModel={lora.loraModel}
         />
       ),
     });

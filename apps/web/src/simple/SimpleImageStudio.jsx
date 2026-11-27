@@ -467,7 +467,7 @@ export function SimpleImageStudio() {
             closeSheet();
           }}
           onImportQueued={lora.noteImportJob}
-          selectedModel={selectedModel}
+          selectedModel={lora.loraModel}
         />
       ),
     });
