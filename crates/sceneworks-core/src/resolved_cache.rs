@@ -2423,6 +2423,32 @@ impl ResolvedCacheReservation {
         attested: &ProducedAttestations,
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        self.publish_produced_measured(plan, ProducedContent::Hashed(attested), check)
+    }
+
+    /// Publish a produced bundle by size alone: no stage reads its bytes back or hashes them.
+    ///
+    /// For producers whose output is a pure, in-process function of inputs that are already
+    /// trusted — saved weight quantizations repack a verified download (or a model the user chose
+    /// to import) on this machine, seconds before publication. Re-reading such a file to compute
+    /// a digest guards against nothing: the producer has fsynced it, the staging directory is
+    /// confined and atomically renamed, and every structural refusal of
+    /// [`Self::publish_produced`] (missing, linked, reparsed or undeclared files) still applies.
+    /// Size remains recorded so retention accounting and the path/size validators keep working.
+    /// The cache key excludes content hashes, so these entries share keys with hashed ones.
+    pub(crate) fn publish_produced_size_only(
+        self,
+        plan: &DerivedArtifactPlan,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        self.publish_produced_measured(plan, ProducedContent::SizeOnly, &|| Ok(()))
+    }
+
+    fn publish_produced_measured(
+        self,
+        plan: &DerivedArtifactPlan,
+        content: ProducedContent<'_>,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         let prepared = (|| {
             check()?;
             let mut artifact = plan.artifact_at(&self.staging_path, ArtifactState::Published);
@@ -2431,10 +2457,21 @@ impl ResolvedCacheReservation {
                 for file in &mut member.files {
                     let relative = member.destination.join(&file.relative_path);
                     let path = self.staging_path.join(&relative);
-                    let (size_bytes, sha256) =
-                        measure_produced_file(&path, attested.get(&relative).as_ref(), check)?;
+                    let (size_bytes, sha256) = match content {
+                        ProducedContent::Hashed(attested) => {
+                            let (size_bytes, sha256) = measure_produced_file(
+                                &path,
+                                attested.get(&relative).as_ref(),
+                                check,
+                            )?;
+                            (size_bytes, Some(sha256))
+                        }
+                        ProducedContent::SizeOnly => {
+                            (inspect_produced_file(&path, check)?.len(), None)
+                        }
+                    };
                     file.size_bytes = Some(size_bytes);
-                    file.sha256 = Some(sha256);
+                    file.sha256 = sha256;
                     declared.insert(relative);
                 }
             }
@@ -2444,8 +2481,12 @@ impl ResolvedCacheReservation {
             check()?;
             Ok::<_, ResolvedCacheError>(artifact)
         })();
+        let attested = match content {
+            ProducedContent::Hashed(attested) => Some(attested),
+            ProducedContent::SizeOnly => None,
+        };
         match prepared {
-            Ok(artifact) => self.publish_staged_with_check(artifact, check, Some(attested)),
+            Ok(artifact) => self.publish_staged_with_check(artifact, check, attested),
             Err(error) => {
                 // A refused measured publication keeps its original refusal as the answer; a
                 // staging tree holding a linked entry is left untouched rather than removed.
@@ -3277,13 +3318,21 @@ fn validate_pending_derivative_shape(
     Ok(())
 }
 
-/// Measure one file a producer staged. Never follows a link and never accepts anything but a
+/// How a produced publication establishes each staged file's recorded content.
+#[derive(Clone, Copy)]
+enum ProducedContent<'a> {
+    /// Record a SHA-256 — from the write-stream attestation when it redeems, else by re-reading.
+    Hashed(&'a ProducedAttestations),
+    /// Record the size only; no stage hashes the bytes.
+    SizeOnly,
+}
+
+/// Inspect one file a producer staged. Never follows a link and never accepts anything but a
 /// regular file, so a producer cannot publish bytes that live outside the staging directory.
-fn measure_produced_file(
+fn inspect_produced_file(
     path: &Path,
-    attestation: Option<&ProducedFileAttestation>,
     check: &dyn Fn() -> std::io::Result<()>,
-) -> Result<(u64, String), ResolvedCacheError> {
+) -> Result<std::fs::Metadata, ResolvedCacheError> {
     check()?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ResolvedCacheError::new(format!(
@@ -3300,6 +3349,16 @@ fn measure_produced_file(
             path.display()
         )));
     }
+    Ok(metadata)
+}
+
+/// Measure one file a producer staged: [`inspect_produced_file`], then its size and SHA-256.
+fn measure_produced_file(
+    path: &Path,
+    attestation: Option<&ProducedFileAttestation>,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(u64, String), ResolvedCacheError> {
+    let metadata = inspect_produced_file(path, check)?;
     // The write stream already hashed these bytes; its digest stands while the file is still the
     // entry that stream closed (sc-26691). Otherwise measure by reading, as before.
     if let Some(measured) = attestation.and_then(|attestation| attestation.redeem(path, None)) {
