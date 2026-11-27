@@ -153,6 +153,32 @@ pub(crate) fn kv_cache_failure_block(policy: KvCompressionPolicy, error: &CoreLl
     block
 }
 
+/// The block of a registered `gen_core::Generator` execution (such as StarVector) ended by
+/// `error` instead of an output: preserves the exact `CoreLlmError` refusal/failure classification
+/// when wrapped in `gen_core::Error::Backend`, otherwise maps `gen_core::Error` directly.
+pub(crate) fn kv_cache_gen_core_failure_block(
+    policy: KvCompressionPolicy,
+    error: &gen_core::Error,
+) -> Value {
+    if let gen_core::Error::Backend(inner) = error {
+        if let Some(llm_error) = inner.downcast_ref::<CoreLlmError>() {
+            return kv_cache_failure_block(policy, llm_error);
+        }
+    }
+    let (outcome, reason) = match error {
+        gen_core::Error::Canceled => ("canceled", "canceled"),
+        gen_core::Error::Unsupported(_) => ("failed", "unsupported"),
+        _ => ("failed", "engine_error"),
+    };
+    json!({
+        "policy": policy_name(policy),
+        "outcome": outcome,
+        "reported": false,
+        "reason": reason,
+        "error": error.to_string(),
+    })
+}
+
 /// The `llm_kv_cache` telemetry event payload of one generation: the job, the engine lane and the
 /// block — identifiers, counters and the engine's message only.
 pub(crate) fn kv_cache_event(job_id: &str, engine: &str, block: Value) -> Value {
@@ -186,6 +212,22 @@ impl KvCacheRecord {
         let block = match generation {
             Ok(output) => kv_cache_block(policy, report(output)),
             Err(error) => kv_cache_failure_block(policy, error),
+        };
+        Self { engine, block }
+    }
+
+    /// The record of a `gen_core::Generator` execution (such as a registered StarVector vector
+    /// route) on `engine`, requested with `policy`: [`kv_cache_block`] of `report` when it
+    /// completed, or [`kv_cache_gen_core_failure_block`] when `gen_core::Error` ended it.
+    pub(crate) fn of_gen_core<T>(
+        engine: &'static str,
+        policy: KvCompressionPolicy,
+        generation: &gen_core::Result<T>,
+        report: impl FnOnce(&T) -> Option<&KvCacheReport>,
+    ) -> Self {
+        let block = match generation {
+            Ok(output) => kv_cache_block(policy, report(output)),
+            Err(error) => kv_cache_gen_core_failure_block(policy, error),
         };
         Self { engine, block }
     }

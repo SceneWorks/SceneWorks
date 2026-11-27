@@ -502,24 +502,32 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
         let gen_request = starvector_generation_request(request, image, cancel.clone())?;
         let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(self.weights_dir.clone()));
         let started = Instant::now();
-        let generator =
-            crate::inference_runtime::load(self.identity.model_id, &spec).map_err(|error| {
-                crate::classify_engine_error(
-                    &format!(
-                        "{} StarVector generator {} load failed",
-                        self.backend, self.identity.model_id
-                    ),
-                    error,
-                )
-            })?;
-        let (source, terminal, execution) = generate_via_registered_vector_route(
-            generator.as_ref(),
-            self.identity,
-            self.backend,
-            self.inference_provider_id,
-            &gen_request,
-            &progress,
-            started,
+        let identity = self.identity;
+        let backend = self.backend;
+        let inference_provider_id = self.inference_provider_id;
+        let kv_cache = self.kv_cache.clone();
+        let load_context = format!(
+            "{} StarVector generator {} load failed",
+            self.backend, self.identity.model_id
+        );
+        let (source, terminal, execution) = tokio::runtime::Handle::current().block_on(
+            crate::generator_cache::with_cached_generator(
+                identity.model_id,
+                spec,
+                load_context,
+                move |generator| {
+                    generate_via_registered_vector_route(
+                        generator,
+                        identity,
+                        backend,
+                        inference_provider_id,
+                        &gen_request,
+                        &progress,
+                        started,
+                        &kv_cache,
+                    )
+                },
+            ),
         )?;
         *self.terminal_outcome.lock().map_err(|_| {
             WorkerError::Engine("StarVector terminal outcome lock poisoned".to_owned())
@@ -540,11 +548,26 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
 }
 
 /// Build the typed [`gen_core::GenerationRequest`] for a registered `Modality::Vector` StarVector
-/// generator route (`SW-6983`, `REG-6`, `PIPE-12`).
+/// generator route (`SW-6983`, `REG-6`, `PIPE-12`), applying the worker's default KV-compression
+/// policy.
 fn starvector_generation_request(
     request: &VectorProviderRequest,
     image: gen_core::Image,
     cancel: gen_core::CancelFlag,
+) -> WorkerResult<gen_core::GenerationRequest> {
+    starvector_generation_request_with_policy(
+        request,
+        image,
+        cancel,
+        crate::llm_kv_cache::worker_default_policy(),
+    )
+}
+
+fn starvector_generation_request_with_policy(
+    request: &VectorProviderRequest,
+    image: gen_core::Image,
+    cancel: gen_core::CancelFlag,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
 ) -> WorkerResult<gen_core::GenerationRequest> {
     if request.mode != VectorMode::ImageToSvg || !request.prompt.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -583,6 +606,8 @@ fn starvector_generation_request(
         // Preserve bounded-limit outcomes as typed VectorOutput so normal jobs fail closed while
         // terminal campaigns can record bounded evidence without publishing partial SVG.
         allow_non_publishable: true,
+        // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator enabled it).
+        kv_compression: Some(kv_compression),
     });
     Ok(gen_request)
 }
@@ -607,8 +632,10 @@ fn map_vector_output_finish_reason(output: &gen_core::VectorOutput) -> WorkerRes
 }
 
 /// Drive a registered `Modality::Vector` [`gen_core::Generator`] route (`starvector_1b` /
-/// `starvector_8b`), mapping progress ticks, MLX decode cache bounds, and typed
-/// [`gen_core::GenerationOutput::Vector`] metadata into worker vector job state (`REG-6`).
+/// `starvector_8b`), mapping progress ticks, MLX decode cache bounds, typed
+/// [`gen_core::GenerationOutput::Vector`] metadata, and KV-cache telemetry into worker vector job
+/// state (`REG-6`).
+#[allow(clippy::too_many_arguments)]
 fn generate_via_registered_vector_route(
     generator: &dyn gen_core::Generator,
     identity: StarVectorModelIdentity,
@@ -617,6 +644,7 @@ fn generate_via_registered_vector_route(
     gen_request: &gen_core::GenerationRequest,
     progress: &tokio::sync::watch::Sender<u32>,
     started: Instant,
+    kv_cache: &Mutex<Option<crate::llm_kv_cache::KvCacheRecord>>,
 ) -> WorkerResult<(
     Option<String>,
     TerminalProviderOutcome,
@@ -635,18 +663,37 @@ fn generate_via_registered_vector_route(
             descriptor.id, descriptor.modality
         )));
     }
+    let policy = gen_request
+        .extensions
+        .vector
+        .as_ref()
+        .and_then(|ext| ext.kv_compression)
+        .unwrap_or_default();
     let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
-    let completed = generator
-        .generate_with_execution_report(gen_request, &mut |event| {
-            if let gen_core::Progress::Step { current, total } = event {
-                cache_bound.note_event();
-                record_vector_token_progress(progress, current, total);
+    let generation = generator.generate_with_execution_report(gen_request, &mut |event| {
+        if let gen_core::Progress::Step { current, total } = event {
+            cache_bound.note_event();
+            record_vector_token_progress(progress, current, total);
+        }
+    });
+    let record = crate::llm_kv_cache::KvCacheRecord::of_gen_core(
+        backend,
+        policy,
+        &generation,
+        |completed| match completed.generation.output.as_ref() {
+            Some(gen_core::GenerationOutput::Vector(vector_out)) => {
+                vector_out.terminal.kv_cache.as_ref()
             }
-        })
-        .map_err(|error| match error {
-            gen_core::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
-            other => WorkerError::Engine(format!("native StarVector generation failed: {other}")),
-        })?;
+            _ => None,
+        },
+    );
+    *kv_cache.lock().map_err(|_| {
+        WorkerError::Engine("StarVector KV-cache record lock poisoned".to_owned())
+    })? = Some(record);
+    let completed = generation.map_err(|error| match error {
+        gen_core::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
+        other => WorkerError::Engine(format!("native StarVector generation failed: {other}")),
+    })?;
     let vector_out = match completed.generation.output {
         Some(gen_core::GenerationOutput::Vector(vector_out)) => vector_out,
         other => {

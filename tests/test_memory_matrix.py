@@ -874,13 +874,13 @@ def moss_source_facts():
         (ROOT / "config/manifests/registry/route-policy.json").read_text(encoding="utf-8")
     )
     policy_rows = {row["id"]: row for row in route_policy["image"]}
-    dumps = {
-        backend: json.loads(
-            (ROOT / f"config/engine-capabilities/runtime/capabilities.{backend}.json").read_text(
-                encoding="utf-8"
-            )
-        )["snapshot"]["generator_capabilities"]
-        for backend in ("mlx", "candle")
+    sga_files = {
+        "mlx": "config/engine-capabilities/sga/macos-mlx.json",
+        "candle": "config/engine-capabilities/sga/candle-cuda.json",
+    }
+    routes_by_backend = {
+        backend: json.loads((ROOT / rel_path).read_text(encoding="utf-8"))["routes"]
+        for backend, rel_path in sga_files.items()
     }
     facts = {}
     for entry in manifest_models:
@@ -890,7 +890,7 @@ def moss_source_facts():
         candle_routed = row["candleRouted"]
         candle_lora = row["candleLora"]
         runtime = {
-            backend: next((c for c in dumps[backend] if c["id"] == entry["id"]), None)
+            backend: routes_by_backend[backend].get(entry["id"])
             for backend in ("mlx", "candle")
         }
         routed = {"mlx": mlx_routed, "candle": candle_routed}
@@ -900,8 +900,9 @@ def moss_source_facts():
         assert all(runtime[b] is not None for b in backends), (entry["id"], runtime)
         # Refusal coherence: the advertised adapter bit must equal the native descriptor's bit.
         for backend in backends:
-            assert runtime[backend]["supports_lora"] == runtime[backend]["supports_lokr"], entry["id"]
-        assert candle_lora == runtime["candle"]["supports_lora"], entry["id"]
+            adapters = runtime[backend]["adapters"]
+            assert adapters["supports_lora"] == adapters["supports_lokr"], entry["id"]
+        assert candle_lora == runtime["candle"]["adapters"]["supports_lora"], entry["id"]
         # An ADVERTISED adapter family (manifest `loraCompatibility.families`) must be backed by
         # BOTH native LoRA and LoKr on every routed backend plus the Candle routing bit. A false
         # source bit is refused here, so it can never be paired with a matrix that dropped the
@@ -910,12 +911,13 @@ def moss_source_facts():
         if advertised:
             assert candle_routed and candle_lora, (entry["id"], "advertised but not Candle-routed")
             for backend in backends:
-                assert runtime[backend]["supports_lora"], (entry["id"], backend)
-                assert runtime[backend]["supports_lokr"], (entry["id"], backend)
+                adapters = runtime[backend]["adapters"]
+                assert adapters["supports_lora"], (entry["id"], backend)
+                assert adapters["supports_lokr"], (entry["id"], backend)
         facts[entry["id"]] = {
             "advertised": advertised,
             "modes": entry["capabilities"],
-            "backends": {b: {"lora": runtime[b]["supports_lora"]} for b in backends},
+            "backends": {b: {"lora": runtime[b]["adapters"]["supports_lora"]} for b in backends},
         }
     return {"models": facts, "expected": payload["expected"]}
 

@@ -16006,7 +16006,7 @@ mod adaln_exclusion_reaches_the_estimate_floor {
     #[cfg(native_lane)]
     #[test]
     fn the_h3_eviction_figures_are_the_pinned_engines_own() {
-        use platform_runtime::providers::minimax_h3::memory_strategy as h3;
+        use platform_runtime::memory_helpers::minimax_h3::memory_strategy as h3;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         use runtime_cuda as platform_runtime;
         #[cfg(target_os = "macos")]

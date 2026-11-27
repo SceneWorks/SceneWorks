@@ -21,23 +21,23 @@ sceneworks-core = { path = "../sceneworks-core" }
 # engine loads, in a separate adapter process BEFORE the measured one loads anything. The convert
 # and its pin contract are gen-core's own backend-neutral `supra2` module (the same code the
 # worker's install-time converter calls), so both lanes share one call path in `lib.rs`.
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57" }
-sceneworks-gen-core-iris = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57" }
-sceneworks-gen-core-flux3 = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57" }
-sceneworks-gen-core-memory-wan = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0" }
+sceneworks-gen-core-iris = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0" }
+sceneworks-gen-core-flux3 = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0" }
+sceneworks-gen-core-memory-wan = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party bundle dependency on the exact pinned inference revision (REG-5).
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "11d0ff7c81e628beaa548e1872db974c10529efe", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 image = { workspace = true, optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57", features = ["testkit"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0", features = ["testkit"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "02601b8ca484544057bc214359bdb9713d225f57" }
+sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "8b7d0b3d1f1acda6f4c087d6faef5a63496769a0" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

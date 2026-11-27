@@ -2247,9 +2247,84 @@ const RUNTIME_BUNDLE_CRATES: &[&str] = &[
     "runtime_ios",
 ];
 
+fn collect_runtime_bundle_aliases_in_use_tree(
+    tree: &syn::UseTree,
+    at_root: bool,
+    bundle_names: &mut BTreeSet<String>,
+) -> bool {
+    match tree {
+        syn::UseTree::Rename(rename) if at_root => {
+            let source = rename.ident.to_string();
+            let alias = rename.rename.to_string();
+            if alias != "_" && bundle_names.contains(&source) {
+                bundle_names.insert(alias)
+            } else {
+                false
+            }
+        }
+        syn::UseTree::Group(group) if at_root => {
+            let mut changed = false;
+            for item in &group.items {
+                changed |= collect_runtime_bundle_aliases_in_use_tree(item, true, bundle_names);
+            }
+            changed
+        }
+        syn::UseTree::Path(path) if at_root && path.ident == "self" => {
+            collect_runtime_bundle_aliases_in_use_tree(&path.tree, true, bundle_names)
+        }
+        _ => false,
+    }
+}
+
+fn collect_runtime_bundle_names(file: &syn::File) -> BTreeSet<String> {
+    struct AliasVisitor<'a> {
+        bundle_names: &'a mut BTreeSet<String>,
+        changed: bool,
+    }
+    impl<'ast> Visit<'ast> for AliasVisitor<'_> {
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            if collect_runtime_bundle_aliases_in_use_tree(&item.tree, true, self.bundle_names) {
+                self.changed = true;
+            }
+            visit::visit_item_use(self, item);
+        }
+
+        fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+            if let Some((_, rename)) = &item.rename {
+                let source = item.ident.to_string();
+                let alias = rename.to_string();
+                if alias != "_"
+                    && self.bundle_names.contains(&source)
+                    && self.bundle_names.insert(alias)
+                {
+                    self.changed = true;
+                }
+            }
+            visit::visit_item_extern_crate(self, item);
+        }
+    }
+
+    let mut bundle_names: BTreeSet<String> = RUNTIME_BUNDLE_CRATES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    loop {
+        let mut visitor = AliasVisitor {
+            bundle_names: &mut bundle_names,
+            changed: false,
+        };
+        visitor.visit_file(file);
+        if !visitor.changed {
+            break;
+        }
+    }
+    bundle_names
+}
+
 fn runtime_providers_imports_in_use_tree(
     tree: &syn::UseTree,
     prefix: Option<&str>,
+    bundle_names: &BTreeSet<String>,
     offenders: &mut Vec<String>,
 ) {
     match tree {
@@ -2261,13 +2336,17 @@ fn runtime_providers_imports_in_use_tree(
                     return;
                 }
             }
-            let next_prefix = if prefix.is_none() && RUNTIME_BUNDLE_CRATES.contains(&ident.as_str())
-            {
+            let next_prefix = if prefix.is_none() && bundle_names.contains(&ident) {
                 Some(ident)
             } else {
                 None
             };
-            runtime_providers_imports_in_use_tree(&path.tree, next_prefix.as_deref(), offenders);
+            runtime_providers_imports_in_use_tree(
+                &path.tree,
+                next_prefix.as_deref(),
+                bundle_names,
+                offenders,
+            );
         }
         syn::UseTree::Name(name) => {
             if let Some(bundle) = prefix {
@@ -2285,15 +2364,20 @@ fn runtime_providers_imports_in_use_tree(
         }
         syn::UseTree::Group(group) => {
             for item in &group.items {
-                runtime_providers_imports_in_use_tree(item, prefix, offenders);
+                runtime_providers_imports_in_use_tree(item, prefix, bundle_names, offenders);
             }
         }
-        syn::UseTree::Glob(_) => {}
+        syn::UseTree::Glob(_) => {
+            if let Some(bundle) = prefix {
+                offenders.push(format!("{bundle}::*"));
+            }
+        }
     }
 }
 
 fn scan_tokens_for_runtime_providers(
     tokens: proc_macro2::TokenStream,
+    bundle_names: &BTreeSet<String>,
     offenders: &mut Vec<String>,
 ) {
     use proc_macro2::TokenTree;
@@ -2306,7 +2390,7 @@ fn scan_tokens_for_runtime_providers(
             if c1.as_char() == ':'
                 && c2.as_char() == ':'
                 && member == "providers"
-                && RUNTIME_BUNDLE_CRATES.contains(&bundle_str.as_str())
+                && bundle_names.contains(&bundle_str)
             {
                 offenders.push(format!("{bundle_str}::providers"));
             }
@@ -2314,27 +2398,38 @@ fn scan_tokens_for_runtime_providers(
     }
     for token in list {
         if let TokenTree::Group(group) = token {
-            scan_tokens_for_runtime_providers(group.stream(), offenders);
+            scan_tokens_for_runtime_providers(group.stream(), bundle_names, offenders);
         }
     }
 }
 
 fn runtime_providers_imports(source: &str) -> Vec<String> {
-    #[derive(Default)]
-    struct UseVisitor(Vec<String>);
-    impl<'ast> Visit<'ast> for UseVisitor {
+    struct UseVisitor<'a> {
+        bundle_names: &'a BTreeSet<String>,
+        offenders: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for UseVisitor<'_> {
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-            runtime_providers_imports_in_use_tree(&item.tree, None, &mut self.0);
+            runtime_providers_imports_in_use_tree(
+                &item.tree,
+                None,
+                self.bundle_names,
+                &mut self.offenders,
+            );
             visit::visit_item_use(self, item);
         }
     }
 
     let file = parse(source);
+    let bundle_names = collect_runtime_bundle_names(&file);
     let mut offenders = Vec::new();
-    let mut visitor = UseVisitor::default();
+    let mut visitor = UseVisitor {
+        bundle_names: &bundle_names,
+        offenders: Vec::new(),
+    };
     visitor.visit_file(&file);
-    offenders.extend(visitor.0);
-    scan_tokens_for_runtime_providers(file.into_token_stream(), &mut offenders);
+    offenders.extend(visitor.offenders);
+    scan_tokens_for_runtime_providers(file.into_token_stream(), &bundle_names, &mut offenders);
     offenders.sort();
     offenders.dedup();
     offenders
@@ -2371,6 +2466,11 @@ fn reg6_providers_import_guard_rejects_violations_and_accepts_facades_and_commen
         "use runtime_macos::providers as p;",
         "fn call() { let _ = runtime_cpu::providers::foo::bar(); }",
         "fn call() { let _ = runtime_ios::providers::baz(); }",
+        "use runtime_macos as platform_runtime; use platform_runtime::providers::minimax_h3;",
+        "use {runtime_macos as platform_runtime}; fn f() { let _ = platform_runtime::providers::wan::config::MAX_AREA_14B; }",
+        "extern crate runtime_cuda as rt; fn f() { rt::providers::kolors::x(); }",
+        "use runtime_macos::*;",
+        "use runtime_macos as platform_runtime; use platform_runtime::*;",
     ] {
         assert!(
             !runtime_providers_imports(violating).is_empty(),
@@ -2380,6 +2480,8 @@ fn reg6_providers_import_guard_rejects_violations_and_accepts_facades_and_commen
 
     let clean = r#"
         // runtime_cuda::providers::kolors must never be imported in code.
+        use runtime_macos as platform_runtime;
+        use platform_runtime::memory_helpers::minimax_h3;
         use runtime_cuda::memory_helpers::flux::memory_strategy;
         use runtime_macos::utilities::face::FaceAnalysis;
         use runtime_macos::converters::wan::product_load;
