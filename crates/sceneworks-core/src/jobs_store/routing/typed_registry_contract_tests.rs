@@ -351,6 +351,15 @@ fn former_audit_regressions_follow_typed_image_and_video_owners() {
         .find(|row| row["variant"] == "int8-convrot")
         .unwrap();
     assert_eq!(convrot["platforms"], json!(["windows", "linux"]));
+    let w4a8 = krea["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["variant"] == "w4a8")
+        .unwrap();
+    assert_eq!(w4a8["platforms"], json!(["windows", "linux"]));
+    assert_eq!(w4a8["repo"], "SceneWorks/krea-2-turbo-w4a8");
+    assert_eq!(w4a8["files"], json!([]));
     let mlx_caps: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../../config/engine-capabilities/runtime/capabilities.mlx.json"
     ))
@@ -955,6 +964,9 @@ mod residual {
                 Some(json!({ "quantTier": crate::image_request::FP8R_QUANT_TIER }))
             }
             "int8-convrot" => Some(json!({ "convRot": true })),
+            crate::image_request::W4A8_QUANT_TIER => {
+                Some(json!({ "quantTier": crate::image_request::W4A8_QUANT_TIER }))
+            }
             _ => return None,
         })
     }
@@ -1753,6 +1765,27 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
     add(
         "models/krea_2_turbo/precisionTier/int8-convrot".into(),
         CANDLE_ONLY,
+    );
+    // SW-6135: the prebuilt W4A8 transformer is a CUDA format with no MLX form, and a job on it
+    // requires the `w4a8` device marker (sm_80+). The probe worker IS the dumped CUDA host, so the
+    // Candle answer follows whether that dump advertises the marker: a dump taken before the marker
+    // existed claims nothing, and the epic-end re-dump on the sm_120 box makes it Candle-only. The
+    // MLX answer is false either way.
+    let candle_dump_advertises_w4a8 = serde_json::from_str::<serde_json::Value>(include_str!(
+        "../../../../../config/engine-capabilities/runtime/capabilities.candle.json"
+    ))
+    .unwrap()["workerCapabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == crate::image_request::W4A8_QUANT_TIER);
+    add(
+        "models/krea_2_turbo/precisionTier/w4a8".into(),
+        if candle_dump_advertises_w4a8 {
+            CANDLE_ONLY
+        } else {
+            NEITHER
+        },
     );
     for tier in ["q4", "q8"] {
         add(format!("models/mage_flow_edit/precisionTier/{tier}"), BOTH);

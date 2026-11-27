@@ -285,6 +285,15 @@ pub(crate) fn with_candle_capabilities(
                     INT8_CONVROT_CAPABILITY.to_owned(),
                 ));
             }
+            // Krea 2 W4A8 eligibility marker (SW-6135, feature SW-F287). Same shape as `int8_convrot`:
+            // advertised ONLY when this candle (CUDA) worker's GPU clears the sm_80 floor of the int8
+            // `mma.sync` tensor-core instruction the fused W4A8 GEMM issues (the inference loader
+            // refuses the tier below it too, typed). The web picker shows the `w4a8` tier only when a
+            // live worker advertises this.
+            if compute_cap_meets_w4a8(compute_cap) {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown(W4A8_CAPABILITY.to_owned()));
+            }
             // NVFP4 tier eligibility marker (sc-11042, epic 11037). Advertised ONLY when this candle
             // worker's GPU clears the sm_120 consumer-Blackwell floor (the FP4 tensor cores the
             // cuBLASLt NVFP4 GEMM needs). Exactly the `int8_convrot` shape above: bundling the candle
@@ -548,6 +557,23 @@ pub(crate) fn parse_max_compute_cap(output: &str) -> Option<f32> {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn compute_cap_meets_int8_convrot(cap: Option<f32>) -> bool {
     cap.is_some_and(|c| c >= INT8_CONVROT_MIN_COMPUTE_CAP)
+}
+
+/// The advertised marker capability meaning "this candle worker can run the Krea 2 W4A8 tier"
+/// (SW-6135). Mirrors [`INT8_CONVROT_CAPABILITY`]: the candle (CUDA) lane plus a GPU compute
+/// capability >= [`W4A8_MIN_COMPUTE_CAP`]. Its name is the tier key itself.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const W4A8_CAPABILITY: &str = sceneworks_core::image_request::W4A8_QUANT_TIER;
+
+/// The W4A8 tier's compute-capability floor: **8.0** (Ampere `sm_80`), the first architecture with
+/// the int8 `mma.sync.m16n8k32` tensor-core instruction — the inference `W4A8_COMPUTE_CAP_FLOOR`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const W4A8_MIN_COMPUTE_CAP: f32 = 8.0;
+
+/// Whether a probed compute cap clears the W4A8 sm_80 floor. `None` (no probe) ⇒ ineligible.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn compute_cap_meets_w4a8(cap: Option<f32>) -> bool {
+    cap.is_some_and(|c| c >= W4A8_MIN_COMPUTE_CAP)
 }
 
 /// The advertised marker capability meaning "this candle worker can run the NVFP4 tier" (sc-11042,

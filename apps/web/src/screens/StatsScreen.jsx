@@ -38,7 +38,7 @@ import {
 // Fixed, mode-stable series colors (Tidepool). Phase timing = three shades of one
 // hue (parts of a whole); quant = categorical.
 const PHASE_COLORS = { load: "#B5D4F4", sample: "#378ADD", decode: "#0C447C" };
-const QUANT_COLORS = { bf16: "#2a78d6", q8: "#1baf7a", q4: "#eda100", "int8-convrot": "#4a3aa7" };
+const QUANT_COLORS = { bf16: "#2a78d6", q8: "#1baf7a", q4: "#eda100", "int8-convrot": "#4a3aa7", w4a8: "#e34948" };
 const SERIES_FALLBACK = ["#2a78d6", "#1baf7a", "#eda100", "#4a3aa7", "#e34948", "#e87ba4"];
 
 // Generation Stats screen (epic 10402, sc-10408): a filterable, sortable list of

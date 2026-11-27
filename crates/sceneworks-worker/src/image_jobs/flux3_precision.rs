@@ -1037,7 +1037,7 @@ mod tests {
         let evidence = position(body, "validate_candle_tier_memory_evidence(", lane);
         let downtier = position(
             body,
-            "if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {",
+            "if convrot.is_none() && w4a8.is_none() && !explicit_pick && flux3_plan.is_none() {",
             lane,
         );
         let quant = position(body, "Some(plan) => plan.quant_and_bits(),", lane);

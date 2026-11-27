@@ -14,6 +14,7 @@ import {
   tierPickerOptions,
   isConvRotTier,
   isNvfp4Tier,
+  isW4a8Tier,
   isSelectableTier,
   modelQualityFloor,
   nativeTierEligibility,
@@ -23,6 +24,7 @@ import {
   tierQuantize,
   INT8_CONVROT_TIER,
   NVFP4_TIER,
+  W4A8_TIER,
   endpointEstimate,
   memoryLane,
   suggestTier,
@@ -175,6 +177,51 @@ describe("INT8-ConvRot tier (sc-9300)", () => {
     expect(shouldShowTierPicker(model)).toBe(true);
     // On an ineligible host only bf16 remains → single tier → no picker.
     expect(shouldShowTierPicker(model, { convRotEligible: false })).toBe(false);
+  });
+});
+
+describe("W4A8 tier (SW-6135)", () => {
+  const worker = (capabilities, status = "online") => ({ capabilities, status });
+  const krea = () => ({
+    id: "krea_2_turbo",
+    family: "krea_2",
+    type: "image",
+    hasVariantMatrix: true,
+    variants: [
+      { variant: "q4", installState: "installed" },
+      { variant: W4A8_TIER, installState: "installed" },
+      { variant: "q8", installState: "installed" },
+      { variant: "bf16", installState: "installed" },
+    ],
+  });
+
+  it("is a selectable non-bits tier with its own label", () => {
+    expect(isW4a8Tier(W4A8_TIER)).toBe(true);
+    expect(isW4a8Tier("q4")).toBe(false);
+    expect(isSelectableTier(W4A8_TIER)).toBe(true);
+    // Rides advanced.quantTier: an mlxQuantize of 4 would select the int4-affine q4 tier.
+    expect(tierQuantize(W4A8_TIER)).toBe(null);
+    expect(tierLabel(W4A8_TIER)).toBe("W4A8 (candle, sm_80+)");
+  });
+
+  it("is offered only when a live worker advertises the w4a8 capability", () => {
+    const model = krea();
+    // A caller that forwards no capabilities hides it (the flag defaults false, like FP8R).
+    expect(installedTiers(model)).toEqual(["q4", "q8", "bf16"]);
+    for (const workers of [[], [worker(["candle", "int8_convrot", "nvfp4"])], [worker(["w4a8"], "offline")]]) {
+      expect(installedTiers(model, nativeTierEligibility(model, workers))).toEqual(["q4", "q8", "bf16"]);
+    }
+    const caps = nativeTierEligibility(model, [worker(["candle", "w4a8"])]);
+    expect(caps.w4a8Eligible).toBe(true);
+    // Ordered between NVFP4 and INT8-ConvRot: q4 < w4a8 < q8 < bf16.
+    expect(installedTiers(model, caps)).toEqual(["q4", W4A8_TIER, "q8", "bf16"]);
+    expect(allPossibleTiers(model, caps)).toEqual(["q4", W4A8_TIER, "q8", "bf16"]);
+  });
+
+  it("is never seeded as the default on an ineligible host", () => {
+    const model = { ...krea(), defaultTier: W4A8_TIER };
+    expect(defaultTierSelection(model, W4A8_TIER)).not.toBe(W4A8_TIER);
+    expect(defaultTierSelection(model, W4A8_TIER, { w4a8Eligible: true })).toBe(W4A8_TIER);
   });
 });
 

@@ -69,6 +69,17 @@ export const NVFP4_TIER = "nvfp4";
 // Rotated FP8 is a distinct native numeric format, never an mlxQuantize bit count.
 export const FP8R_TIER = "fp8r";
 
+// The candle-only Krea 2 W4A8 tier key (SW-6135, feature SW-F287): ConvRot-rotated int4 weights with
+// int8 activations on the int8 tensor cores (CUDA sm_80+), published prebuilt at
+// `SceneWorks/krea-2-turbo-w4a8`. Not a bits-based quant either: `4` would select the int4-affine q4
+// tier, so it is absent from TIER_QUANTIZE and rides the distinct `advanced.quantTier: "w4a8"` label
+// (see imageJobAdvanced.js), like NVFP4.
+export const W4A8_TIER = "w4a8";
+
+export function isW4a8Tier(tier) {
+  return tier === W4A8_TIER;
+}
+
 export function isFp8rTier(tier) {
   return tier === FP8R_TIER;
 }
@@ -83,6 +94,7 @@ export function nativeTierEligibility(model, workers = []) {
     convRotEligible: has("int8_convrot"),
     nvfp4Eligible: has(flux3 ? "flux3_nvfp4" : "nvfp4"),
     fp8rEligible: has("fp8r"),
+    w4a8Eligible: has("w4a8"),
   };
 }
 
@@ -106,14 +118,18 @@ const TIER_LABELS = {
   // from Q4 on purpose — it is a different numeric regime, not a faster q4.
   [NVFP4_TIER]: "NVFP4 (candle, Blackwell sm_120+)",
   [FP8R_TIER]: "FP8R (candle, sm_89+)",
+  // Candle-only (Windows/Linux, sm_80+). int4 weights x int8 activations (SW-6135): PSNR 31.3 dB vs
+  // bf16 on Krea 2 Turbo, between NVFP4 and INT8-ConvRot.
+  [W4A8_TIER]: "W4A8 (candle, sm_80+)",
 };
 
 // Display order (smallest → largest); tiers not in this list sort after, alphabetically. int8-convrot
 // sits between q4 and q8 by footprint/fidelity (int8 DiT, PSNR 34.4 dB — better than Q4's 22.7 dB).
 // nvfp4 sits just above q4: ~4.5 effective bits/weight vs q4's 4, with weight accuracy measured at
 // roughly the int4 tier's (spike sc-11038: rel-RMS ~0.094) — so it is the nearest neighbour above q4
-// and below the int8 tier by footprint.
-const TIER_ORDER = ["q4", NVFP4_TIER, INT8_CONVROT_TIER, FP8R_TIER, "q8", "bf16"];
+// and below the int8 tier by footprint. w4a8 (int4 weights, 16.5 GB Krea DiT, PSNR 31.3 dB) sits between
+// nvfp4 and int8-convrot by both footprint and fidelity.
+const TIER_ORDER = ["q4", NVFP4_TIER, W4A8_TIER, INT8_CONVROT_TIER, FP8R_TIER, "q8", "bf16"];
 
 // Map a tier key to its `advanced.mlxQuantize` value, or null when the key isn't a known quant
 // tier (e.g. "default" on a single-variant model — such models never render the picker).
@@ -172,25 +188,29 @@ export function effectiveTierLabel(tier, model) {
 }
 
 // Whether a tier key is a user-selectable generation tier: a known bits-based quant (bf16/q8/q4) OR one
-// of the candle-only non-bits tiers (INT8-ConvRot, NVFP4). Excludes the "default" pseudo-variant of a
+// of the candle-only non-bits tiers (INT8-ConvRot, NVFP4, FP8R, W4A8). Excludes the "default" pseudo-variant of a
 // single-variant model and non-generation pseudo-tiers like "training". Distinct from `tierQuantize`
 // (which returns null for both non-bits tiers because they have no mlxQuantize value — they still
 // select, via `advanced.convRot` / `advanced.quantTier`).
 export function isSelectableTier(tier) {
-  return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier) || isFp8rTier(tier);
+  return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier) || isFp8rTier(tier) ||
+    isW4a8Tier(tier);
 }
 
 // Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
 // worker can serve them; every bits-based tier is unaffected. Both flags default true, which keeps a
-// caller that knows nothing about worker capabilities behaving exactly as before.
+// caller that knows nothing about worker capabilities behaving exactly as before. The newer FP8R and
+// W4A8 flags default false: a tier added after those call sites existed stays hidden until a caller
+// forwards a live worker's capability for it.
 //
 // Extracted so the THREE readers of this rule share one spelling — `installedTiers`, `allPossibleTiers`,
 // and (sc-15400) the Simple Models floor label, which must not size a host against a tier that host
 // cannot serve.
 export function tierHostEligible(tier, options = {}) {
-  const { convRotEligible = true, nvfp4Eligible = true, fp8rEligible = false } = options;
+  const { convRotEligible = true, nvfp4Eligible = true, fp8rEligible = false, w4a8Eligible = false } = options;
   return (convRotEligible || !isConvRotTier(tier)) &&
-    (nvfp4Eligible || !isNvfp4Tier(tier)) && (fp8rEligible || !isFp8rTier(tier));
+    (nvfp4Eligible || !isNvfp4Tier(tier)) && (fp8rEligible || !isFp8rTier(tier)) &&
+    (w4a8Eligible || !isW4a8Tier(tier));
 }
 
 // The installed, selectable quant tiers of a model, in display order. A tier is selectable when it is

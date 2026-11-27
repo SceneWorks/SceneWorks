@@ -1829,3 +1829,8 @@ mod candle_disabled_plan_backed_refusal_tests;
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 #[path = "tests/candle_label_tests.rs"]
 mod candle_label_tests;
+
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/krea_w4a8_tests.rs"]
+mod krea_w4a8_tests;

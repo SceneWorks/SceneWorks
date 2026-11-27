@@ -363,7 +363,11 @@ fn krea_control_candle_available_with_pose_count(
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
         && pose_count > 0
-        && if super::artifact_resolution::wants_krea_convrot(request) {
+        // SW-6135: a W4A8 pose job is CLAIMED here so it meets this lane's typed refusal, instead of
+        // falling through to a route that would render it without its poses.
+        && if super::artifact_resolution::wants_krea_w4a8(request) {
+            true
+        } else if super::artifact_resolution::wants_krea_convrot(request) {
             super::artifact_resolution::resolve_krea_convrot_dit(settings).is_some()
         } else {
             matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
@@ -718,6 +722,19 @@ impl CandleStrictControl for KreaStrictControl {
     }
 }
 
+/// Krea pose control runs on the composable control trunk, which has no W4A8 projection (the
+/// inference control provider refuses the tier by type). Refuse it here, before the bf16 base or
+/// the overlay is fetched, with the same reason API validation gives (SW-6135).
+pub(super) fn refuse_krea_control_w4a8(request: &ImageRequest) -> WorkerResult<()> {
+    if !super::artifact_resolution::wants_krea_w4a8(request) {
+        return Ok(());
+    }
+    Err(WorkerError::InvalidPayload(
+        sceneworks_core::image_request::w4a8_tier_refusal(&request.model, false, true, None)
+            .unwrap_or_else(|| "Krea pose control does not run on the W4A8 tier".to_owned()),
+    ))
+}
+
 /// Real candle Krea 2 strict-pose generation: one image per pose, each conditioned on a full DWPose
 /// skeleton (`controlMode` unset ⇒ pose) via a trained control-branch overlay on the frozen Turbo base
 /// (sc-8464; engine sc-8462). Resolves the dense base + the overlay, then hands a [`KreaStrictControl`] to
@@ -739,8 +756,9 @@ pub(super) async fn generate_candle_krea_control_stream(
     request
         .reject_active_pag("Krea pose control")
         .map_err(WorkerError::InvalidPayload)?;
+    refuse_krea_control_w4a8(request)?;
     if super::artifact_resolution::wants_krea_convrot(request) {
-        super::artifact_resolution::ensure_krea_convrot_base_present(api, settings, job, request)
+        super::artifact_resolution::ensure_krea_dense_base_present(api, settings, job, request)
             .await?;
     }
     let (base, convrot_dit) = if super::artifact_resolution::wants_krea_convrot(request) {

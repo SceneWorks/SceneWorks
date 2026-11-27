@@ -76,6 +76,28 @@ pub fn conv_rot_selected(variant: Option<&str>, flag: bool) -> bool {
     }
 }
 
+/// The top-level `variant` / `advanced.quantTier` that names the Krea 2 Turbo W4A8 tier (SW-6135).
+pub const KREA_W4A8_VARIANT: &str = crate::image_request::W4A8_QUANT_TIER;
+
+/// The published repo of the Krea 2 Turbo W4A8 transformer (SW-6135).
+pub const KREA_W4A8_REPO: &str = "SceneWorks/krea-2-turbo-w4a8";
+
+/// Whether a request selects the Krea 2 W4A8 tier on a route that can load it: the Candle backend
+/// off macOS (CUDA sm_80+; the device floor is the worker's `w4a8` capability and the loader's own
+/// check). `requested_variant` is the admitted tier ([`crate::model_artifacts::artifact_selection::
+/// requested_runtime_variant`]: the top-level `variant`, then `advanced.quantTier`).
+pub fn krea_w4a8_requested_resolved(
+    model_id: &str,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+) -> bool {
+    model_id == "krea_2_turbo"
+        && backend == "candle"
+        && platform != "macos"
+        && requested_variant.is_some_and(crate::image_request::is_w4a8_tier)
+}
+
 pub fn krea_convrot_requested_resolved(
     model_id: &str,
     backend: &str,
