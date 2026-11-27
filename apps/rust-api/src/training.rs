@@ -1598,7 +1598,7 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     if let Some(prompt) = prompt.filter(|_| condense_rows.is_none()) {
         job_payload.insert("prompt".to_owned(), json!(prompt));
     }
-    if condense_rows.is_none() && !payload.prompt_exclusions.is_empty() {
+    if !payload.prompt_exclusions.is_empty() {
         job_payload.insert(
             "promptExclusions".to_owned(),
             json!(payload.prompt_exclusions),

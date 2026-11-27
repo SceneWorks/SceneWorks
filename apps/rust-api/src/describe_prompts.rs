@@ -300,18 +300,21 @@ pub(crate) async fn delete_describe_prompt_preset(
 mod unit_tests {
     use super::*;
     use sceneworks_core::dataset_batch_describe::{
-        prompt_asset_section, JOYCAPTION_REPO, MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS,
-        VISION_CAPTIONER_REPO,
+        prompt_asset_section, render_scene_observation, JOYCAPTION_REPO,
+        MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS, VISION_CAPTIONER_REPO,
     };
 
     #[test]
-    fn each_model_default_is_exactly_its_own_asset_section() {
+    fn each_model_default_renders_its_own_asset_section_without_the_output_contract() {
         let vision = default_describe_instruction(VISION_CAPTIONER_REPO);
         let joy = default_describe_instruction(JOYCAPTION_REPO);
         // The worker's own section text, read from the worker's asset file.
         assert_eq!(
             vision,
-            prompt_asset_section(IMAGE_BATCH_DESCRIBE_ASSET, "SYSTEM")
+            render_scene_observation(
+                &prompt_asset_section(IMAGE_BATCH_DESCRIBE_ASSET, "SYSTEM"),
+                false
+            )
         );
         assert_eq!(
             joy,
@@ -320,18 +323,23 @@ mod unit_tests {
         assert!(vision.starts_with("You are a meticulous scene describer."));
         assert!(vision.contains("## LIGHTING"));
         assert!(
-            vision.trim_end().ends_with("and where the shadows fall."),
+            vision
+                .trim_end()
+                .ends_with("Do not add details to compensate for an empty field."),
             "the Vision default stops before [JOYCAPTION_SYSTEM]"
         );
+        assert!(vision.contains("visible support points"));
+        assert!(!vision.contains("{{scene_observation}}"));
+        assert!(!vision.contains("## APPEARANCE"));
         assert!(!vision.contains("JOYCAPTION") && !vision.contains("about 500 words"));
         for prompt in [&vision, &joy] {
             assert!(
-                !prompt.contains("## OUTPUT"),
+                !prompt.contains("## OUTPUT —"),
                 "the JSON contract is never editable"
             );
             assert!(!prompt.contains("[OUTPUT]") && !prompt.contains("[META]"));
         }
-        assert!(joy.contains("about 500 words") && !joy.contains("## LABELS"));
+        assert!(joy.contains("## LABELS") && !joy.contains("about 500 words"));
         assert!(vision.chars().count() <= MAX_DESCRIBE_PROMPT_CHARS);
         assert!(joy.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
     }

@@ -399,6 +399,9 @@ pub(crate) struct DescribePrompt {
     pub(crate) user: String,
     exclusion_instruction: String,
     compact_exclusion_instruction: String,
+    exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    /// Default observation rules must not rewrite an explicit custom instruction's detail level.
+    use_default_observation: bool,
 }
 
 #[cfg(native_lane)]
@@ -407,6 +410,7 @@ impl DescribePrompt {
         mut self,
         exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
     ) -> Self {
+        self.exclusions = exclusions.to_vec();
         self.exclusion_instruction =
             sceneworks_core::options::prompt_content::exclusion_instruction(exclusions);
         self.compact_exclusion_instruction =
@@ -431,6 +435,8 @@ impl DescribePrompt {
             user: crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, "USER"),
             exclusion_instruction: String::new(),
             compact_exclusion_instruction: String::new(),
+            exclusions: Vec::new(),
+            use_default_observation: is_default,
         };
         (prompt, is_default)
     }
@@ -438,7 +444,11 @@ impl DescribePrompt {
     /// Instruction, fixed output contract, then optional exclusions. Exclusions take precedence
     /// over content requests while explicitly preserving the contract's output shape.
     pub(crate) fn system(&self) -> String {
-        let system = format!("{}\n\n{}", self.instruction, self.output_contract);
+        let instruction = sceneworks_core::options::prompt_content::select_content_sections(
+            &self.instruction,
+            &self.exclusions,
+        );
+        let system = format!("{}\n\n{}", instruction, self.output_contract);
         if self.exclusion_instruction.is_empty() {
             system
         } else {
@@ -455,7 +465,12 @@ impl DescribePrompt {
             // even at the maximum instruction size. Other providers use the explicit rules.
             format!(
                 "{}\n\n{}\n\n{}",
-                self.instruction, self.output_contract, self.compact_exclusion_instruction
+                sceneworks_core::options::prompt_content::select_content_sections(
+                    &self.instruction,
+                    &self.exclusions
+                ),
+                self.output_contract,
+                self.compact_exclusion_instruction
             )
         }
     }
@@ -1017,7 +1032,14 @@ pub(crate) trait BatchDescriber: Send + Sync {
 
     /// One text-only generation with the loaded model: `system` is the condensing instruction,
     /// `user` the fields. Only called when [`Self::condenses`].
-    fn condense(&self, _system: String, _user: String, _cancel: CancelFlag) -> CondenseFuture {
+    fn condense(
+        &self,
+        _system: String,
+        _user: String,
+        _source: String,
+        _cancel: CancelFlag,
+        _exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    ) -> CondenseFuture {
         Box::pin(async { Ok(Err("This describer does not condense.".to_owned())) })
     }
 
@@ -1174,7 +1196,7 @@ impl VisionCaptionerDescriber {
 }
 
 /// One image describe request: the system and user prompts with the image, the JSON constraint,
-/// thinking off, and the describer's speculative option (`product`; `auto` on the Qwen3.8 27B, so
+/// thinking when supported, and the describer's speculative option (`product`; `auto` on Qwen3.8 27B, so
 /// the engine runs a resident block draft where it measured faster), checked linearly (SW-7204).
 #[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
@@ -1188,10 +1210,13 @@ pub(crate) fn describe_request(
     kv_compression: gen_core::core_llm::KvCompressionPolicy,
 ) -> gen_core::core_llm::TextLlmRequest {
     use gen_core::core_llm::{Content, Message, Role, Sampling, TextLlmRequest, ThinkingMode};
-    // Thinking is always off: the 8B Vision Captioner has no thinking mode, and the Qwen3.8 27B
-    // has one that this request disables. A no-think request keeps the JSON mask safe to apply
-    // from the first token.
-    let thinking = ThinkingMode::Disabled;
+    // Let a reasoning-capable model establish visual facts before writing the object. The shared
+    // constraint policy waits for reasoning to close; non-reasoning models keep immediate JSON.
+    let thinking = if supports_thinking {
+        ThinkingMode::Enabled
+    } else {
+        ThinkingMode::Disabled
+    };
     let constraint =
         crate::prompt_refine_jobs::json_decode_constraint(true, supports_thinking, thinking);
     let (speculative, speculative_verify) = crate::qwen38_block_draft::request_speculation(product);
@@ -1211,7 +1236,11 @@ pub(crate) fn describe_request(
             top_p: 0.9,
             ..Sampling::default()
         },
-        max_new_tokens: DESCRIBE_MAX_NEW_TOKENS,
+        max_new_tokens: if supports_thinking {
+            crate::prompt_refine_jobs::REASONING_DESCRIBE_MAX_NEW_TOKENS
+        } else {
+            DESCRIBE_MAX_NEW_TOKENS
+        },
         constraint,
         cancel,
         thinking,
@@ -1265,6 +1294,8 @@ impl BatchDescriber for VisionCaptionerDescriber {
         let (spec, requirements) = self.load_key();
         let system = prompt.system();
         let user = prompt.user();
+        let exclusions = prompt.exclusions.clone();
+        let review_pose = prompt.use_default_observation;
         let job_id = self.job_id.clone();
         let kv_compression = crate::llm_kv_cache::worker_default_policy();
         let name = self.model.display_name();
@@ -1282,7 +1313,7 @@ impl BatchDescriber for VisionCaptionerDescriber {
                         return Ok(Err(format!("The image could not be prepared: {error}")))
                     }
                 };
-                let request = describe_request(
+                let mut request = describe_request(
                     product_speculative,
                     system,
                     user,
@@ -1293,30 +1324,39 @@ impl BatchDescriber for VisionCaptionerDescriber {
                 );
                 // sc-24029: bound MLX's process-global freed-buffer cache across the decode.
                 let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
-                let generation =
-                    crate::load_progress::generate_text(model, &request, &mut |event| {
-                        if matches!(event, StreamEvent::Token { .. }) {
-                            cache_bound.note_event();
+                let checked = crate::prompt_content_guard::generate_checked(
+                    &mut request,
+                    &exclusions,
+                    &job_id,
+                    review_pose,
+                    |request| {
+                        let generation =
+                            crate::load_progress::generate_text(model, request, &mut |event| {
+                                if matches!(event, StreamEvent::Token { .. }) {
+                                    cache_bound.note_event();
+                                }
+                            });
+                        crate::llm_kv_cache::KvCacheRecord::of(
+                            crate::llm_kv_cache::NATIVE_LLM_ENGINE,
+                            request.kv_compression,
+                            &generation,
+                            |output| output.kv_cache.as_ref(),
+                        )
+                        .emit(&job_id);
+                        if let Ok(output) = &generation {
+                            emit_generation_stats(&job_id, "describe", output);
+                            note_decode(
+                                &tally,
+                                crate::qwen38_block_draft::DecodePhase::Describe,
+                                model,
+                                output,
+                                block_draft.as_ref(),
+                            );
                         }
-                    });
-                crate::llm_kv_cache::KvCacheRecord::of(
-                    crate::llm_kv_cache::NATIVE_LLM_ENGINE,
-                    request.kv_compression,
-                    &generation,
-                    |output| output.kv_cache.as_ref(),
-                )
-                .emit(&job_id);
-                if let Ok(output) = &generation {
-                    emit_generation_stats(&job_id, "describe", output);
-                    note_decode(
-                        &tally,
-                        crate::qwen38_block_draft::DecodePhase::Describe,
-                        model,
-                        output,
-                        block_draft.as_ref(),
-                    );
-                }
-                Ok(generation
+                        generation.map_err(|error| WorkerError::Engine(error.to_string()))
+                    },
+                );
+                Ok(checked
                     .map(|output| output.text)
                     .map_err(|error| format!("{name} generation failed: {error}")))
             },
@@ -1340,7 +1380,14 @@ impl BatchDescriber for VisionCaptionerDescriber {
 
     /// The text-only rewrite on the model the describe call left resident (same cache key, so no
     /// second load and no new memory admission): plain text, thinking disabled.
-    fn condense(&self, system: String, user: String, cancel: CancelFlag) -> CondenseFuture {
+    fn condense(
+        &self,
+        system: String,
+        user: String,
+        source: String,
+        cancel: CancelFlag,
+        exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    ) -> CondenseFuture {
         use gen_core::core_llm::{FinishReason, StreamEvent};
         let (spec, requirements) = self.load_key();
         let job_id = self.job_id.clone();
@@ -1354,32 +1401,42 @@ impl BatchDescriber for VisionCaptionerDescriber {
             requirements,
             format!("{name} load failed"),
             move |model| -> WorkerResult<Result<CondenseReply, String>> {
-                let request =
+                let mut request =
                     condense_request(product_speculative, system, user, cancel, kv_compression);
                 let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
-                let generation =
-                    crate::load_progress::generate_text(model, &request, &mut |event| {
-                        if matches!(event, StreamEvent::Token { .. }) {
-                            cache_bound.note_event();
+                let generation = crate::prompt_content_guard::generate_checked_with_source(
+                    &mut request,
+                    &exclusions,
+                    &job_id,
+                    false,
+                    Some(&source),
+                    |request| {
+                        let generation =
+                            crate::load_progress::generate_text(model, request, &mut |event| {
+                                if matches!(event, StreamEvent::Token { .. }) {
+                                    cache_bound.note_event();
+                                }
+                            });
+                        crate::llm_kv_cache::KvCacheRecord::of(
+                            crate::llm_kv_cache::NATIVE_LLM_ENGINE,
+                            request.kv_compression,
+                            &generation,
+                            |output| output.kv_cache.as_ref(),
+                        )
+                        .emit(&job_id);
+                        if let Ok(output) = &generation {
+                            emit_generation_stats(&job_id, "condense", output);
+                            note_decode(
+                                &tally,
+                                crate::qwen38_block_draft::DecodePhase::Condense,
+                                model,
+                                output,
+                                block_draft.as_ref(),
+                            );
                         }
-                    });
-                crate::llm_kv_cache::KvCacheRecord::of(
-                    crate::llm_kv_cache::NATIVE_LLM_ENGINE,
-                    request.kv_compression,
-                    &generation,
-                    |output| output.kv_cache.as_ref(),
-                )
-                .emit(&job_id);
-                if let Ok(output) = &generation {
-                    emit_generation_stats(&job_id, "condense", output);
-                    note_decode(
-                        &tally,
-                        crate::qwen38_block_draft::DecodePhase::Condense,
-                        model,
-                        output,
-                        block_draft.as_ref(),
-                    );
-                }
+                        generation.map_err(|error| WorkerError::Engine(error.to_string()))
+                    },
+                );
                 Ok(generation
                     .map(|output| CondenseReply {
                         generated_tokens: output.usage.generated_tokens as usize,
@@ -2183,10 +2240,36 @@ async fn run_batch_describe(
                 .as_ref()
                 .map(|fields| fields.fields.clone())
                 .unwrap_or_default();
-            match condense_fields(api, settings, job, describer, fit, &fields, (index, total))
-                .await?
+            match condense_fields(
+                api,
+                settings,
+                job,
+                describer,
+                fit,
+                &fields,
+                &request.prompt.exclusions,
+                (index, total),
+            )
+            .await?
             {
-                Some(condensed) => outcome.condensed = Some(condensed),
+                Some(mut condensed) => {
+                    if !crate::prompt_content_guard::known_leaks(
+                        &condensed.text,
+                        &request.prompt.exclusions,
+                    )
+                    .is_empty()
+                    {
+                        // Preserve the already checked fields as the existing failure fallback.
+                        condensed.text.clear();
+                        condensed.tokens = None;
+                        condensed.characters = 0;
+                        condensed.mentions = 0;
+                        condensed.over = false;
+                        condensed.failed = true;
+                        condensed.notice = Some("The condensed prompt included excluded content; use the description fields instead.".to_owned());
+                    }
+                    outcome.condensed = Some(condensed);
+                }
                 None => {
                     // Canceled while condensing: a newly described image is already stored
                     // with its fields; a condense-only row is unchanged.
@@ -2366,10 +2449,12 @@ async fn describe_with_retries(
             Err(error) => return Ok(Some(Err(error))),
         };
         match describer.parse(&raw) {
-            Ok(fields) => return Ok(Some(Ok(fields))),
+            Ok(fields) => return Ok(Some(check_described_exclusions(fields, &prompt.exclusions))),
             Err(error) if attempt >= retries => {
                 if let Some(recovered) = describer.recover(&raw) {
-                    return Ok(Some(recovered));
+                    return Ok(Some(recovered.and_then(|fields| {
+                        check_described_exclusions(fields, &prompt.exclusions)
+                    })));
                 }
                 return Ok(Some(Err(if attempt == 0 {
                     error
@@ -2403,6 +2488,28 @@ async fn describe_with_retries(
         )
         .await?;
     }
+}
+
+/// Check the fields actually stored, including a provider's recovered/truncated reply. This
+/// also covers JoyCaption's separate captioner interface without introducing a model load path.
+#[cfg(native_lane)]
+fn check_described_exclusions(
+    fields: DescribedFields,
+    exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
+) -> Result<DescribedFields, String> {
+    if !exclusions.is_empty() {
+        let object: serde_json::Map<String, Value> = DESCRIBE_FIELDS
+            .iter()
+            .zip(&fields.fields)
+            .map(|(key, value)| ((*key).to_owned(), Value::String(value.clone())))
+            .collect();
+        if !crate::prompt_content_guard::known_leaks(&Value::Object(object).to_string(), exclusions)
+            .is_empty()
+        {
+            return Err("The describer returned excluded content; try another installed model or revise the request.".to_owned());
+        }
+    }
+    Ok(fields)
 }
 
 /// Without a native vision provider (neither the macOS MLX worker nor the candle build) the

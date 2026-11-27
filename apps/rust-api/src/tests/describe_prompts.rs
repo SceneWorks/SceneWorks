@@ -20,8 +20,11 @@ fn asset_section(name: &str) -> &'static str {
         .trim()
 }
 
-fn asset_system_section() -> &'static str {
-    asset_section("SYSTEM")
+fn asset_system_section() -> String {
+    sceneworks_core::dataset_batch_describe::render_scene_observation(
+        asset_section("SYSTEM"),
+        false,
+    )
 }
 
 #[tokio::test]
@@ -37,6 +40,10 @@ async fn default_describe_prompt_route_serves_the_worker_assets_system_section()
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["prompt"], asset_system_section());
+    let instruction = body["prompt"].as_str().unwrap();
+    assert!(!instruction.contains("{{scene_observation}}"));
+    assert!(instruction.contains("visible support points"));
+    assert!(!instruction.contains("## APPEARANCE"));
     assert!(
         !body["prompt"]
             .as_str()

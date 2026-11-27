@@ -43,7 +43,7 @@ use finalize::{finalize_refine_job, RefineCompletion};
 // Llama seam with no conversion (stock bf16, ~16GB). Overridable per-job via `payload.model`.
 #[cfg(native_lane)]
 const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
-#[cfg(native_lane)]
+#[cfg(any(test, native_lane))]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
 // Output-length cap. The two caption tasks (magic-prompt + image_caption) emit a full Ideogram JSON
 // caption — multi-element, with bboxes, #RRGGBB palettes and (since sc-8199) optional per-element
@@ -77,6 +77,10 @@ const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
 // short-paragraph budget. Tags retain their output contract within the same ceiling.
 #[cfg(any(test, native_lane))]
 const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 2048;
+// Visual reasoning and the final scene description share this bounded budget on models that
+// support reasoning. The non-reasoning 8B path keeps its existing answer-only ceiling.
+#[cfg(native_lane)]
+pub(crate) const REASONING_DESCRIBE_MAX_NEW_TOKENS: u32 = 8192;
 // A whole shot plan is the longest reply this job ever emits — one JSON object carrying every shot's
 // prompt, states, framing and sound (sc-22713). Truncation there is not a degraded plan but an
 // unparseable one, so it takes the same generous ceiling the captions take.
@@ -95,23 +99,25 @@ fn resolve_max_new_tokens(
     // the worker's caption ceiling, which is far below either card.
     rewriter: Option<crate::qwen_prompt_rewrite::Rewriter>,
 ) -> u32 {
+    explicit_max_new_tokens(payload).unwrap_or(match task {
+        RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
+        RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
+        RefineTask::QwenImageRewrite => rewriter
+            .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
+            .max_new_tokens(),
+        RefineTask::MiniMaxH3ImageExpand => DEFAULT_CAPTION_MAX_NEW_TOKENS,
+        RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
+        RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
+    })
+}
+
+#[cfg(any(test, native_lane))]
+fn explicit_max_new_tokens(payload: &serde_json::Map<String, Value>) -> Option<u32> {
     payload
         .get("maxNewTokens")
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
-        .unwrap_or(match task {
-            RefineTask::MagicPrompt | RefineTask::ImageCaption => DEFAULT_CAPTION_MAX_NEW_TOKENS,
-            RefineTask::FilmPlan => DEFAULT_FILM_PLAN_MAX_NEW_TOKENS,
-            RefineTask::QwenImageRewrite => rewriter
-                .unwrap_or(crate::qwen_prompt_rewrite::Rewriter::TextToImage)
-                .max_new_tokens(),
-            // SW-7102: the published recipe's own budget (4096, thinking and answer together) is
-            // read from the prompt files and replaces this fallback when no override is given.
-            RefineTask::MiniMaxH3ImageExpand => DEFAULT_CAPTION_MAX_NEW_TOKENS,
-            RefineTask::ImageDescribe => DEFAULT_DESCRIBE_MAX_NEW_TOKENS,
-            RefineTask::Rewrite => DEFAULT_REFINE_MAX_NEW_TOKENS,
-        })
 }
 
 /// The engine-built H3 expansion `request` (SW-7102) as the job runs it: the request
@@ -351,15 +357,16 @@ fn base_rules(medium: &str) -> String {
         "- Output exactly one rewritten prompt and nothing else — no explanations, reasoning, \
          commentary, options, or labels."
             .to_owned(),
-        format!(
-            "- Preserve the user's intent: do not change the subjects, attributes, actions, \
-             relationships, or core setting they described. You may add concrete details only when \
-             they make the {medium} more coherent and stay consistent with the user's meaning."
-        ),
-        "- If the user's prompt is already detailed and on-guide, make only minimal edits for \
-         fluency."
+        "- Preserve the user's intent: do not change the subjects, attributes, actions, \
+             relationships, or core setting they described, except details explicitly excluded by \
+             the user. Do not invent or alter body support, limb positions, gaze, garments, props \
+             or camera specifications. Improve wording while preserving the remaining facts."
             .to_owned(),
-        "- Follow the guide's recommended structure, phrasing, and what-to-avoid guidance."
+        "- If the user's prompt is already detailed and on-guide, make only minimal edits for \
+         fluency and the requested exclusions."
+            .to_owned(),
+        "- Follow the guide's recommended structure, phrasing, and what-to-avoid guidance where \
+         compatible with the user's exclusions. Examples in a guide are not facts to add to the scene."
             .to_owned(),
         "- Match the user's language: if their prompt is not in English, respond in the same \
          language."
@@ -811,7 +818,10 @@ pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -
         (DescribeStyle::Tags, false) => IMAGE_DESCRIBE_TAGS_V1,
         (DescribeStyle::Tags, true) => IMAGE_DESCRIBE_MOODBOARD_TAGS_V1,
     };
-    let system = magic_section_from(asset, "SYSTEM");
+    let system = sceneworks_core::dataset_batch_describe::render_scene_observation(
+        &magic_section_from(asset, "SYSTEM"),
+        true,
+    );
     let mut user = magic_section_from(asset, "USER");
     if user.is_empty() {
         user = match (style, multi) {
@@ -950,6 +960,7 @@ pub(crate) async fn run_prompt_refine_job(
         weights_dir,
         system,
         user_message,
+        prompt_exclusions,
         h3_expand,
     } = parse_refine_request(settings, job).await?;
     // SW-7102: an expansion runs the request the engine assembled; only its reply contract travels
@@ -1027,6 +1038,13 @@ pub(crate) async fn run_prompt_refine_job(
     // set minimal.
     let emits_json = task.emits_json();
     let is_h3_expand = h3_expand_reply.is_some();
+    let expansion_contract = h3_expand_reply.as_ref().map(|reply| {
+        (
+            reply.workflow,
+            reply.allowed_ratios.clone(),
+            reply.aspect.clone(),
+        )
+    });
     // sc-24113: the blocking closure's image invariant is "this task DECLARES it takes reference
     // images", not "this task is a vision task" — the Qwen rewrite carries images while
     // `is_vision()` is false. Copied out as a bool for the same reason `emits_json` is: so the
@@ -1061,6 +1079,11 @@ pub(crate) async fn run_prompt_refine_job(
         )
         .await?;
     }
+    let pose_source = (task == RefineTask::Rewrite
+        && prompt_exclusions.contains(
+            &sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories,
+        ))
+    .then(|| original_prompt.clone());
     let blocking = crate::load_progress::spawn(crate::refine_model_cache::with_cached_refiner(
         refine_spec,
         refine_reqs,
@@ -1070,6 +1093,7 @@ pub(crate) async fn run_prompt_refine_job(
             Value,
             Value,
             crate::minimax_h3_image_prompt_expand::Recovery,
+            gen_core::core_llm::ThinkingMode,
         )> {
             emit_event(
                 "prompt_refine_load_start",
@@ -1100,8 +1124,16 @@ pub(crate) async fn run_prompt_refine_job(
                 // SW-7102: the engine-built expansion request keeps its messages, sampling recipe,
                 // budget, reasoning knobs and reply schema; it gains this job's cancel flag,
                 // progress observer and KV opt-in, and (SW-7204) `auto` checked linearly.
-                let request = if let Some(request) = prepared_request {
-                    prepare_expansion_request(request, blocking_cancel.clone(), kv_compression)
+                let mut request = if let Some(request) = prepared_request {
+                    let mut request =
+                        prepare_expansion_request(request, blocking_cancel.clone(), kv_compression);
+                    let policy = sceneworks_core::options::prompt_content::exclusion_instruction(
+                        &prompt_exclusions,
+                    );
+                    if !policy.is_empty() {
+                        request.messages.push(Message::user(policy));
+                    }
+                    request
                 } else {
                     let mut messages = Vec::with_capacity(2);
                     if !system.trim().is_empty() {
@@ -1238,32 +1270,29 @@ pub(crate) async fn run_prompt_refine_job(
                         }
                     }
                 };
-                let (mut output, mut kv_cache) =
-                    generate_refined(refiner, &request, &mut on_event, &job_id)?;
-                // An expansion whose reasoning used up the whole budget wrote no caption (or not
-                // one whole sentence of it). Rather than fail, ask again on the same resident model
-                // with reasoning off: the schema constraint then applies from the first token, so
-                // the full budget goes to the answer. Whatever the second reply keeps is finalized
-                // the same way (a cut caption is kept to its last whole sentence).
-                let mut recovery = crate::minimax_h3_image_prompt_expand::Recovery::None;
-                if is_h3_expand
-                    && output.finish_reason == Some(gen_core::core_llm::FinishReason::Length)
-                    && crate::minimax_h3_image_prompt_expand::needs_answer_only_retry(&output.text)
-                {
-                    if blocking_cancel.is_cancelled() {
-                        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-                    }
-                    tracing::warn!(
-                        event = "minimax_h3_image_expansion_reasoning_exhausted_budget",
-                        job_id = %job_id,
-                        max_new_tokens = request.max_new_tokens,
-                        "MiniMax-H3-Image prompt expansion: the reasoning used the whole budget; \
-                         asking again with reasoning off"
-                    );
-                    let retry = answer_only_expansion_request(&request);
-                    (output, kv_cache) = generate_refined(refiner, &retry, &mut on_event, &job_id)?;
-                    recovery = crate::minimax_h3_image_prompt_expand::Recovery::AnswerOnlyRetry;
-                }
+                let mut kv_cache = Value::Null;
+                let mut final_thinking = request.thinking;
+                let (output, recovery) = generate_refine_checked(
+                    &mut request,
+                    &prompt_exclusions,
+                    &job_id,
+                    task == RefineTask::ImageDescribe && image_reference_count == 1,
+                    pose_source.as_deref(),
+                    expansion_contract
+                        .as_ref()
+                        .map(|(workflow, allowed_ratios, aspect)| ExpansionContract {
+                            workflow: *workflow,
+                            allowed_ratios,
+                            aspect,
+                        }),
+                    |request| {
+                        final_thinking = request.thinking;
+                        let (output, kv) =
+                            generate_refined(refiner, request, &mut on_event, &job_id)?;
+                        kv_cache = kv;
+                        Ok(output)
+                    },
+                )?;
                 // SW-7204: an expansion records what it decoded with.
                 let decode = if is_h3_expand {
                     crate::qwen38_block_draft::decode_record(
@@ -1274,7 +1303,7 @@ pub(crate) async fn run_prompt_refine_job(
                 } else {
                     Value::Null
                 };
-                (output, kv_cache, decode, recovery)
+                (output, kv_cache, decode, recovery, final_thinking)
             };
 
             Ok(output)
@@ -1314,8 +1343,17 @@ pub(crate) async fn run_prompt_refine_job(
         mark_job_canceled(api, &job.id, CANCEL_MESSAGE).await?;
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
-    let (output, kv_cache, decode, recovery) =
+    let (output, kv_cache, decode, recovery, final_thinking) =
         result.map_err(|error| task_join_error("prompt refine task join", error))??;
+    let thinking_mode_name = if final_thinking == thinking_mode {
+        thinking_mode_name
+    } else {
+        match final_thinking {
+            gen_core::core_llm::ThinkingMode::Auto => "auto",
+            gen_core::core_llm::ThinkingMode::Enabled => "enabled",
+            gen_core::core_llm::ThinkingMode::Disabled => "disabled",
+        }
+    };
     let h3_expand_reply = h3_expand_reply.map(|mut reply| {
         reply.decode = decode;
         reply.recovery = recovery;
@@ -1484,6 +1522,101 @@ pub(crate) fn answer_only_expansion_request(
     retry
 }
 
+/// The existing expansion contract, borrowed only while budget recovery runs.
+#[cfg(any(test, native_lane))]
+struct ExpansionContract<'a> {
+    workflow: crate::minimax_h3_image_prompt_expand::Workflow,
+    allowed_ratios: &'a [String],
+    aspect: &'a gen_core::core_llm::minimax_h3_image_pe::AspectSelection,
+}
+
+/// Recover an expansion's budget against its original request BEFORE the shared editor can
+/// replace the messages or finish reason. Ordinary refinements use the same checked path.
+#[cfg(any(test, native_lane))]
+fn generate_refine_checked(
+    request: &mut gen_core::core_llm::TextLlmRequest,
+    exclusions: &[sceneworks_core::options::prompt_content::PromptExclusion],
+    job_id: &str,
+    review_pose: bool,
+    source: Option<&str>,
+    mut expansion: Option<ExpansionContract<'_>>,
+    mut generate: impl FnMut(
+        &gen_core::core_llm::TextLlmRequest,
+    ) -> WorkerResult<gen_core::core_llm::TextLlmOutput>,
+) -> WorkerResult<(
+    gen_core::core_llm::TextLlmOutput,
+    crate::minimax_h3_image_prompt_expand::Recovery,
+)> {
+    use crate::minimax_h3_image_prompt_expand as expand;
+    use gen_core::core_llm::FinishReason;
+    debug_assert!(!review_pose || expansion.is_none());
+    let mut recovery = expand::Recovery::None;
+    let output = crate::prompt_content_guard::generate_checked_with_source(
+        request,
+        exclusions,
+        job_id,
+        review_pose,
+        source,
+        |request| {
+            let mut output = generate(request)?;
+            // Only the first native call has the original expansion request and its references.
+            let Some(contract) = expansion.take() else {
+                return Ok(output);
+            };
+            if output.finish_reason == Some(FinishReason::Length)
+                && (!exclusions.is_empty() || expand::needs_answer_only_retry(&output.text))
+            {
+                if request.cancel.is_cancelled() {
+                    return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+                }
+                let discarded_usage = output.usage;
+                let retry = answer_only_expansion_request(request);
+                output = generate(&retry)?;
+                recovery = expand::Recovery::AnswerOnlyRetry;
+                emit_event(
+                    "minimax_h3_image_expansion_budget_recovery",
+                    json!({
+                        "jobId": job_id, "maxNewTokens": request.max_new_tokens,
+                        "discardedPromptTokens": discarded_usage.prompt_tokens,
+                        "discardedGeneratedTokens": discarded_usage.generated_tokens,
+                        "retryPromptTokens": output.usage.prompt_tokens,
+                        "retryGeneratedTokens": output.usage.generated_tokens,
+                    }),
+                );
+            }
+            if !exclusions.is_empty() && output.finish_reason == Some(FinishReason::Length) {
+                let partial = expand::salvage_truncated_reply(
+                    &output.text,
+                    contract.workflow,
+                    contract.allowed_ratios,
+                    contract.aspect,
+                )
+                .ok_or_else(|| {
+                    WorkerError::Engine(expand::truncated_reply_error(request.max_new_tokens))
+                })?;
+                // Close only the values the existing salvage path actually recovered. Do not invent
+                // a missing ratio. The finalizer retains the truncation notice even if editing stops.
+                let mut object = serde_json::Map::new();
+                object.insert(
+                    "expanded_caption".to_owned(),
+                    Value::from(partial.expanded_caption),
+                );
+                if let Some(ratio) = partial.aspect_ratio {
+                    let key = match contract.workflow {
+                        expand::Workflow::TextToImage => "aspect_ratio",
+                        expand::Workflow::Edit => "target_aspect_ratio",
+                    };
+                    object.insert(key.to_owned(), Value::from(ratio));
+                }
+                output.text = Value::Object(object).to_string();
+                recovery = expand::Recovery::AnswerOnlyRetryWithPartial;
+            }
+            Ok(output)
+        },
+    )?;
+    Ok((output, recovery))
+}
+
 /// Run the refine decode on `refiner` and record the generation's `llm_kv_cache` event whichever
 /// way it ends — completed, or refused, canceled or failed by the engine (sc-20682, sc-20688). A
 /// completed decode returns its output with the block its result carries: the event's own block.
@@ -1505,6 +1638,14 @@ fn generate_refined(
     let output = generation.map_err(|error| {
         WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
     })?;
+    emit_event(
+        "prompt_refine_generation",
+        json!({
+            "jobId": job_id, "thinkingMode": format!("{:?}", request.thinking),
+            "maxNewTokens": request.max_new_tokens, "finishReason": finish_reason_name(output.finish_reason),
+            "promptTokens": output.usage.prompt_tokens, "generatedTokens": output.usage.generated_tokens,
+        }),
+    );
     Ok((output, record.block().clone()))
 }
 

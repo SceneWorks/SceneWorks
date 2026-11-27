@@ -11,96 +11,146 @@ use sceneworks_core::dataset_batch_describe::MAX_JOYCAPTION_DESCRIBE_PROMPT_CHAR
 
 const DRAFT_OUTPUT_HEADING: &str = "## OUTPUT — one JSON object, no other text";
 
+#[test]
+fn explicit_custom_observation_instructions_keep_their_detail_level() {
+    let instruction = "Describe the clearly visible palm orientation and exact hand positions.";
+    let (prompt, is_default) =
+        DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, Some(instruction));
+    assert!(!is_default);
+    assert!(prompt.system().contains(instruction));
+    let mut request = gen_core::core_llm::TextLlmRequest::default();
+    let mut calls = 0;
+    let draft = "The palm lies flat on the table beside the hip.";
+    let output = crate::prompt_content_guard::generate_checked(
+        &mut request,
+        &prompt.exclusions,
+        "fixture",
+        prompt.use_default_observation,
+        |_| {
+            calls += 1;
+            Ok(gen_core::core_llm::TextLlmOutput {
+                text: draft.to_owned(),
+                ..Default::default()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(output.text, draft);
+    let (default, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    assert!(default.use_default_observation);
+}
+
+#[test]
+fn parsed_or_recovered_fields_cannot_bypass_selected_exclusions() {
+    use sceneworks_core::options::prompt_content::PromptExclusion::*;
+    for (category, key, value) in [
+        (Style, "style", "high contrast"),
+        (ClothingAndAccessories, "pose", "boots extend backward"),
+        (ColorMode, "lighting", "black-and-white print"),
+        (
+            IdentifyingCharacteristics,
+            "description",
+            "a woman with short dark hair",
+        ),
+    ] {
+        let fields = parse_described_fields(&reply(&[(key, json!(value))])).unwrap();
+        assert!(check_described_exclusions(fields.clone(), &[]).is_ok());
+        assert!(check_described_exclusions(fields, &[category]).is_err());
+    }
+    for allowed in [
+        "An adult elephant stands beside a calf.",
+        "A woman visits a hair salon.",
+    ] {
+        let raw = reply(&[("description", json!(allowed))]);
+        for fields in [
+            parse_described_fields(&raw).unwrap(),
+            parse_lenient_described_fields(&raw).unwrap(),
+        ] {
+            assert!(check_described_exclusions(fields, &[IdentifyingCharacteristics]).is_ok());
+        }
+    }
+    for allowed in [
+        "A coat of peeling paint covers the wall.",
+        "A belt of trees borders the field beside a conveyor belt.",
+    ] {
+        let raw = reply(&[("environment", json!(allowed))]);
+        for fields in [
+            parse_described_fields(&raw).unwrap(),
+            parse_lenient_described_fields(&raw).unwrap(),
+        ] {
+            assert!(check_described_exclusions(fields, &[ClothingAndAccessories]).is_ok());
+        }
+    }
+}
+
+#[test]
+fn style_exclusion_keeps_literal_actions_in_strict_and_recovered_batch_fields() {
+    use sceneworks_core::options::prompt_content::PromptExclusion::Style;
+    for action in [
+        "A person is drawing water from a well.",
+        "A woman is drawing the curtains shut.",
+        "A worker is painting a door.",
+        "A painting of a woman hangs on the wall.",
+        "A person is reading a vintage photograph.",
+    ] {
+        let raw = reply(&[("description", json!(action)), ("style", json!(""))]);
+        for fields in [
+            parse_described_fields(&raw).unwrap(),
+            parse_lenient_described_fields(&raw).unwrap(),
+        ] {
+            assert!(check_described_exclusions(fields, &[Style]).is_ok());
+        }
+    }
+    let raw = reply(&[
+        (
+            "description",
+            json!("An oil painting of a person drawing water."),
+        ),
+        ("style", json!("")),
+    ]);
+    for fields in [
+        parse_described_fields(&raw).unwrap(),
+        parse_lenient_described_fields(&raw).unwrap(),
+    ] {
+        assert!(check_described_exclusions(fields, &[Style]).is_err());
+    }
+}
+
 // ── The describing prompt ─────────────────────────────────────────────────────────────────────
 
 #[test]
 fn the_default_instruction_is_the_system_block_without_the_output_contract() {
     let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
-    assert!(instruction.starts_with("You are a meticulous scene describer."));
-    for rule in [
-        "## LABELS — every person",
-        "## NO PHYSICAL TRAITS — ever",
-        "## LENGTH — a target for each field",
-        "## DESCRIPTION — the people",
-        "## POSE — the pose field",
-        "## ENVIRONMENT — the setting",
-        "## STYLE — medium, era, and vintage look",
-        "## CAMERA — the apparent gear and settings",
-        "## COMPOSITION — framing",
+    for category in [
+        "## LABELS",
+        "## PRIVACY",
+        "## POSE",
+        "## CLOTHING",
+        "## ENVIRONMENT",
+        "## CAMERA",
         "## LIGHTING",
+        "## STYLE",
+        "## COLOR",
     ] {
-        assert!(
-            instruction.contains(rule),
-            "default instruction keeps {rule:?}"
-        );
+        assert!(instruction.contains(category), "missing {category}");
     }
-    assert!(
-        instruction.ends_with("where the shadows fall."),
-        "the LIGHTING rule is the last editable line"
-    );
+    assert!(!instruction.contains("{{scene_observation}}"));
+    assert!(!instruction.contains("## APPEARANCE"));
     assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
     assert!(!instruction.contains("\"description\":"));
 }
 
 #[test]
-fn the_describing_prompt_gives_every_field_a_length_target() {
-    let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
-    let start = instruction.find("## LENGTH").expect("a LENGTH section");
-    let end = start
-        + instruction[start + 1..]
-            .find("\n## ")
-            .expect("a next section")
-        + 1;
-    let length = &instruction[start..end];
-    for (field, target) in [
-        ("description", "3 to 5 sentences per person"),
-        (
-            "pose",
-            "each slot one clause or one short sentence; the left_arm, right_arm, left_leg and \
-             right_leg slots up to two sentences each",
-        ),
-        ("style", "2 sentences"),
-        ("camera", "1 sentence"),
-        ("composition", "1 to 2 sentences"),
-        ("lighting", "1 to 2 sentences"),
-        ("environment", "2 to 3 sentences"),
-    ] {
-        assert!(
-            length.contains(&format!("- {field}: {target}")),
-            "LENGTH sets a target for {field}"
-        );
+fn the_describing_prompt_prioritizes_evidence_over_quotas() {
+    for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
+        let instruction = default_describe_instruction(model);
+        assert!(instruction.contains("visible evidence"));
+        assert!(instruction.contains("support"));
+        assert!(instruction.contains("Do not invent"));
+        assert!(!instruction.contains("450 to 550"));
+        assert!(!instruction.contains("give a rough amount"));
     }
-    assert!(length.contains("about 450 to 550 words"));
-    assert!(length.contains("each additional person adds about 200 words"));
-    assert!(length.contains(
-        "cut environment, style and camera detail first, before any pose slot. Never drop a \
-         person's pose entry to save length."
-    ));
-    // The wording that asked for exhaustive output is gone; the accuracy rules stay.
-    for asset in [
-        instruction.as_str(),
-        &default_describe_instruction(DescribeModel::JoyCaption),
-    ] {
-        for exhaustive in [
-            "exhaustively",
-            "every detail",
-            "in minute detail",
-            "every garment",
-        ] {
-            assert!(!asset.contains(exhaustive), "{exhaustive:?} is gone");
-        }
-    }
-    assert!(instruction.contains("## NO PHYSICAL TRAITS — ever"));
-    assert!(instruction.contains("quoted verbatim in single quotes"));
-    assert!(instruction.contains("check the three facts most often got wrong"));
-    // JoyCaption gets a short matching line and keeps its overall word cap.
-    let joy = default_describe_instruction(DescribeModel::JoyCaption);
-    assert!(joy.contains(
-        "LENGTH: description 3 to 5 sentences per person; pose one short clause per body part; \
-         style 2 sentences; camera 1; composition, lighting 1 to 2; environment 2 to 3."
-    ));
-    assert!(joy.contains("never drop a person's pose"));
-    assert!(joy.contains("Keep the whole reply under about 500 words"));
 }
 
 #[test]
@@ -115,9 +165,7 @@ fn the_output_contract_names_every_field_and_is_always_appended() {
             "contract names {field}"
         );
     }
-    assert!(default
-        .user
-        .starts_with("Examine the attached image meticulously"));
+    assert!(default.user.starts_with("Examine the attached image"));
     assert_eq!(
         default.system(),
         format!(
@@ -233,53 +281,18 @@ fn both_contracts_take_precedence_over_an_old_preset_about_pose() {
 #[test]
 fn the_describing_prompt_keeps_pose_out_of_description_and_labels_off_animals() {
     let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
-    let description = &instruction
-        [instruction.find("## DESCRIPTION").unwrap()..instruction.find("## POSE").unwrap()];
-    assert!(
-        !description.contains("- Pose:"),
-        "description no longer asks for pose"
-    );
-    assert!(description.contains("Do not describe pose in the description"));
-    let pose = &instruction
-        [instruction.find("## POSE").unwrap()..instruction.find("## ENVIRONMENT").unwrap()];
-    // The sides and angles rules and the three-facts check stay.
-    assert!(pose.contains("Never write a bare \"left\" or \"right\""));
-    assert!(pose.contains("about 45°"));
-    assert!(pose.contains("check the three facts most often got wrong"));
-    for (key, _) in POSE_SLOTS {
-        assert!(pose.contains(key), "the POSE rules explain {key}");
-    }
-    assert!(pose.contains("write \"hidden\" in its slot and what hides it"));
-    assert!(pose.contains("words like \"likely\", \"probably\" or \"presumably\" never belong"));
-    // A half-reclined body has its own body_line option; horizontal means the torso lies flat.
-    assert!(pose.contains("reclined and propped up"));
-    assert!(pose.contains("on an elbow, on a straight arm, or against a backrest"));
-    assert!(pose.contains("roughly how far the torso is from upright"));
-    assert!(pose.contains("Horizontal is only for a body whose torso lies flat"));
-    assert!(pose.contains(
-        "For a horizontal or reclined body, say at which side of the frame is the head and at \
-         which the feet."
-    ));
-    assert!(pose.contains("Give each animal its own entry with no label"));
-    assert!(pose.contains("The pose field is a list with one entry per person"));
-    assert!(pose.contains("in order of prominence (the same order the labels were assigned)"));
-    assert!(!instruction.contains("keyed by their label"));
-    // Interactions keep who looks at whom, contact and dynamic; position is the pose slots' job.
-    assert!(description.contains("who is looking at whom, physical contact"));
-    assert!(!description.contains("distance and orientation"));
-    assert!(instruction.contains("Animals never get a label."));
-    // No animal label anywhere in the asset (every section, every model).
+    assert!(instruction.contains("keep body mechanics in pose"));
+    assert!(instruction.contains("Animals use plain nouns without labels"));
+    assert!(instruction.contains("hands, forearms, elbows, knees"));
+    assert!(instruction
+        .contains("a lower leg extending backward does not make the entire leg straight"));
+    assert!(instruction.contains("finger configuration"));
+    assert!(instruction.contains("anatomical left/right only when the side is clear"));
+    assert!(instruction.contains("Separate face orientation from pupil direction"));
+    assert!(instruction.contains("A vertical or downward forearm stays ABOVE"));
     for animal in ["dog_", "cat_", "horse_", "animal_"] {
-        assert!(
-            !IMAGE_BATCH_DESCRIBE_V1.contains(animal),
-            "the asset never shows an animal label like {animal}N"
-        );
+        assert!(!IMAGE_BATCH_DESCRIBE_V1.contains(animal));
     }
-    let joy = default_describe_instruction(DescribeModel::JoyCaption);
-    assert!(joy.contains("Animals get no label"));
-    assert!(joy.contains("demeanor. No pose here."));
-    assert!(joy.contains("who looks at whom, physical contact, and the emotional dynamic"));
-    assert!(!joy.contains("distance and orientation"));
 }
 
 // ── Reply parsing ─────────────────────────────────────────────────────────────────────────────
@@ -842,13 +855,37 @@ fn the_describe_and_condense_requests_send_auto_checked_linearly() {
             "system".to_owned(),
             "user".to_owned(),
             image.clone(),
-            true,
+            model == DescribeModel::Qwen38,
             CancelFlag::new(),
             KvCompressionPolicy::default(),
         );
         assert_eq!(describe.speculative, expected, "{model:?} describe");
         assert_eq!(describe.speculative_verify, SpeculativeVerify::Linear);
-        assert_eq!(describe.max_new_tokens, DESCRIBE_MAX_NEW_TOKENS);
+        let reasoning = model == DescribeModel::Qwen38;
+        assert_eq!(
+            describe.thinking,
+            if reasoning {
+                gen_core::core_llm::ThinkingMode::Enabled
+            } else {
+                gen_core::core_llm::ThinkingMode::Disabled
+            }
+        );
+        assert_eq!(
+            describe.constraint,
+            if reasoning {
+                None
+            } else {
+                Some(gen_core::core_llm::Constraint::Json)
+            }
+        );
+        assert_eq!(
+            describe.max_new_tokens,
+            if reasoning {
+                crate::prompt_refine_jobs::REASONING_DESCRIBE_MAX_NEW_TOKENS
+            } else {
+                DESCRIBE_MAX_NEW_TOKENS
+            }
+        );
         let condense = condense_request(
             model.speculative(),
             "system".to_owned(),
@@ -919,83 +956,26 @@ fn all_content_exclusions_preserve_the_contract_and_fit_joycaptions_limit() {
 fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
     let (prompt, is_default) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
     assert!(is_default);
-    let instruction = default_describe_instruction(DescribeModel::JoyCaption);
-    assert_eq!(prompt.instruction, instruction);
-    assert_ne!(
-        instruction,
-        default_describe_instruction(DescribeModel::VisionCaptioner),
-        "JoyCaption gets the condensed rules"
-    );
-    for rule in [
-        "LABELS:",
-        "man_N, woman_N, boy_N, girl_N",
-        "NO PHYSICAL TRAITS:",
-        "DESCRIPTION:",
-        "ENVIRONMENT:",
-        "STYLE:",
-        "CAMERA:",
-        "COMPOSITION:",
-        "LIGHTING:",
-    ] {
-        assert!(
-            instruction.contains(rule),
-            "JoyCaption default keeps {rule:?}"
-        );
-    }
-    assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
-    assert!(instruction.contains("POSE, its own field, plain text, one line per person or animal"));
-    assert!(instruction.contains(
-        "Write hidden and what hides it for a hidden or out-of-frame limb; never guess where it \
-         probably is."
-    ));
-    assert!(instruction.contains(
-        "reclined and propped up (on what, how far from upright), or horizontal only if the \
-         torso lies flat"
-    ));
-    // The built-in default is itself an instruction the API accepts for JoyCaption.
-    assert!(instruction.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
-    // JoyCaption's own contract: every field, pose as one plain-text string, no slots.
-    let (vision, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
-    assert_ne!(prompt.output_contract, vision.output_contract);
-    assert!(prompt.output_contract.starts_with(DRAFT_OUTPUT_HEADING));
+    assert!(prompt.instruction.contains("visible support points"));
+    assert!(prompt.instruction.contains("## PRIVACY"));
+    assert!(prompt.instruction.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
     for field in DESCRIBE_FIELDS {
-        assert!(
-            prompt.output_contract.contains(&format!("\"{field}\": \"")),
-            "JoyCaption's contract names {field} as a string"
-        );
+        assert!(prompt.output_contract.contains(&format!("\"{field}\": \"")));
     }
     for (key, _) in POSE_SLOTS {
-        assert!(
-            !prompt.output_contract.contains(&format!("\"{key}\"")),
-            "JoyCaption's contract has no {key} slot"
-        );
+        assert!(!prompt.output_contract.contains(&format!("\"{key}\"")));
     }
     assert_pose_is_written_last(&prompt.output_contract);
-    assert!(prompt
-        .output_contract
-        .contains("one line per person or animal"));
-    assert!(prompt
-        .output_contract
-        .contains("Outside pose, omit hidden or unreadable details rather than guess."));
-    // One prompt: instruction, then the contract, then the user line.
     assert_eq!(
         prompt.single_turn(),
         format!(
-            "{instruction}\n\n{}\n\n{}",
-            prompt.output_contract, prompt.user
+            "{}\n\n{}\n\n{}",
+            prompt.instruction, prompt.output_contract, prompt.user
         )
     );
-    assert!(prompt.single_turn().chars().count() <= JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS);
-    // The longest instruction the API accepts for JoyCaption still fits the provider's limit.
     let longest = "x".repeat(MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
-    let (custom, is_default) =
-        DescribePrompt::for_instruction(DescribeModel::JoyCaption, Some(&longest));
-    assert!(!is_default);
-    assert!(
-        custom.single_turn().chars().count() <= JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS,
-        "{} chars",
-        custom.single_turn().chars().count()
-    );
+    let (custom, _) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, Some(&longest));
+    assert!(custom.single_turn().chars().count() <= JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS);
 }
 
 #[test]
@@ -1137,6 +1117,7 @@ struct StubDescriber {
     /// Each condensing call's (system, user) and the replies it answers, in order. A stub that is
     /// not JoyCaption-like condenses, like the Vision Captioner.
     condense_calls: Mutex<Vec<(String, String)>>,
+    condense_exclusions: Mutex<Vec<Vec<sceneworks_core::options::prompt_content::PromptExclusion>>>,
     condense_replies: Mutex<VecDeque<WorkerResult<Result<CondenseReply, String>>>>,
 }
 
@@ -1148,6 +1129,7 @@ impl StubDescriber {
             cancel_after: None,
             joycaption_like: None,
             condense_calls: Mutex::default(),
+            condense_exclusions: Mutex::default(),
             condense_replies: Mutex::default(),
         }
     }
@@ -1210,7 +1192,15 @@ impl BatchDescriber for StubDescriber {
         self.joycaption_like.is_none()
     }
 
-    fn condense(&self, system: String, user: String, _cancel: CancelFlag) -> CondenseFuture {
+    fn condense(
+        &self,
+        system: String,
+        user: String,
+        _source: String,
+        _cancel: CancelFlag,
+        exclusions: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    ) -> CondenseFuture {
+        self.condense_exclusions.lock().unwrap().push(exclusions);
         self.condense_calls
             .lock()
             .expect("condense calls lock")
@@ -3140,6 +3130,34 @@ fn running_messages(api: &StubApi) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn fit_to_receives_exclusions_and_rejects_a_leaking_shortened_prompt() {
+    use sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories;
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok(labelled_reply()))])
+        .with_condense_replies(vec![condense_reply("woman_1 kneels in boots.", 50)]);
+    let mut payload = fit_payload(&stage, fit_entry(1024));
+    payload["promptExclusions"] = json!(["clothingAndAccessories"]);
+    run_fit_job(&stage, payload, &describer, None)
+        .await
+        .unwrap();
+    let calls = describer.condense_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].0.contains("MANDATORY CONTENT EXCLUSIONS"));
+    assert!(calls[0].1.contains("MANDATORY CONTENT EXCLUSIONS"));
+    assert_eq!(
+        *describer.condense_exclusions.lock().unwrap(),
+        vec![vec![ClothingAndAccessories]]
+    );
+    let item = &stored_items(&api)[0];
+    assert_eq!(item["condensed"]["failed"], true);
+    assert_eq!(item["condensed"]["text"], "");
+    assert_eq!(item["condensed"]["characters"], 0);
+    assert!(item["condensed"]["tokens"].is_null());
+    assert_eq!(item["description"], "woman_1 description");
+}
+
+#[tokio::test]
 async fn a_condensed_prompt_that_fits_first_time_is_stored_beside_the_seven_fields() {
     let (url, api) = spawn_stub_api().await;
     let stage = stage(url);
@@ -3754,7 +3772,14 @@ impl BatchDescriber for LoadFailsOnCondense {
         true
     }
 
-    fn condense(&self, _: String, _: String, _: CancelFlag) -> CondenseFuture {
+    fn condense(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: CancelFlag,
+        _: Vec<sceneworks_core::options::prompt_content::PromptExclusion>,
+    ) -> CondenseFuture {
         Box::pin(async {
             Err(WorkerError::Engine(
                 "Vision Captioner load failed".to_owned(),

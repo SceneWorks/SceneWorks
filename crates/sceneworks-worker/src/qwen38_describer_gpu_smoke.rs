@@ -99,11 +99,14 @@ async fn checked_decode_record(
     use crate::batch_describe_jobs::condense::{condense_system, condense_user};
     use sceneworks_core::dataset_batch_describe::{condense_char_bound, condense_word_target};
     let words = condense_word_target(1024, condense_char_bound(), 0);
+    let source = condense_user(fields);
     let condensed = describer
         .condense(
             condense_system(words),
-            condense_user(fields),
+            source.clone(),
+            source,
             CancelFlag::new(),
+            Vec::new(),
         )
         .await
         .expect("the describer stays loaded for the condense")

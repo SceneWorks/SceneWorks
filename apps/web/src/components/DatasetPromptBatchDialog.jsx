@@ -965,7 +965,6 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         };
       } else {
         body = { model: describer.entry.repo, requestedGpu: "auto" };
-        if (promptExclusions.length) body.promptExclusions = promptExclusions;
         if (describer.tier) body.variant = describer.tier;
         // The built-in default is sent as "no prompt" so the worker uses its own default instruction.
         if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
@@ -974,6 +973,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         // Only a target the catalog still offers: a remembered id of a removed model is never sent.
         if (fitTarget && describer.entry.condenses) body.fitTo = fitTarget.id;
       }
+      if (promptExclusions.length) body.promptExclusions = promptExclusions;
       pollAbort.current?.abort();
       const controller = new AbortController();
       pollAbort.current = controller;

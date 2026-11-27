@@ -384,7 +384,25 @@ pub fn prompt_asset_section(source: &str, name: &str) -> String {
 
 /// `model`'s default editable describing instruction, read from the describe prompt asset text.
 pub fn default_describe_instruction(asset: &str, model: Option<&str>) -> String {
-    prompt_asset_section(asset, default_instruction_section(model))
+    render_scene_observation(
+        &prompt_asset_section(asset, default_instruction_section(model)),
+        false,
+    )
+}
+
+/// Shared visual-grounding rules for single-image and batch prose. The batch's existing
+/// no-physical-traits policy removes appearance instructions before the prompt is shown/used.
+pub fn render_scene_observation(template: &str, allow_appearance: bool) -> String {
+    use crate::options::prompt_content::{select_content_sections, PromptExclusion};
+    let exclusions = if allow_appearance {
+        vec![]
+    } else {
+        vec![PromptExclusion::IdentifyingCharacteristics]
+    };
+    template.replace(
+        "{{scene_observation}}",
+        &select_content_sections(include_str!("image_scene_observation_v1.txt"), &exclusions),
+    )
 }
 
 #[cfg(test)]
@@ -397,6 +415,45 @@ mod tests {
         assert_eq!(prompt_asset_section(source, "B"), "two\n  three");
         assert_eq!(prompt_asset_section(source, "b"), "two\n  three");
         assert_eq!(prompt_asset_section(source, "missing"), "");
+    }
+
+    #[test]
+    fn shared_scene_rules_render_and_selected_categories_can_be_removed() {
+        use crate::options::prompt_content::{select_content_sections, PromptExclusion::*};
+        let single = render_scene_observation("intro\n{{scene_observation}}\n## OTHER\nend", true);
+        let batch = render_scene_observation("{{scene_observation}}", false);
+        assert!(single.contains("## APPEARANCE"));
+        assert!(!batch.contains("## APPEARANCE"));
+        let keys = [
+            IdentifyingCharacteristics,
+            ClothingAndAccessories,
+            Style,
+            ColorMode,
+        ];
+        for mask in 0..16 {
+            let selected: Vec<_> = keys
+                .iter()
+                .enumerate()
+                .filter_map(|(i, k)| (mask & (1 << i) != 0).then_some(*k))
+                .collect();
+            let rendered = select_content_sections(&single, &selected);
+            assert!(!rendered.contains("{{scene_observation}}"));
+            for (i, heading) in ["## APPEARANCE", "## CLOTHING", "## STYLE", "## COLOR"]
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(rendered.contains(heading), mask & (1 << i) == 0);
+            }
+            for retained in [
+                "visible support points",
+                "## ENVIRONMENT",
+                "## CAMERA",
+                "## LIGHTING",
+                "## OTHER\nend",
+            ] {
+                assert!(rendered.contains(retained));
+            }
+        }
     }
 
     #[test]

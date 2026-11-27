@@ -1359,24 +1359,25 @@ fn build_image_describe_messages_returns_prose_system_and_user() {
 fn single_image_description_covers_pose_and_scene_in_detail() {
     let (system, _) = build_image_describe_messages(DescribeStyle::Prose, false);
     for detail in [
-        "OWN left and right",
-        "elbow bend",
-        "fingers",
-        "knee bend",
-        "ROOM AND ENVIRONMENT",
+        "visible support points",
+        "both arms and both legs",
+        "finger configuration",
+        "## ENVIRONMENT",
         "depth of field",
-        "camera height and angle",
-        "LIGHTING",
-        "CLOTHING AND ACCESSORIES",
-        "STYLE AND ERA",
+        "viewpoint",
+        "## LIGHTING",
+        "## CLOTHING",
+        "## STYLE",
+        "## COLOR",
     ] {
         assert!(
             system.contains(detail),
             "missing detailed guidance: {detail}"
         );
     }
+    assert!(!system.contains("{{scene_observation}}"));
+    assert!(!system.contains("350–550"));
 }
-
 // ── sc-8205 (epic 8203): captionStyle="tags" describe variant ──
 
 #[test]
@@ -1500,7 +1501,7 @@ fn builtin_booru_model_declarations_select_the_tags_asset() {
         let (system, _) = build_image_describe_messages(style, false);
         assert_eq!(style, DescribeStyle::Prose);
         assert!(
-            system.contains("natural-language description"),
+            system.contains("Output ONLY flowing prose paragraphs"),
             "absent and explicit prose select the prose asset"
         );
         assert!(!system.contains("comma-separated booru"));
@@ -3021,4 +3022,252 @@ fn the_answer_only_retry_keeps_the_request_and_turns_reasoning_off() {
     assert!(matches!(retry.constraint, Some(Constraint::JsonSchema(_))));
     // The first attempt's request is untouched.
     assert_eq!(request.thinking, ThinkingMode::Enabled);
+}
+
+#[test]
+fn expansion_budget_recovery_precedes_exclusion_editing_with_original_references() {
+    use crate::minimax_h3_image_prompt_expand::{Recovery, Workflow};
+    use gen_core::core_llm::minimax_h3_image_pe::AspectSelection;
+    use gen_core::core_llm::{
+        Constraint, Content, FinishReason, ImageRef, JsonSchema, Message, Role, TextLlmOutput,
+        TextLlmRequest, ThinkingMode,
+    };
+    use sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories;
+    for (retry_text, retry_finish, expected_recovery) in [
+        (
+            r#"{"expanded_caption":"A person in boots kneels.","aspect_ratio":"9:16"}"#,
+            FinishReason::Stop,
+            Recovery::AnswerOnlyRetry,
+        ),
+        (
+            r#"{"expanded_caption":"A person in boots kneels. Another phrase"#,
+            FinishReason::Length,
+            Recovery::AnswerOnlyRetryWithPartial,
+        ),
+    ] {
+        let mut request = TextLlmRequest::new(
+            vec![
+                Message::system("Original reference and aspect-ratio instructions."),
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        Content::Image(ImageRef::new(1, 1, vec![0, 0, 0]).unwrap()),
+                        Content::text("Use the original reference and ratio."),
+                    ],
+                    thinking: None,
+                    tool_calls: vec![],
+                },
+            ],
+            4096,
+        );
+        request.thinking = ThinkingMode::Enabled;
+        let original_schema = JsonSchema::compile(&json!({
+            "type": "object",
+            "properties": {
+                "expanded_caption": {"type": "string"},
+                "aspect_ratio": {"type": "string", "enum": ["9:16"]}
+            },
+            "required": ["expanded_caption", "aspect_ratio"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        request.constraint = Some(Constraint::JsonSchema(original_schema.clone()));
+        let ratios = vec!["9:16".to_owned()];
+        let aspect = AspectSelection::Adaptive;
+        let mut calls = 0;
+        let (output, recovery) = generate_refine_checked(
+            &mut request,
+            &[ClothingAndAccessories],
+            "fixture",
+            false,
+            None,
+            Some(ExpansionContract {
+                workflow: Workflow::TextToImage,
+                allowed_ratios: &ratios,
+                aspect: &aspect,
+            }),
+            |r| {
+                calls += 1;
+                let image_count = r
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .filter(|c| matches!(c, Content::Image(_)))
+                    .count();
+                if calls <= 2 {
+                    assert_eq!(image_count, 1);
+                    assert!(format!("{:?}", r.messages)
+                        .contains("Original reference and aspect-ratio instructions"));
+                    assert_eq!(r.max_new_tokens, 4096);
+                    assert_eq!(
+                        r.thinking,
+                        if calls == 1 {
+                            ThinkingMode::Enabled
+                        } else {
+                            ThinkingMode::Disabled
+                        }
+                    );
+                    return Ok(TextLlmOutput {
+                        text: if calls == 1 {
+                            r#"{"expanded_caption":"A person in boots"#
+                        } else {
+                            retry_text
+                        }
+                        .to_owned(),
+                        finish_reason: Some(if calls == 1 {
+                            FinishReason::Length
+                        } else {
+                            retry_finish
+                        }),
+                        ..Default::default()
+                    });
+                }
+                assert_eq!(calls, 3);
+                assert_eq!(image_count, 0);
+                assert_eq!(r.thinking, ThinkingMode::Disabled);
+                let text = if retry_finish == FinishReason::Length {
+                    r#"{"expanded_caption":"A person kneels."}"#
+                } else {
+                    r#"{"expanded_caption":"A person kneels.","aspect_ratio":"9:16"}"#
+                };
+                let Some(Constraint::JsonSchema(schema)) = &r.constraint else {
+                    panic!("the editor must keep a schema for the recovered fields");
+                };
+                assert!(schema.accepts(text));
+                if retry_finish == FinishReason::Length {
+                    assert!(!schema.accepts(
+                        r#"{"expanded_caption":"A person kneels.","aspect_ratio":"9:16"}"#
+                    ));
+                    assert!(!schema.source()["properties"]
+                        .as_object()
+                        .unwrap()
+                        .contains_key("aspect_ratio"));
+                } else {
+                    assert!(!schema.accepts(
+                        r#"{"expanded_caption":"A person kneels.","aspect_ratio":"1:1"}"#
+                    ));
+                }
+                Ok(TextLlmOutput {
+                    text: text.to_owned(),
+                    finish_reason: Some(FinishReason::Stop),
+                    ..Default::default()
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(recovery, expected_recovery);
+        assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+        assert!(!output.text.contains("boots"));
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.thinking, ThinkingMode::Enabled);
+        assert_eq!(
+            request.constraint,
+            Some(Constraint::JsonSchema(original_schema))
+        );
+    }
+}
+
+#[test]
+fn expansion_cancellation_prevents_budget_retry_and_content_edit() {
+    use crate::minimax_h3_image_prompt_expand::Workflow;
+    use gen_core::core_llm::minimax_h3_image_pe::AspectSelection;
+    use gen_core::core_llm::{FinishReason, Message, TextLlmOutput, TextLlmRequest};
+    use sceneworks_core::options::prompt_content::PromptExclusion::Style;
+    let mut request = TextLlmRequest::new(vec![Message::user("Original expansion.")], 4096);
+    let aspect = AspectSelection::Adaptive;
+    let mut calls = 0;
+    let result = generate_refine_checked(
+        &mut request,
+        &[Style],
+        "fixture",
+        false,
+        None,
+        Some(ExpansionContract {
+            workflow: Workflow::TextToImage,
+            allowed_ratios: &[],
+            aspect: &aspect,
+        }),
+        |r| {
+            calls += 1;
+            r.cancel.cancel();
+            Ok(TextLlmOutput {
+                text: r#"{"expanded_caption":"A person"#.to_owned(),
+                finish_reason: Some(FinishReason::Length),
+                ..Default::default()
+            })
+        },
+    );
+    assert!(matches!(result, Err(WorkerError::Canceled(_))));
+    assert_eq!(calls, 1);
+    assert_eq!(request.messages.len(), 1);
+}
+
+#[test]
+fn expansion_without_exclusions_keeps_the_existing_partial_sentence_path() {
+    use crate::minimax_h3_image_prompt_expand::{Recovery, Workflow};
+    use gen_core::core_llm::minimax_h3_image_pe::AspectSelection;
+    use gen_core::core_llm::{FinishReason, Message, TextLlmOutput, TextLlmRequest};
+    let mut request = TextLlmRequest::new(vec![Message::user("Original expansion.")], 4096);
+    let aspect = AspectSelection::Adaptive;
+    let raw = r#"{"expanded_caption":"A person kneels. A second unfinished"#;
+    let mut calls = 0;
+    let (output, recovery) = generate_refine_checked(
+        &mut request,
+        &[],
+        "fixture",
+        false,
+        None,
+        Some(ExpansionContract {
+            workflow: Workflow::TextToImage,
+            allowed_ratios: &[],
+            aspect: &aspect,
+        }),
+        |_| {
+            calls += 1;
+            Ok(TextLlmOutput {
+                text: raw.to_owned(),
+                finish_reason: Some(FinishReason::Length),
+                ..Default::default()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(output.text, raw);
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
+    assert_eq!(recovery, Recovery::None);
+}
+
+#[test]
+fn clothing_exclusion_rewrites_check_the_original_arm_relation() {
+    use gen_core::core_llm::{Message, TextLlmOutput, TextLlmRequest};
+    use sceneworks_core::options::prompt_content::PromptExclusion::ClothingAndAccessories;
+    let source = "An arm extends down behind the bag; the hand is on the table.";
+    let mut request = TextLlmRequest::new(vec![Message::user(source)], 512);
+    let mut calls = 0;
+    let (output, _) = generate_refine_checked(
+        &mut request,
+        &[ClothingAndAccessories],
+        "fixture",
+        false,
+        Some(source),
+        None,
+        |_| {
+            calls += 1;
+            Ok(TextLlmOutput {
+                text: if calls == 1 {
+                    "The arm is down behind the back, hand on the table."
+                } else {
+                    "The arm extends down, hand on the table."
+                }
+                .to_owned(),
+                ..Default::default()
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(output.text, "The arm extends down, hand on the table.");
+    assert_eq!(request.messages, vec![Message::user(source)]);
 }

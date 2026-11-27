@@ -1550,7 +1550,7 @@ describe("DatasetPromptBatchDialog", () => {
     expect(button("Describe all again")).toBeTruthy();
   });
 
-  it("condenses a 27B row with the model and tier that described it", async () => {
+  it("condenses a 27B row at its own tier with the selected exclusions", async () => {
     context.models = [...context.models, KREA, describerWithTiers("q4", "q8")];
     serveHistory([
       { id: "job_q8", status: "completed", result: { processedCount: 1, itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q8" } },
@@ -1558,17 +1558,21 @@ describe("DatasetPromptBatchDialog", () => {
     ]);
     serveStoredRuns({ job_q8: [described("item_a", 300, 400)], job_q4: [described("item_b", 400, 300)] });
     await render();
+    for (const option of document.body.querySelectorAll('fieldset.dataset-caption-options input')) await click(option);
+    const exclusions = ["identifyingCharacteristics", "clothingAndAccessories", "colorMode", "style"];
     jobsApi.resultItems.mockReset().mockImplementation(async () => ({ items: [], total: 0, nextOffset: null }));
     await chooseFitTo("krea_2_turbo");
     // One condense-only job per tier, each naming the tier its rows were described with.
     const first = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body);
     expect(first).toMatchObject({ model: VISION_DESCRIBE_MODEL_REPO, variant: "q8", fitTo: "krea_2_turbo" });
     expect(first.condenseRows.map((row) => row.itemId)).toEqual(["item_a"]);
+    expect(first.promptExclusions).toEqual(exclusions);
     await act(async () => nextPoll(snapshot("completed", [], { itemCount: 1, model: VISION_DESCRIBE_MODEL_REPO, variant: "q8" })));
     await settle();
     const second = JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body);
     expect(second).toMatchObject({ model: VISION_DESCRIBE_MODEL_REPO, variant: "q4", fitTo: "krea_2_turbo" });
     expect(second.condenseRows.map((row) => row.itemId)).toEqual(["item_b"]);
+    expect(second.promptExclusions).toEqual(exclusions);
   });
 
   it("marks a condensed prompt stale after a field edit and holds Save (not Export) until it is condensed again", async () => {

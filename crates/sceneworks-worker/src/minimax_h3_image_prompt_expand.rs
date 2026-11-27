@@ -576,6 +576,8 @@ pub(crate) enum Recovery {
     None,
     /// The reasoning used up the budget, so the expander was asked again with reasoning off.
     AnswerOnlyRetry,
+    /// The answer-only retry was also cut short; its kept caption was then content-edited.
+    AnswerOnlyRetryWithPartial,
 }
 
 /// The suggestion block the job result carries beside `refinedPrompt`:
@@ -603,7 +605,10 @@ pub(crate) fn suggestion_result_block(
     if truncated {
         block.insert("truncated".to_owned(), Value::Bool(true));
     }
-    if recovery == Recovery::AnswerOnlyRetry {
+    if matches!(
+        recovery,
+        Recovery::AnswerOnlyRetry | Recovery::AnswerOnlyRetryWithPartial
+    ) {
         block.insert("reasoningSkipped".to_owned(), Value::Bool(true));
     }
     block
