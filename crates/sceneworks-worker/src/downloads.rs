@@ -1019,7 +1019,7 @@ async fn download_file(
     expected_sha256: Option<&str>,
     label: &str,
     progress: &mut DownloadProgress<'_>,
-) -> WorkerResult<()> {
+) -> WorkerResult<Option<gen_core::ArtifactDigestAttestation>> {
     let streamed_digest = download_file_inner(
         context,
         url,
@@ -1050,7 +1050,7 @@ async fn verify_completed_download(
     streamed_digest: Option<&str>,
     label: &str,
     progress: &DownloadProgress<'_>,
-) -> WorkerResult<()> {
+) -> WorkerResult<Option<gen_core::ArtifactDigestAttestation>> {
     // Hashing a large legacy/416-complete entry needs the same visible phase and
     // heartbeat wrapper as verification of a freshly streamed file.
     if expected_size.unwrap_or(tokio::fs::metadata(dest).await?.len()) >= VERIFY_PROGRESS_MIN_BYTES
@@ -1062,8 +1062,11 @@ async fn verify_completed_download(
         )
         .await;
     }
+    // The staged bytes are read back even when the transfer streamed a digest: a writer outside
+    // this process can replace them mid-transfer, and only a read of what is on disk proves what a
+    // later load would open. That one read is then the proof the first load seal redeems.
     if let Some(expected) = expected_sha256.or(streamed_digest) {
-        verify_file_sha256(
+        return verify_file_sha256_attested(
             context.api,
             context.settings,
             context.job_id,
@@ -1071,12 +1074,45 @@ async fn verify_completed_download(
             expected,
             label,
         )
-        .await?;
-    } else {
-        // A complete legacy/416 partial has size evidence but no transfer digest.
-        sha256_file(context.api, context.settings, context.job_id, dest).await?;
+        .await
+        .map(|(_, attestation)| attestation);
     }
-    Ok(())
+    // A complete legacy/416 partial has size evidence but no transfer digest.
+    sha256_file(context.api, context.settings, context.job_id, dest).await?;
+    Ok(None)
+}
+
+/// The digest a download proved for the file at `path`, bound to the file's identity as it is now.
+/// `None` for a `.partial` staging file (renamed after verification, so no later reader opens it
+/// under this path) and for a malformed digest.
+fn proven_download_attestation(
+    path: &Path,
+    sha256: &str,
+) -> Option<gen_core::ArtifactDigestAttestation> {
+    if path.extension() == Some(std::ffi::OsStr::new("partial")) {
+        return None;
+    }
+    let digest = sceneworks_core::hashing::sha256_digest_from_hex(sha256)?;
+    let path = std::path::absolute(path).ok()?;
+    gen_core::ArtifactDigestAttestation::capture(path, digest).ok()
+}
+
+/// Record `attestation` in gen-core's load-seal store for `path` without reading content.
+///
+/// Redeemed only while a fresh capture of `path`'s target identity equals the attested one; a
+/// file that changed since the proof is left for the load to read, exactly as before. Checked here
+/// first so seeding can never turn into a full read at download time.
+fn seed_load_seal(
+    path: &Path,
+    attestation: &gen_core::ArtifactDigestAttestation,
+) -> Option<gen_core::PinnedWeightsFile> {
+    let path = std::path::absolute(path).ok()?;
+    let now =
+        gen_core::ArtifactDigestAttestation::capture(&path, *attestation.content_sha256()).ok()?;
+    if now.target_fingerprint() != attestation.target_fingerprint() {
+        return None;
+    }
+    gen_core::PinnedWeightsFile::pin_attested(&path, attestation).ok()
 }
 
 /// Verify `path`'s SHA-256 equals `expected`; on mismatch, remove the file and return
@@ -1090,9 +1126,27 @@ pub(crate) async fn verify_file_sha256(
     expected: &str,
     label: &str,
 ) -> WorkerResult<Option<String>> {
+    verify_file_sha256_attested(api, settings, job_id, path, expected, label)
+        .await
+        .map(|(digest, _)| digest)
+}
+
+/// [`verify_file_sha256`], also returning the verified digest bound to `path`'s identity as it was
+/// BEFORE the hash read it, and seeding gen-core's load-seal store with it, so the first load does
+/// not hash the file again. A file that changed while it was hashed is never seeded.
+pub(crate) async fn verify_file_sha256_attested(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    path: &Path,
+    expected: &str,
+    label: &str,
+) -> WorkerResult<(Option<String>, Option<gen_core::ArtifactDigestAttestation>)> {
     let Some(expected) = normalize_sha256(expected) else {
-        return Ok(None);
+        return Ok((None, None));
     };
+    // Captured before the hash: seeding below then requires the file to be unchanged since.
+    let attestation = proven_download_attestation(path, &expected);
     // Stamp the file's real path (a hub snapshot link resolves to its blob, as admission does)
     // before hashing, so the verdict below covers exactly the bytes hashed.
     // Skipped for a `.partial` staging file (renamed after verification, so a verdict under its
@@ -1129,7 +1183,10 @@ pub(crate) async fn verify_file_sha256(
     if let Some(observed) = observed {
         let _ = cache.record_hashed(observed, &format!("sha256:{actual}"));
     }
-    Ok(Some(actual))
+    // The same for the first load's seal: redeemed only if the file is unchanged since the
+    // pre-hash capture, so a rewrite during the hash is never attested.
+    let attestation = attestation.filter(|attestation| seed_load_seal(path, attestation).is_some());
+    Ok((Some(actual), attestation))
 }
 
 /// Stream `path` through SHA-256 on the blocking pool (weights are multi-GB; hashing on the async
@@ -1139,6 +1196,12 @@ pub(crate) async fn verify_file_sha256(
 /// `interrupted` the moment the byte-streaming loop's own heartbeats stop — the exact "No heartbeat
 /// from the worker for 90s" freeze the transfer-only sc-11939 watchdog left uncovered (sc-13856 /
 /// GitHub #1690).
+/// Every path a download verification read back to hash, process-wide (tests filter by their own
+/// temp directory).
+#[cfg(test)]
+pub(crate) static VERIFY_FILE_HASHES: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
 pub(crate) async fn sha256_file(
     api: &ApiClient,
     settings: &Settings,
@@ -1146,6 +1209,8 @@ pub(crate) async fn sha256_file(
     path: &Path,
 ) -> WorkerResult<String> {
     let path = path.to_path_buf();
+    #[cfg(test)]
+    VERIFY_FILE_HASHES.lock().unwrap().push(path.clone());
     let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
         sceneworks_core::hashing::sha256_file(&path).map_err(WorkerError::Io)
     });
@@ -1543,8 +1608,12 @@ pub(crate) async fn download_snapshot_into_cache(
     )
     .build()?;
     let mut commit: Option<String> = None;
-    let mut placements: Vec<(String, String, Option<String>)> =
-        Vec::with_capacity(snapshot.files.len());
+    let mut placements: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<gen_core::ArtifactDigestAttestation>,
+    )> = Vec::with_capacity(snapshot.files.len());
 
     for file in &snapshot.files {
         check_download_cancel(context).await?;
@@ -1573,7 +1642,7 @@ pub(crate) async fn download_snapshot_into_cache(
         let blob_path = safe_join(&blobs_dir, &etag)?;
         let _lock = DownloadLock::acquire_async(&blob_path).await?;
         progress.record_existing_file(&blob_path, file.size).await?;
-        download_file(
+        let proven = download_file(
             context,
             &file.download_url,
             &blob_path,
@@ -1585,7 +1654,7 @@ pub(crate) async fn download_snapshot_into_cache(
             progress,
         )
         .await?;
-        placements.push((file.path.clone(), etag, file.sha256.clone()));
+        placements.push((file.path.clone(), etag, file.sha256.clone(), proven));
     }
 
     // Materialize the snapshot once every blob is present: refs/<rev> -> commit and
@@ -1602,7 +1671,7 @@ pub(crate) async fn download_snapshot_into_cache(
     tokio::fs::create_dir_all(&refs_dir).await?;
     tokio::fs::write(safe_join(&refs_dir, revision)?, commit.as_bytes()).await?;
     let snapshot_dir = safe_join(&repo_dir.join("snapshots"), &commit)?;
-    for (relpath, etag, expected_sha256) in &placements {
+    for (relpath, etag, expected_sha256, proven) in &placements {
         let link = safe_join(&snapshot_dir, relpath)?;
         if let Some(parent) = link.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -1621,6 +1690,22 @@ pub(crate) async fn download_snapshot_into_cache(
         }
         rel_target.push("blobs");
         rel_target.push(etag);
+        // A blob this download proved places its entry without reading it again, and hands the
+        // same proof to the entry's load seal. Anything that cannot be proven unchanged falls back
+        // to the ordinary placement and its re-verification below.
+        if let Some(proven) = proven {
+            if place_proven_snapshot_entry(
+                context.settings,
+                &blobs_dir.join(etag),
+                &rel_target,
+                &link,
+                proven,
+            )
+            .await
+            {
+                continue;
+            }
+        }
         if !link_blob(&blobs_dir.join(etag), &rel_target, &link).await {
             // Copy fallback (a Windows hardlink failure across the blob/snapshot pair): a multi-GB
             // blob copy can outlast the stale-worker timeout just like the hash above, so keep the
@@ -1778,6 +1863,82 @@ async fn link_blob(blob_abs: &Path, rel_target: &Path, link: &Path) -> bool {
         let _ = (blob_abs, rel_target, link);
         false
     }
+}
+
+/// Place the snapshot entry for a blob this download proved, carrying that proof instead of
+/// reading the file again, and record it for admission and for the entry's first load seal.
+///
+/// Windows hard-links through the blob's load seal ([`gen_core::PinnedWeightsFile::hard_link_with_check`]):
+/// adding a link moves the shared file's change time, which every stamp reads as drift, so the
+/// seal performs the link itself and proves nothing but that moved. Unix symlinks as
+/// [`link_blob`] does; the entry resolves to the blob, which must still be the proven one.
+///
+/// Returns false, leaving no entry behind, whenever the blob cannot be shown unchanged since its
+/// proof; the caller's ordinary placement and re-verification then run instead.
+async fn place_proven_snapshot_entry(
+    settings: &Settings,
+    blob: &Path,
+    rel_target: &Path,
+    link: &Path,
+    proven: &gen_core::ArtifactDigestAttestation,
+) -> bool {
+    if place_proven_entry(blob, rel_target, link, proven)
+        .await
+        .is_none()
+    {
+        if tokio::fs::symlink_metadata(link).await.is_ok() {
+            let _ = tokio::fs::remove_file(link).await;
+        }
+        return false;
+    }
+    // Admission keys its hash-once record on the entry's real path: the blob itself behind a Unix
+    // symlink (already recorded by the blob's verification), the entry for a Windows hard link.
+    if settings.data_dir.is_absolute() {
+        let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
+            &settings.data_dir,
+        );
+        if let Ok(observed) = std::fs::canonicalize(link).and_then(|real| cache.observe(&real)) {
+            let digest = sceneworks_core::hashing::hex(proven.content_sha256());
+            let _ = cache.record_hashed(observed, &format!("sha256:{digest}"));
+        }
+    }
+    true
+}
+
+async fn place_proven_entry(
+    blob: &Path,
+    rel_target: &Path,
+    link: &Path,
+    proven: &gen_core::ArtifactDigestAttestation,
+) -> Option<()> {
+    // The blob must still be exactly the file its download proved.
+    let blob_seal = seed_load_seal(blob, proven)?;
+    let link = std::path::absolute(link).ok()?;
+    #[cfg(windows)]
+    let target = {
+        let _ = rel_target;
+        blob_seal.hard_link_with_check(&link, || Ok(())).ok()?
+    };
+    #[cfg(unix)]
+    let target = {
+        tokio::fs::symlink(rel_target, &link).await.ok()?;
+        blob_seal
+    };
+    #[cfg(not(any(unix, windows)))]
+    let target: gen_core::PinnedWeightsFile = {
+        let _ = (rel_target, blob_seal);
+        return None;
+    };
+    // The entry must resolve to that same proven file object, unchanged, before its own load seal
+    // may carry the digest.
+    let entry =
+        gen_core::ArtifactDigestAttestation::capture(&link, *proven.content_sha256()).ok()?;
+    if entry.target_fingerprint() != target.target_fingerprint() {
+        return None;
+    }
+    gen_core::PinnedWeightsFile::pin_attested(&link, &entry)
+        .ok()
+        .map(|_| ())
 }
 
 pub(crate) async fn download_lora_source_url(
