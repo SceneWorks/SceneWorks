@@ -9,12 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use serde_json::Value;
-
-const FACTS: &[&str] = &[
-    include_str!("../../../config/engine-capabilities/capabilities.candle.json"),
-    include_str!("../../../config/engine-capabilities/capabilities.mlx.json"),
-];
+use serde_json::{json, Value};
 
 pub const DECODERS_FIELD: &str = "decoders";
 pub const BY_BACKEND_FIELD: &str = "byBackend";
@@ -28,50 +23,37 @@ static TABLE: OnceLock<Result<DecoderTable, String>> = OnceLock::new();
 
 fn parse() -> Result<DecoderTable, String> {
     let mut table = DecoderTable::new();
-    for contents in FACTS {
-        let facts: Value = serde_json::from_str(contents)
-            .map_err(|error| format!("engine capability facts are malformed: {error}"))?;
-        let backend = facts
-            .get("backend")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "engine capability facts have no backend".to_owned())?;
-        let engines = facts
-            .get("engines")
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("{backend} engine capability facts have no engines array"))?;
-        for engine in engines {
-            let Some(options) = engine.get("decoderOptions").and_then(Value::as_array) else {
-                continue;
-            };
-            if options.is_empty() {
+    for export in [
+        crate::sga_capabilities::candle_cuda(),
+        crate::sga_capabilities::macos_mlx(),
+    ] {
+        let backend = export.backend.as_str();
+        for (route_id, route) in &export.routes {
+            if route.decoders.alternate_decoder_ids.is_empty() {
                 continue;
             }
-            let id = engine
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("{backend} decoder-capable engine has no id"))?;
-            for option in options {
-                for field in ["id", "label", "componentId", "licenseComponent"] {
-                    if option.get(field).and_then(Value::as_str).is_none() {
-                        return Err(format!(
-                            "{backend} engine {id} decoder option is missing string field {field}"
-                        ));
-                    }
-                }
-                if option
-                    .get("experimental")
-                    .and_then(Value::as_bool)
-                    .is_none()
-                {
-                    return Err(format!(
-                        "{backend} engine {id} decoder option is missing boolean experimental"
-                    ));
-                }
+            let mut options = Vec::with_capacity(route.decoders.alternate_decoder_ids.len());
+            for decoder_id in &route.decoders.alternate_decoder_ids {
+                let option = gen_core::latent::DECODER_OPTIONS
+                    .iter()
+                    .find(|candidate| candidate.id == decoder_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "{backend} route {route_id} declares unknown alternate decoder {decoder_id:?}"
+                        )
+                    })?;
+                options.push(json!({
+                    "id": option.id,
+                    "label": option.label,
+                    "componentId": option.component_id,
+                    "licenseComponent": option.license_component,
+                    "experimental": option.experimental,
+                }));
             }
             table
-                .entry(id.to_owned())
+                .entry(route_id.clone())
                 .or_default()
-                .insert(backend.to_owned(), options.clone());
+                .insert(backend.to_owned(), options);
         }
     }
     Ok(table)

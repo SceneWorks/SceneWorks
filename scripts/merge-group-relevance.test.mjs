@@ -30,8 +30,8 @@ test("parses the real macos-mlx anchor, comments and all", async () => {
     "apps/rust-worker/**",
     "apps/rust-api/**",
     "config/manifests/**",
-    "config/engine-capabilities/capabilities.mlx.json",
-    "config/engine-capabilities/audio/capabilities.candle.json",
+    "config/engine-capabilities/sga/**",
+    "scripts/check-generation-route-profiles.mjs",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -53,7 +53,7 @@ test("parses the real windows-candle anchor", async () => {
     assert.ok(paths.includes(watched), `candle_paths should carry ${watched}`);
   }
   assert.ok(!paths.includes("crates/**"));
-  assert.ok(paths.includes("config/engine-capabilities/capabilities.candle.json"));
+  assert.ok(paths.includes("config/engine-capabilities/sga/**"));
   // sc-17703 deliberately keeps apps/rust-worker/** OFF this lane; the parse must reflect the file,
   // not the sibling lane's list.
   assert.ok(!paths.includes("apps/rust-worker/**"), paths.join(", "));
@@ -91,8 +91,8 @@ test("glob semantics match GitHub filter patterns", () => {
   assert.ok(matchesGlob("Cargo.toml", "Cargo.toml"));
   // A bare filename anchors — it must not match the same name nested in a subdirectory.
   assert.ok(!matchesGlob("Cargo.toml", "crates/sceneworks-core/Cargo.toml"));
-  assert.ok(matchesGlob("config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/capabilities.mlx.json"));
-  assert.ok(!matchesGlob("config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/capabilities.candle.json"));
+  assert.ok(matchesGlob("config/engine-capabilities/sga/macos-mlx.json", "config/engine-capabilities/sga/macos-mlx.json"));
+  assert.ok(!matchesGlob("config/engine-capabilities/sga/macos-mlx.json", "config/engine-capabilities/sga/candle-cuda.json"));
 });
 
 test("a docs-only merge group skips the lane; a watched crate runs it", async () => {

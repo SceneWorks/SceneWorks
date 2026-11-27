@@ -33,7 +33,7 @@ test("native, pin, anchor and tooling changes select their real dependent suites
 });
 
 test("cross-boundary inputs read by real web tests/builds remain reachable", () => {
-  for (const file of ["config/manifests/builtin.models.jsonc", "config/engine-capabilities/capabilities.mlx.json", "packages/schemas/model-manifest.schema.json", "apps/desktop/Entitlements.plist", "apps/desktop/licenses/README.md", "crates/sceneworks-core/src/yue2_score/fixtures/score.abc", "tests/fixtures/moss-batch-recipe.json", "docs/workflow-share-envelope.md", "docs/film-script-writing.md", "docs/film-editor.md"]) {
+  for (const file of ["config/manifests/builtin.models.jsonc", "config/engine-capabilities/sga/macos-mlx.json", "packages/schemas/model-manifest.schema.json", "apps/desktop/Entitlements.plist", "apps/desktop/licenses/README.md", "crates/sceneworks-core/src/yue2_score/fixtures/score.abc", "tests/fixtures/moss-batch-recipe.json", "docs/workflow-share-envelope.md", "docs/film-script-writing.md", "docs/film-editor.md"]) {
     assert.equal(decision(file).web, true, file);
   }
   assert.equal(decision("docs/calibration-runbook.md").history, true);

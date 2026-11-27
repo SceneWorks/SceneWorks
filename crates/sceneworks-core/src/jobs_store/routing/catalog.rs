@@ -937,14 +937,9 @@ pub fn is_builtin_image_model(id: &str) -> bool {
     IMAGE_MODEL_CAPS.iter().any(|caps| caps.id == id)
 }
 
-const MLX_ENGINE_FACTS: &str =
-    include_str!("../../../../../config/engine-capabilities/capabilities.mlx.json");
-const CANDLE_ENGINE_FACTS: &str =
-    include_str!("../../../../../config/engine-capabilities/capabilities.candle.json");
-
-/// Checked-in projection of one exact imported-source registration. It is generated from the
-/// inference registry and therefore describes the provider that really validates and loads the
-/// source, rather than a SceneWorks family table.
+/// Checked-in projection of one exact imported-source registration, derived from the canonical
+/// `sga.capabilities/2` export (`SW-6983`). Describes the registered provider that validates and
+/// loads the source, rather than a SceneWorks family table.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedProviderSurface {
@@ -963,24 +958,59 @@ pub struct ImportedProviderSurface {
     pub registry_cached: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct ImportedProviderFactsFile {
     backend: String,
-    #[serde(default)]
     imports: Vec<ImportedProviderSurface>,
 }
 
 fn imported_provider_facts() -> &'static Result<Vec<ImportedProviderFactsFile>, String> {
     static FACTS: OnceLock<Result<Vec<ImportedProviderFactsFile>, String>> = OnceLock::new();
     FACTS.get_or_init(|| {
-        [MLX_ENGINE_FACTS, CANDLE_ENGINE_FACTS]
-            .into_iter()
-            .map(|raw| {
-                serde_json::from_str(raw).map_err(|error| {
-                    format!("engine import capability facts are malformed: {error}")
-                })
+        [
+            crate::sga_capabilities::macos_mlx(),
+            crate::sga_capabilities::candle_cuda(),
+        ]
+        .into_iter()
+        .map(|export| {
+            let mut imports = Vec::with_capacity(export.imported_models.len());
+            for entry in &export.imported_models {
+                let route = export.routes.get(&entry.provider_id).ok_or_else(|| {
+                    format!(
+                        "sga.capabilities/2 {} imported model {:?}/{:?}/{:?} names unregistered provider {:?}",
+                        export.backend, entry.family, entry.source, entry.operation, entry.provider_id
+                    )
+                })?;
+                let conditioning = route
+                    .conditioning
+                    .kinds
+                    .iter()
+                    .map(|kind| match kind.as_str() {
+                        "multiReference" => "multi_reference".to_owned(),
+                        other => other.to_owned(),
+                    })
+                    .collect();
+                imports.push(ImportedProviderSurface {
+                    family: entry.family.clone(),
+                    source: crate::sga_capabilities::normalize_import_source_shape(&entry.source)
+                        .to_owned(),
+                    operation: entry.operation.clone(),
+                    provider_id: entry.provider_id.clone(),
+                    conditioning,
+                    supports_lora: entry.inherit_adapters && route.adapters.supports_lora,
+                    supports_lokr: entry.inherit_adapters && route.adapters.supports_lokr,
+                    supported_quants: route.quant.supported_tiers.clone(),
+                    supports_kv_cache: route.capabilities.supports_kv_cache,
+                    supports_sequential_offload: route.capabilities.supports_sequential_offload,
+                    registry_cached: true,
+                });
+            }
+            Ok(ImportedProviderFactsFile {
+                backend: export.backend.clone(),
+                imports,
             })
-            .collect()
+        })
+        .collect()
     })
 }
 

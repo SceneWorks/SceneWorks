@@ -2590,14 +2590,9 @@ fn sanitize_flux3_layout(value: &Value) -> Option<Value> {
 fn sanitize_moss_options(value: &Value) -> Option<Value> {
     use gen_core::moss_image::{MossImageOptions, MossImageResolved, MossImageVariant};
     let options: MossImageOptions = serde_json::from_value(value.clone()).ok()?;
-    MossImageResolved::resolve(
-        MossImageVariant::Sft,
-        &gen_core::GenerationRequest {
-            moss_image: Some(options.clone()),
-            ..Default::default()
-        },
-    )
-    .ok()?;
+    let mut req = gen_core::GenerationRequest::default();
+    req.extensions.moss_image = Some(gen_core::MossImageExtension::from_options(options.clone()));
+    MossImageResolved::resolve(MossImageVariant::Sft, &req).ok()?;
     serde_json::to_value(options).ok()
 }
 /// Keep the native validated receipt while excluding this machine's optional adapter location.

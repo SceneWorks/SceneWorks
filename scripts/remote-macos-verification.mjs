@@ -23,9 +23,7 @@ export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0"
 export const TARGET_REGISTRY = "tests/fixtures/rust_migration_contracts/training/target-registry.json";
 export const TARGET_REGISTRY_WRITER = "regen_target_registry_fixture";
 export const OUTPUTS = [
-  "config/engine-capabilities/capabilities.mlx.json",
-  "config/engine-capabilities/audio/capabilities.candle.json",
-  "config/engine-capabilities/runtime/capabilities.mlx.json",
+  "config/engine-capabilities/sga/macos-mlx.json",
   "config/manifests/builtin.preview-support.jsonc",
   "apps/web/src/data/previewSupport.json",
   "docs/generated/memory-matrix.json",
@@ -134,29 +132,23 @@ export function validateTargetRegistry(value) {
   }
 }
 
-export function validateCapabilityFile(value, backend, kind, pin) {
-  const revision = value?.generatedFrom?.inferenceRevision;
-  requireFact(SHA.test(revision ?? "") && (pin === undefined || revision === pin), "capability file has wrong inference pin");
-  if (kind === "runtime") {
-    requireFact(value.schemaVersion === 2 && value.snapshot?.backend === backend && value.snapshot?.platform === (backend === "mlx" ? "macos" : "cuda"), "runtime schema/backend/platform mismatch");
-    for (const key of ["generator_ids", "trainer_ids"]) requireFact(Array.isArray(value.snapshot[key]) && value.snapshot[key].every(id => typeof id === "string" && id.length > 0) && new Set(value.snapshot[key]).size === value.snapshot[key].length, `invalid runtime identity list: ${key}`);
-    for (const key of ["generator_capabilities", "trainer_capabilities"]) requireFact(Array.isArray(value.snapshot[key]) && value.snapshot[key].every(row => typeof row.id === "string" && row.backend === backend), `invalid runtime descriptors: ${key}`);
-    for (const key of ["modelMappings", "trainerMappings"]) requireFact(value[key] && typeof value[key] === "object" && !Array.isArray(value[key]), `invalid runtime mapping: ${key}`);
-    requireFact(Array.isArray(value.videoModelMappings) && value.videoModelMappings.every(row => typeof row.modelId === "string" && typeof row.mode === "string" && Array.isArray(row.engineIds) && row.engineIds.every(id => typeof id === "string")), "invalid runtime video mapping list");
-    requireFact(Array.isArray(value.workerCapabilities) && value.workerCapabilities.every(item => typeof item === "string"), "invalid worker capability list");
-  } else {
-    requireFact(value.backend === backend && Array.isArray(value.engines) && value.engines.length > 0 && value.engines.every(row => typeof row.id === "string" && row.id.length > 0 && typeof row.modality === "string" && typeof row.supportsPreview === "boolean"), "invalid native capability registry");
-    if (kind === "audio") requireFact(value.registry === "audio", "wrong audio registry");
+export function validateCapabilityFile(value, backend, featureSet = backend === "mlx" ? "macos-mlx" : "candle-cuda") {
+  requireFact(value && typeof value === "object" && !Array.isArray(value), "capability export must be an object");
+  requireFact(value.schema_version === "sga.capabilities/2", "capability export must declare schema_version sga.capabilities/2");
+  requireFact(!Object.hasOwn(value, "generatedFrom") && !Object.hasOwn(value, "inferenceRevision"), "sga.capabilities/2 export must be pin-free (M8)");
+  requireFact(value.backend === backend && value.feature_set === featureSet && value.platform === (backend === "mlx" ? "macos" : "cuda"), "sga.capabilities/2 backend/feature_set/platform mismatch");
+  requireFact(value.routes && typeof value.routes === "object" && !Array.isArray(value.routes) && Object.keys(value.routes).length > 0, "invalid sga.capabilities/2 routes map");
+  for (const key of ["trainers", "audio_routes"]) {
+    requireFact(value[key] && typeof value[key] === "object" && !Array.isArray(value[key]), `invalid sga.capabilities/2 ${key} map`);
   }
 }
 
-export function validateFacts(files, pin, backends = ["mlx", "candle"]) {
+export function validateFacts(files, backends = ["mlx", "candle"]) {
   for (const backend of backends) {
-    for (const prefix of ["", "audio/", "runtime/"]) {
-      const name = `config/engine-capabilities/${prefix}capabilities.${prefix === "audio/" ? "candle" : backend}.json`;
-      const value = JSON.parse(files(name));
-      validateCapabilityFile(value, prefix === "audio/" ? "candle" : backend, prefix === "runtime/" ? "runtime" : prefix === "audio/" ? "audio" : "media", pin);
-    }
+    const featureSet = backend === "mlx" ? "macos-mlx" : "candle-cuda";
+    const name = `config/engine-capabilities/sga/${featureSet}.json`;
+    const value = JSON.parse(files(name));
+    validateCapabilityFile(value, backend, featureSet);
   }
 }
 
@@ -210,7 +202,7 @@ export async function authenticateReceipt({ receipt, files, context, api, runId,
     validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);
   } else {
     for (const file of OUTPUTS.filter(file => /\.jsonc?$/.test(file))) JSON.parse(stripJsoncComments(files[`payload/${file}`].toString()));
-    for (const [index, kind] of ["media", "audio", "runtime"].entries()) validateCapabilityFile(JSON.parse(files[`payload/${OUTPUTS[index]}`]), kind === "audio" ? "candle" : "mlx", kind, context.inference_sha);
+    validateCapabilityFile(JSON.parse(files[`payload/${OUTPUTS[0]}`]), "mlx", "macos-mlx");
     validateRegistryGeneration(receipt.target_registry_generation);
     validateTargetRegistry(JSON.parse(files[`payload/${TARGET_REGISTRY}`]));
   }
@@ -476,34 +468,23 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
   const receipt = { schema_version: 1, status: "running", ...context, ...identity, repository: REPOSITORY, job: JOB, runner_name: env.RUNNER_NAME, machine, clean_before: true, files: {} };
   const runEnv = { ...remoteBuildEnv(env, request.profile), ...createUnitHfSandbox(root, env).env };
   if (request.profile === "facts-and-projections") {
-    // Keep committed Windows provenance as declared; never restamp it or add a pin-currency gate.
-    // Preserve committed Candle provenance and capture current MLX producer facts for typed
-    // registry, preview and memory projections.
-    validateFacts(file => readFileSync(path.join(root, file), "utf8"), undefined, ["candle"]);
-    const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-facts-"));
+    // Hardware-free `sga.capabilities/2` exports are validated directly before regenerating
+    // derived preview-support, memory-matrix, and training target-registry projections.
+    validateFacts(file => readFileSync(path.join(root, file), "utf8"));
     const log = path.join(output, "facts.log");
-    try {
-      await runLogged(root, ["cargo", "run", "--locked", "--verbose", "-p", "sceneworks-worker", "--bin", "dump-engine-capabilities", "--", scratch], log, runEnv);
-      for (const file of OUTPUTS.slice(0, 3)) {
-        const from = path.join(scratch, file.slice("config/engine-capabilities/".length));
-        const bytes = readFileSync(from); requireFact(JSON.parse(bytes).generatedFrom?.inferenceRevision === request.inference_sha, "dump pin differs");
-        writeFileSync(path.join(root, file), bytes);
-      }
-      validateFacts(file => readFileSync(path.join(root, file), "utf8"));
-      validateFacts(file => readFileSync(path.join(root, file), "utf8"), request.inference_sha, ["mlx"]);
-      await runLogged(root, ["npm", "--prefix", "apps/web", "run", "gen:preview-support"], log, runEnv, true);
-      await runLogged(root, ["npm", "run", "generate:memory-matrix"], log, runEnv, true);
-      // GENERATION ONLY: the existing ignored writer is not a validation test or mutation proof.
-      // Its flag is confined to this one child; all later commands keep the declared profile env.
-      const writerLogStart = readFileSync(log).length;
-      await runLogged(root, ["cargo", "test", "--locked", "-p", "sceneworks-core", "--test", "training_contracts", TARGET_REGISTRY_WRITER, "--", "--exact", "--ignored"], log, { ...runEnv, REGEN_FIXTURE: "1" }, true);
-      receipt.target_registry_generation = registryGenerationRecord(readFileSync(log).subarray(writerLogStart).toString("utf8"));
-      validateRegistryGeneration(receipt.target_registry_generation);
-      validateTargetRegistry(JSON.parse(readFileSync(path.join(root, TARGET_REGISTRY), "utf8")));
-      requireFact(git(root, "diff", "--name-only").split("\n").filter(Boolean).every(file => OUTPUTS.includes(file)), "producer modified non-derived source");
-      for (const file of OUTPUTS) atomicWrite(path.join(output, "payload", file), readFileSync(path.join(root, file)));
-      receipt.command = ["facts-and-projections"];
-    } finally { rmSync(scratch, { recursive: true, force: true }); }
+    await runLogged(root, [process.execPath, "scripts/check-generation-route-profiles.mjs"], log, runEnv);
+    await runLogged(root, ["npm", "--prefix", "apps/web", "run", "gen:preview-support"], log, runEnv, true);
+    await runLogged(root, ["npm", "run", "generate:memory-matrix"], log, runEnv, true);
+    // GENERATION ONLY: the existing ignored writer is not a validation test or mutation proof.
+    // Its flag is confined to this one child; all later commands keep the declared profile env.
+    const writerLogStart = readFileSync(log).length;
+    await runLogged(root, ["cargo", "test", "--locked", "-p", "sceneworks-core", "--test", "training_contracts", TARGET_REGISTRY_WRITER, "--", "--exact", "--ignored"], log, { ...runEnv, REGEN_FIXTURE: "1" }, true);
+    receipt.target_registry_generation = registryGenerationRecord(readFileSync(log).subarray(writerLogStart).toString("utf8"));
+    validateRegistryGeneration(receipt.target_registry_generation);
+    validateTargetRegistry(JSON.parse(readFileSync(path.join(root, TARGET_REGISTRY), "utf8")));
+    requireFact(git(root, "diff", "--name-only").split("\n").filter(Boolean).every(file => OUTPUTS.includes(file)), "producer modified non-derived source");
+    for (const file of OUTPUTS) atomicWrite(path.join(output, "payload", file), readFileSync(path.join(root, file)));
+    receipt.command = ["facts-and-projections"];
   } else if (request.profile === "consumer-assertions") {
     const scratch = mkdtempSync(path.join(os.tmpdir(), "moss-consumer-assertions-"));
     const run = path.join(scratch, "run");

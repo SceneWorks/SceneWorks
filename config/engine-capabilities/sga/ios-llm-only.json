@@ -1,0 +1,151 @@
+{
+  "advanced_quant_tiers": [],
+  "audio_backend": null,
+  "audio_routes": {},
+  "audio_snapshot_preparer_backends": [],
+  "backend": "mlx",
+  "bespoke_waivers": {
+    "crate_api_providers": [],
+    "memory_route_waivers": [],
+    "utility_crates": []
+  },
+  "captioners": {},
+  "checkpoint_adapters": {},
+  "embedders": {
+    "audio": {},
+    "image": {},
+    "text": {},
+    "voice": {}
+  },
+  "feature_routes": {},
+  "feature_set": "ios-llm-only",
+  "imported_models": [],
+  "llm_models": {
+    "mlx-joycaption": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 0,
+        "max_new_tokens": 0,
+        "mtp": null,
+        "prefix_checkpoints": null,
+        "reasoning_efforts": [],
+        "speculative": [],
+        "supported_constraints": [],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": true,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": true,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "text_llm",
+      "family": "joycaption",
+      "id": "mlx-joycaption",
+      "modality": "vision_language"
+    },
+    "mlx-llama": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 0,
+        "max_new_tokens": 0,
+        "mtp": null,
+        "prefix_checkpoints": {
+          "max_checkpoints_per_request": 4,
+          "supports_document_span": true,
+          "supports_hybrid_boundaries": true
+        },
+        "reasoning_efforts": [],
+        "speculative": [
+          {
+            "max_depth": 7,
+            "proposer": "prompt_lookup",
+            "recommended_depth": 4
+          }
+        ],
+        "supported_constraints": [
+          "json",
+          "json_schema"
+        ],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": true,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": false,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "text_llm",
+      "family": "llama",
+      "id": "mlx-llama",
+      "modality": "text"
+    },
+    "mlx-starvector-1b": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 8192,
+        "max_new_tokens": 7933,
+        "mtp": null,
+        "prefix_checkpoints": null,
+        "reasoning_efforts": [],
+        "speculative": [],
+        "supported_constraints": [],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": false,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": true,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "vector",
+      "family": "starvector",
+      "id": "mlx-starvector-1b",
+      "modality": "image_to_svg"
+    },
+    "mlx-starvector-8b": {
+      "backend": "mlx",
+      "capabilities": {
+        "max_context_tokens": 16000,
+        "max_new_tokens": 15422,
+        "mtp": null,
+        "prefix_checkpoints": null,
+        "reasoning_efforts": [],
+        "speculative": [],
+        "supported_constraints": [],
+        "supports_audio": false,
+        "supports_preserve_thinking": false,
+        "supports_reasoning_effort": false,
+        "supports_system_prompt": false,
+        "supports_thinking": false,
+        "supports_tools": false,
+        "supports_video": false,
+        "supports_vision": true,
+        "tree_verify": null
+      },
+      "entrypoint_kind": "vector",
+      "family": "starvector",
+      "id": "mlx-starvector-8b",
+      "modality": "image_to_svg"
+    }
+  },
+  "platform": "ios",
+  "rejected_quants": {},
+  "routes": {},
+  "schema_version": "sga.capabilities/2",
+  "snapshot_preparer_backends": [
+    "mlx"
+  ],
+  "trainers": {},
+  "transcribers": {},
+  "transforms": {
+    "audio": {},
+    "image": {}
+  }
+}

@@ -1,5 +1,5 @@
-//! PIPE-18 route reconciliation (SW-6931, SW-F331 E1): a metadata-only join, not a capability
-//! authority and not an execution or device-fit claim.
+//! PIPE-18 route reconciliation (SW-6931, SW-F331 E1, SW-6983): a metadata-only join, not a
+//! capability authority and not an execution or device-fit claim.
 //!
 //! The two sides are written independently:
 //!
@@ -8,10 +8,9 @@
 //!   `config/manifests/registry/route-policy.json`, the vector providers each product names, the
 //!   native job arms of `crates/sceneworks-worker/src/utility_dispatch.rs`, and the production
 //!   claim gate with its bespoke worker lanes. No field the core build copies out of a capability
-//!   dump is read on this side.
-//! * **Engine side:** the platform registries in
-//!   `config/engine-capabilities/runtime/capabilities.{mlx,candle}.json`, written by the worker's
-//!   `engine_capability_facts.rs` dumper.
+//!   export is read on this side.
+//! * **Engine side:** the hardware-free `sga.capabilities/2` exports in
+//!   `config/engine-capabilities/sga/{macos-mlx,candle-cuda,candle-cpu,ios-media,ios-llm-only}.json`.
 //!
 //! Every product route is joined by provider, mode, conditioning and output on each backend that
 //! admits it. A route with neither a registry binding nor a bespoke worker lane is missing. An
@@ -27,18 +26,16 @@ use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability,
     WorkerSnapshot, WorkerStatus,
 };
-use crate::registry::ModelSpec;
+use crate::registry::{route_bindings, ModelSpec};
+use crate::sga_capabilities::{
+    CapabilitiesExportV2, ExportedRouteV2, CANDLE_CPU_JSON, CANDLE_CUDA_JSON, IOS_LLM_ONLY_JSON,
+    IOS_MEDIA_JSON, MACOS_MLX_JSON,
+};
 
 const DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/utility_dispatch.rs");
-const MLX_RUNTIME_FACTS: &str =
-    include_str!("../../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
-const CANDLE_RUNTIME_FACTS: &str =
-    include_str!("../../../../../config/engine-capabilities/runtime/capabilities.candle.json");
 const PRODUCT_MANIFEST: &str = include_str!("../../../../../config/manifests/builtin.models.jsonc");
 const ROUTE_POLICY: &str =
     include_str!("../../../../../config/manifests/registry/route-policy.json");
-const PROFILE_RECEIPT: &str =
-    include_str!("../../../tests/fixtures/generation-route-profiles.json");
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,7 +46,7 @@ pub struct RouteCoverage {
     pub jobs: Vec<JobLifecycle>,
     pub cells: Vec<RouteCell>,
     pub registries: Vec<RegistrySurface>,
-    pub profile_source_receipt: Value,
+    pub profile_exports: BTreeMap<String, Value>,
     pub model_aliases: Vec<Value>,
     /// Product routes with no registry binding and no bespoke lane, and no approved exception.
     pub missing: Vec<String>,
@@ -107,39 +104,39 @@ pub struct JobLifecycle {
     pub output: &'static str,
     pub owner: &'static str,
     pub entry_point: &'static str,
-    /// Platforms whose worker advertises this job arm in its registry dump.
+    /// Platforms whose worker advertises this job arm.
     pub advertised_by: Vec<String>,
 }
 
-/// One platform's engine registries, read from its runtime capability dump.
+/// One platform's engine registries, read from its canonical `sga.capabilities/2` export.
 struct Engine {
-    raw: Value,
+    export: CapabilitiesExportV2,
     platform: String,
     backend: String,
     audio_backend: String,
+    worker_capabilities: Vec<String>,
     worker: WorkerSnapshot,
 }
 
 impl Engine {
     fn parse(source: &str) -> Result<Self, String> {
-        let raw: Value = serde_json::from_str(source).map_err(|e| e.to_string())?;
-        let snapshot = raw["snapshot"].as_object().ok_or("missing snapshot")?;
-        let text = |key: &str| {
-            snapshot
-                .get(key)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| format!("snapshot has no {key}"))
-        };
-        let platform = text("platform")?;
-        let backend = text("backend")?;
-        let audio_backend = text("audio_backend")?;
-        let capabilities = raw["workerCapabilities"]
-            .as_array()
-            .ok_or("missing worker capabilities")?
+        let export =
+            CapabilitiesExportV2::from_json_bytes(source.as_bytes()).map_err(|e| e.to_string())?;
+        let platform = export.platform.clone();
+        let backend = export.backend.clone();
+        let audio_backend = export
+            .audio_backend
+            .clone()
+            .ok_or_else(|| format!("{} export has no audio_backend", export.feature_set))?;
+        let worker_capabilities: Vec<String> =
+            route_bindings::platform_worker_capabilities(&backend)
+                .iter()
+                .map(|cap| (*cap).to_owned())
+                .collect();
+        let capabilities = worker_capabilities
             .iter()
             .map(|value| {
-                serde_json::from_value::<WorkerCapability>(value.clone()).map_err(|e| e.to_string())
+                serde_json::from_value::<WorkerCapability>(json!(value)).map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
         let worker = WorkerSnapshot {
@@ -158,69 +155,146 @@ impl Engine {
             extra: BTreeMap::new(),
         };
         Ok(Self {
-            raw,
+            export,
             platform,
             backend,
             audio_backend,
+            worker_capabilities,
             worker,
         })
     }
 
-    fn snapshot(&self) -> &Map<String, Value> {
-        self.raw["snapshot"].as_object().expect("parsed snapshot")
+    fn route(&self, id: &str) -> Option<&ExportedRouteV2> {
+        self.export.routes.get(id)
     }
 
-    fn ids(&self, surface: &str) -> BTreeSet<&str> {
-        self.snapshot()
-            .get(surface)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
+    fn audio_route(&self, id: &str) -> Option<&ExportedRouteV2> {
+        self.export.audio_routes.get(id)
+    }
+
+    fn conditioning(route: &ExportedRouteV2) -> BTreeSet<&str> {
+        route
+            .conditioning
+            .kinds
+            .iter()
+            .map(String::as_str)
             .collect()
     }
 
-    fn descriptor(&self, list: &str, id: &str) -> Option<&Value> {
-        self.snapshot()
-            .get(list)
-            .and_then(Value::as_array)
-            .and_then(|items| items.iter().find(|d| d["id"] == id))
-    }
-
-    fn conditioning(descriptor: &Value) -> BTreeSet<&str> {
-        descriptor["conditioning"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect()
-    }
-
-    /// The registered media generator the platform maps a public model to.
-    fn mapped_generator(&self, model: &str) -> Option<&Value> {
-        let engine = self.raw["modelMappings"].get(model)?.as_str()?;
-        self.ids("generator_ids")
-            .contains(engine)
-            .then(|| self.descriptor("generator_capabilities", engine))
-            .flatten()
+    /// The registered media generator the platform maps a public image model to.
+    fn mapped_generator(&self, model: &str) -> Option<&ExportedRouteV2> {
+        if let Some(id) = route_bindings::image_route_id(model, |candidate| {
+            self.export.routes.contains_key(candidate)
+        }) {
+            return self.route(id);
+        }
+        route_bindings::bespoke_image_route_id(model).and_then(|id| self.route(id))
     }
 
     fn video_engines(&self, model: &str, mode: &str) -> Vec<String> {
-        self.raw["videoModelMappings"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|row| row["modelId"] == model && row["mode"] == mode)
-            .flat_map(|row| row["engineIds"].as_array().into_iter().flatten())
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
+        route_bindings::video_route_ids(&self.backend, model, mode)
+            .iter()
+            .map(|id| (*id).to_owned())
             .collect()
+    }
+
+    fn surface_ids(&self, surface: &str) -> Vec<String> {
+        match surface {
+            "generator_ids" => self.export.routes.keys().cloned().collect(),
+            "audio_generator_ids" => self.export.audio_routes.keys().cloned().collect(),
+            "trainer_ids" => self.export.trainers.keys().cloned().collect(),
+            "captioner_ids" => self.export.captioners.keys().cloned().collect(),
+            "image_embedder_ids" => self.export.embedders.image.keys().cloned().collect(),
+            "text_embedder_ids" => self.export.embedders.text.keys().cloned().collect(),
+            "text_llm_ids" => self.export.llm_models.keys().cloned().collect(),
+            "transform_ids" => self.export.transforms.image.keys().cloned().collect(),
+            "audio_transform_ids" => self.export.transforms.audio.keys().cloned().collect(),
+            "audio_voice_embedder_ids" => self.export.embedders.voice.keys().cloned().collect(),
+            "audio_transcriber_ids" => self.export.transcribers.keys().cloned().collect(),
+            "audio_embedder_ids" => self.export.embedders.audio.keys().cloned().collect(),
+            "snapshot_preparer_backends" => self.export.snapshot_preparer_backends.clone(),
+            "audio_snapshot_preparer_backends" => {
+                self.export.audio_snapshot_preparer_backends.clone()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn has_surface_id(&self, surface: &str, id: &str) -> bool {
+        match surface {
+            "generator_ids" => self.export.routes.contains_key(id),
+            "audio_generator_ids" => self.export.audio_routes.contains_key(id),
+            "trainer_ids" => self.export.trainers.contains_key(id),
+            "captioner_ids" => self.export.captioners.contains_key(id),
+            "image_embedder_ids" => self.export.embedders.image.contains_key(id),
+            "text_embedder_ids" => self.export.embedders.text.contains_key(id),
+            "text_llm_ids" => self.export.llm_models.contains_key(id),
+            "transform_ids" => self.export.transforms.image.contains_key(id),
+            "audio_transform_ids" => self.export.transforms.audio.contains_key(id),
+            "audio_voice_embedder_ids" => self.export.embedders.voice.contains_key(id),
+            "audio_transcriber_ids" => self.export.transcribers.contains_key(id),
+            "audio_embedder_ids" => self.export.embedders.audio.contains_key(id),
+            "snapshot_preparer_backends" => self
+                .export
+                .snapshot_preparer_backends
+                .iter()
+                .any(|item| item == id),
+            "audio_snapshot_preparer_backends" => self
+                .export
+                .audio_snapshot_preparer_backends
+                .iter()
+                .any(|item| item == id),
+            _ => false,
+        }
+    }
+
+    fn surface_descriptor(&self, surface: &str, id: &str) -> Option<Value> {
+        match surface {
+            "generator_ids" => self
+                .export
+                .routes
+                .get(id)
+                .and_then(|r| serde_json::to_value(r).ok()),
+            "audio_generator_ids" => self
+                .export
+                .audio_routes
+                .get(id)
+                .and_then(|r| serde_json::to_value(r).ok()),
+            "trainer_ids" => self
+                .export
+                .trainers
+                .get(id)
+                .and_then(|t| serde_json::to_value(t).ok()),
+            "text_llm_ids" => self
+                .export
+                .llm_models
+                .get(id)
+                .and_then(|m| serde_json::to_value(m).ok()),
+            _ => None,
+        }
     }
 
     fn claims(&self, job: &JobSnapshot) -> bool {
         crate::jobs_store::worker_supports_job(&self.worker, job)
     }
 }
+
+const ALL_SURFACES: [&str; 14] = [
+    "generator_ids",
+    "audio_generator_ids",
+    "trainer_ids",
+    "captioner_ids",
+    "image_embedder_ids",
+    "text_embedder_ids",
+    "text_llm_ids",
+    "transform_ids",
+    "audio_transform_ids",
+    "audio_voice_embedder_ids",
+    "audio_transcriber_ids",
+    "audio_embedder_ids",
+    "snapshot_preparer_backends",
+    "audio_snapshot_preparer_backends",
+];
 
 fn probe(job_type: JobType, model: &str, payload: Value) -> JobSnapshot {
     let mut payload = payload.as_object().cloned().unwrap_or_default();
@@ -449,7 +523,7 @@ fn owner(spec: &ModelSpec) -> Result<&'static str, String> {
 fn registry_owner(
     surface: &str,
     provider: &str,
-    snapshot: &Map<String, Value>,
+    export: &CapabilitiesExportV2,
 ) -> Result<&'static str, String> {
     if surface.starts_with("audio_") {
         return Ok("ENG-14");
@@ -462,22 +536,22 @@ fn registry_owner(
         "transform_ids" => "ENG-6/ENG-10",
         "snapshot_preparer_backends" => "ENG-9",
         "generator_ids" => {
-            let family = snapshot["generator_capabilities"]
-                .as_array()
-                .and_then(|ds| ds.iter().find(|d| d["id"] == provider))
-                .and_then(|d| d["family"].as_str())
-                .ok_or_else(|| format!("generator {provider} has no descriptor family"))?;
+            let family = export
+                .routes
+                .get(provider)
+                .map(|r| r.family.as_str())
+                .ok_or_else(|| format!("generator {provider} has no route family"))?;
             match family {
                 "flux" | "pulid" => "ENG-1a",
                 "chroma" | "flux2" | "lens" | "anima" | "sd3" | "stable-diffusion-3" | "sana"
-                | "boogu" | "qwen-image" | "qwen-image-2-1" | "z-image" | "kolors" | "sdxl" => {
-                    "ENG-2/ENG-5"
-                }
+                | "boogu" | "qwen-image" | "qwen-image-2-1" | "z-image" | "kolors" | "sdxl"
+                | "instantid" => "ENG-2/ENG-5",
                 "wan" | "scail2" | "svd" | "mochi" => "ENG-3/ENG-5",
                 "krea_2" => "ENG-4b",
                 "flux3" | "moss_image" | "iris" | "ideogram" | "supra2" => "ENG-5",
                 "ltx" | "minimax_h3" | "minimax_h3_image" | "mage_flow" | "sensenova-u1"
                 | "bernini" | "krea_realtime" | "seedvr2" => "ENG-6",
+                "starvector" => "ENG-7/APP-5",
                 other => return Err(format!("unowned native generator {provider}/{other}")),
             }
         }
@@ -667,8 +741,6 @@ fn image_probe(spec: &ModelSpec, axis: &str, mode: &str) -> Option<JobSnapshot> 
                 payload["advanced"] = json!({ "poses": [{}] });
                 (job_type, payload)
             }
-            // The ordered reference list rides the product's own reference surface: its
-            // character request, else its source edit, else (MOSS) a reference-only edit.
             "multiReference" if has("character_image") => {
                 let (job_type, mut payload) = image_request(id, "character_image")?;
                 payload.as_object_mut()?.remove("referenceAssetId");
@@ -707,14 +779,13 @@ fn bind_image(
     let id = spec.product.id.as_str();
     let mapped = engine.mapped_generator(id);
     let expected: Vec<String> = mapped
-        .and_then(|d| d["id"].as_str())
-        .map(|engine_id| vec![engine_id.to_owned()])
+        .map(|route| vec![route.route_id.clone()])
         .unwrap_or_default();
     if !engine.claims(job) {
         return Binding::none(expected, Some(request_json(job)));
     }
-    let registered = mapped.is_some_and(|descriptor| {
-        let kinds = Engine::conditioning(descriptor);
+    let registered = mapped.is_some_and(|route| {
+        let kinds = Engine::conditioning(route);
         let required: &[&str] = if axis == "conditioning" {
             &[]
         } else {
@@ -739,9 +810,6 @@ fn bind_image(
     let bespoke = if engine.backend == "candle" {
         candle_bespoke_lane(job)
     } else {
-        // The MLX router has no lane enum, but it refuses every carrier it has no lane for, so
-        // its admission of the carrier-bearing request is the lane's claim. A pose folded into a
-        // reference is not a strict control lane: that also needs an authored pose control mode.
         let carrier = job.payload.contains_key("referenceAssetId")
             || job.payload.contains_key("referenceAssetIds")
             || job.payload.contains_key("sourceAssetId")
@@ -771,19 +839,11 @@ fn bind_image(
 fn bind_video(spec: &ModelSpec, engine: &Engine, mode: &str, job: &JobSnapshot) -> Binding {
     let id = spec.product.id.as_str();
     let engines = engine.video_engines(id, mode);
-    let registered: Vec<&Value> = engines
-        .iter()
-        .filter_map(|e| {
-            engine
-                .ids("generator_ids")
-                .contains(e.as_str())
-                .then(|| engine.descriptor("generator_capabilities", e))
-                .flatten()
-        })
-        .collect();
+    let registered: Vec<&ExportedRouteV2> =
+        engines.iter().filter_map(|e| engine.route(e)).collect();
     let kinds: BTreeSet<&str> = registered
         .iter()
-        .flat_map(|d| Engine::conditioning(d))
+        .flat_map(|route| Engine::conditioning(route))
         .collect();
     let requirements_met = super::video_mode_conditioning_requirements(mode)
         .iter()
@@ -807,7 +867,7 @@ fn bind_video(spec: &ModelSpec, engine: &Engine, mode: &str, job: &JobSnapshot) 
 
 fn bind_vector(spec: &ModelSpec, engine: &Engine, mode: &str) -> Result<Binding, String> {
     let id = spec.product.id.as_str();
-    let provider = field(spec, "vector")
+    let llm_provider = field(spec, "vector")
         .and_then(|vector| vector["providers"][engine.backend.as_str()]["id"].as_str())
         .ok_or_else(|| format!("{id} names no {} vector provider", engine.backend))?
         .to_owned();
@@ -816,17 +876,21 @@ fn bind_vector(spec: &ModelSpec, engine: &Engine, mode: &str) -> Result<Binding,
         id,
         json!({ "mode": mode, "sourceAssetId": "probe" }),
     );
-    let bound = engine.ids("text_llm_ids").contains(provider.as_str()) && engine.claims(&job);
+    let route_ok = engine.route(id).is_some_and(|route| {
+        route.modality == "vector" && route.modes.iter().any(|candidate| candidate == mode)
+    });
+    let llm_ok = engine.has_surface_id("text_llm_ids", &llm_provider);
+    let bound = route_ok && llm_ok && engine.claims(&job);
     Ok(if bound {
         Binding {
-            providers: vec![provider.clone()],
+            providers: vec![id.to_owned(), llm_provider.clone()],
             kind: "registry",
             entry_point: "crates/sceneworks-worker/src/vector_jobs.rs::run_vector_job".into(),
-            expected: vec![provider],
+            expected: vec![llm_provider],
             request: Some(request_json(&job)),
         }
     } else {
-        Binding::none(vec![provider], Some(request_json(&job)))
+        Binding::none(vec![llm_provider], Some(request_json(&job)))
     })
 }
 
@@ -842,10 +906,10 @@ fn bind_audio(spec: &ModelSpec, engine: &Engine, axis: &str, mode: &str) -> Bind
     let id = spec.product.id.as_str();
     let surface = AUDIO_SURFACES
         .iter()
-        .find(|surface| engine.ids(surface).contains(id));
+        .find(|surface| engine.has_surface_id(surface, id));
     let carrier_ok = axis != "conditioning"
         || engine
-            .descriptor("audio_generator_capabilities", id)
+            .audio_route(id)
             .map(Engine::conditioning)
             .is_some_and(|kinds| {
                 let mut camel = mode.to_owned();
@@ -876,8 +940,6 @@ fn product_cells(spec: &ModelSpec) -> Vec<(&'static str, String)> {
         .collect();
     match spec.product.model_type.as_str() {
         "image" => {
-            // A strict control carrier is authored through `ui.controlModes`; a bare pose library
-            // folds the pose into the reference carrier instead.
             if ui(spec, "controlModes")
                 .and_then(Value::as_array)
                 .is_some_and(|modes| !modes.is_empty())
@@ -906,21 +968,53 @@ fn product_cells(spec: &ModelSpec) -> Vec<(&'static str, String)> {
     cells
 }
 
-/// Join every authored product route to the platform registries and bespoke lanes.
-/// Metadata only: no model or backend is constructed, allocated or run.
+/// Join every authored product route to the canonical `sga.capabilities/2` exports and bespoke
+/// lanes. Metadata only: no model or backend is constructed, allocated or run.
 pub fn generation_route_coverage() -> Result<RouteCoverage, String> {
-    reconcile(MLX_RUNTIME_FACTS, CANDLE_RUNTIME_FACTS)
+    reconcile_with_profiles(
+        MACOS_MLX_JSON,
+        CANDLE_CUDA_JSON,
+        IOS_MEDIA_JSON,
+        IOS_LLM_ONLY_JSON,
+        CANDLE_CPU_JSON,
+    )
 }
 
+#[cfg(test)]
 fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, String> {
+    reconcile_with_profiles(
+        mlx_source,
+        candle_source,
+        IOS_MEDIA_JSON,
+        IOS_LLM_ONLY_JSON,
+        CANDLE_CPU_JSON,
+    )
+}
+
+fn reconcile_with_profiles(
+    mlx_source: &str,
+    candle_source: &str,
+    ios_media_source: &str,
+    ios_llm_only_source: &str,
+    candle_cpu_source: &str,
+) -> Result<RouteCoverage, String> {
     let engines = [Engine::parse(mlx_source)?, Engine::parse(candle_source)?];
+    let ios_media = CapabilitiesExportV2::from_json_bytes(ios_media_source.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let ios_llm_only = CapabilitiesExportV2::from_json_bytes(ios_llm_only_source.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let candle_cpu = CapabilitiesExportV2::from_json_bytes(candle_cpu_source.as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut sources = BTreeMap::new();
     for (name, source) in [
         ("productManifest", PRODUCT_MANIFEST),
         ("productRoutePolicy", ROUTE_POLICY),
         ("jobDispatcher", DISPATCH),
-        ("mlxRuntimeRegistries", mlx_source),
-        ("candleRuntimeRegistries", candle_source),
+        ("sgaMacosMlx", mlx_source),
+        ("sgaCandleCuda", candle_source),
+        ("sgaCandleCpu", candle_cpu_source),
+        ("sgaIosMedia", ios_media_source),
+        ("sgaIosLlmOnly", ios_llm_only_source),
     ] {
         sources.insert(name.to_owned(), format!("{:x}", Sha256::digest(source)));
     }
@@ -950,8 +1044,6 @@ fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, Str
             let mut admitted_anywhere = false;
             for engine in &engines {
                 if !product_admits(spec, engine, job.as_ref())? {
-                    // The approved register records deliberate MLX-only product cells. Report the
-                    // Candle side it explains, so an approved difference stays visible.
                     if engine.backend == "candle" {
                         if let Some((decision, exception)) = approved_exception(id, axis, &value) {
                             exceptions.push(ExceptionCell {
@@ -1005,8 +1097,6 @@ fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, Str
                     entry_point: binding.entry_point,
                 });
             }
-            // An authored public cell that no backend's routing admits is unreachable product
-            // surface, not a backend difference.
             if !admitted_anywhere {
                 let key = format!("product/{id}/{axis}/{value}");
                 record_unbound(
@@ -1022,60 +1112,57 @@ fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, Str
     let mut registries = Vec::new();
     let mut model_aliases = Vec::new();
     for engine in &engines {
-        let snapshot = engine.snapshot();
-        for (model, provider) in engine.raw["modelMappings"]
-            .as_object()
-            .ok_or("missing model mappings")?
-        {
-            let registered = provider
-                .as_str()
-                .is_some_and(|p| engine.ids("generator_ids").contains(p));
-            model_aliases.push(json!({ "platform": engine.platform, "backend": engine.backend,
-                "model": model, "provider": provider, "registeredMediaGenerator": registered,
-                "publicModel": public.iter().any(|spec| spec.product.id == *model),
-                "entryPoint": if registered { "runtime bundle media registry (public eligibility checked separately)" }
-                    else { "production bespoke selector; alias alone does not establish eligibility" },
-                "owner": "ENG-7" }));
-        }
-        for (surface, ids) in snapshot
+        for &(model, alias_target) in route_bindings::IMAGE_MODEL_ALIASES
             .iter()
-            .filter(|(k, _)| k.ends_with("_ids") || k.ends_with("_backends"))
+            .chain(route_bindings::BESPOKE_IMAGE_ROUTE_ALIASES.iter())
         {
+            let resolved = engine
+                .mapped_generator(model)
+                .map(|r| r.route_id.as_str())
+                .unwrap_or(alias_target);
+            let registered = engine.route(resolved).is_some();
+            model_aliases.push(json!({
+                "platform": engine.platform,
+                "backend": engine.backend,
+                "model": model,
+                "provider": resolved,
+                "registeredMediaGenerator": registered,
+                "publicModel": public.iter().any(|spec| spec.product.id == model),
+                "entryPoint": if registered {
+                    "runtime bundle media registry (public eligibility checked separately)"
+                } else {
+                    "production bespoke selector; alias alone does not establish eligibility"
+                },
+                "owner": "ENG-7"
+            }));
+        }
+        for surface in ALL_SURFACES {
             let backend = if surface.starts_with("audio_") {
                 engine.audio_backend.as_str()
             } else {
                 engine.backend.as_str()
             };
-            for id in ids.as_array().ok_or("registry IDs must be arrays")? {
-                let provider = id.as_str().ok_or("registry ID must be a string")?;
+            for provider in engine.surface_ids(surface) {
                 let public_cells: Vec<_> = cells
                     .iter()
                     .filter(|c| {
                         c.platform == engine.platform
                             && c.backend == backend
-                            && c.providers.iter().any(|p| p == provider)
+                            && c.providers.iter().any(|p| p == &provider)
                     })
                     .map(|c| format!("{}/{}/{}/{}", c.backend, c.model, c.axis, c.mode))
                     .collect();
-                let callable_entry = registry_entry(&engine.platform, surface, provider);
+                let callable_entry = registry_entry(&engine.platform, surface, &provider);
                 if callable_entry.starts_with("unclassified registry surface:") {
                     return Err(callable_entry);
                 }
                 registries.push(RegistrySurface {
                     platform: engine.platform.clone(),
                     backend: backend.into(),
-                    surface: surface.clone(),
-                    provider: provider.into(),
-                    descriptor: snapshot
-                        .get(match surface.as_str() {
-                            "audio_generator_ids" => "audio_generator_capabilities",
-                            "trainer_ids" => "trainer_capabilities",
-                            _ => "generator_capabilities",
-                        })
-                        .and_then(Value::as_array)
-                        .and_then(|ds| ds.iter().find(|d| d["id"] == provider))
-                        .cloned(),
-                    owner: registry_owner(surface, provider, snapshot)?,
+                    surface: surface.to_owned(),
+                    provider: provider.clone(),
+                    descriptor: engine.surface_descriptor(surface, &provider),
+                    owner: registry_owner(surface, &provider, &engine.export)?,
                     disposition: if public_cells.is_empty() {
                         "direct-engine/bundle-consumer"
                     } else {
@@ -1091,72 +1178,132 @@ fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, Str
             }
         }
     }
-    // The mobile and CPU consumers submit no SceneWorks jobs. Keep their independently
-    // source-identified profile contracts rather than projecting desktop product eligibility.
-    let profile_source_receipt: Value =
-        serde_json::from_str(PROFILE_RECEIPT).map_err(|e| e.to_string())?;
-    for (surface, ids) in profile_source_receipt["ios"]
-        .as_object()
-        .ok_or("missing iOS profile")?
-    {
-        for id in ids.as_array().ok_or("profile IDs must be arrays")? {
-            let provider = id.as_str().ok_or("invalid profile ID")?;
+    // Non-desktop shipping profiles come directly from their hardware-free `sga.capabilities/2`
+    // exports (`ios-media.json`, `ios-llm-only.json`, `candle-cpu.json`).
+    let mut profile_exports = BTreeMap::new();
+    profile_exports.insert(
+        "ios-media".into(),
+        json!({
+            "platform": ios_media.platform,
+            "backend": ios_media.backend,
+            "routes": ios_media.routes.keys().collect::<Vec<_>>(),
+            "llmModels": ios_media.llm_models.keys().collect::<Vec<_>>(),
+            "imageTransforms": ios_media.transforms.image.keys().collect::<Vec<_>>(),
+            "snapshotPreparerBackends": ios_media.snapshot_preparer_backends,
+        }),
+    );
+    profile_exports.insert(
+        "ios-llm-only".into(),
+        json!({
+            "platform": ios_llm_only.platform,
+            "backend": ios_llm_only.backend,
+            "routes": ios_llm_only.routes.keys().collect::<Vec<_>>(),
+            "llmModels": ios_llm_only.llm_models.keys().collect::<Vec<_>>(),
+            "imageTransforms": ios_llm_only.transforms.image.keys().collect::<Vec<_>>(),
+        }),
+    );
+    profile_exports.insert(
+        "candle-cpu".into(),
+        json!({
+            "platform": candle_cpu.platform,
+            "backend": candle_cpu.backend,
+            "routesCount": candle_cpu.routes.len(),
+            "audioRoutesCount": candle_cpu.audio_routes.len(),
+            "llmModels": candle_cpu.llm_models.keys().collect::<Vec<_>>(),
+        }),
+    );
+    for (surface, ids) in [
+        (
+            "generator_ids",
+            ios_media.routes.keys().cloned().collect::<Vec<_>>(),
+        ),
+        (
+            "text_llm_ids",
+            ios_media.llm_models.keys().cloned().collect::<Vec<_>>(),
+        ),
+        (
+            "transform_ids",
+            ios_media
+                .transforms
+                .image
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "snapshot_preparer_backends",
+            ios_media.snapshot_preparer_backends.clone(),
+        ),
+    ] {
+        for provider in ids {
+            let callable_entry = registry_entry("ios", surface, &provider);
             registries.push(RegistrySurface {
                 platform: "ios".into(),
                 backend: "mlx".into(),
-                surface: surface.clone(),
-                provider: provider.into(),
-                descriptor: None,
+                surface: surface.to_owned(),
+                provider: provider.clone(),
+                descriptor: if surface == "generator_ids" {
+                    ios_media
+                        .routes
+                        .get(&provider)
+                        .and_then(|r| serde_json::to_value(r).ok())
+                } else {
+                    None
+                },
                 owner: "ENG-13",
                 public_cells: Vec::new(),
-                disposition: "direct-engine/bundle-consumer; source-identified profile",
+                disposition: "direct-engine/bundle-consumer; sga.capabilities/2 export",
                 entry_point:
                     "runtime-ios::catalog() (media-enabled; LLM-only omits generators/transforms)"
                         .into(),
-                callable_entry: registry_entry("ios", surface, provider),
+                callable_entry,
             });
         }
     }
-    let cpu_registries: Vec<_> = registries
-        .iter()
-        .filter(|r| r.platform == "cuda" && r.surface != "text_llm_ids")
-        .map(|r| RegistrySurface {
-            platform: "cpu".into(),
-            backend: r.backend.clone(),
-            surface: r.surface.clone(),
-            provider: r.provider.clone(),
-            descriptor: r.descriptor.clone(),
-            owner: r.owner,
-            public_cells: Vec::new(),
-            disposition:
-                "direct-engine/bundle-consumer; shared Candle catalog, separate device admission",
-            entry_point:
-                "runtime-cpu::catalog() (default media+audio; profiles may disable either)".into(),
-            callable_entry: registry_entry("cpu", &r.surface, &r.provider),
-        })
-        .collect();
-    registries.extend(cpu_registries);
-    for id in profile_source_receipt["cpu"]["text_llm_ids"]
-        .as_array()
-        .ok_or("missing CPU LLM profile")?
-    {
-        let provider = id.as_str().ok_or("invalid CPU LLM ID")?;
-        registries.push(RegistrySurface {
-            platform: "cpu".into(),
-            backend: "candle".into(),
-            surface: "text_llm_ids".into(),
-            provider: provider.into(),
-            descriptor: None,
-            owner: if provider.contains("starvector") {
-                "ENG-7/APP-5"
-            } else {
-                "ENG-14"
-            },
-            public_cells: Vec::new(),
-            disposition: "direct-engine/bundle-consumer; source-identified profile",
-            entry_point: "runtime-cpu::catalog().text()".into(),
-            callable_entry: registry_entry("cpu", "text_llm_ids", provider),
-        });
+    for surface in ALL_SURFACES {
+        let cpu_ids: Vec<String> = match surface {
+            "generator_ids" => candle_cpu.routes.keys().cloned().collect(),
+            "audio_generator_ids" => candle_cpu.audio_routes.keys().cloned().collect(),
+            "trainer_ids" => candle_cpu.trainers.keys().cloned().collect(),
+            "captioner_ids" => candle_cpu.captioners.keys().cloned().collect(),
+            "image_embedder_ids" => candle_cpu.embedders.image.keys().cloned().collect(),
+            "text_embedder_ids" => candle_cpu.embedders.text.keys().cloned().collect(),
+            "text_llm_ids" => candle_cpu.llm_models.keys().cloned().collect(),
+            "transform_ids" => candle_cpu.transforms.image.keys().cloned().collect(),
+            "audio_transform_ids" => candle_cpu.transforms.audio.keys().cloned().collect(),
+            "audio_voice_embedder_ids" => candle_cpu.embedders.voice.keys().cloned().collect(),
+            "audio_transcriber_ids" => candle_cpu.transcribers.keys().cloned().collect(),
+            "audio_embedder_ids" => candle_cpu.embedders.audio.keys().cloned().collect(),
+            "snapshot_preparer_backends" => candle_cpu.snapshot_preparer_backends.clone(),
+            "audio_snapshot_preparer_backends" => {
+                candle_cpu.audio_snapshot_preparer_backends.clone()
+            }
+            _ => Vec::new(),
+        };
+        for provider in cpu_ids {
+            let callable_entry = registry_entry("cpu", surface, &provider);
+            registries.push(RegistrySurface {
+                platform: "cpu".into(),
+                backend: "candle".into(),
+                surface: surface.to_owned(),
+                provider: provider.clone(),
+                descriptor: if surface == "generator_ids" {
+                    candle_cpu
+                        .routes
+                        .get(&provider)
+                        .and_then(|r| serde_json::to_value(r).ok())
+                } else {
+                    None
+                },
+                owner: registry_owner(surface, &provider, &candle_cpu)?,
+                public_cells: Vec::new(),
+                disposition: "direct-engine/bundle-consumer; sga.capabilities/2 export",
+                entry_point:
+                    "runtime-cpu::catalog() (default media+audio; profiles may disable either)"
+                        .into(),
+                callable_entry,
+            });
+        }
     }
     let jobs = JobType::known_values()
         .iter()
@@ -1165,11 +1312,7 @@ fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, Str
             let (lifecycle, output, owner) = lifecycle(job.clone())?;
             let advertised_by = engines
                 .iter()
-                .filter(|engine| {
-                    engine.raw["workerCapabilities"]
-                        .as_array()
-                        .is_some_and(|caps| caps.iter().any(|cap| cap == *wire))
-                })
+                .filter(|engine| engine.worker_capabilities.iter().any(|cap| cap == *wire))
                 .map(|engine| engine.platform.clone())
                 .collect();
             Ok(JobLifecycle {
@@ -1184,13 +1327,13 @@ fn reconcile(mlx_source: &str, candle_source: &str) -> Result<RouteCoverage, Str
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(RouteCoverage {
-        schema_version: 2,
+        schema_version: 3,
         evidence_kind: "metadata-only; registration is not execution or device-fit evidence",
         sources,
         jobs,
         cells,
         registries,
-        profile_source_receipt,
+        profile_exports,
         model_aliases,
         missing,
         exceptions,
@@ -1203,10 +1346,18 @@ mod tests {
 
     fn without_starvector(source: &str) -> String {
         let mut value: Value = serde_json::from_str(source).unwrap();
-        value["snapshot"]["text_llm_ids"]
-            .as_array_mut()
+        value["routes"]
+            .as_object_mut()
             .unwrap()
-            .retain(|id| !id.as_str().unwrap().contains("starvector"));
+            .remove("starvector_1b");
+        value["routes"]
+            .as_object_mut()
+            .unwrap()
+            .remove("starvector_8b");
+        value["llm_models"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|id, _| !id.contains("starvector"));
         serde_json::to_string(&value).unwrap()
     }
 
@@ -1242,14 +1393,71 @@ mod tests {
         assert!(report
             .cells
             .iter()
-            .any(|c| c.model == "pulid_flux_dev" && c.binding != "unbound"));
+            .any(|c| c.model == "pulid_flux_dev" && c.binding == "registry"));
+        assert!(report
+            .cells
+            .iter()
+            .any(|c| c.model == "instantid_realvisxl" && c.binding == "registry"));
     }
 
     #[test]
-    fn removing_starvector_names_exactly_four_backend_provider_cells() {
+    fn starvector_routes_bind_all_four_cells_via_modality_vector_and_fail_closed_when_removed() {
+        let baseline = generation_route_coverage().unwrap();
+        for (platform, backend, model) in [
+            ("macos", "mlx", "starvector_1b"),
+            ("cuda", "candle", "starvector_1b"),
+            ("macos", "mlx", "starvector_8b"),
+            ("cuda", "candle", "starvector_8b"),
+        ] {
+            let cell = baseline
+                .cells
+                .iter()
+                .find(|c| {
+                    c.platform == platform
+                        && c.backend == backend
+                        && c.model == model
+                        && c.axis == "operation"
+                        && c.mode == "image_to_svg"
+                })
+                .unwrap_or_else(|| {
+                    panic!("missing baseline StarVector cell {platform}/{backend}/{model}")
+                });
+            assert_eq!(cell.binding, "registry");
+            assert!(cell.providers.iter().any(|p| p == model));
+        }
+
+        // Negative control: removing the Modality::Vector routes alone must fail all 4 cells
+        // even if llm_models entries are still present.
+        let strip_vector_routes = |src: &str| {
+            let mut value: Value = serde_json::from_str(src).unwrap();
+            value["routes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("starvector_1b");
+            value["routes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("starvector_8b");
+            serde_json::to_string(&value).unwrap()
+        };
+        let without_routes = reconcile(
+            &strip_vector_routes(MACOS_MLX_JSON),
+            &strip_vector_routes(CANDLE_CUDA_JSON),
+        )
+        .unwrap();
+        assert_eq!(
+            without_routes.missing,
+            [
+                "macos/mlx/starvector_1b/operation/image_to_svg",
+                "cuda/candle/starvector_1b/operation/image_to_svg",
+                "macos/mlx/starvector_8b/operation/image_to_svg",
+                "cuda/candle/starvector_8b/operation/image_to_svg",
+            ]
+        );
+
         let report = reconcile(
-            &without_starvector(MLX_RUNTIME_FACTS),
-            &without_starvector(CANDLE_RUNTIME_FACTS),
+            &without_starvector(MACOS_MLX_JSON),
+            &without_starvector(CANDLE_CUDA_JSON),
         )
         .unwrap();
         assert_eq!(
@@ -1278,6 +1486,61 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    #[test]
+    fn candle_qwen_edit_aliases_and_newly_registered_bespoke_routes_reconcile() {
+        let candle = crate::sga_capabilities::candle_cuda();
+        for alias in super::super::candle::CANDLE_QWEN_EDIT_ROUTE_ALIASES {
+            let route = candle
+                .routes
+                .get(*alias)
+                .unwrap_or_else(|| panic!("missing Candle registered Qwen edit alias {alias}"));
+            assert!(
+                route.modes.iter().any(|m| m == "image_to_image")
+                    && route.modes.iter().any(|m| m == "multi_reference"),
+                "Candle Qwen edit route {alias} must advertise image_to_image + multi_reference"
+            );
+            assert!(route.capabilities.supports_preview);
+        }
+        for bespoke_route in [
+            "pulid_flux",
+            "instantid",
+            "flux1_dev_control",
+            "flux1_dev_ip_adapter",
+            "flux2_dev_edit",
+            "flux2_klein_9b_edit",
+            "sdxl_control",
+            "sdxl_detail",
+            "sdxl_edit",
+            "sdxl_ip_adapter",
+            "kolors_control",
+            "kolors_ip_adapter",
+            "qwen_image_control",
+            "z_image_control",
+            "z_image_turbo_control",
+        ] {
+            assert!(
+                candle.routes.contains_key(bespoke_route),
+                "Candle sga.capabilities/2 must register promoted route {bespoke_route}"
+            );
+        }
+        let baseline = generation_route_coverage().unwrap();
+        for model in ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"] {
+            let cell = baseline
+                .cells
+                .iter()
+                .find(|c| {
+                    c.platform == "cuda"
+                        && c.backend == "candle"
+                        && c.model == model
+                        && c.axis == "operation"
+                        && c.mode == "edit_image"
+                })
+                .unwrap_or_else(|| panic!("missing cuda/candle/{model}/operation/edit_image"));
+            assert_eq!(cell.binding, "registry");
+            assert_eq!(cell.providers, vec![model.to_owned()]);
+        }
     }
 
     #[test]
@@ -1383,14 +1646,14 @@ mod tests {
     #[test]
     fn an_exception_explains_a_candle_gap_but_never_hides_an_mlx_loss() {
         // Krea Realtime is MLX-only by an approved sequencing decision: its Candle cells are
-        // reported as exception-covered. Dropping its MLX registrations must surface the MLX
-        // cells as missing; the register cannot explain them away.
+        // reported as exception-covered. Dropping its MLX route from sga.capabilities/2 must
+        // surface the MLX cells as missing; the register cannot explain them away.
         fn without_krea_realtime(source: &str) -> String {
             let mut value: Value = serde_json::from_str(source).unwrap();
-            value["videoModelMappings"]
-                .as_array_mut()
+            value["routes"]
+                .as_object_mut()
                 .unwrap()
-                .retain(|row| row["modelId"] != "krea_realtime_14b");
+                .remove("krea_realtime_14b");
             serde_json::to_string(&value).unwrap()
         }
         let krea = |r: &RouteCoverage| -> Vec<String> {
@@ -1406,8 +1669,8 @@ mod tests {
             .all(|cell| cell.starts_with("cuda/candle/")));
         assert!(!krea(&baseline).is_empty());
         let report = reconcile(
-            &without_krea_realtime(MLX_RUNTIME_FACTS),
-            &without_krea_realtime(CANDLE_RUNTIME_FACTS),
+            &without_krea_realtime(MACOS_MLX_JSON),
+            &without_krea_realtime(CANDLE_CUDA_JSON),
         )
         .unwrap();
         assert_eq!(

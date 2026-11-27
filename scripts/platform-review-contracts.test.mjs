@@ -1008,7 +1008,7 @@ test("Windows H3 opt-out with every model selector false runs the existing ordin
   }
   const worker = workflowJob(workflow, "candle-worker");
   const outcomes = { verify_candle_capabilities: { outcome: "success" } };
-  for (const name of COMPILE_CHAIN_STEPS) {
+  for (const name of [...COMPILE_CHAIN_STEPS, "Verify sga.capabilities/2 route-profile exports"]) {
     assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker, name)), "workflow_dispatch", inputs, outcomes)), true,
       `${name} remains enabled rather than duplicating or narrowing the ordinary lane`);
   }
@@ -1019,7 +1019,7 @@ test("Windows H3 opt-out with every model selector false runs the existing ordin
   assert.match(stepBody(worker, "Clippy (candle worker)"),
     /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
   for (const step of jobSteps(worker)) {
-    if (COMPILE_CHAIN_STEPS.includes(step.name)) continue;
+    if (COMPILE_CHAIN_STEPS.includes(step.name) || step.name === "Verify sga.capabilities/2 route-profile exports") continue;
     const expression = step.body.match(/^ +if: \$\{\{ (.+) \}\}$/m)?.[1];
     if (!expression || !/inputs\.(run_|provision_snapshot|yue2_|quant_kernel_only)/.test(expression)) continue;
     assert.equal(Boolean(evaluateWorkflow(expression, "workflow_dispatch", inputs, outcomes)), false,
@@ -2372,7 +2372,6 @@ const COMPILE_CHAIN_STEPS = [
   "Check the candle sidecar builds (rust-api, backend-candle)",
   "Check and test the candle memory adapter (lib + memory-candle-adapter)",
   "Clippy (candle worker)",
-  "Verify capabilities.candle.json content against a fresh dump",
 ];
 
 // The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
@@ -3504,98 +3503,46 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify native capability content last among coverage, reachably, and publish only its evidence", async () => {
-  // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
-  // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
-  // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
-  // contents. All of that is satisfied by a RESTAMP — rewriting the revision line over a stale
-  // engine list — which is how both files were actually produced through two consecutive pin bumps.
-  // Only a lane that LINKS the engine can tell the difference, and there is exactly one such PR lane
-  // per backend.
+test("both stage-1 lanes verify hardware-free sga.capabilities/2 exports last among coverage and reachably", async () => {
+  // SW-6983 (ENG-7 / REG-3): the 5 legacy dump files and `dump-engine-capabilities` workflow
+  // steps are replaced by hardware-free `sga.capabilities/2` exports under
+  // `config/engine-capabilities/sga/**`, verified by `scripts/check-generation-route-profiles.mjs`
+  // while native runtime-vs-export parity runs inside `sceneworks-worker` tests.
   const lanes = [
-    [".github/workflows/macos-mlx.yml", "capabilities.mlx.json"],
-    [".github/workflows/windows-candle.yml", "capabilities.candle.json"],
+    ".github/workflows/macos-mlx.yml",
+    ".github/workflows/windows-candle.yml",
   ];
-  for (const [path, file] of lanes) {
+  for (const path of lanes) {
     const lane = await source(path);
-    const verifyAt = lane.indexOf(`- name: Verify ${file} content against a fresh dump`);
-    assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    const verifyAt = lane.indexOf("- name: Verify sga.capabilities/2 route-profile exports");
+    assert.ok(verifyAt > 0, `${path} must verify sga.capabilities/2 exports`);
+    assert.doesNotMatch(lane, /bin dump-engine-capabilities/, `${path} must not invoke obsolete dump-engine-capabilities`);
     if (path.endsWith("macos-mlx.yml")) {
       const hostedAt = lane.indexOf("\n  macos-checks:");
       const naxAt = lane.indexOf("\n  nax-worker:");
       assert.ok(
         hostedAt < verifyAt && verifyAt < naxAt,
-        "the weights-free MLX facts producer belongs on the hosted Mac job, not the M5/NAX pool",
+        "the hardware-free sga.capabilities/2 check belongs on the hosted Mac job, not the M5/NAX pool",
       );
       assert.doesNotMatch(
         lane.slice(naxAt),
-        /Verify capabilities\.mlx\.json|Upload fresh MLX capability facts/,
-        "the NAX-only job must not duplicate the hosted MLX facts producer",
+        /Verify sga\.capabilities\/2/,
+        "the NAX-only job must not duplicate the hosted export check",
       );
     }
-    // Re-dump to a SCRATCH dir and compare all capability content while deliberately allowing the
-    // two valid inference revision labels to differ. Pin-only label drift is not capability drift
-    // (e14171984); every other field remains part of the native comparison.
-    assert.match(lane, /bin dump-engine-capabilities/, path);
-    assert.match(lane, /node scripts[\\/]compare-engine-capability-facts\.mjs/, path);
+    assert.match(lane, /node scripts[\\/]check-generation-route-profiles\.mjs/, path);
 
-    // LAST on the PR path. A step failure aborts the job, so a real native capability mismatch placed
-    // earlier would cancel the coverage each lane uniquely carries (macOS: the hosted full workspace
-    // suite; Windows: the only PR run of `cargo test -p sceneworks-worker --features backend-candle`).
-    // A missing dump must not suppress unrelated verdicts.
-    //
-    // "Last" means last among steps that RUN in the same job on a pull request. The Mac workflow has
-    // a later, separate NAX job; bounding this scan at the next job key keeps its M5-only steps out.
-    // Asserting the ordering rather than mere presence is
-    // the point — nothing else would notice an unconditional step being appended later.
     const afterVerify = lane.slice(verifyAt);
     const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
     const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
     for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
-      // Ordinary runs publish a failed comparison's diagnostics. The explicit CPU facts-only
-      // dispatch also retains a successful dump; neither case adds runtime work after verification.
-      const candleFailureArtifact =
-        path === ".github/workflows/windows-candle.yml" &&
-        block.startsWith(
-          "name: Upload fresh Candle capability facts after a verification failure",
-        ) &&
-        block.includes(`if: \u0024{{ ${CANDLE_FACTS_UPLOAD_IF} }}`);
-      if (candleFailureArtifact) continue;
-      if (/^name: Upload fresh MLX capability facts/m.test(block)) {
-        assert.match(block, /if: \$\{\{ always\(\) \}\}/);
-        assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);
-        assert.match(block, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
-        continue;
-      }
       assert.match(
         block,
         /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
-        `${path}: "${block.split("\n")[0]}" runs after the dump-verification step on the PR path. ` +
-          "That step must stay last for everything a PR executes, so its failure cannot cancel " +
-          "coverage this lane is the only place to have. Move it above the verification step.",
+        `${path}: "${block.split("\n")[0]}" runs after the sga.capabilities/2 verification step on the PR path.`,
       );
     }
 
-    // The rich runtime descriptor artifact is part of the same native evidence contract. It must
-    // be generated by the one matching-platform producer and content-compared beside the legacy
-    // preview projection; hashing a narrow supportsPreview file is not descriptor drift protection.
-    assert.match(lane, /runtime[\\/]capabilities\.(?:mlx|candle)\.json/);
-    assert.match(lane, /backend-capability-facts-(?:mlx|candle)/);
-
-    // Reachability. A facts edit can touch ONLY the facts file, so without this path entry the lane
-    // does not run at all on the PR the step exists to catch — declared but unreachable, the same
-    // trap sc-17026 was about.
-    //
-    // Pinned to THIS lane's own file, not `config/engine-capabilities/**` (sc-17665). The directory
-    // glob satisfied reachability too, but it also woke each lane for the OTHER backend's dump — a
-    // whole self-hosted job, on the fleet's most constrained resource, for a file the woken lane
-    // never opens.
-    //
-    // Asserted by MATCHING the declared globs against both filenames, not by forbidding particular
-    // spellings. A spelling blocklist only catches a straight revert: keeping the narrow entry and
-    // *adding* `config/engine-capabilities/*.json`, `config/engine-capabilities/**/*` or `config/**`
-    // restores the cross-wake in full, and every one of those passes a `**`/`*` blocklist. Matching
-    // is spelling-independent and closes all of them at once.
     const anchorAt = lane.indexOf("paths: &");
     assert.ok(anchorAt > 0, `${path} must declare a paths anchor`);
     const declared = [
@@ -3603,99 +3550,20 @@ test("both stage-1 lanes verify native capability content last among coverage, r
         .slice(anchorAt, lane.indexOf("pull_request:"))
         .matchAll(/^ {6}- "([^"]+)"$/gm),
     ].map((match) => match[1]);
-    // Every file this lane's verify step actually DIFFS must be watched. Read out of the step body
-    // rather than listed here, because the failure this closes was a step growing a new file while
-    // the filter stayed as it was — a hardcoded list would have been updated by the same edit that
-    // grew the step, or not at all, so it could not have caught it.
-    //
-    // sc-17593 added an audio diff to BOTH lanes' steps; sc-17665 had just narrowed both filters
-    // from `config/engine-capabilities/**` to a single filename. Each is right on its own. Together
-    // they left the audio verification declared but unreachable, which `97a7655a9` — an audio-only
-    // re-dump — demonstrated by waking neither stage-1 lane.
-    const diffed = new Set(
-      [
-        ...lane
-          .slice(verifyAt)
-          .split("\n      - name:")[0]
-          .matchAll(/config[/\\]engine-capabilities[/\\][\w./\\-]*\.json/g),
-      ].map((match) => match[0].replaceAll("\\", "/")),
-    );
-    assert.ok(
-      diffed.size >= 2,
-      `${path}: expected the verify step to diff at least ${file} and the audio dump, found ` +
-        `${JSON.stringify([...diffed])}`,
-    );
-    for (const target of diffed) {
+    for (const target of [
+      "config/engine-capabilities/sga/macos-mlx.json",
+      "config/engine-capabilities/sga/candle-cuda.json",
+      "config/engine-capabilities/sga/candle-cpu.json",
+      "config/engine-capabilities/sga/ios-media.json",
+      "config/engine-capabilities/sga/ios-llm-only.json",
+      "scripts/check-generation-route-profiles.mjs",
+    ]) {
       assert.ok(
         declared.some((glob) => matches(glob, target)),
-        `${path}'s verify step diffs ${target}, but no declared path matches it — so an edit to ` +
-          "that file alone never triggers the lane, and the check is declared but unreachable. " +
-          "Add it to the paths anchor.",
-      );
-    }
-
-    const own = `config/engine-capabilities/${file}`;
-    assert.ok(
-      declared.some((glob) => matches(glob, own)),
-      `${path} must watch ${own}, or a content edit to it — which touches nothing else — never ` +
-        "triggers the lane and the verification step is declared but unreachable.",
-    );
-    for (const [, otherFile] of lanes) {
-      if (otherFile === file) continue;
-      const foreign = `config/engine-capabilities/${otherFile}`;
-      const culprits = declared.filter((glob) => matches(glob, foreign));
-      assert.deepEqual(
-        culprits,
-        [],
-        `${path} triggers on ${foreign} via ${JSON.stringify(culprits)}, but has no step that ` +
-          "reads it. That wakes an entire self-hosted job — the fleet's most constrained " +
-          "resource — for a file this lane cannot check. Narrow the pattern to this lane's own dump.",
+        `${path} must watch ${target} because sceneworks-core embeds all sga.capabilities/2 exports and the verify step validates them.`,
       );
     }
   }
-});
-
-// Kept as its own test rather than folded into the `candleFailureArtifact` carve-out above, which was
-// raised as possible duplication. It is not: that carve-out is a `continue` GUARD, so it can only ever
-// weaken the ordering rule, never assert anything. Three claims below have nowhere else to live —
-//
-//   * the upload step EXISTS. Delete it and the guard simply stops matching, the ordering loop finds no
-//     such block, and every assertion up there still passes. The failure-only upload would be gone with
-//     nothing red.
-//   * the VERIFY step declares `id: verify_candle_capabilities`. Without the id,
-//     `steps.verify_candle_capabilities.outcome` resolves to nothing, the condition is false on every
-//     run, and the upload never fires — while the guard's literal text match keeps passing.
-//   * the artifact CONTENT: name, whole-directory path, if-no-files-found. See the note below on the
-//     enumerated two-file spelling that silently produced an unusable artifact.
-//
-// The exact condition is shared with the carve-out; the facts-only truth table below additionally
-// proves that ordinary successful PR/push runs do not publish anything.
-test("Windows preserves fresh capability facts when content verification fails", async () => {
-  const workflow = await source(".github/workflows/windows-candle.yml");
-  const verifyAt = workflow.indexOf(
-    "- name: Verify capabilities.candle.json content against a fresh dump",
-  );
-  const uploadAt = workflow.indexOf(
-    "- name: Upload fresh Candle capability facts after a verification failure",
-  );
-  assert.ok(verifyAt > 0 && uploadAt > verifyAt);
-  const tail = workflow.slice(verifyAt, uploadAt + 1000);
-  assert.match(tail, /id: verify_candle_capabilities/);
-  assert.ok(tail.includes(`if: \u0024{{ ${CANDLE_FACTS_UPLOAD_IF} }}`));
-  // The shape, not a review-time SHA — see the note in the calibration-artifact test above.
-  assert.match(tail, /actions\/upload-artifact@[0-9a-f]{40}\b/);
-  // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
-  // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
-  // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
-  // runtime descriptor is an input to the typed model registry. The enumerated two-file spelling
-  // this used to assert predates that third file, so an artifact produced under it looks complete
-  // and silently cannot repair the registry input. Pin the directory and
-  // the artifact name the repair instructions actually tell you to download.
-  assert.match(tail, /name: backend-capability-facts-candle/);
-  assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
-  const missing = workflowExpression(tail, "if-no-files-found");
-  assert.equal(evaluateWorkflow(missing, "pull_request"), "warn");
-  assert.equal(evaluateWorkflow(missing, "workflow_dispatch", { capability_facts_only: true }), "error");
 });
 
 test("Windows facts-only capture hides CUDA and compiles both runtime test suites without execution", async () => {
@@ -3729,7 +3597,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
   }
   assert.match(workflowStep(worker, "Check the candle sidecar builds (rust-api, backend-candle)"), /cargo check -p sceneworks-rust-api --features backend-candle/);
   assert.match(workflowStep(worker, "Clippy (candle worker)"), /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
-  for (const name of ["Fetch the pinned inference release", "Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)", "Verify capabilities.candle.json content against a fresh dump"]) {
+  for (const name of ["Fetch the pinned inference release", "Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)", "Verify sga.capabilities/2 route-profile exports"]) {
     assert.equal(evaluateWorkflow(workflowExpression(workflowStep(worker, name)), "workflow_dispatch", { capability_facts_only: true }), true, name);
   }
 });
@@ -3762,28 +3630,12 @@ test("Windows facts-only capture rejects mixed profiles and cannot escape throug
   }
 });
 
-test("Windows facts-only capture publishes real native dumps on success or mismatch without swallowing strict comparisons", async () => {
+test("Windows sga.capabilities/2 verification fails closed without invoking dump-engine-capabilities", async () => {
   const worker = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
-  const verify = workflowStep(worker, "Verify capabilities.candle.json content against a fresh dump");
-  assert.match(verify, /cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle -- "%scratch%" \|\| exit \/b 1/);
+  const verify = workflowStep(worker, "Verify sga.capabilities/2 route-profile exports");
+  assert.match(verify, /node scripts\\check-generation-route-profiles\.mjs \|\| exit \/b 1/);
   assert.doesNotMatch(verify, /continue-on-error/);
-  assert.equal((verify.match(/node scripts\\compare-engine-capability-facts\.mjs/g) ?? []).length, 3);
-  assert.match(verify, /:capabilities_mismatch[\s\S]*?exit \/b 1/);
-  assert.match(verify, /:audio_mismatch[\s\S]*?exit \/b 1/);
-  assert.match(verify, /:runtime_mismatch[\s\S]*?exit \/b 1/);
-  const upload = workflowStep(worker, "Upload fresh Candle capability facts after a verification failure");
-  const condition = workflowExpression(upload);
-  assert.equal(condition, CANDLE_FACTS_UPLOAD_IF);
-  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
-    for (const facts of [false, true]) {
-      for (const outcome of ["success", "failure", "skipped", "cancelled"]) {
-        const expected = outcome === "failure" || (event === "workflow_dispatch" && facts && outcome === "success");
-        assert.equal(evaluateWorkflow(condition, event, { capability_facts_only: facts }, { verify_candle_capabilities: { outcome } }), expected);
-      }
-    }
-  }
-  assert.match(upload, /name: backend-capability-facts-candle/);
-  assert.match(upload, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
+  assert.doesNotMatch(verify, /dump-engine-capabilities/);
 });
 
 test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {
@@ -3862,14 +3714,8 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       // sibling lane" is never the reason (rule 2; sc-17592 is the scar).
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
-        "config/engine-capabilities/capabilities.candle.json", // the native verification step compares it
-        "config/engine-capabilities/runtime/capabilities.candle.json", // same step compares rich descriptor + worker facts
-        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
-        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
-        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
-        // and not symmetry for its own sake.
-        "config/engine-capabilities/audio/capabilities.candle.json",
-        "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "config/engine-capabilities/sga/**", // embedded by sceneworks-core and verified by check-generation-route-profiles.mjs
+        "scripts/check-generation-route-profiles.mjs", // invoked directly by the sga.capabilities/2 verification step
         "scripts/moss-native-api-validation*.mjs", // normal pre-compiler Node probe executes this test/reader family
         "scripts/moss-training-acceptance*.mjs", // that same probe imports the native supervisor and exact-PID reader
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
@@ -3885,14 +3731,8 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       path: ".github/workflows/macos-mlx.yml",
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
-        "config/engine-capabilities/capabilities.mlx.json", // the native verification step compares it
-        "config/engine-capabilities/runtime/capabilities.mlx.json", // same step compares rich descriptor + worker facts
-        // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
-        // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
-        // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
-        // and not symmetry for its own sake.
-        "config/engine-capabilities/audio/capabilities.candle.json",
-        "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "config/engine-capabilities/sga/**", // embedded by sceneworks-core and verified by check-generation-route-profiles.mjs
+        "scripts/check-generation-route-profiles.mjs", // invoked directly by the sga.capabilities/2 verification step
         "scripts/fetch-prebuilt-mlx.sh", // both jobs run it to fetch the prebuilt libmlx (sc-21382)
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the MLX revision the whole lane compiles
@@ -5572,33 +5412,6 @@ const MLX_FATAL_GUARDS = [
     diagnostic: /^echo "::error::hosted_only requires \$flag=false;/,
   },
   {
-    step: "Verify capabilities.mlx.json content against a fresh dump",
-    detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
-    branch: [
-      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
-    ],
-    diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json differs in capability"/,
-  },
-  {
-    step: "Verify capabilities.mlx.json content against a fresh dump",
-    detects:
-      "the checked-in RUNTIME facts file differs in capability content from inference's fresh snapshot",
-    branch: [
-      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/runtime/capabilities.mlx.json "$scratch/runtime/capabilities.mlx.json"; then',
-    ],
-    diagnostic:
-      /^echo "::error::config\/engine-capabilities\/runtime\/capabilities\.mlx\.json does not"/,
-  },
-  {
-    step: "Verify capabilities.mlx.json content against a fresh dump",
-    detects: "the checked-in AUDIO facts file differs in capability content — the one dump BOTH lanes write",
-    branch: [
-      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/audio/capabilities.candle.json "$scratch/audio/capabilities.candle.json"; then',
-    ],
-    diagnostic:
-      /^echo "::error::config\/engine-capabilities\/audio\/capabilities\.candle\.json does not"/,
-  },
-  {
     step: "Validate Qwen provisioning mode",
     detects: "a ~57 GiB Qwen download requested by a dispatch that will not calibrate",
     branch: [
@@ -5744,7 +5557,6 @@ const MLX_GUARD_STEP_REACHABILITY = {
   "Reject conflicting browser fixture selectors before setup": null,
   "Refuse conflicting MOSS validation inputs before compiler setup": null,
   "Validate hosted-only dispatch intent": "if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}",
-  "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate memory-strategy calibration identities":
@@ -5963,9 +5775,9 @@ test("MLX-lane guard steps stay reachable and cannot be degraded into warnings",
   // the comparison and the guard compares against nothing.
   assert.ok(
     byName
-      .get("Verify capabilities.mlx.json content against a fresh dump")
+      .get("Verify sga.capabilities/2 route-profile exports")
       .statements.includes("set -euo pipefail"),
-    `${MLX_LANE}: the content-verify step must keep \`set -euo pipefail\``,
+    `${MLX_LANE}: the sga.capabilities/2 verify step must keep \`set -euo pipefail\``,
   );
 });
 

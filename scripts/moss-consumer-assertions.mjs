@@ -14,7 +14,7 @@ export const MUTABLE_FILES = [
   "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-  "config/engine-capabilities/runtime/capabilities.mlx.json",
+  "crates/sceneworks-core/src/registry/route_bindings.rs",
   "config/manifests/registry/route-policy.json",
   "crates/sceneworks-worker/src/training_jobs.rs",
   "crates/sceneworks-options/src/training_validation.rs",
