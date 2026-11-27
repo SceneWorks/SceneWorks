@@ -76,6 +76,15 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
   ]],
+  // SW-6135: artifact selection gains the Krea W4A8 tier's checkpoint + dense-base co-requisite
+  // branch (the ConvRot branch moved, unchanged, into a shared helper). No existing tier selects
+  // differently, so this records source review, not a new physical proof.
+  ["7ce2d2864b4b3c03a3d7a55da9166f1f6b41b424", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    REPAIR_SHA256[1],
+    "5473ca1414e2e886c562fff6e9085853d3d52ac50c52c8c2e8a42750d4656d6b",
+    "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
+  ]],
 ];
 
 async function readSource(root, file) {
