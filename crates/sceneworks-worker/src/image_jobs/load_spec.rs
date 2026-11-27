@@ -609,6 +609,24 @@ pub(crate) fn candle_artifact_path_matches(actual: &Path, expected: &Path) -> bo
     }
 }
 
+/// Substitute a resolved Krea 2 W4A8 tier into a Krea Turbo load spec (SW-6135) — the ONE place
+/// every Krea route that can run the tier (generic t2i/img2img/Hires, Kontext edit) builds it: the
+/// W4A8 transformer becomes the primary `weights` FILE (the inference native-file route detects the
+/// tier from the file header and builds its projections through `W4A8Linear`), and the dense bf16
+/// base that supplied `weights` moves to the `base_snapshot` component for the tokenizer, Qwen3-VL
+/// text encoder, VAE and transformer config. The load quant stays `None`: a W4A8 transformer is never
+/// requantized. Every other field (adapters, encoder receipt, residency) is kept, so the selector
+/// and the eventual provider load inspect the same spec.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn krea_w4a8_load_spec(mut spec: LoadSpec, base_dir: &Path, dit: &Path) -> LoadSpec {
+    spec.weights = WeightsSource::File(dit.to_path_buf());
+    spec.quantize = None;
+    spec.with_component(
+        gen_core::BASE_SNAPSHOT_COMPONENT,
+        WeightsSource::Dir(base_dir.to_path_buf()),
+    )
+}
+
 pub(super) fn load_spec(
     weights_dir: PathBuf,
     quant: Option<Quant>,

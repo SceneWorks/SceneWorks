@@ -829,22 +829,6 @@ pub(crate) fn candle_resolved_tier_key(
     )
 }
 
-/// [`candle_resolved_tier_key`] for the generic Candle image stream, which can also resolve a Krea 2
-/// W4A8 tier (SW-6135). A resolved W4A8 load is named by its tier IDENTITY: its `weights_dir` is the
-/// dense bf16 base surface, whose basename would otherwise size the render as the 47 GB bf16 tier.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(crate) fn candle_stream_tier_key(
-    request: &ImageRequest,
-    weights_dir: &Path,
-    convrot_resolved: bool,
-    w4a8_resolved: bool,
-) -> &'static str {
-    if w4a8_resolved {
-        return super::W4A8_TIER;
-    }
-    candle_resolved_tier_key(request, weights_dir, convrot_resolved)
-}
-
 /// Run the shared selector for an uncached, bespoke SDXL provider after every physical component
 /// has been assembled. This is the only admission that can authorize the subsequent loader; the
 /// older scalar gate remains useful telemetry but cannot mint an optimized execution plan.

@@ -15,15 +15,13 @@ use super::artifact_resolution::is_anima_model;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::model_repo;
 #[cfg(not(target_os = "macos"))]
+use super::artifact_resolution::require_krea_w4a8;
+#[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::resolve_candle_flux1_packed_weights_dir;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::resolve_krea_convrot;
 #[cfg(not(target_os = "macos"))]
-use super::artifact_resolution::resolve_krea_w4a8;
-#[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::resolve_weights_dir;
-#[cfg(not(target_os = "macos"))]
-use super::artifact_resolution::wants_krea_w4a8;
 #[cfg(not(target_os = "macos"))]
 use super::attach_prompt_upsampler;
 #[cfg(not(target_os = "macos"))]
@@ -93,6 +91,8 @@ use super::load_spec::candle_certified_load_spec;
 #[cfg(not(target_os = "macos"))]
 use super::load_spec::candle_shared_memory_tier;
 #[cfg(not(target_os = "macos"))]
+use super::load_spec::krea_w4a8_load_spec;
+#[cfg(not(target_os = "macos"))]
 use super::load_spec::load_spec;
 #[cfg(not(target_os = "macos"))]
 use super::load_spec::seal_ideogram_load_spec;
@@ -113,7 +113,7 @@ use super::memory::candle_capability_reject_message;
 #[cfg(not(target_os = "macos"))]
 use super::memory::candle_quant_for_resolved_tier;
 #[cfg(not(target_os = "macos"))]
-use super::memory::candle_stream_tier_key;
+use super::memory::candle_resolved_tier_key;
 #[cfg(not(target_os = "macos"))]
 use super::memory::candle_tier_fit;
 #[cfg(not(target_os = "macos"))]
@@ -652,14 +652,7 @@ async fn generate_candle_registry_stream_using(
     // `weights` FILE and the base rides the `base_snapshot` component (see the spec substitution
     // below). Unlike ConvRot, a W4A8 pick that cannot resolve is refused, never rendered at another
     // tier: the tier is a deliberate numeric choice.
-    let w4a8 = resolve_krea_w4a8(request, settings);
-    if wants_krea_w4a8(request) && w4a8.is_none() {
-        return Err(WorkerError::InvalidPayload(
-            "Krea 2 Turbo W4A8 tier is not installed: download the W4A8 variant \
-             (SceneWorks/krea-2-turbo-w4a8) and its bf16 base, or pick another tier"
-                .to_owned(),
-        ));
-    }
+    let w4a8 = require_krea_w4a8(request, settings)?;
     // `mut` for the sc-10733 capability downtier below: a DEFAULT job whose resolved tier won't fit the
     // live VRAM budget is re-pointed at the highest installed tier that does, before the spec is built.
     let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref().or(w4a8.as_ref()) {
@@ -966,8 +959,8 @@ async fn generate_candle_registry_stream_using(
     // to be handed to the bits-derived `requested_tier_key`, which aliased it to q8 and under-gated it.
     // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
     // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
-    // SW-6135: a resolved W4A8 load is named by its tier identity too (`candle_stream_tier_key`).
-    let mut tier = candle_stream_tier_key(request, &weights_dir, convrot.is_some(), w4a8.is_some());
+    // SW-6135: a W4A8 request is named by its tier identity too (`gate_tier_key_resolved`).
+    let mut tier = candle_resolved_tier_key(request, &weights_dir, convrot.is_some());
     if matches!(engine_id, "sana_1600m" | "sana_sprint_1600m") {
         tier = "bf16";
     }
@@ -3070,23 +3063,6 @@ async fn generate_candle_registry_stream_using(
 /// whose verified binding froze a tier. The latter is served in place from the hub snapshot, so a
 /// downtier would load a sibling tier the guard never verified; such a job is gated as bound
 /// (fits, or is refused before load).
-/// Substitute a resolved Krea 2 W4A8 tier into the Krea Turbo load spec (SW-6135): the W4A8
-/// transformer becomes the primary `weights` FILE (the inference native-file route detects the tier
-/// from the file header and builds its projections through `W4A8Linear`), and the dense bf16 base
-/// that supplied `weights` until now moves to the `base_snapshot` component for the tokenizer,
-/// Qwen3-VL text encoder, VAE and transformer config. The load quant stays `None`: a W4A8
-/// transformer is never requantized. Every other field (adapters, encoder receipt, residency) is
-/// kept, so the selector and the eventual provider load inspect the same spec.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn krea_w4a8_load_spec(mut spec: LoadSpec, base_dir: &Path, dit: &Path) -> LoadSpec {
-    spec.weights = WeightsSource::File(dit.to_path_buf());
-    spec.quantize = None;
-    spec.with_component(
-        gen_core::BASE_SNAPSHOT_COMPONENT,
-        WeightsSource::Dir(base_dir.to_path_buf()),
-    )
-}
-
 /// A W4A8 transformer loads resident — whole, or in the sequential heavy phase of a staged load.
 /// Its packed projections have no transformer block-streaming form, so a memory selection that
 /// would stream blocks is refused here, typed and before any load, instead of reaching the

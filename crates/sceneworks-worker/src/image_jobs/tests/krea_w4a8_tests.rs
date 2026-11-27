@@ -1,13 +1,15 @@
 //! SW-6135 (feature SW-F287): the Krea 2 Turbo W4A8 tier on the generic Candle image stream —
 //! request selection, artifact resolution, the native-file LoadSpec substitution, its tier
 //! identity, telemetry label, and the typed refusals. Pure: no GPU, no weights.
+use super::super::artifact_resolution::require_krea_w4a8;
 use super::super::artifact_resolution::resolve_krea_w4a8;
 use super::super::artifact_resolution::wants_krea_w4a8;
-use super::super::candle::krea_w4a8_load_spec;
 use super::super::candle::refuse_w4a8_block_streaming;
 use super::super::krea_control_candle::refuse_krea_control_w4a8;
+use super::super::krea_edit_candle::krea_edit_candle_available;
+use super::super::load_spec::krea_w4a8_load_spec;
 use super::super::load_spec::load_spec;
-use super::super::memory::candle_stream_tier_key;
+use super::super::memory::candle_resolved_tier_key;
 use super::super::metrics::effective_quant_label_gated;
 use super::super::AdapterKind;
 use super::super::AdapterSpec;
@@ -154,12 +156,13 @@ fn w4a8_is_gated_and_labelled_by_its_own_tier_identity() {
     let base = Path::new("/models/krea-2-turbo-mlx/bf16");
     assert_eq!(W4A8_TIER, "w4a8");
     assert_eq!(
-        candle_stream_tier_key(&request, base, false, true),
+        candle_resolved_tier_key(&request, base, false),
         W4A8_TIER,
         "the bf16 base basename must never size a W4A8 render as the bf16 tier"
     );
-    // Unresolved, the same request sizes against the directory it would actually load.
-    assert_eq!(candle_stream_tier_key(&request, base, false, false), "bf16");
+    // Any other tier still sizes against the directory it actually loads.
+    let q8 = bound_request(json!({"model": "krea_2_turbo", "advanced": {"quantTier": "q8"}}));
+    assert_eq!(candle_resolved_tier_key(&q8, base, false), "bf16");
     assert_eq!(
         effective_quant_label_gated(&request, false, Some(base)),
         (Some("w4a8".to_owned()), None),
@@ -201,4 +204,72 @@ fn w4a8_pose_control_is_refused_with_the_shared_reason() {
         "advanced": {"quantTier": "q8"}
     }));
     assert!(refuse_krea_control_w4a8(&q8).is_ok());
+}
+
+fn install_turnkey_tier(data_dir: &Path, tier: &str) {
+    let root = cached_snapshot(
+        data_dir,
+        "SceneWorks/krea-2-turbo-mlx",
+        "d009674080cc1bccf2b629d834c34bf5eccdb723",
+    )
+    .join(tier);
+    for component in [
+        "transformer",
+        "text_encoder",
+        "vae",
+        "tokenizer",
+        "scheduler",
+    ] {
+        fs::create_dir_all(root.join(component)).unwrap();
+        fs::write(root.join(component).join("model.safetensors"), b"fixture").unwrap();
+    }
+    fs::write(root.join("transformer").join("config.json"), "{}").unwrap();
+    fs::write(root.join("tokenizer").join("tokenizer.json"), "{}").unwrap();
+    fs::write(root.join("model_index.json"), "{}").unwrap();
+}
+
+/// PR #3526 review: a Kontext edit that selects W4A8 must never render the q8 turnkey that happens
+/// to be installed. The edit lane claims the job, and the shared resolution either yields the W4A8
+/// pair or refuses by type.
+#[test]
+fn w4a8_edit_with_only_q8_installed_is_claimed_and_refused_never_rendered_at_q8() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let settings = settings(temp.path());
+    install_turnkey_tier(temp.path(), "q8");
+    let edit = |tier: &str| {
+        bound_request(json!({
+            "model": "krea_2_turbo",
+            "mode": "edit_image",
+            "sourceAssetId": "asset_src",
+            "loras": [{"id": "krea2_identity_edit", "weight": 1.0}],
+            "advanced": {"quantTier": tier},
+        }))
+    };
+    // The q8 edit claims the lane off the installed turnkey, as before.
+    assert!(krea_edit_candle_available(&edit("q8"), &settings));
+    assert!(require_krea_w4a8(&edit("q8"), &settings).unwrap().is_none());
+    // The W4A8 edit is claimed too, and refused by type rather than rendered at q8.
+    let w4a8 = edit("w4a8");
+    assert!(krea_edit_candle_available(&w4a8, &settings));
+    let error = require_krea_w4a8(&w4a8, &settings)
+        .expect_err("q8 must not stand in for an explicit W4A8 pick")
+        .to_string();
+    assert!(error.contains("W4A8 tier is not installed"), "{error}");
+
+    // Installed (transformer + dense base), the edit resolves the W4A8 pair; the edit lane builds
+    // its spec through the same substitution as the generic stream.
+    install_turnkey_tier(temp.path(), "bf16");
+    let w4a8_repo = cached_snapshot(
+        temp.path(),
+        "SceneWorks/krea-2-turbo-w4a8",
+        "1e79167e1e8ad4c23dfbfa22b39f88a7ca2ba4d2",
+    );
+    fs::write(w4a8_repo.join("krea2_turbo_w4a8.safetensors"), b"fixture").unwrap();
+    let (base, dit) = require_krea_w4a8(&w4a8, &settings)
+        .unwrap()
+        .expect("W4A8 pair");
+    assert_eq!(base.file_name().unwrap(), "bf16");
+    assert_eq!(dit.file_name().unwrap(), "krea2_turbo_w4a8.safetensors");
+    assert_eq!(candle_resolved_tier_key(&w4a8, &base, false), W4A8_TIER);
 }
