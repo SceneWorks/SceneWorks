@@ -565,6 +565,133 @@ async fn download_snapshot_accepts_matching_digest() {
     );
 }
 
+/// A snapshot download reads each file back exactly once — the blob's verification, which is what
+/// catches bytes replaced on disk mid-transfer — and that one read is the only proof needed: the
+/// snapshot entry (a Windows hard link) is not hashed again, and the first load's seal redeems the
+/// proof instead of hashing the entry.
+#[tokio::test]
+async fn download_snapshot_verifies_once_and_its_first_load_seal_hashes_nothing() {
+    use sha2::{Digest, Sha256};
+    let temp = tempdir().expect("tempdir creates");
+    let base_url = spawn_binary_stub(b"weights!!".to_vec()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base_url.clone();
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let repo_dir = temp.path().join("models--owner--model");
+
+    let digest = Sha256::digest(b"weights!!");
+    let snapshot = HuggingFaceSnapshot {
+        files: vec![SnapshotFile {
+            path: "model.safetensors".to_owned(),
+            size: Some(9),
+            download_url: format!("{base_url}/owner/model/resolve/main/model.safetensors"),
+            sha256: Some(format!("{digest:x}")),
+        }],
+    };
+    let mut progress = DownloadProgress::new(
+        "owner/model",
+        0,
+        snapshot.total_bytes(),
+        Duration::from_secs(3600),
+    );
+    let commit = download_snapshot_into_cache(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "job-1",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &repo_dir,
+        "main",
+        &snapshot,
+        &mut progress,
+    )
+    .await
+    .expect("a matching digest is accepted");
+
+    let marker = temp
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let reread: Vec<_> = crate::downloads::VERIFY_FILE_HASHES
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|path| path.to_string_lossy().contains(&marker))
+        .cloned()
+        .collect();
+    assert_eq!(
+        reread.len(),
+        1,
+        "only the blob's verification reads it back: {reread:?}"
+    );
+    assert!(
+        reread[0].to_string_lossy().contains("blobs"),
+        "the snapshot entry is never re-hashed: {reread:?}"
+    );
+
+    let entry = repo_dir
+        .join("snapshots")
+        .join(&commit)
+        .join("model.safetensors");
+    assert_eq!(tokio::fs::read(&entry).await.unwrap(), b"weights!!");
+    let mut work = Vec::new();
+    let pin = gen_core::PinnedWeightsFile::pin_with_progress(
+        &entry,
+        || Ok(()),
+        |progress| work.push((progress.acquisition, progress.hashed_bytes)),
+    )
+    .expect("the snapshot entry pins");
+    assert_eq!(pin.content_sha256().as_slice(), digest.as_slice());
+    assert!(
+        work.iter().all(|(acquisition, hashed)| {
+            *hashed == 0 && *acquisition != gen_core::runtime::ArtifactSealAcquisition::ColdContentRead
+        }),
+        "the first load seal redeems the download's proof instead of hashing: {work:?}"
+    );
+}
+
+/// Admission's hash-once record describes the SEALED snapshot entry, never whatever occupies its
+/// path when the record is stamped: a different file swapped in before the stamp — even one with an
+/// older mtime, which the record's own racy rule would trust — records nothing.
+#[test]
+fn an_entry_replaced_before_admission_stamps_it_is_never_recorded() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let entry = temp.path().join("model.safetensors");
+    std::fs::write(&entry, b"proven-bytes").unwrap();
+    let seal = gen_core::PinnedWeightsFile::pin(&entry).expect("the proven entry seals");
+
+    let forged = temp.path().join("forged.safetensors");
+    std::fs::write(&forged, b"forged-bytes").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&forged)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(86_400))
+        .unwrap();
+    std::fs::rename(&forged, &entry).unwrap();
+
+    assert!(
+        !crate::downloads::record_sealed_entry_for_admission(&data_dir, &entry, &seal),
+        "a replaced entry must not inherit the sealed file's digest"
+    );
+    let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(&data_dir);
+    assert_eq!(cache.recorded(&std::fs::canonicalize(&entry).unwrap()), None);
+
+    // The same entry, sealed as it now is, records normally.
+    let resealed = gen_core::PinnedWeightsFile::pin(&entry).unwrap();
+    assert!(crate::downloads::record_sealed_entry_for_admission(
+        &data_dir, &entry, &resealed
+    ));
+}
+
 #[tokio::test]
 async fn download_snapshot_resumes_existing_partial_blob() {
     let temp = tempdir().expect("tempdir creates");
