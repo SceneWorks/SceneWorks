@@ -241,6 +241,8 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
     value === null || value === undefined || value === ""
       ? fallback
       : (finiteRecipeNumber(value) ?? fallback);
+  // SW-7276: only an explicit opt-out is recorded; absent means the default, on.
+  values.flashAttn = rawSettings.flashAttn !== false;
   values.enhancePrompt = rawSettings.enhancePrompt === true;
   values.textEncoderModel = { value: rawSettings.textEncoderModel ?? null, modelId: recipe.model ?? model };
   values.usePid = rawSettings.usePid === true;

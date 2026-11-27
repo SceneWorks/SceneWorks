@@ -73,6 +73,7 @@ export function useVideoSubmission({
   temporalUpsampleRounds,
   supportsPromptEnhancement,
   enhancePrompt,
+  flashAttn,
   supportsTextEncoderSelection,
   selectedTextEncoderModel,
   defaultTextEncoderId,
@@ -231,6 +232,9 @@ export function useVideoSubmission({
               temporalUpsampleRounds,
             }
           : {}),
+        // SW-7276: the worker defaults the shared candle FlashAttention-2 toggle on when absent, so only
+        // an explicit opt-out is sent (same shape as the image request).
+        ...(flashAttn === false ? { flashAttn: false } : {}),
         ...(supportsPromptEnhancement && enhancePrompt
           ? { enhancePrompt: true }
           : {}),

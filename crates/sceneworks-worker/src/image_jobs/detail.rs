@@ -597,6 +597,10 @@ pub(crate) async fn run_image_detail_job(
     let mut request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     request.portable_aux = portable_aux.clone();
+    // SW-7276: this typed handler bypasses the image generate seam, so it sets the shared candle
+    // FlashAttention-2 toggle itself (`advanced.flashAttn`, default on).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    crate::attention_path::apply_image_request(&request);
     request
         .reject_active_pag("SDXL detail enhancement")
         .map_err(WorkerError::InvalidPayload)?;

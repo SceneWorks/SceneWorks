@@ -1,3 +1,4 @@
+import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx";
 import { sourcePrecisionLabel } from "../../quantTier.js";
 import { GpuSelect } from "../../components/StudioFields.jsx";
 import { CharacterLookFields } from "../../components/StudioFields.jsx";
@@ -48,6 +49,9 @@ export function VideoAdvancedPanel({
   supportsPromptEnhancement,
   enhancePrompt,
   setEnhancePrompt,
+  activeBackend,
+  flashAttn,
+  setFlashAttn,
   supportsStockPromptEnhancement,
   supportsTextEncoderSelection,
   setTextEncoderModel,
@@ -311,6 +315,7 @@ export function VideoAdvancedPanel({
                   </label>
                 </>
               ) : null}
+              <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
               {supportsPromptEnhancement ? (
                 <>
                   <div className="lightning-toggle">
