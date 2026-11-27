@@ -469,22 +469,151 @@ fn completed_lora_history_survives_queue_clearing_and_retention() {
         .list_jobs(Some("project"), None, 100)
         .unwrap()
         .is_empty());
-    let history = store.list_completed_lora_runs("project", 0, 1).unwrap();
+    let history = store.list_saved_lora_runs("project", 0, 1).unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].id, "saved-uncleared");
     assert_eq!(
-        store.list_completed_lora_runs("project", 1, 1).unwrap()[0].id,
+        store.list_saved_lora_runs("project", 1, 1).unwrap()[0].id,
         "saved"
     );
     assert!(store
-        .list_completed_lora_runs("project", 2, 1)
+        .list_saved_lora_runs("project", 2, 1)
         .unwrap()
         .is_empty());
     assert!(store
-        .list_completed_lora_runs("other-project", 0, 100)
+        .list_saved_lora_runs("other-project", 0, 100)
         .unwrap()
         .is_empty());
     assert_eq!(store.get_job("saved").unwrap().payload["dryRun"], false);
+}
+
+/// Canceled and interrupted LoRA runs are saved work too (resumed from their last checkpoint):
+/// listed and retained like completed runs until a retry supersedes them. A failed run, and a
+/// stopped run whose retry already exists, stay ordinary queue history.
+#[test]
+fn stopped_lora_runs_are_saved_until_a_retry_supersedes_them() {
+    let db = temp_db("stopped-lora-history");
+    let store = JobsStore::new(db.path());
+    store.initialize().unwrap();
+    let connection = Connection::open(db.path()).unwrap();
+    for (id, status, source, completed_at) in [
+        ("completed", "completed", None, "2020-01-01T00:00:04Z"),
+        ("canceled", "canceled", None, "2020-01-01T00:00:03Z"),
+        ("interrupted", "interrupted", None, "2020-01-01T00:00:02Z"),
+        ("failed", "failed", None, "2020-01-01T00:00:01Z"),
+        ("superseded", "canceled", None, "2020-01-01T00:00:00Z"),
+        (
+            "retry",
+            "running",
+            Some("superseded"),
+            "2020-01-01T00:00:00Z",
+        ),
+        // A completed run stays saved however many continuations link back to it.
+        (
+            "continued",
+            "queued",
+            Some("completed"),
+            "2020-01-01T00:00:00Z",
+        ),
+    ] {
+        let payload = serde_json::json!({
+            "dryRun": false, "plan": {"target": {"outputKind": "lora"}}
+        });
+        let completed_at = (!matches!(status, "running" | "queued")).then_some(completed_at);
+        connection.execute(
+            "insert into jobs (
+                id,type,status,project_id,payload_json,result_json,requested_gpu,progress,stage,message,
+                attempts,source_job_id,cancel_requested,created_at,updated_at,completed_at
+             ) values (?1,'lora_train',?2,'project',?3,'{}','auto',0,?2,'',1,?4,0,
+                       '2020-01-01T00:00:00Z','2020-01-01T00:00:00Z',?5)",
+            params![id, status, payload.to_string(), source, completed_at],
+        ).unwrap();
+    }
+    let ids = |store: &JobsStore| {
+        store
+            .list_saved_lora_runs("project", 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|job| job.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&store), ["completed", "canceled", "interrupted"]);
+    // Retention clears saved runs from the queue but keeps them; the failed and superseded
+    // runs are purged as ordinary history.
+    assert_eq!(
+        store
+            .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+            .unwrap(),
+        2
+    );
+    assert!(store.get_job("failed").is_err());
+    assert!(store.get_job("superseded").is_err());
+    assert_eq!(ids(&store), ["completed", "canceled", "interrupted"]);
+    let queue = store
+        .list_jobs(Some("project"), None, 100)
+        .unwrap()
+        .into_iter()
+        .map(|job| job.id)
+        .collect::<Vec<_>>();
+    assert!(!queue.contains(&"canceled".to_owned()), "{queue:?}");
+}
+
+/// Removing a saved LoRA run is permanent: it leaves the saved list and the queue, a second
+/// removal (or one from another project, or of a job that is not a saved run) is NotFound, and
+/// retention then purges the row as ordinary history.
+#[test]
+fn removed_saved_lora_runs_never_return_and_are_purged_by_retention() {
+    let db = temp_db("removed-lora-history");
+    let store = JobsStore::new(db.path());
+    store.initialize().unwrap();
+    let connection = Connection::open(db.path()).unwrap();
+    for (id, job_type, status) in [
+        ("kept", "lora_train", "completed"),
+        ("removed", "lora_train", "canceled"),
+        ("image", "image_generate", "completed"),
+    ] {
+        let payload = serde_json::json!({
+            "dryRun": false, "plan": {"target": {"outputKind": "lora"}}
+        });
+        connection
+            .execute(
+                "insert into jobs (
+                id,type,status,project_id,payload_json,result_json,requested_gpu,progress,stage,message,
+                attempts,cancel_requested,created_at,updated_at,completed_at
+             ) values (?1,?2,?3,'project',?4,'{}','auto',1,?3,'',1,0,
+                       '2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                params![id, job_type, status, payload.to_string()],
+            )
+            .unwrap();
+    }
+    let not_found = |result: sceneworks_core::jobs_store::JobsStoreResult<()>| {
+        matches!(
+            result,
+            Err(sceneworks_core::jobs_store::JobsStoreError::NotFound(_))
+        )
+    };
+    assert!(not_found(
+        store.remove_saved_lora_run("other-project", "removed")
+    ));
+    assert!(not_found(store.remove_saved_lora_run("project", "image")));
+    store.remove_saved_lora_run("project", "removed").unwrap();
+    assert!(not_found(store.remove_saved_lora_run("project", "removed")));
+    let saved = store.list_saved_lora_runs("project", 0, 100).unwrap();
+    assert_eq!(
+        saved.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+        ["kept"]
+    );
+    let queue = store.list_jobs(Some("project"), None, 100).unwrap();
+    assert!(queue.iter().all(|job| job.id != "removed"));
+    assert_eq!(
+        store
+            .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+            .unwrap(),
+        2,
+        "the removed run and the image job are purged; the kept run is retained"
+    );
+    assert!(store.get_job("removed").is_err());
+    assert!(store.get_job("kept").is_ok());
 }
 
 #[test]

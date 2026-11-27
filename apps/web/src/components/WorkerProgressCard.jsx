@@ -720,6 +720,8 @@ export function WorkerProgressCard({
   onDuplicate,
   onContinueTraining,
   onOpenQueue,
+  // Screen-specific actions appended after the card's own (Training Studio's saved-run removal).
+  extraActions = null,
   hideOpenQueue = false,
   allowTitleExpansion = false,
   className,
@@ -991,6 +993,7 @@ export function WorkerProgressCard({
         {showOpenQueue ? (
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>
         ) : null}
+        {extraActions}
       </div>
       {typeof job.payload?.continuation?.sourceJobId === "string" && Number.isInteger(job.payload.continuation.initialStep) ? (
         <p className="worker-progress-card__continuation">

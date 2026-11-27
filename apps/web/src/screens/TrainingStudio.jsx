@@ -286,7 +286,7 @@ function LiveIrisMetrics({ job, token, live = true }) {
   return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onPreview, token, completed = false }) {
+function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRetry, onRemove, removing, onPreview, token, completed = false }) {
   return (
       <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => {
@@ -303,6 +303,11 @@ function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onPre
                 expectedThumbnailCount={4}
                 onCancel={onCancel}
                 onContinueTraining={onContinueTraining}
+                onRetry={onRetry}
+                extraActions={onRemove ? (
+                  <button className="secondary-action danger" type="button" disabled={removing?.has(job.id)}
+                    onClick={() => onRemove(job)}>{removing?.has(job.id) ? "Removing…" : "Remove"}</button>
+                ) : null}
                 onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
               />
               {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} live={!completed} /> : null}
@@ -741,8 +746,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
         .slice(0, 3),
     [activeProject?.id, jobs],
   );
-  const completedTrainingRefreshKey = useMemo(
-    () => jobs.filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id && job.status === "completed").map((job) => `${job.id}:${job.updatedAt}`).join("|"),
+  // Saved-run history reloads when a run finishes or stops, and when a resume queues a new
+  // run (which supersedes the stopped one). A running job's progress ticks change only its
+  // updatedAt, so a live run is keyed by status alone.
+  const savedTrainingRefreshKey = useMemo(
+    () => jobs
+      .filter((job) => job.type === "lora_train" && job.projectId === activeProject?.id)
+      .map((job) => (terminalStatuses.has(job.status) ? `${job.id}:${job.status}:${job.updatedAt}` : `${job.id}:${job.status}`))
+      .join("|"),
     [activeProject?.id, jobs],
   );
   const gpuOptionsKey = gpuOptions.join("\u0000");
@@ -2452,11 +2463,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
               />
             ) : trainingAction === "continue" ? (
               <TrainingRunHistory key={activeProject.id} projectId={activeProject.id} token={token}
-                refreshKey={completedTrainingRefreshKey}
-                renderRuns={(savedJobs) => (
+                refreshKey={savedTrainingRefreshKey}
+                renderRuns={(savedJobs, { onRemove, removing }) => (
                   <TrainingRunCards jobs={savedJobs} projectId={activeProject.id} token={token} completed
+                    onRemove={onRemove} removing={removing}
                     onPreview={setPreviewAsset}
-                    onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined} />
+                    onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined}
+                    onRetry={jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined} />
                 )} />
             ) : (
               <>

@@ -26,10 +26,19 @@ use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_
 /// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
 pub const IMPORT_CLAIM_CAPABILITY_KEY: &str = "importClaimCapability";
 
-// Completed LoRA plans are saved training work, independent of the disposable queue view.
-const COMPLETED_LORA_RUN_SQL: &str = "type = 'lora_train' and status = 'completed' \
+// Saved LoRA runs are training work, independent of the disposable queue view: completed runs
+// (continued with more steps) and canceled or interrupted runs (resumed from their last
+// checkpoint). A stopped run that a retry has superseded is not saved work any more: the retry
+// is a new job carrying `source_job_id`, and it owns the run's output from then on. Only a
+// retry links a stopped run (a continuation requires a completed source), so a completed run
+// stays saved however many continuations it has. A run the user removed from the saved list
+// (`history_removed_at`) is ordinary queue history again, so retention purges it in time. The
+// outer table must be unaliased `jobs`.
+const SAVED_LORA_RUN_SQL: &str = "type = 'lora_train' and history_removed_at is null \
     and json_extract(payload_json, '$.dryRun') = 0 \
-    and json_extract(payload_json, '$.plan.target.outputKind') = 'lora'";
+    and json_extract(payload_json, '$.plan.target.outputKind') = 'lora' \
+    and (status = 'completed' or (status in ('canceled', 'interrupted') \
+         and not exists (select 1 from jobs as retry where retry.source_job_id = jobs.id)))";
 
 fn mint_import_claim_capability(
     payload: &mut serde_json::Map<String, Value>,
@@ -796,6 +805,8 @@ impl JobsStore {
               on jobs(assigned_gpu, status);
             create index if not exists idx_jobs_worker_status
               on jobs(worker_id, status);
+            create index if not exists idx_jobs_source_job
+              on jobs(source_job_id);
 
             create table if not exists workers (
               id text primary key,
@@ -1006,6 +1017,9 @@ impl JobsStore {
         // `jobs`, so deleting the row would silently wipe that run's stats and
         // orphan its metrics. Non-null == "cleared from the queue", timestamped.
         ensure_column(&transaction, "jobs", "cleared_at", "text")?;
+        // Non-null == the user removed this run from Training Studio's saved runs
+        // (`remove_saved_lora_run`). It is never listed or retained as saved work again.
+        ensure_column(&transaction, "jobs", "history_removed_at", "text")?;
         // Structured per-run generation metrics (epic 10402). A companion table
         // keyed 1:1 by job id — kept out of the hot `jobs` row so the queue
         // read path stays lean. Written by the worker on completion and read
@@ -1167,8 +1181,8 @@ impl JobsStore {
     /// owning jobs. Legacy orphan metrics are also removed. Every statement
     /// shares the one caller-supplied cutoff, so the window cannot move
     /// underneath the sweep; a job completed exactly ON the cutoff is retained.
-    /// Saved completed LoRA plans are cleared from the queue at the cutoff, but retained
-    /// for training history and continuation.
+    /// Saved LoRA runs (completed, or canceled/interrupted and not yet retried) are cleared
+    /// from the queue at the cutoff, but retained for training history, continuation and resume.
     pub fn purge_terminal_jobs_completed_before(&self, cutoff: &str) -> JobsStoreResult<usize> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -1177,12 +1191,12 @@ impl JobsStore {
         let predicate = format!(
             "status in ({terminal}) and completed_at is not null \
              and datetime(completed_at) < datetime(?1) \
-             and coalesce(({COMPLETED_LORA_RUN_SQL}), 0) = 0"
+             and coalesce(({SAVED_LORA_RUN_SQL}), 0) = 0"
         );
         transaction.execute(
             &format!(
                 "update jobs set cleared_at = coalesce(cleared_at, ?2) \
-                 where ({COMPLETED_LORA_RUN_SQL}) and cleared_at is null and completed_at is not null \
+                 where ({SAVED_LORA_RUN_SQL}) and cleared_at is null and completed_at is not null \
                  and datetime(completed_at) < datetime(?1)"
             ),
             params![cutoff, utc_now()],
@@ -1213,7 +1227,7 @@ impl JobsStore {
                         m.peak_memory_bytes, m.peak_memory_pct, m.peak_gpu_load_pct, m.backend,
                         m.updated_at, j.type, j.status, j.project_id, j.created_at
                    from generation_metrics m join jobs j on j.id = m.job_id
-                  where j.{predicate}"
+                  where m.job_id in (select id from jobs where {predicate})"
             ),
             params![cutoff],
         )?;
@@ -2125,9 +2139,10 @@ impl JobsStore {
         Ok(jobs)
     }
 
-    /// Saved completed LoRA runs, including jobs cleared from the queue. Keep filtering and
-    /// pagination in SQL so unrelated queue traffic cannot push training history out of view.
-    pub fn list_completed_lora_runs(
+    /// Saved LoRA runs (see `SAVED_LORA_RUN_SQL`), including jobs cleared from the queue. Keep
+    /// filtering and pagination in SQL so unrelated queue traffic cannot push training history
+    /// out of view.
+    pub fn list_saved_lora_runs(
         &self,
         project_id: &str,
         offset: u32,
@@ -2135,7 +2150,7 @@ impl JobsStore {
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
         let connection = self.open_connection()?;
         let mut statement = connection.prepare(&format!(
-            "select * from jobs where project_id = ?1 and ({COMPLETED_LORA_RUN_SQL}) \
+            "select * from jobs where project_id = ?1 and ({SAVED_LORA_RUN_SQL}) \
              order by completed_at desc, rowid desc limit ?2 offset ?3"
         ))?;
         let jobs = collect_jobs(statement.query_map(
@@ -2979,6 +2994,30 @@ impl JobsStore {
         let job = self.get_job_on_connection(&transaction, job_id)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Permanently remove a saved LoRA run (see `SAVED_LORA_RUN_SQL`) from `project_id`'s saved
+    /// runs, and clear it from the queue. There is no undo: the run is never listed, continued
+    /// from the list, or retained as saved work again, and retention later purges its row like
+    /// any other queue history. Its files (an exported LoRA, recovery checkpoints) are untouched;
+    /// a registered LoRA stays in the library. A job that is not a saved run of that project is
+    /// [`JobsStoreError::NotFound`], so a second removal is a 404 rather than a silent no-op.
+    pub fn remove_saved_lora_run(&self, project_id: &str, job_id: &str) -> JobsStoreResult<()> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let removed = transaction.execute(
+            &format!(
+                "update jobs set history_removed_at = ?1, cleared_at = coalesce(cleared_at, ?1)                  where id = ?2 and project_id = ?3 and ({SAVED_LORA_RUN_SQL})"
+            ),
+            params![now, job_id, project_id],
+        )?;
+        if removed == 0 {
+            return Err(JobsStoreError::NotFound(job_id.to_owned()));
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {

@@ -1,9 +1,17 @@
 # Continue a completed LoRA run
 
 In Training Studio, choose **New training** to configure a fresh run, or
-**Continue training** to browse saved completed LoRA runs in the current workspace.
-The saved run history is paged and remains available after clearing the Queue or
-automatic queue retention. It is visible without first selecting a dataset or
+**Continue training** to browse saved LoRA runs in the current workspace: completed
+runs, which can be continued with more steps, and canceled or interrupted runs, which
+offer **Resume from step N** (the Queue's checkpoint resume, training on to the run's
+planned total) or **Restart from step 0**. Once a stopped run is resumed or restarted,
+the new run supersedes it and it leaves the list. Failed runs are not listed; retry
+them from the Queue. The saved run history is paged and remains available after
+clearing the Queue or automatic queue retention. **Remove** on a saved run (after a
+confirmation) takes it out of the list and the Queue permanently
+(`DELETE /api/v1/projects/:project_id/training/runs/:job_id`); retention later purges
+its record like any other queue history. Its files are kept: a completed run's LoRA
+stays in the library, and a stopped run's checkpoints stay in its output directory. It is visible without first selecting a dataset or
 having a trainable base model installed; submission still checks the required resources.
 Run records already deleted by an older retention sweep are not reconstructed.
 Completed jobs also offer **Continue training** directly in the Queue.

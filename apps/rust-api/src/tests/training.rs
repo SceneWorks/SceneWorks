@@ -205,8 +205,35 @@ async fn training_continuation_creates_independent_linked_outputs_and_keeps_sour
         original_loras.as_array().unwrap().len() + 1
     );
     assert_eq!(std::fs::read(&adapter).unwrap(), adapter_before);
-    let (_, source_after) = request(app, "GET", &format!("/api/v1/jobs/{id}"), Value::Null).await;
+    let (_, source_after) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Value::Null,
+    )
+    .await;
     assert_eq!(source_after, original_snapshot);
+    // Removing a saved run is scoped to its project, permanent, and leaves its files and LoRA.
+    let other_remove = format!(
+        "/api/v1/projects/{}/training/runs/{id}",
+        other_project["id"].as_str().unwrap()
+    );
+    let (status, _) = request(app.clone(), "DELETE", &other_remove, Value::Null).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let remove = format!("/api/v1/projects/{project_id}/training/runs/{id}");
+    let (status, body) = request(app.clone(), "DELETE", &remove, Value::Null).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (status, _) = request(app.clone(), "DELETE", &remove, Value::Null).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let all_runs = format!("/api/v1/projects/{project_id}/training/runs");
+    let (_, remaining) = request(app.clone(), "GET", &all_runs, Value::Null).await;
+    let remaining = remaining["jobs"].as_array().unwrap();
+    assert!(remaining.iter().all(|job| job["id"] != id), "{remaining:?}");
+    assert!(remaining.iter().any(|job| job["id"] == first.as_str()));
+    assert_eq!(std::fs::read(&adapter).unwrap(), adapter_before);
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), bytes);
+    let (_, loras_removed) = request(app, "GET", &loras_path, Value::Null).await;
+    assert_eq!(loras_removed, loras_after);
 }
 
 // Training endpoint fixtures use small staged snapshots; bind their exact local bytes as the
