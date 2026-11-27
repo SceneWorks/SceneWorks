@@ -6238,6 +6238,84 @@ fn flux3_publisher_tiers_require_the_worker_device_marker() {
     }
 }
 
+/// SW-6135: a Krea 2 Turbo W4A8 job (by `advanced.quantTier` or top-level `variant`, generate or
+/// edit) requires the `w4a8` device marker, so an otherwise compatible pre-sm_80 worker leaves it
+/// queued for one whose GPU clears the floor. Other Krea tiers keep the job-type capability.
+#[test]
+fn krea_w4a8_jobs_require_the_w4a8_worker_marker() {
+    let generate = |payload: Value| image_generate_job(payload);
+    let edit = |payload: Value| {
+        let mut job = image_generate_job(payload);
+        job.job_type = JobType::ImageEdit;
+        job
+    };
+    let base = |extra: Value| {
+        let mut payload = json!({"model": "krea_2_turbo", "mode": "text_to_image", "prompt": "p"});
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        payload
+    };
+    let with_marker = |marker: &'static str, job_cap: &'static str| {
+        let mut caps = CANDLE_CAPS.to_vec();
+        caps.push(job_cap);
+        caps.push(marker);
+        gpu_worker(&caps)
+    };
+    let without_marker = |job_cap: &'static str| {
+        let mut caps = CANDLE_CAPS.to_vec();
+        caps.push(job_cap);
+        gpu_worker(&caps)
+    };
+    for (job, job_cap) in [
+        (
+            generate(base(json!({"advanced": {"quantTier": "w4a8"}}))),
+            "image_generate",
+        ),
+        (
+            generate(base(json!({"variant": " W4A8 "}))),
+            "image_generate",
+        ),
+        (
+            edit(base(
+                json!({"mode": "edit_image", "sourceAssetId": "a", "variant": "w4a8"}),
+            )),
+            "image_edit",
+        ),
+    ] {
+        assert!(
+            !worker_supports_job(&without_marker(job_cap), &job),
+            "a pre-sm_80 worker must not claim {:?}",
+            job.payload
+        );
+        assert!(
+            worker_supports_job(&with_marker("w4a8", job_cap), &job),
+            "an sm_80+ worker claims {:?}",
+            job.payload
+        );
+        // Another tier's device marker does not stand in for this one.
+        assert!(!worker_supports_job(
+            &with_marker("int8_convrot", job_cap),
+            &job
+        ));
+    }
+    // Every other Krea tier, and a top-level variant that names another tier, needs no marker.
+    for extra in [
+        json!({}),
+        json!({"advanced": {"mlxQuantize": 4}}),
+        json!({"advanced": {"convRot": true}}),
+        json!({"variant": "q8", "advanced": {"quantTier": "w4a8"}}),
+    ] {
+        assert!(
+            worker_supports_job(
+                &without_marker("image_generate"),
+                &generate(base(extra.clone()))
+            ),
+            "{extra}"
+        );
+    }
+}
+
 /// SW-7102: a MiniMax-H3-Image prompt expansion the API froze to the NVFP4 tier needs BOTH the
 /// `prompt_refine` provider and the NVFP4 device marker, so neither a pre-Blackwell worker nor a
 /// Blackwell worker without the text provider claims it; every other tier (and every other refine
