@@ -131,3 +131,94 @@ fn legacy_ltx_fallback_refreshes_when_alternate_becomes_valid_or_corrupt() {
     apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
     assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 1);
 }
+
+/// The whole-catalog encoder pass must leave `GET /models` byte-for-byte what the per-model
+/// computation produced: same rows, same keys in the same insertion order, same option lists.
+/// The reference below is the pre-batching loop verbatim, run against the same snapshot.
+#[tokio::test]
+async fn sized_catalog_is_byte_identical_to_the_per_model_encoder_computation() {
+    let _env = crate::tests::support::isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (_, state) =
+        crate::create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
+    // A row whose seeds point at a staged directory, so source collection has real work to do.
+    let staged = state.settings.data_dir.join("staged-encoder");
+    std::fs::create_dir_all(staged.join("text_encoder")).unwrap();
+    write_tiny_safetensors(&staged.join("text_encoder/model.safetensors"));
+    std::fs::write(staged.join("text_encoder/config.json"), b"{}").unwrap();
+    let mut snapshot = model_catalog_snapshot(&state)
+        .await
+        .unwrap()
+        .as_ref()
+        .clone();
+    assert!(
+        !snapshot.is_empty(),
+        "the test settings seed a builtin catalog"
+    );
+    snapshot.push(json!({
+        "id": "staged_row",
+        "name": "Staged",
+        "type": "image",
+        "catalogScope": "imported",
+        "installedPath": staged,
+        "adapter": "ltx_video",
+    }));
+    {
+        let mut cache = state.model_catalog_cache.state.lock();
+        cache.snapshot = Some((
+            cache.generation,
+            crate::generation::enqueue_backend(&state),
+            Arc::new(snapshot),
+        ));
+    }
+
+    let batched = model_catalog_sized(&state).await.unwrap();
+
+    let size_estimates = estimate_current_model_catalog_sizes(&state).await.unwrap();
+    let mut reference = model_catalog_snapshot(&state)
+        .await
+        .unwrap()
+        .as_ref()
+        .clone();
+    crate::model_sources::refresh_live_external_availability(
+        &state.settings.data_dir,
+        &mut reference,
+    )
+    .await
+    .unwrap();
+    let selection_catalog = reference.clone();
+    for model in &mut reference {
+        let context = model_download_context(model).unwrap();
+        let live_estimate = context.as_ref().and_then(|context| {
+            size_estimates
+                .get(&(context.repo.clone(), context.files.clone()))
+                .copied()
+                .flatten()
+        });
+        apply_model_catalog_size_fields(model, context.as_ref(), live_estimate).unwrap();
+        apply_runtime_text_encoder_options(
+            model,
+            &selection_catalog,
+            &state.settings.data_dir,
+            &state.settings.external_model_roots,
+        )
+        .unwrap();
+        annotate_commercial_use_alternatives(model, &selection_catalog);
+    }
+
+    assert_eq!(batched.len(), reference.len());
+    assert_eq!(
+        serde_json::to_vec(&batched).unwrap(),
+        serde_json::to_vec(&reference).unwrap(),
+        "the batched encoder pass changed the public catalog bytes"
+    );
+    // A second, memo-warm request is identical too.
+    assert_eq!(
+        serde_json::to_vec(&model_catalog_sized(&state).await.unwrap()).unwrap(),
+        serde_json::to_vec(&reference).unwrap(),
+    );
+}

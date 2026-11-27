@@ -354,7 +354,8 @@ mod external_library_runtime;
 mod inference_runtime;
 mod text_encoder_selection;
 pub use text_encoder_selection::{
-    image_text_encoder_options, resolve_image_text_encoder_selection, ImageTextEncoderOption,
+    image_text_encoder_options, image_text_encoder_options_for_catalog,
+    resolve_image_text_encoder_selection, ImageTextEncoderOption,
 };
 // Promotion activation (sc-19706): the idle-time producer that turns a successful source-tier load
 // into an app-owned resolved bundle. The guard above records an I/O-free hint; this drains it.

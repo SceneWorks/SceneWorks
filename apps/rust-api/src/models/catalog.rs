@@ -166,8 +166,14 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let mut models = snapshot?.as_ref().clone();
     crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
         .await?;
-    let selection_catalog = models.clone();
-    for model in &mut models {
+    let selection_catalog = Arc::new(models.clone());
+    let text_encoder_options = runtime_text_encoder_options_for_catalog(
+        selection_catalog.clone(),
+        state.settings.data_dir.clone(),
+        state.settings.external_model_roots.clone(),
+    )
+    .await?;
+    for (model, text_encoder_options) in models.iter_mut().zip(text_encoder_options) {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
             size_estimates
@@ -176,12 +182,7 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
                 .flatten()
         });
         apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
-        apply_runtime_text_encoder_options(
-            model,
-            &selection_catalog,
-            &state.settings.data_dir,
-            &state.settings.external_model_roots,
-        )?;
+        set_runtime_text_encoder_options(model, text_encoder_options)?;
         annotate_commercial_use_alternatives(model, &selection_catalog);
     }
     Ok(models)
@@ -216,21 +217,56 @@ pub(super) fn annotate_commercial_use_alternatives(model: &mut Value, catalog: &
     }
 }
 
-/// Add runtime-only text-encoder choices to the public model catalog. The worker owns enumeration so
-/// the API and generation resolver share one completeness predicate. This runs on the response clone,
-/// outside the cached catalog snapshot: an operator who stages a complete alternate and refreshes
-/// Models sees it without a server restart, while no repo/revision/download metadata is persisted.
-pub(super) fn apply_runtime_text_encoder_options(
-    model: &mut Value,
+/// Runtime-only text-encoder choices for every catalog row, element `i` belonging to `catalog[i]`.
+/// The worker owns enumeration so the API and generation resolver share one completeness predicate.
+/// This runs on the response clone, outside the cached catalog snapshot: an operator who stages a
+/// complete alternate and refreshes Models sees it without a server restart, while no
+/// repo/revision/download metadata is persisted.
+///
+/// Discovery stats, canonicalizes and reads safetensors headers across the whole model library, so
+/// it runs on the blocking pool rather than on a runtime worker thread. The worker computes every
+/// row in one pass (one source collection, one inspection per source and encoder contract, memoized
+/// across requests behind a stat fingerprint) instead of re-walking the library once per model.
+pub(super) async fn runtime_text_encoder_options_for_catalog(
+    catalog: Arc<Vec<Value>>,
+    data_dir: PathBuf,
+    external_roots: Vec<PathBuf>,
+) -> Result<Vec<Vec<Value>>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        runtime_text_encoder_options_blocking(&catalog, &data_dir, &external_roots)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("text encoder discovery failed: {error}")))
+}
+
+fn runtime_text_encoder_options_blocking(
     catalog: &[Value],
     data_dir: &FsPath,
     external_roots: &[PathBuf],
-) -> Result<(), ApiError> {
-    let mut options =
-        sceneworks_worker::image_text_encoder_options(catalog, model, data_dir, external_roots)
-            .into_iter()
-            .map(|option| serde_json::to_value(option).expect("text encoder option serializes"))
-            .collect::<Vec<_>>();
+) -> Vec<Vec<Value>> {
+    let image_options = sceneworks_worker::image_text_encoder_options_for_catalog(
+        catalog,
+        data_dir,
+        external_roots,
+    );
+    catalog
+        .iter()
+        .zip(image_options)
+        .map(|(model, image_options)| {
+            runtime_text_encoder_option_values(model, image_options, data_dir)
+        })
+        .collect()
+}
+
+fn runtime_text_encoder_option_values(
+    model: &Value,
+    image_options: Vec<sceneworks_worker::ImageTextEncoderOption>,
+    data_dir: &FsPath,
+) -> Vec<Value> {
+    let mut options = image_options
+        .into_iter()
+        .map(|option| serde_json::to_value(option).expect("text encoder option serializes"))
+        .collect::<Vec<_>>();
     if options.is_empty() {
         let adapter = model
             .get("adapter")
@@ -244,6 +280,21 @@ pub(super) fn apply_runtime_text_encoder_options(
                 }),
         );
     }
+    options
+}
+
+/// The per-model computation the catalog used before the whole-catalog pass. Kept as the reference
+/// the batched response is tested against.
+#[cfg(test)]
+pub(super) fn apply_runtime_text_encoder_options(
+    model: &mut Value,
+    catalog: &[Value],
+    data_dir: &FsPath,
+    external_roots: &[PathBuf],
+) -> Result<(), ApiError> {
+    let image_options =
+        sceneworks_worker::image_text_encoder_options(catalog, model, data_dir, external_roots);
+    let options = runtime_text_encoder_option_values(model, image_options, data_dir);
     set_runtime_text_encoder_options(model, options)
 }
 
