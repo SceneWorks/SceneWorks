@@ -661,6 +661,9 @@ pub(super) fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32,
         GenerationOutput::Audio(_) => {
             Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
         }
+        GenerationOutput::Interleaved { .. } => {
+            Err("MLX LTX-2.3 render returned interleaved output, not a video clip".to_owned())
+        }
     }
 }
 
@@ -698,6 +701,9 @@ pub(super) fn diagnostic_video_frames(
         }
         GenerationOutput::Audio(_) => Err(format!(
             "{label} render returned an audio track, not a video clip"
+        )),
+        GenerationOutput::Interleaved { .. } => Err(format!(
+            "{label} render returned interleaved output, not a video clip"
         )),
     }
 }

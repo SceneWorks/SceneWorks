@@ -1894,6 +1894,12 @@ pub(super) fn run_sc22737_video_capture(
                 arm.model_id
             ))
         }
+        GenerationOutput::Interleaved { .. } => {
+            return Err(format!(
+                "{} returned interleaved output, not a video clip",
+                arm.model_id
+            ))
+        }
     };
     if fps != target.fps {
         return Err(format!(

@@ -317,6 +317,11 @@ pub(super) fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
         GenerationOutput::Audio(_) => {
             return Err(format!("{LTX25_ID} returned audio without video frames"))
         }
+        GenerationOutput::Interleaved { .. } => {
+            return Err(format!(
+                "{LTX25_ID} returned interleaved output, not a video clip"
+            ))
+        }
     };
     if fps != target.fps || audio.is_none() {
         return Err(format!(

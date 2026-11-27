@@ -690,6 +690,9 @@ fn full_av_video(output: GenerationOutput) -> Result<(Vec<Image>, u32, AudioTrac
         GenerationOutput::Audio(_) => Err(format!(
             "{LABEL} returned a standalone audio track, not a video clip"
         )),
+        GenerationOutput::Interleaved { .. } => Err(format!(
+            "{LABEL} returned interleaved output, not a video clip"
+        )),
     }
 }
 
