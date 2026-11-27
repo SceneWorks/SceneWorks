@@ -57,4 +57,5 @@ mod download_binding_tests;
 mod execution_receipt_tests;
 mod import_claim_capability_tests;
 mod portable_binding_tests;
+mod queue_summary_index_tests;
 mod storage_maintenance_tests;

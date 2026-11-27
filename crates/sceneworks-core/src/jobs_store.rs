@@ -257,6 +257,39 @@ fn terminal_statuses_sql() -> &'static str {
     SQL.get_or_init(|| status_sql_list(TERMINAL_STATUSES))
 }
 
+/// Rows still shown in the operator's queue (not soft-hidden by "Clear completed").
+/// Shared verbatim by `idx_jobs_uncleared_status` and `queue_summary`'s count query:
+/// SQLite only picks a partial index whose WHERE term the query repeats.
+const UNCLEARED_JOBS_SQL: &str = "cleared_at is null";
+
+/// Non-terminal rows (including `queued`). Shared verbatim by
+/// `idx_jobs_unfinished_created` and `queue_summary`'s active-jobs query, for the
+/// same partial-index reason as [`UNCLEARED_JOBS_SQL`]. `not in` (rather than a
+/// list of the live statuses) keeps an unexpected status visible as active.
+fn unfinished_jobs_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| format!("status not in ({})", terminal_statuses_sql()))
+}
+
+/// `queue_summary`'s per-status count query; served by `idx_jobs_uncleared_status`.
+fn queue_summary_counts_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        format!("select status, count(*) from jobs where {UNCLEARED_JOBS_SQL} group by status")
+    })
+}
+
+/// `queue_summary`'s active-jobs query; served by `idx_jobs_unfinished_created`.
+fn queue_summary_active_jobs_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        format!(
+            "select * from jobs where {} order by created_at desc",
+            unfinished_jobs_sql()
+        )
+    })
+}
+
 /// The pending statuses as a quoted SQL list for `status in (...)` filters, derived
 /// once from [`PENDING_STATUSES`] — same anti-drift rationale as
 /// [`terminal_statuses_sql`]. Used to select the not-yet-started jobs the bulk
@@ -1029,6 +1062,22 @@ impl JobsStore {
         // `jobs`, so deleting the row would silently wipe that run's stats and
         // orphan its metrics. Non-null == "cleared from the queue", timestamped.
         ensure_column(&transaction, "jobs", "cleared_at", "text")?;
+        // Every queue publish runs `queue_summary`'s two scans. Both used to walk the whole
+        // table (~22k rows, ~50-110 ms each on a real install) to find the handful of
+        // uncleared or unfinished rows; these partial indexes hold only those rows. SQLite uses
+        // a partial index only when the query repeats its WHERE term verbatim, so both sides
+        // share `UNCLEARED_JOBS_SQL` / `unfinished_jobs_sql()`.
+        transaction.execute_batch(&format!(
+            "
+            create index if not exists idx_jobs_uncleared_status
+              on jobs(status)
+             where {UNCLEARED_JOBS_SQL};
+            create index if not exists idx_jobs_unfinished_created
+              on jobs(created_at)
+             where {unfinished};
+            ",
+            unfinished = unfinished_jobs_sql(),
+        ))?;
         // Non-null == the user removed this run from Training Studio's saved runs
         // (`remove_saved_lora_run`). It is never listed or retained as saved work again.
         ensure_column(&transaction, "jobs", "history_removed_at", "text")?;
@@ -5200,9 +5249,7 @@ impl JobsStore {
         // Cleared jobs (sc-12231, issue #1556) are excluded from the operator's
         // status counts too, matching `list_jobs` — a cleared "completed" run must
         // not keep inflating the completed badge after the user tidied the queue.
-        let mut statement = connection.prepare(
-            "select status, count(*) from jobs where cleared_at is null group by status",
-        )?;
+        let mut statement = connection.prepare(queue_summary_counts_sql())?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
@@ -5218,10 +5265,7 @@ impl JobsStore {
         // Active (non-terminal, includes `queued`) jobs come from a dedicated
         // uncapped query so an old still-queued/running job can't fall out of the
         // newest-N window and become invisible to the operator.
-        let mut statement = connection.prepare(&format!(
-            "select * from jobs where status not in ({terminal}) order by created_at desc",
-            terminal = terminal_statuses_sql()
-        ))?;
+        let mut statement = connection.prepare(queue_summary_active_jobs_sql())?;
         let active_jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
 
         Ok(QueueSummary {
