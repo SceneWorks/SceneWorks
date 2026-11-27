@@ -2689,6 +2689,39 @@ impl CheckpointPlanStore {
             layers,
         })
     }
+
+    /// Bind the digest this store already proved for one resolved layer to the layer file's load
+    /// identity, so a native load seal can redeem it instead of reading the whole source again.
+    ///
+    /// The import hashed every layer and persisted a stamp beside the digest; resolve trusts that
+    /// stamp only while it names the same entry and is not racy. This applies the SAME predicate,
+    /// but AFTER capturing the seal identity: a change landing before the capture fails the stamp
+    /// comparison here, and one landing after it fails the seal's own identity comparison when the
+    /// attestation is redeemed, so the digest can never be carried onto bytes it does not describe.
+    /// `None` whenever anything cannot be shown unchanged; the caller then pins by reading.
+    pub fn attest_resolved_layer(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        layer: &ResolvedLayerV1,
+    ) -> Option<gen_core::ArtifactDigestAttestation> {
+        let digest =
+            crate::hashing::sha256_digest_from_hex(layer.layer.source.content_digest().ok()?)?;
+        let attestation = gen_core::ArtifactDigestAttestation::capture(&layer.path, digest).ok()?;
+        let bindings = self
+            .read_json::<SourceBindingsV1>(
+                &self.bindings_path(&resolved.plan.plan_id).ok()?,
+                "source bindings",
+            )
+            .ok()??;
+        if bindings.schema_version != SOURCE_BINDINGS_SCHEMA_VERSION
+            || bindings.plan_id != resolved.plan.plan_id
+        {
+            return None;
+        }
+        let stamp = bindings.stamps.get(&layer.layer.layer_id)?;
+        let current = SourceStampV1::of(&layer.path, self.clock).ok()?;
+        (stamp.identifies_same_entry(&current) && !stamp.is_racy()).then_some(attestation)
+    }
 }
 
 #[cfg(test)]

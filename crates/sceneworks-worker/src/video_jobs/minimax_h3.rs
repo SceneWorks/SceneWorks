@@ -2181,11 +2181,14 @@ fn resolve_imported_minimax_h3_dit_with_check(
     // private attempt lease. Its original checkpoint id may embed a root id from another host,
     // so resolving it against this worker's plan store would reject identical registered bytes.
     // Unbound jobs retain the local store lease and its existing source-drift checks.
-    let (resolved, source_lease) = if let Some(verified) = &settings.verified_plan_layers {
+    let (resolved, source_lease, plan_store) = if let Some(verified) =
+        &settings.verified_plan_layers
+    {
         (
             verified
                 .resolve_checkpoint(&checkpoint_id, check)
                 .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
+            None,
             None,
         )
     } else {
@@ -2197,7 +2200,7 @@ fn resolve_imported_minimax_h3_dit_with_check(
         let resolved = store
             .resolve_with_check(&checkpoint_id, check)
             .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        (resolved, Some(source_lease))
+        (resolved, Some(source_lease), Some(store))
     };
     // The stamped plan id belongs to the API host's physical import. The portable guard already
     // bound this server-owned entry to the semantic plan and exact layer bytes, and the worker's
@@ -2220,19 +2223,34 @@ fn resolve_imported_minimax_h3_dit_with_check(
             // Native-main late consumer delta: the plan layer pins through the typed checked
             // pin, so a cancelled acquisition stops inside a bounded read and the native layer's
             // actual acquisition work reaches the active preparation span verbatim.
-            let pin = gen_core::PinnedWeightsFile::pin_with_progress(
-                &layer.path,
-                || match check() {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                        Err(gen_core::Error::Canceled)
-                    }
-                    Err(error) => Err(gen_core::Error::Io(error)),
-                },
-                |progress| {
-                    sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
-                },
-            )
+            let checked = || match check() {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    Err(gen_core::Error::Canceled)
+                }
+                Err(error) => Err(gen_core::Error::Io(error)),
+            };
+            let observe = |progress: &gen_core::runtime::ArtifactSealProgress| {
+                sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+            };
+            // The import already hashed this layer and the store still trusts its stamp: carry
+            // that proof into the seal rather than reading the whole source a second time. The
+            // attestation is redeemed only while the file is still the entry it was bound to;
+            // otherwise this is the ordinary reading pin.
+            let attestation = plan_store
+                .as_ref()
+                .and_then(|store| store.attest_resolved_layer(&resolved, layer));
+            let pin = match &attestation {
+                Some(attestation) => gen_core::PinnedWeightsFile::pin_attested_with_progress(
+                    &layer.path,
+                    attestation,
+                    checked,
+                    observe,
+                ),
+                None => {
+                    gen_core::PinnedWeightsFile::pin_with_progress(&layer.path, checked, observe)
+                }
+            }
             .map_err(|e| match e {
                 gen_core::Error::Canceled => {
                     refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
