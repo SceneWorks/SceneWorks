@@ -848,18 +848,31 @@ def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
         "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
         "bf16/shared components come from two separately pinned installed snapshots"
     )
+    # Three exact authorities: the upstream snapshot (bf16 + shared floor), the Candle-native GGML
+    # rehost (q4/q8), and the MLX rehost (off-Mac only for the dense bf16 Ref2VA pair). The tier
+    # root picks between the two rehosts by whether a packed tier was requested. Compared with
+    # whitespace collapsed so the check does not depend on line endings or rustfmt wrapping.
+    flat = " ".join(production.split())
     for declaration, use in (
         (
             'const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";',
             "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?",
         ),
         (
-            'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
-            "candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)",
+            'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-candle";',
+            "let tier_repo = if quant.is_some() { CANDLE_MINIMAX_H3_TIER_REPO } else {",
+        ),
+        (
+            'const CANDLE_MINIMAX_H3_BF16_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+            "} else { CANDLE_MINIMAX_H3_BF16_TIER_REPO };",
+        ),
+        (
+            "let tier_repo = if quant.is_some() {",
+            "candle_minimax_h3_snapshot_dir(settings, tier_repo)",
         ),
     ):
-        assert declaration in production, f"missing exact MiniMax-H3 repo authority: {declaration}"
-        assert use in production, f"MiniMax-H3 resolver no longer consumes {use}"
+        assert declaration in flat, f"missing exact MiniMax-H3 repo authority: {declaration}"
+        assert use in flat, f"MiniMax-H3 resolver no longer consumes {use}"
 
 
 def test_minimax_h3_candle_repo_audit_rejects_override_and_root_mutations():
@@ -875,10 +888,24 @@ def test_minimax_h3_candle_repo_audit_rejects_override_and_root_mutations():
             ),
         ),
         (
-            "tier rehost root",
+            "packed tier rehost root",
             source.replace(
-                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+                'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-candle";',
                 'const CANDLE_MINIMAX_H3_TIER_REPO: &str = "mutable/rehost";',
+            ),
+        ),
+        (
+            "bf16 tier rehost root",
+            source.replace(
+                'const CANDLE_MINIMAX_H3_BF16_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";',
+                'const CANDLE_MINIMAX_H3_BF16_TIER_REPO: &str = "mutable/rehost";',
+            ),
+        ),
+        (
+            "packed tier read from the MLX rehost",
+            source.replace(
+                "if quant.is_some() {",
+                "if quant.is_none() {",
             ),
         ),
         (
@@ -4203,11 +4230,14 @@ def _text_encoder_rows(entry: dict) -> list:
 def test_minimax_h3_image_text_encoder_rows_are_minimax_h3s():
     """E22: H3-Image reads H3's text encoder, so its text-encoder rows are H3's rows verbatim —
     same repos, revisions, files (the macOS bf16 shard-13 omission included) and platforms. A
-    cache holding H3's tier therefore downloads no text-encoder byte for H3-Image."""
+    cache holding H3's tier therefore downloads no text-encoder byte for H3-Image.
+
+    Six rows: q4/q8 from the MLX rehost (macOS) and from the Candle-native GGML rehost
+    (Windows/Linux), plus the upstream bf16 encoder for each platform group."""
     models = _models_by_id()
     image_rows = _text_encoder_rows(models["minimax_h3_image"])
     h3_rows = _text_encoder_rows(models["minimax_h3"])
-    assert len(image_rows) == 4
+    assert len(image_rows) == 6
     assert image_rows == h3_rows
     shard_13 = "text_encoder/model-00013-of-00014.safetensors"
     macos_bf16 = [
