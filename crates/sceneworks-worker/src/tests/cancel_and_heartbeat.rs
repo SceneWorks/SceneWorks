@@ -1468,19 +1468,28 @@ async fn with_job_heartbeat_keeps_worker_live_through_a_long_staging_copy() {
     settings.heartbeat_seconds = 5; // progress_report_interval floor
     let api = ApiClient::new(&settings);
 
-    let copied = with_job_heartbeat(&api, &settings, "job-1", async {
-        tokio::time::sleep(Duration::from_millis(5_400)).await;
+    // The region outlasts the interval by running until the stub has counted a beat,
+    // rather than sleeping a fixed 5.4 s against the 5 s interval: under full-suite
+    // load the first beat's HTTP round trip can land after a fixed deadline. The bound
+    // turns a missing heartbeat into a failure instead of a hang.
+    let region_beats = beats.clone();
+    let copied = with_job_heartbeat(&api, &settings, "job-1", async move {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while region_beats.load(Ordering::SeqCst) == 0 {
+            if std::time::Instant::now() >= deadline {
+                return Err(WorkerError::Engine(
+                    "no heartbeat fired within 60 s while the region ran".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         Ok::<_, WorkerError>("staged")
     })
     .await
-    .expect("the region's result is returned once it finishes");
+    .expect("a heartbeat fires while a >interval region runs");
 
     assert_eq!(copied, "staged");
-    assert!(
-        beats.load(Ordering::SeqCst) >= 1,
-        "at least one heartbeat must fire while a >interval region runs (got {})",
-        beats.load(Ordering::SeqCst)
-    );
+    assert!(beats.load(Ordering::SeqCst) >= 1);
 }
 
 /// F-005/F-035: arbitrary lane events, the independent progress cadence, and heartbeat cadence
