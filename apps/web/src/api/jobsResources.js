@@ -10,6 +10,9 @@ export const jobsApi = {
     apiFetch(`/api/v1/jobs/clear`, token, options),
   cancelPending: (token, options = {}) =>
     apiFetch(`/api/v1/jobs/cancel-pending`, token, options),
+  // Cancel an explicit id list in one request: `{ jobIds }` -> `{ canceled, jobs }`.
+  cancelMany: (token, options = {}) =>
+    apiFetch(`/api/v1/jobs/cancel`, token, options),
   prioritize: (token, options = {}) =>
     apiFetch(`/api/v1/jobs/prioritize`, token, options),
   clearJob: (jobId, token, options = {}) =>

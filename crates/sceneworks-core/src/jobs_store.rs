@@ -23,6 +23,13 @@ use crate::model_artifacts::portable_binding::{
 use crate::store_util::{ensure_column, parse_string_enum, random_hex, sql_int, unsigned_int};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
+/// One worker's parsed private source claims, shared rather than copied: a set can hold
+/// thousands of claims (MBs of JSON), and admission consults it several times per submission.
+pub type PortableClaimSet = std::sync::Arc<Vec<PortableSourceClaim>>;
+
+/// Parsed claim sets kept at most; see `JobsStore::portable_claim_cache`.
+const PORTABLE_CLAIM_CACHE_MAX_WORKERS: usize = 64;
+
 /// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
 pub const IMPORT_CLAIM_CAPABILITY_KEY: &str = "importClaimCapability";
 
@@ -72,8 +79,10 @@ fn execution_binding_sha256(
     .map_err(Into::into)
 }
 
+mod maintenance;
 mod result_items;
 mod routing;
+pub use maintenance::{CompactionPolicy, CompactionReport, WalCheckpoint};
 pub(crate) use routing::catalog::video_route_facts;
 
 pub use result_items::{
@@ -253,6 +262,39 @@ fn active_statuses_sql() -> &'static str {
 fn terminal_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
     SQL.get_or_init(|| status_sql_list(TERMINAL_STATUSES))
+}
+
+/// Rows still shown in the operator's queue (not soft-hidden by "Clear completed").
+/// Shared verbatim by `idx_jobs_uncleared_status` and `queue_summary`'s count query:
+/// SQLite only picks a partial index whose WHERE term the query repeats.
+const UNCLEARED_JOBS_SQL: &str = "cleared_at is null";
+
+/// Non-terminal rows (including `queued`). Shared verbatim by
+/// `idx_jobs_unfinished_created` and `queue_summary`'s active-jobs query, for the
+/// same partial-index reason as [`UNCLEARED_JOBS_SQL`]. `not in` (rather than a
+/// list of the live statuses) keeps an unexpected status visible as active.
+fn unfinished_jobs_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| format!("status not in ({})", terminal_statuses_sql()))
+}
+
+/// `queue_summary`'s per-status count query; served by `idx_jobs_uncleared_status`.
+fn queue_summary_counts_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        format!("select status, count(*) from jobs where {UNCLEARED_JOBS_SQL} group by status")
+    })
+}
+
+/// `queue_summary`'s active-jobs query; served by `idx_jobs_unfinished_created`.
+fn queue_summary_active_jobs_sql() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        format!(
+            "select * from jobs where {} order by created_at desc",
+            unfinished_jobs_sql()
+        )
+    })
 }
 
 /// The pending statuses as a quoted SQL list for `status in (...)` filters, derived
@@ -468,6 +510,12 @@ pub struct JobsStore {
     /// Deterministic evidence that the platform-reachability sweep only
     /// hydrated rows its durable headers had already identified as candidates.
     last_platform_reachability_sweep: Mutex<PlatformReachabilitySweepStats>,
+    /// Parsed private claim sets keyed by worker id, each with the `worker_claim_versions`
+    /// token it was parsed under. A set is reused only while its token is unchanged.
+    portable_claim_cache: Mutex<HashMap<String, (Vec<u8>, PortableClaimSet)>>,
+    /// Deterministic evidence of how many claim sets were actually parsed (not served from
+    /// `portable_claim_cache`); a count, like `last_claim_hydration`, not a duration.
+    portable_claim_parses: std::sync::atomic::AtomicU64,
     /// When the owning API process started, as a stored-timestamp string. A stale worker whose
     /// last heartbeat predates it never reported to this process at all, so the stale sweep can
     /// say the app (or the machine) stopped mid-job instead of blaming a quiet worker. `None`
@@ -729,6 +777,8 @@ impl JobsStore {
             lock: Mutex::new(None),
             last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
             last_platform_reachability_sweep: Mutex::new(PlatformReachabilitySweepStats::default()),
+            portable_claim_cache: Mutex::new(HashMap::new()),
+            portable_claim_parses: std::sync::atomic::AtomicU64::new(0),
             session_started_at: None,
             busy_timeout: crate::store_util::SQLITE_BUSY_TIMEOUT,
         }
@@ -846,6 +896,48 @@ impl JobsStore {
             "workers",
             "source_proof_authenticated",
             "integer not null default 0",
+        )?;
+        // A change token per worker claim set, so admission can reuse a parsed set until it
+        // changes instead of re-reading and re-parsing MBs of claim JSON per worker on every
+        // submission (`portable_source_claim_sets_for_route_with_facts`). It lives in its own
+        // table so bumping it never rewrites the `workers` row and its claim text, and triggers
+        // maintain it on every write path (register upsert, heartbeat, offline/cleanup writes,
+        // deletes) without each statement having to remember it. A heartbeat that re-sends the
+        // stored claims (or omits them) leaves the token alone. The triggers upsert rather than
+        // `insert or replace`: an outer statement's conflict policy (the register UPSERT's ABORT)
+        // overrides a trigger's `or replace`.
+        transaction.execute_batch(
+            "
+            create table if not exists worker_claim_versions (
+              worker_id text primary key,
+              token blob not null
+            );
+            insert or ignore into worker_claim_versions (worker_id, token)
+              select id, randomblob(16) from workers;
+            drop trigger if exists workers_claim_version_after_insert;
+            create trigger workers_claim_version_after_insert
+            after insert on workers
+            begin
+              insert into worker_claim_versions (worker_id, token)
+                values (new.id, randomblob(16))
+                on conflict(worker_id) do update set token = excluded.token;
+            end;
+            drop trigger if exists workers_claim_version_after_update;
+            create trigger workers_claim_version_after_update
+            after update of portable_source_claims_json on workers
+            when new.portable_source_claims_json is not old.portable_source_claims_json
+            begin
+              insert into worker_claim_versions (worker_id, token)
+                values (new.id, randomblob(16))
+                on conflict(worker_id) do update set token = excluded.token;
+            end;
+            drop trigger if exists workers_claim_version_after_delete;
+            create trigger workers_claim_version_after_delete
+            after delete on workers
+            begin
+              delete from worker_claim_versions where worker_id = old.id;
+            end;
+            ",
         )?;
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
@@ -1027,6 +1119,22 @@ impl JobsStore {
         // `jobs`, so deleting the row would silently wipe that run's stats and
         // orphan its metrics. Non-null == "cleared from the queue", timestamped.
         ensure_column(&transaction, "jobs", "cleared_at", "text")?;
+        // Every queue publish runs `queue_summary`'s two scans. Both used to walk the whole
+        // table (~22k rows, ~50-110 ms each on a real install) to find the handful of
+        // uncleared or unfinished rows; these partial indexes hold only those rows. SQLite uses
+        // a partial index only when the query repeats its WHERE term verbatim, so both sides
+        // share `UNCLEARED_JOBS_SQL` / `unfinished_jobs_sql()`.
+        transaction.execute_batch(&format!(
+            "
+            create index if not exists idx_jobs_uncleared_status
+              on jobs(status)
+             where {UNCLEARED_JOBS_SQL};
+            create index if not exists idx_jobs_unfinished_created
+              on jobs(created_at)
+             where {unfinished};
+            ",
+            unfinished = unfinished_jobs_sql(),
+        ))?;
         // Non-null == the user removed this run from Training Studio's saved runs
         // (`remove_saved_lora_run`). It is never listed or retained as saved work again.
         ensure_column(&transaction, "jobs", "history_removed_at", "text")?;
@@ -2443,7 +2551,45 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.get_job_on_connection(&transaction, job_id)?;
+        let job = self.cancel_job_on_transaction(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Cancel an explicit set of jobs in ONE transaction, each exactly as [`Self::cancel_job`]
+    /// would: a pending job goes straight to `canceled`, a worker-owned job gets a cooperative
+    /// cancel request, and a terminal job is returned unchanged. Ids that name no job are
+    /// skipped (a batch can race the job's retention or a typo), and duplicates are cancelled
+    /// once. Snapshots come back in first-seen request order so a batch caller can publish one
+    /// `job.updated` per job and a single queue refresh.
+    pub fn cancel_jobs(&self, job_ids: &[String]) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut jobs = Vec::new();
+        for job_id in job_ids {
+            if !seen.insert(job_id.as_str()) {
+                continue;
+            }
+            match self.cancel_job_on_transaction(&transaction, job_id) {
+                Ok(job) => jobs.push(job),
+                Err(JobsStoreError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        transaction.commit()?;
+        Ok(jobs)
+    }
+
+    /// The one cancel transition shared by [`Self::cancel_job`] and [`Self::cancel_jobs`]; the
+    /// caller owns the immediate transaction.
+    fn cancel_job_on_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        job_id: &str,
+    ) -> JobsStoreResult<JobSnapshot> {
+        let job = self.get_job_on_connection(transaction, job_id)?;
         if is_terminal_status(job.status.as_str()) {
             return Ok(job);
         }
@@ -2486,9 +2632,7 @@ impl JobsStore {
                 params![now, job_id],
             )?;
         }
-        let job = self.get_job_on_connection(&transaction, job_id)?;
-        transaction.commit()?;
-        Ok(job)
+        self.get_job_on_connection(transaction, job_id)
     }
 
     /// Bulk-cancel every PENDING (not-yet-worker-owned) job — the fleet analog of the
@@ -3265,14 +3409,15 @@ impl JobsStore {
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<Vec<PortableSourceClaim>> {
         Ok(self
-            .portable_source_claim_sets_for_route(
+            .portable_source_claim_sets_for_route_with_facts(
                 backend,
                 platform,
                 requested_gpu,
                 worker_timeout_seconds,
+                None,
             )?
             .into_iter()
-            .flatten()
+            .flat_map(|(_, claims)| claims.as_ref().clone())
             .collect())
     }
 
@@ -3294,7 +3439,7 @@ impl JobsStore {
                 None,
             )?
             .into_iter()
-            .map(|(_, claims)| claims)
+            .map(|(_, claims)| claims.as_ref().clone())
             .collect())
     }
 
@@ -3307,7 +3452,7 @@ impl JobsStore {
         worker_timeout_seconds: u64,
         job_type: &JobType,
         payload: &Map<String, Value>,
-    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+    ) -> JobsStoreResult<Vec<PortableClaimSet>> {
         let facts = ClaimRoutingFacts::from_parts(job_type, payload);
         Ok(self
             .portable_source_claim_sets_for_route_with_facts(
@@ -3368,8 +3513,10 @@ impl JobsStore {
         requested_gpu: &str,
         worker_timeout_seconds: u64,
         facts: Option<&ClaimRoutingFacts>,
-    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
-        let connection = self.open_connection()?;
+    ) -> JobsStoreResult<Vec<(String, PortableClaimSet)>> {
+        let mut connection = self.open_connection()?;
+        // One read snapshot, so a claim set is always cached under the token it was written with.
+        let connection = connection.transaction()?;
         let workers = portable_claim_route_workers(
             &connection,
             backend,
@@ -3380,19 +3527,59 @@ impl JobsStore {
         )?;
         let mut claims = Vec::new();
         for worker in workers {
-            let raw: Option<String> = connection.query_row(
+            // `typeof` reads only the record header, never the multi-MB claim text.
+            let Some(token) = connection
+                .query_row(
+                    "select v.token from workers w
+                       left join worker_claim_versions v on v.worker_id = w.id
+                      where w.id = ?1 and typeof(w.portable_source_claims_json) != 'null'",
+                    params![worker.id],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()?
+            else {
+                continue;
+            };
+            let cached = token.as_ref().and_then(|token| {
+                self.portable_claim_cache
+                    .lock()
+                    .get(&worker.id)
+                    .filter(|(cached_token, _)| cached_token == token)
+                    .map(|(_, claims)| claims.clone())
+            });
+            if let Some(worker_claims) = cached {
+                claims.push((worker.id, worker_claims));
+                continue;
+            }
+            let raw: String = connection.query_row(
                 "select portable_source_claims_json from workers where id = ?1",
                 params![worker.id],
                 |row| row.get(0),
             )?;
-            if let Some(raw) = raw {
-                let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
-                validate_portable_source_claims(&worker_claims)
-                    .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
-                claims.push((worker.id, worker_claims));
+            let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
+            validate_portable_source_claims(&worker_claims)
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+            self.portable_claim_parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let worker_claims = PortableClaimSet::new(worker_claims);
+            if let Some(token) = token {
+                let mut cache = self.portable_claim_cache.lock();
+                // Worker incarnations are not reused, so drop the dead ones wholesale
+                // rather than growing with every app launch.
+                if cache.len() >= PORTABLE_CLAIM_CACHE_MAX_WORKERS {
+                    cache.clear();
+                }
+                cache.insert(worker.id.clone(), (token, worker_claims.clone()));
             }
+            claims.push((worker.id, worker_claims));
         }
         Ok(claims)
+    }
+
+    /// How many worker claim sets admission has parsed (rather than reused) so far.
+    pub fn portable_claim_parses(&self) -> u64 {
+        self.portable_claim_parses
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn mark_stale_workers_interrupted(
@@ -5198,9 +5385,7 @@ impl JobsStore {
         // Cleared jobs (sc-12231, issue #1556) are excluded from the operator's
         // status counts too, matching `list_jobs` — a cleared "completed" run must
         // not keep inflating the completed badge after the user tidied the queue.
-        let mut statement = connection.prepare(
-            "select status, count(*) from jobs where cleared_at is null group by status",
-        )?;
+        let mut statement = connection.prepare(queue_summary_counts_sql())?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
@@ -5216,10 +5401,7 @@ impl JobsStore {
         // Active (non-terminal, includes `queued`) jobs come from a dedicated
         // uncapped query so an old still-queued/running job can't fall out of the
         // newest-N window and become invisible to the operator.
-        let mut statement = connection.prepare(&format!(
-            "select * from jobs where status not in ({terminal}) order by created_at desc",
-            terminal = terminal_statuses_sql()
-        ))?;
+        let mut statement = connection.prepare(queue_summary_active_jobs_sql())?;
         let active_jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
 
         Ok(QueueSummary {
@@ -5958,7 +6140,9 @@ const OFFLINE_WORKER_RETENTION_DAYS: i64 = 30;
 /// Drops the private source-claim inventory of every offline row — a claim set only means something
 /// for a live worker, and the paths that take a worker offline now drop it themselves — and deletes
 /// offline rows older than [`OFFLINE_WORKER_RETENTION_DAYS`]. Released pages go to SQLite's
-/// freelist for reuse; there is deliberately no VACUUM on the startup path.
+/// freelist for reuse; inside this transaction there is deliberately no VACUUM. The API compacts
+/// the file afterwards only when the freelist is a large share of it
+/// (`JobsStore::compact_if_fragmented` with `CompactionPolicy::STARTUP`).
 fn release_dead_worker_rows(connection: &Connection, now_unix: i64) -> JobsStoreResult<()> {
     connection.execute(
         "update workers set portable_source_claims_json = null

@@ -53,6 +53,7 @@ mod moss_training_native;
 mod projects;
 mod prompt_batches;
 mod provenance;
+mod queue_publisher;
 mod recipe_presets;
 mod routes;
 mod security;

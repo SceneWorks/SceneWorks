@@ -70,6 +70,11 @@ pub(crate) struct TestHooks {
     /// Deterministic rendezvous after an SSE snapshot is read but before its
     /// live subscription is installed. Production builds contain no hook.
     pub(crate) sse_snapshot_before_subscribe_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    /// Route tests flush pending queue publishes after every request
+    /// (`queue_publisher::flush_after_test_request`) so they observe `queue.updated` as
+    /// part of the request that asked for it. Coalescing tests set this to see the
+    /// production behavior: requests return before the background publish.
+    pub(crate) defer_queue_publishes: AtomicBool,
     /// One-shot failure after terminal acceptance, used to prove the durable
     /// pending handoff survives an error and resumes on the owner's retry.
     pub(crate) progress_side_effects_fail_once: Arc<Mutex<bool>>,

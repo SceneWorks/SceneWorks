@@ -1,6 +1,6 @@
 //! rust-api media tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
-use crate::publish_queue;
+use crate::{flush_queue_publishes, request_queue_publish};
 use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
 use std::sync::Arc;
 
@@ -1046,7 +1046,10 @@ async fn sse_snapshot_precedes_a_concurrent_queue_publication() {
         .cancel_job(&job_id)
         .expect("concurrent terminal transition commits");
     let publish_state = state.clone();
-    let publish = tokio::spawn(async move { publish_queue(&publish_state).await });
+    let publish = tokio::spawn(async move {
+        request_queue_publish(&publish_state);
+        flush_queue_publishes(&publish_state).await
+    });
     barrier.wait().await;
 
     publish

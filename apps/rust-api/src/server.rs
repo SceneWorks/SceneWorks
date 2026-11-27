@@ -408,6 +408,9 @@ pub struct AppState {
     /// represented either in the initial snapshot or by a later live event,
     /// never by a buffered event that can be replayed behind a newer snapshot.
     pub(crate) queue_snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Coalesces `queue.updated` rebuilds into one background publish per interval
+    /// (see `queue_publisher`); mutations request, they never rebuild inline.
+    pub(crate) queue_publisher: Arc<crate::queue_publisher::QueuePublisher>,
     pub(crate) event_tickets: Arc<TicketStore>,
     pub(crate) media_tickets: Arc<TicketStore>,
     /// Bounds CPU and memory consumed by on-demand Library thumbnail backfills.
@@ -860,6 +863,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let progress_side_effect_recovery =
         crate::jobs::spawn_terminal_progress_side_effect_recovery(state.clone());
+    let jobs_wal_checkpoints = crate::spawn_jobs_wal_checkpoints(state.clone());
 
     // Conversion recovery is readiness-critical for the utility worker, not for
     // HTTP. Keep polling the already-ready server while the worker initializes.
@@ -869,6 +873,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             result = &mut serve => {
                 state.startup_maintenance.cancel();
                 progress_side_effect_recovery.abort();
+                jobs_wal_checkpoints.abort();
                 shutdown_catalog_scans(&state).await;
                 result?;
                 return Ok(());
@@ -881,6 +886,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let serve_result = serve.await;
     state.startup_maintenance.cancel();
     progress_side_effect_recovery.abort();
+    jobs_wal_checkpoints.abort();
     film_reconciliation.abort();
     film_planning_reconciliation.abort();
     shutdown_catalog_scans(&state).await;

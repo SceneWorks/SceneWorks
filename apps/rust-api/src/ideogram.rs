@@ -222,14 +222,7 @@ pub(crate) fn spawn_ideogram_caption_watcher(
                         "promoted the pending_caption Ideogram 4 job to queued"
                     );
                     publish(&state, "job.updated", &promotion.job);
-                    if let Err(error) = publish_queue(&state).await {
-                        tracing::warn!(
-                            event = "ideogram_auto_caption_queue_publish_failed",
-                            job = %job_id,
-                            error = %error.detail,
-                            "promoted the job but could not refresh the queue summary"
-                        );
-                    }
+                    request_queue_publish(&state);
                 } else {
                     tracing::info!(
                         event = "ideogram_auto_caption_promotion_skipped",

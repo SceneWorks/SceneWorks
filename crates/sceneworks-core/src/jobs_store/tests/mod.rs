@@ -43,6 +43,7 @@ pub(crate) fn primary_rows_on(model: &serde_json::Value, os: &str) -> usize {
 mod active_statuses_sql_tests;
 mod bulk_reload_tests;
 mod candle_routing_tests;
+mod claim_cache_tests;
 mod claim_projection_tests;
 mod connection_pool_tests;
 mod derive_job_title_truncate_tests;
@@ -57,3 +58,5 @@ mod download_binding_tests;
 mod execution_receipt_tests;
 mod import_claim_capability_tests;
 mod portable_binding_tests;
+mod queue_summary_index_tests;
+mod storage_maintenance_tests;

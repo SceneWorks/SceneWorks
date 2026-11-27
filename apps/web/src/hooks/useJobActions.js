@@ -4,6 +4,9 @@ import { jobsApi } from "../api/jobsResources.js";
 import { useCallback } from "react";
 import { upsertJobNewest } from "../sorters.js";
 
+// `POST /api/v1/jobs/cancel` accepts at most this many ids per request.
+const CANCEL_JOBS_MAX = 500;
+
 // F-189: extracted from App along its existing concern boundary.
 export function useJobActions({
   token, setJobs, setError
@@ -86,6 +89,36 @@ export function useJobActions({
     [setError, setJobs, token],
   );
 
+  // Cancel an explicit set of jobs in one request (Image Studio's batch Stop). The server
+  // cancels each exactly as the per-job route would, in one transaction with one queue
+  // refresh, and returns the updated snapshots to upsert. Ids are sent in chunks of the
+  // route's cap so an oversized batch still cancels in a handful of requests.
+  const cancelJobs = useCallback(
+    async (jobIds) => {
+      const ids = [...new Set(jobIds)].filter(Boolean);
+      if (!ids.length) return [];
+      try {
+        const canceled = [];
+        for (let start = 0; start < ids.length; start += CANCEL_JOBS_MAX) {
+          const response = await jobsApi.cancelMany(token, {
+            method: "POST",
+            body: JSON.stringify({ jobIds: ids.slice(start, start + CANCEL_JOBS_MAX) }),
+          });
+          canceled.push(...(response?.jobs ?? []));
+        }
+        if (canceled.length) {
+          setJobs((items) => canceled.reduce((acc, job) => upsertJobNewest(acc, job), items));
+        }
+        setError("");
+        return canceled;
+      } catch (err) {
+        setError(err.message);
+        return [];
+      }
+    },
+    [setError, setJobs, token],
+  );
+
   // Move an explicit Queue-screen selection ahead of all work that was waiting when the action
   // was submitted. The server ignores anything a worker claimed in the meantime, so this updates
   // ordering without becoming a preemption control. Returned snapshots carry their durable
@@ -131,6 +164,7 @@ export function useJobActions({
   );
   const context = useAppDomainValue({
     jobAction,
+    cancelJobs,
     clearCompletedJobs,
     cancelPendingJobs,
     prioritizeJobs,

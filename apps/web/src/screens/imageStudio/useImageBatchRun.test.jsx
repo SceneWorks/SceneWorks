@@ -311,6 +311,35 @@ it("drains and cancels every late-created job after stopping 15 pending submissi
   expect(state()).toMatchObject({ submitted: 15, failed: 0, submitting: false });
 });
 
+it("stops a submitted batch with one bulk cancel of its queued and running jobs", async () => {
+  const jobAction = vi.fn();
+  const cancelJobs = vi.fn();
+  const { runtime, plan, state } = runtimeBatch({
+    batchPrompts: ["a", "b", "c", "d"], batchJobCount: 4,
+  });
+  runtime.commit("project", [], jobAction, cancelJobs);
+  await runtime.runBatch(plan);
+  expect(state()).toMatchObject({ submitted: 4, submitting: false });
+  // One finished and one running item: only unfinished items are cancelled.
+  runtime.commit("project", [{ id: "job-a", status: "completed" }, { id: "job-b", status: "running" }],
+    jobAction, cancelJobs);
+  runtime.cancelBatchRun();
+  expect(cancelJobs).toHaveBeenCalledTimes(1);
+  expect(cancelJobs.mock.calls[0][0].sort()).toEqual(["job-b", "job-c", "job-d"]);
+  expect(jobAction).not.toHaveBeenCalled();
+});
+
+it("keeps the per-job cancel for a single unfinished batch item", async () => {
+  const jobAction = vi.fn();
+  const cancelJobs = vi.fn();
+  const { runtime, plan } = runtimeBatch({ batchPrompts: ["only"], batchJobCount: 1 });
+  runtime.commit("project", [], jobAction, cancelJobs);
+  await runtime.runBatch(plan);
+  runtime.cancelBatchRun();
+  expect(cancelJobs).not.toHaveBeenCalled();
+  expect(jobAction).toHaveBeenCalledWith(expect.objectContaining({ id: "job-only" }), "cancel");
+});
+
 it("keeps late responses from a prior project's 15 submissions out of the new run", async () => {
   const pending = [];
   const jobAction = vi.fn();

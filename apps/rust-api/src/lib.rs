@@ -23,12 +23,12 @@ use axum::{Json, Router};
 use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
-    ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject,
-    PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary, RetryJobRequest,
-    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
-    WorkerTerminationRequest,
+    CancelJobsRequest, CancelJobsResponse, CancelPendingJobsRequest, CancelPendingJobsResponse,
+    ClaimRequest, ClaimResponse, ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest,
+    GenerationMetrics, GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType,
+    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
+    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 #[cfg(test)]
 use sceneworks_core::hf_home::huggingface_hub_cache_dir;
@@ -107,6 +107,12 @@ use job_redaction::*;
 use project_files::*;
 use validators::*;
 mod catalog_scan_supervisor;
+mod queue_publisher;
+#[cfg(test)]
+pub(crate) use queue_publisher::flush_queue_publishes;
+pub(crate) use queue_publisher::{request_queue_publish, request_queue_publish_skip_sweep};
+mod jobs_db_maintenance;
+pub(crate) use jobs_db_maintenance::{compact_and_checkpoint_jobs_db, spawn_jobs_wal_checkpoints};
 mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
@@ -199,10 +205,10 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    append_job_result_items, cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs,
-    create_job, duplicate_job, exact_replay_job, get_execution_receipt, get_job, get_job_metrics,
-    invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs, list_metrics,
-    prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
+    append_job_result_items, cancel_job, cancel_jobs, cancel_pending_jobs, claim_job, clear_job,
+    clear_jobs, create_job, duplicate_job, exact_replay_job, get_execution_receipt, get_job,
+    get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs,
+    list_metrics, prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -1456,6 +1462,7 @@ fn create_app_with_state_mode(
             "applied terminal job retention"
         );
         let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
+        compact_and_checkpoint_jobs_db(&jobs_store);
         (jobs_store, interrupted_jobs_on_startup)
     };
     if !defer_upload_sweeps {
@@ -1552,6 +1559,7 @@ fn create_app_with_state_mode(
         project_store,
         events: Arc::new(EventHub::default()),
         queue_snapshot_lock: Arc::new(AsyncMutex::new(())),
+        queue_publisher: Arc::new(queue_publisher::QueuePublisher::default()),
         event_tickets: Arc::new(TicketStore::with_max_outstanding(
             EVENT_TICKET_TTL_SECONDS,
             MAX_OUTSTANDING_EVENT_TICKETS,
@@ -1620,9 +1628,17 @@ fn create_app_with_state_mode(
         state.settings.cors_origins.clone(),
     );
 
+    let routes = router::routes();
+    // Route tests observe `queue.updated` (and the stale sweep it runs) as part of
+    // the request that asked for it; see `queue_publisher::flush_after_test_request`.
+    #[cfg(test)]
+    let routes = routes.layer(middleware::from_fn_with_state(
+        state.clone(),
+        queue_publisher::flush_after_test_request,
+    ));
     let router = Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(router::routes())
+        .merge(routes)
         .fallback(app_fallback)
         .with_state(state.clone())
         // sc-8812 (F-010): small router-wide default so JSON routes can't buffer
@@ -1933,24 +1949,6 @@ async fn create_generation_job_with_status(
         (initial_status, None),
     )
     .await
-}
-
-async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
-    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
-    let queue = queue_summary_snapshot(state.clone()).await?;
-    publish(state, "queue.updated", &queue);
-    Ok(())
-}
-
-/// Like [`publish_queue`], but skips the stale-worker sweep because the caller
-/// already ran one in its own transaction this request (sc-8889 / F-087). Use
-/// only right after a `mark_stale_workers_interrupted` call — otherwise stale
-/// workers won't be reaped on this refresh.
-async fn publish_queue_skip_sweep(state: &AppState) -> Result<(), ApiError> {
-    let _snapshot_guard = state.queue_snapshot_lock.lock().await;
-    let queue = queue_summary_snapshot_inner(state.clone(), true).await?;
-    publish(state, "queue.updated", &queue);
-    Ok(())
 }
 
 fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {

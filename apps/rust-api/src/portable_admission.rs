@@ -8,6 +8,7 @@ use crate::error::ApiError;
 use crate::portable_routes::{SelectedRouteSource, SelectedSourceLocation};
 use crate::AppState;
 use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
+use sceneworks_core::jobs_store::PortableClaimSet;
 #[cfg(test)]
 use sceneworks_core::model_artifacts::artifact_selection::selected_portable_model_artifact_closure;
 use sceneworks_core::model_artifacts::artifact_selection::{
@@ -432,7 +433,7 @@ async fn record_source_proof_request(
 fn unclaimed_digest_members(
     route: &PortableRouteBinding,
     payload: &JsonObject,
-    claim_sets: &[Vec<PortableSourceClaim>],
+    claim_sets: &[PortableClaimSet],
 ) -> Vec<(String, Vec<PortableArtifactFile>)> {
     let value = Value::Object(payload.clone());
     let mut missing = Vec::new();
@@ -444,7 +445,7 @@ fn unclaimed_digest_members(
             let Ok(source_id) = registered_digest_member_claim_id(model, member, &value) else {
                 continue;
             };
-            let advertised_by = |claims: &Vec<PortableSourceClaim>| {
+            let advertised_by = |claims: &PortableClaimSet| {
                 claims.iter().any(|claim| {
                     claim.source_id == source_id
                         && claim.provenance == PortableSourceProvenance::OperatorOverride
@@ -1931,12 +1932,12 @@ async fn capture_portable_model_binding_inner(
                     incomplete(format!("worker source claims are unavailable: {error}"))
                 })?
         } else {
-            vec![Vec::new()]
+            vec![PortableClaimSet::default()]
         };
         if claim_sets.is_empty() && !worker_only_source {
             // A pinned manifest default remains admissible when no worker advertises an optional
             // operator override. Its exact Revision bytes are verified when a worker claims it.
-            claim_sets.push(Vec::new());
+            claim_sets.push(PortableClaimSet::default());
         }
         let preferred_count = |claims: &[PortableSourceClaim]| {
             selected_sources
@@ -5797,7 +5798,10 @@ mod tests {
         let route = PortableRouteBinding::new("candle", "windows", vec![base, adapter]).unwrap();
         let worker_a = vec![base_claim.clone()];
         let worker_b = vec![adapter_claim.clone()];
-        let sets = vec![worker_a.clone(), worker_b.clone()];
+        let sets = vec![
+            PortableClaimSet::new(worker_a.clone()),
+            PortableClaimSet::new(worker_b.clone()),
+        ];
         assert!(sets.iter().all(|claims| replay_route_claims_match(
             &route,
             &JsonObject::new(),
@@ -5813,7 +5817,7 @@ mod tests {
             "each worker's missing source is challenged: {missing_ids:?}"
         );
         // A worker advertising the whole closure leaves nothing to challenge.
-        let complete = vec![vec![base_claim, adapter_claim]];
+        let complete = vec![PortableClaimSet::new(vec![base_claim, adapter_claim])];
         assert!(unclaimed_digest_members(&route, &JsonObject::new(), &complete).is_empty());
     }
 

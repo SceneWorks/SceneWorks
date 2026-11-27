@@ -901,8 +901,8 @@ export function App() {
     return () => controller.abort();
   }, [hydrationRoute, simpleHydrationRoute, activeProject?.id, projectsLoaded, ready, token, setJobs, setDomainError]);
 
-  const { jobAction, context: jobActionsContext } = useJobActions({ token, setJobs, setError });
-  const backgroundImageBatch = useImageBatchController({ activeProject, jobs, jobAction });
+  const { jobAction, cancelJobs, context: jobActionsContext } = useJobActions({ token, setJobs, setError });
+  const backgroundImageBatch = useImageBatchController({ activeProject, jobs, jobAction, cancelJobs });
 
   const { createVideoJob, context: jobCreatorsContext } = useJobCreators({
     token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration
