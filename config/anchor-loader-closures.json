@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "86acf5dfb732a2b763c9e22246c287bfcfa216a1",
+  "inferenceRevision": "e145b040c0dd8dbdcc84cb7466c7a532d02a08e9",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -62070,7 +62070,7 @@
         "crates/media/candle-gen/candle-gen-z-image/src/base.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "e41ff664aae51b248d65784105d171d072d80ab2921883f89defc37190ff0d3c",
+      "digest": "b76302bd4d80befa6a7dedb662858f31215fd99f37a6fae53c3d5779d8119af2",
       "closureFileCount": 452,
       "closureFiles": [
         "crates/contracts/core-llm/src/block_draft.rs",
@@ -62991,7 +62991,7 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "766a3ce68c67a5ce3641f26ad183c07b0d6c25e49d4de81d9bca5c885d498e02",
+      "digest": "b29f060cb752134dd71ff65a352feae18a7f9f77a17bb0d131d6a40b977669ff",
       "closureFileCount": 454,
       "closureFiles": [
         "crates/contracts/core-llm/src/block_draft.rs",
@@ -63914,7 +63914,7 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "72b5698491d14def1752d517951e817fc048871e0965f4c65fcc096974bd150a",
+      "digest": "c19225f65a537523abf2249c142591be3a8c4bf5a5f999a33755fe4c3fc5a583",
       "closureFileCount": 454,
       "closureFiles": [
         "crates/contracts/core-llm/src/block_draft.rs",
