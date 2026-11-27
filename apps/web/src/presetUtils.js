@@ -335,6 +335,21 @@ export function loraMatchesModel(lora, model) {
   return true;
 }
 
+// `model` as the LoRA gate should see it for a request in `mode`. A HYBRID MiniMax-H3 import serves
+// both partitions (`adapterPartitionModels` lists both), but one request runs exactly one of them —
+// a `reference_to_video` render the reference partition, every other mode the base one — and the
+// API narrows it the same way (`entry_adapter_partition_models`). Without this the picker keeps an
+// fl2v turbo adapter on a reference render that the API refuses at enqueue. Every other model
+// (and an absent mode) is returned unchanged, same identity, so memoized consumers stay stable.
+export function loraModelForMode(model, mode) {
+  const partitions = model?.adapterPartitionModels;
+  if (!Array.isArray(partitions) || partitions.length < 2 || typeof mode !== "string" || !mode.trim()) {
+    return model;
+  }
+  const partition = mode.trim() === "reference_to_video" ? "minimax_h3_ref" : "minimax_h3";
+  return partitions.includes(partition) ? { ...model, adapterPartitionModels: [partition] } : model;
+}
+
 // The exact model ids a LoRA declares it is for (sc-19563), or `[]` when it declares none.
 // Mirrors the API's `lora_model_ids`, including the snake_case alias an inline spec may carry.
 export function loraModelIds(lora) {

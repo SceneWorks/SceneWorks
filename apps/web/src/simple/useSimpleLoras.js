@@ -3,6 +3,7 @@ import {
   MAX_USER_JOB_LORAS,
   loraHasResolvableFamily,
   loraMatchesModel,
+  loraModelForMode,
   loraWeight,
   serializeLora,
 } from "../presetUtils.js";
@@ -39,8 +40,10 @@ export function loraMeta(lora) {
  *   LoRA — the advanced studio hides it from its picker the same way).
  * @param {string} input.scope - the owning studio ("image" | "video"), so the picks survive
  *   that studio's unmount on navigation without colliding with the other's.
+ * @param {string} [input.mode] - the studio's generation mode. A hybrid MiniMax-H3 import serves
+ *   both partitions but a request runs one, so the LoRA gate narrows to it (`loraModelForMode`).
  */
-export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLoraId = null, scope }) {
+export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLoraId = null, scope, mode }) {
   const [selectedLoraIds, setSelectedLoraIds] = useStudioState(scope, "selectedLoraIds", EMPTY_IDS);
   const [weightOverrides, setWeightOverrides] = useStudioState(scope, "loraWeights", EMPTY_WEIGHTS);
   // Only the IDS of imports started from this studio's sheet. Status, progress and the
@@ -48,6 +51,7 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
   // not carry a second, drifting copy of what the Queue already knows.
   const [importJobIds, setImportJobIds] = useStudioState(scope, "loraImportJobIds", EMPTY_IDS);
 
+  const loraModel = useMemo(() => loraModelForMode(selectedModel, mode), [selectedModel, mode]);
   const compatibleLoras = useMemo(
     () =>
       loras.filter((lora) => {
@@ -63,9 +67,9 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
         if (!loraHasResolvableFamily(lora)) {
           return false;
         }
-        return loraMatchesModel(lora, selectedModel);
+        return loraMatchesModel(lora, loraModel);
       }),
-    [loras, selectedModel, excludeLoraId],
+    [loras, loraModel, excludeLoraId],
   );
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
 
@@ -82,7 +86,7 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
 
   const hasPendingCompatibleLoras =
     Boolean(selectedModel) &&
-    loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
+    loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, loraModel));
   // Verbatim from `LoraPickerSection` minus its "Show incompatible" branch, which Simple
   // doesn't expose.
   const loraEmptyMessage = !selectedModel
@@ -124,7 +128,7 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
     if (!modelId || turboSeededModels.includes(modelId)) {
       return;
     }
-    const variants = turboVariantsForModel(selectedModel, compatibleLoras);
+    const variants = turboVariantsForModel(loraModel, compatibleLoras);
     if (!variants.length) {
       return;
     }
@@ -132,13 +136,14 @@ export function useSimpleLoras({ loras = [], selectedModel, jobs = [], excludeLo
     if (selectedLoraIds.some((id) => variants.some((variant) => variant.id === id))) {
       return;
     }
-    const preferred = defaultTurboVariant(selectedModel, variants);
+    const preferred = defaultTurboVariant(loraModel, variants);
     if (!preferred) {
       return;
     }
     setSelectedLoraIds((ids) => (ids.includes(preferred.id) ? ids : [...ids, preferred.id]));
   }, [
     selectedModel,
+    loraModel,
     compatibleLoras,
     turboSeededModels,
     selectedLoraIds,

@@ -146,7 +146,7 @@ export function SimpleVideoStudio() {
 
   // User-picked LoRAs (epic 15404) — same hook, same eligibility and cap as the Image studio;
   // the video lane just has no auto-applied managed LoRA to exclude.
-  const lora = useSimpleLoras({ loras, selectedModel, jobs, scope: "video" });
+  const lora = useSimpleLoras({ loras, selectedModel, jobs, scope: "video", mode });
   const openLoraPicker = () =>
     openSheet({
       title: "Add LoRA",

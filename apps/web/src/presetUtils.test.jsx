@@ -18,6 +18,7 @@ import {
   loraIsInstalled,
   loraLooksLikeImageEditLora,
   loraMatchesModel,
+  loraModelForMode,
   loraWeight,
   normalizeLoraFamily,
   presetMatchesModel,
@@ -232,6 +233,21 @@ describe("loraMatchesModel", () => {
     expect(loraMatchesModel(ref2v, finetune(["minimax_h3", "minimax_h3_ref"]))).toBe(true);
     // Without the served field the finetune keeps exact-id gating.
     expect(loraMatchesModel(fl2v, finetune(undefined))).toBe(false);
+
+    // A hybrid narrows to the partition the MODE runs, as the API does for the request.
+    const hybrid = finetune(["minimax_h3", "minimax_h3_ref"]);
+    const inReference = loraModelForMode(hybrid, "reference_to_video");
+    const inFirstLast = loraModelForMode(hybrid, "first_last_frame");
+    expect(loraMatchesModel(ref2v, inReference)).toBe(true);
+    expect(loraMatchesModel(fl2v, inReference)).toBe(false);
+    expect(loraMatchesModel(fl2v, inFirstLast)).toBe(true);
+    expect(loraMatchesModel(ref2v, inFirstLast)).toBe(false);
+    // Single-partition rows, stock rows and an absent mode are returned as-is (same identity).
+    const single = finetune(["minimax_h3"]);
+    expect(loraModelForMode(single, "reference_to_video")).toBe(single);
+    expect(loraModelForMode(hybrid, undefined)).toBe(hybrid);
+    const stock = { id: "minimax_h3", family: "minimax-h3" };
+    expect(loraModelForMode(stock, "text_to_video")).toBe(stock);
   });
 
   it("partitions trained LTX-2.3 and LTX-2.5 outputs while preserving the 2.3 Eros sibling", () => {
