@@ -6,6 +6,7 @@ import { validatePortableBatch } from "../../portableValidation.js";
 import { emptyCaption, serializeCaption } from "../../ideogramCaption.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../../createJob.js";
 import { submitJobRequest } from "../../api/jobs.js";
+import { createModelLibraryGate, MODEL_LIBRARY_UNAVAILABLE_CODE, setModelLibraryHandler } from "../../modelLibrary.js";
 vi.mock("../../api/jobs.js", async (original) => ({ ...await original(), submitJobRequest: vi.fn() }));
 vi.mock("../../portableValidation.js", () => ({
   MAX_VALIDATION_BATCH: 32,
@@ -232,6 +233,36 @@ it("sends 15 actual job POSTs through the shared creator after one confirmation"
   await running;
   expect(submitJobRequest).toHaveBeenCalledTimes(15);
   expect(state()).toMatchObject({ submitted: 15, failed: 0, submitting: false });
+});
+
+it("finishes draining late failures without reopening cancelled library recovery", async () => {
+  const rejections = [];
+  vi.mocked(submitJobRequest).mockImplementation(() => new Promise((_resolve, reject) => rejections.push(reject)));
+  const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+  const block = vi.fn(gate.block);
+  const unregister = setModelLibraryHandler(block);
+  try {
+    const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "token",
+      project: { id: "project", name: "Project" }, requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+    const { runtime, plan, state } = runtimeBatch({
+      batchPrompts: Array.from({ length: 20 }, (_, index) => String(index)), batchJobCount: 20, createImageJob,
+    });
+    const running = runtime.runBatch(plan);
+    await vi.waitFor(() => expect(submitJobRequest).toHaveBeenCalledTimes(15));
+    const failure = { code: MODEL_LIBRARY_UNAVAILABLE_CODE, message: "Library disconnected",
+      context: { availability: "installed_external_unavailable", modelId: "model" } };
+    rejections.shift()(failure);
+    await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+    gate.cancel();
+    await vi.waitFor(() => expect(state().failed).toBe(1));
+    rejections.forEach((reject) => reject(failure));
+    await running;
+    await gate.retry();
+    expect(submitJobRequest).toHaveBeenCalledTimes(15);
+    expect(block).toHaveBeenCalledTimes(1);
+    expect(gate.getState().status).toBe("idle");
+    expect(state()).toMatchObject({ submitted: 15, failed: 15, submitting: false });
+  } finally { unregister(); }
 });
 
 it("reserves queue capacity for POSTs still awaiting a job id", async () => {

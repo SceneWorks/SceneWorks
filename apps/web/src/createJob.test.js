@@ -259,6 +259,15 @@ describe("makeCreateJob", () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it("does not POST an already-aborted detailed request without a confirmation callback", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+      requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+    expect(await creator.withResult([{ prompt: "stopped" }], { signal: controller.signal })).toEqual({ cancelled: true });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
   // sc-19709. The end-to-end shape of the recovery, at the one choke point every generation
   // submission passes through: a typed unavailable-library rejection becomes a prompt (not an
   // error banner), and resuming it re-POSTs the SAME submission exactly once.
@@ -320,6 +329,56 @@ describe("makeCreateJob", () => {
         expect(results.every((result) => result.stop && !result.job)).toBe(true);
         expect(apiFetch).toHaveBeenCalledTimes(2);
         expect(submissionGroup.recovery).toBeNull();
+      } finally { unregister(); }
+    });
+
+    it("keeps recovery cancellation terminal when another POST fails later", async () => {
+      const rejections = [];
+      apiFetch.mockImplementation(() => new Promise((_resolve, reject) => rejections.push(reject)));
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const first = creator.withResult([{ prompt: "first" }], { submissionGroup });
+        const late = creator.withResult([{ prompt: "late" }], { submissionGroup });
+        rejections[0](unavailableRejection());
+        await vi.waitFor(() => expect(block).toHaveBeenCalledTimes(1));
+        gate.cancel();
+        expect((await first).stop).toBe(true);
+        expect(submissionGroup.recovery).toBeNull();
+        rejections[1](unavailableRejection());
+        expect((await late).stop).toBe(true);
+        expect(gate.getState().status).toBe("idle");
+        await gate.retry();
+        expect((await creator.withResult([{ prompt: "tail" }], { submissionGroup })).stop).toBe(true);
+        expect(apiFetch).toHaveBeenCalledTimes(2);
+        expect(block).toHaveBeenCalledTimes(1);
+        // A new user-owned batch gets a new decision, rather than inheriting abandonment.
+        apiFetch.mockResolvedValueOnce({ id: "fresh", status: "queued" });
+        expect((await creator.withResult([{ prompt: "fresh" }], { submissionGroup: createJobSubmissionGroup() })).job.id).toBe("fresh");
+      } finally { unregister(); }
+    });
+
+    it("opens no recovery dialog for POST failures delivered after batch cancellation", async () => {
+      const rejections = [];
+      apiFetch.mockImplementation(() => new Promise((_resolve, reject) => rejections.push(reject)));
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const block = vi.fn(gate.block);
+      const unregister = setModelLibraryHandler(block);
+      try {
+        const controller = new AbortController();
+        const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+          requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+        const submissionGroup = createJobSubmissionGroup();
+        const pending = ["first", "second"].map((prompt) => creator.withResult([{ prompt }], { submissionGroup, signal: controller.signal }));
+        controller.abort();
+        rejections.forEach((reject) => reject(unavailableRejection()));
+        expect((await Promise.all(pending)).every((result) => result.cancelled)).toBe(true);
+        expect(block).not.toHaveBeenCalled();
+        expect(apiFetch).toHaveBeenCalledTimes(2);
       } finally { unregister(); }
     });
 

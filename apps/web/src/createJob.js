@@ -63,7 +63,7 @@ export const CREATE_JOB_DEFINITIONS = Object.freeze({
 // One batch owns one confirmation decision and one model-library recovery at a time.
 // Keep these scoped to the run; unrelated creators retain their independent lifecycle.
 export function createJobSubmissionGroup() {
-  return { confirmation: null, recovery: null };
+  return { confirmation: null, recovery: null, terminalResult: null };
 }
 
 // Canonical project-scoped POST-job wrapper. Each definition owns only its route
@@ -81,7 +81,8 @@ export function makeCreateJob({
 }) {
   async function execute(args, options = {}, operation = Symbol("submission")) {
     const { shouldContinue = () => true, detailed = false, signal, submissionGroup } = options;
-    if (!shouldContinue()) return { cancelled: true };
+    if (signal?.aborted || !shouldContinue()) return { cancelled: true };
+    if (submissionGroup?.terminalResult) return submissionGroup.terminalResult;
     if (!project) {
       const message = "Create or open a project first.";
       setError(message);
@@ -106,9 +107,9 @@ export function makeCreateJob({
           : { error: "Job creation was canceled before submission." };
       }
       // A batch may be stopped while its shared confirmation is open.
-      if (!shouldContinue()) return { cancelled: true };
+      if (signal?.aborted || !shouldContinue()) return { cancelled: true };
       const body = definition.buildBody(args, project, requestedGpu);
-      if (!shouldContinue()) return { cancelled: true };
+      if (signal?.aborted || !shouldContinue()) return { cancelled: true };
       const job = await submitJobRequest(definition.path, token, {
         method: "POST",
         body: JSON.stringify(body),
@@ -118,10 +119,13 @@ export function makeCreateJob({
       setError("");
       return { job };
     } catch (err) {
+      if (detailed && (signal?.aborted || !shouldContinue())) return { cancelled: true };
       const message = err?.message || (typeof err === "string" ? err : "Could not create job.");
       if (detailed) {
+        const libraryFailure = modelLibraryContext(err);
+        if (libraryFailure && submissionGroup?.terminalResult) return submissionGroup.terminalResult;
         const sharedRecovery = submissionGroup?.recovery;
-        if (sharedRecovery && sharedRecovery.owner !== operation && modelLibraryContext(err)) {
+        if (sharedRecovery && sharedRecovery.owner !== operation && libraryFailure) {
           const result = await sharedRecovery.promise;
           if (result.cancelled || result.stop) return { ...result, job: undefined };
           return execute(args, options, operation);
@@ -134,6 +138,7 @@ export function makeCreateJob({
         const finish = (result) => {
           if (!waiting) return;
           waiting = false;
+          if (submissionGroup && (result.cancelled || result.stop)) submissionGroup.terminalResult = result;
           signal?.removeEventListener("abort", abort);
           resolveRecovery(result);
         };
