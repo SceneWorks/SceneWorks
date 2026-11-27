@@ -5,6 +5,14 @@ import { apiFetch } from "../api.js";
 export const assetsApi = {
   listIncludingHidden: (projectId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets?includeRejected=true&includeTrashed=true`, token, options),
+  // Catalog/grid shape: summary items (`listView: "summary"`) without the replay bulk. Open,
+  // replay and regenerate paths load the full asset through `item` (see assetCatalog.js).
+  listSummaryIncludingHidden: (projectId, token, options = {}) =>
+    apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets?includeRejected=true&includeTrashed=true&view=summary`, token, options),
+  // Incremental summary catalog: `since` "" returns everything plus a cursor; a cursor returns
+  // only `{ assets, removedIds }` changed after it (`reset: true` means "replace, don't merge").
+  summaryChangesIncludingHidden: (projectId, since, token, options = {}) =>
+    apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets?includeRejected=true&includeTrashed=true&view=summary&since=${encodeURIComponent(since ?? "")}`, token, options),
   status: (projectId, assetId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/status`, token, options),
   tags: (projectId, assetId, token, options = {}) =>

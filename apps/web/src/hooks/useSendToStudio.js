@@ -6,6 +6,7 @@ import { upsertJobNewest } from "../sorters.js";
 import { ADVANCED_MODE, SIMPLE_MODE } from "../simple/uiMode.js";
 import { modelsApi } from "../api/modelsResources.js";
 import { assetsApi } from "../api/assetsResources.js";
+import { ensureFullAsset, isSummaryAsset } from "../assetCatalog.js";
 
 function guardAction(requestPageExit, action) {
   if (!requestPageExit) return action;
@@ -72,6 +73,23 @@ export function useSendToStudio({
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
+  // Replay, re-run and regenerate read the asset's COMPLETE recipe (shared generation-set
+  // recipe, LoRAs, adapter settings), which a catalog summary leaves out. Resolve the full
+  // envelope first; a full asset runs the action synchronously exactly as before. A project
+  // switch while the asset loads drops the action.
+  function withFullAsset(action) {
+    return (asset, ...rest) => {
+      if (!isSummaryAsset(asset)) return action(asset, ...rest);
+      const projectId = activeProjectRef.current?.id;
+      return ensureFullAsset(asset, (assetProjectId, id) => assetsApi.item(assetProjectId, id, token))
+        .then((full) => (activeProjectRef.current?.id === projectId ? action(full, ...rest) : null));
+    };
+  }
+  const sendAssetRecipeToImage = withFullAsset(sendAssetRecipeToImageWithAsset);
+  const sendAssetRecipeToVideo = withFullAsset(sendAssetRecipeToVideoWithAsset);
+  const sendAssetRecipeToStudio = withFullAsset(sendAssetRecipeToStudioWithAsset);
+  const sendAssetRecipeToQueue = withFullAsset(sendAssetRecipeToQueueWithAsset);
+
   // Shared-workflow prefill (sc-15951) lands in the studio named by the envelope kind. Keep the
   // hydration race guard and launch shape shared so a video envelope reaches Video Studio's
   // existing recipe effect instead of silently loading its controls into Image Studio.
@@ -127,7 +145,7 @@ export function useSendToStudio({
     return { ok: true };
   }
 
-  async function sendAssetRecipeToImage(asset, options = {}) {
+  async function sendAssetRecipeToImageWithAsset(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
@@ -153,7 +171,7 @@ export function useSendToStudio({
   // sc-12324: the video twin of sendAssetRecipeToImage — re-run a generated clip from its own
   // recorded recipe, with or without its seed. Distinct from `sendAssetToVideo` below, which
   // sends an asset as a source clip/frame and replays no settings.
-  async function sendAssetRecipeToVideo(asset, options = {}) {
+  async function sendAssetRecipeToVideoWithAsset(asset, options = {}) {
     const recipe = recipeForAsset(asset);
     if (!asset || !recipe) {
       return;
@@ -179,7 +197,7 @@ export function useSendToStudio({
 
   // Route the viewer's "Use this recipe" to the studio that can actually run the asset's recipe.
   // The two studios own different forms, so a video's recipe must not land in the Image Studio.
-  function sendAssetRecipeToStudio(asset, options = {}) {
+  function sendAssetRecipeToStudioWithAsset(asset, options = {}) {
     if (asset?.type === "video") {
       sendAssetRecipeToVideo(asset, options);
       return;
@@ -195,7 +213,7 @@ export function useSendToStudio({
   }
 
   // Re-Generate is a background enqueue: never close the viewer, change pages, or touch a draft.
-  async function sendAssetRecipeToQueue(asset) {
+  async function sendAssetRecipeToQueueWithAsset(asset) {
     const { regenerateImage } = await import("../regenerateImage.js");
     const projectId = activeProjectRef.current?.id;
     return regenerateImage({
