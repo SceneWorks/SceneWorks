@@ -2142,7 +2142,8 @@ async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline
         "the refusal must name the row that fooled the old check: {message}"
     );
 
-    // A live row of the same shape passes.
+    // A live row of the same shape passes. Reviving the offline row republishes its (empty)
+    // claim set, as the real worker does: going offline dropped it.
     let (status, _) = crate::tests::support::request(
         harness.app.clone(),
         "POST",
@@ -2150,6 +2151,7 @@ async fn preflight_refuses_a_worker_row_that_advertises_image_vqa_but_is_offline
         serde_json::json!({
             "status": "idle", "loadedModels": [],
             "utilization": { "memoryTotalMb": 128 * 1024 },
+            "portableSourceClaims": [],
         }),
     )
     .await;

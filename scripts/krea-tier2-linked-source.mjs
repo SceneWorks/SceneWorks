@@ -60,6 +60,14 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
   ]],
+  // Portable admission's proof waits read only the claim-owning worker ids, not every live
+  // worker's parsed claim JSON (`portable_source_claim_worker_ids_for_job_route`). The same
+  // workers are asked and answer, so this records source review, not a new physical proof.
+  ["b5c8ff577aa4ad465e097063b41e1923f8ac3e63", [
+    "d7ae4ed9ec1b5add926c7149991b93b60af806f728486c96a8bdc4d8b4d147b2",
+    REPAIR_SHA256[1], REPAIR_SHA256[2],
+    "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
+  ]],
 ];
 
 async function readSource(root, file) {

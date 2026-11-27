@@ -540,9 +540,12 @@ async fn every_preflight_ignores_a_stale_worker_row_that_still_advertises_the_ca
                 app,
                 "POST",
                 "/api/v1/workers/stale-gpu/heartbeat",
+                // Claims ride along as the real worker republishes them: an `offline` row drops
+                // its claim set, and reviving it requires republication.
                 json!({
                     "status": worker_status, "loadedModels": [],
                     "utilization": { "memoryTotalMb": 128 * 1024 },
+                    "portableSourceClaims": [],
                 }),
             )
             .await;

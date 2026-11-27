@@ -328,6 +328,12 @@ pub enum JobsStoreError {
     /// A job result item a worker tried to store is malformed or over its size limit (SW-7082).
     InvalidResultItem(String),
     ReplayUnavailable(crate::execution_receipt::ReplayUnavailable),
+    /// A heartbeat omitted its portable source claims for a worker row whose claims were dropped
+    /// when it went offline. The worker must republish its full claim inventory; the API maps this
+    /// to `PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE`, which the worker answers in the same heartbeat.
+    PortableSourceClaimsRequired {
+        worker_id: String,
+    },
 }
 
 /// Permit the existing retry freshness control while keeping the authorized source immutable.
@@ -393,6 +399,10 @@ impl std::fmt::Display for JobsStoreError {
             ),
             Self::InvalidResultItem(detail) => write!(formatter, "{detail}"),
             Self::ReplayUnavailable(reason) => write!(formatter, "{}", reason.reason),
+            Self::PortableSourceClaimsRequired { worker_id } => write!(
+                formatter,
+                "Worker {worker_id} must republish its source claims: they were dropped when it went offline."
+            ),
         }
     }
 }
@@ -1150,6 +1160,7 @@ impl JobsStore {
         // Per-item job results (SW-7082), kept out of the replaced-per-POST `result_json`.
         transaction.execute_batch(result_items::RESULT_ITEMS_SCHEMA)?;
         backfill_claim_routing_facts(&transaction)?;
+        release_dead_worker_rows(&transaction, now_unix_seconds())?;
         transaction.commit()?;
         Ok(())
     }
@@ -1326,9 +1337,12 @@ impl JobsStore {
             // written. It describes why an ALIVE worker withdrew its capabilities; on a worker we
             // have just declared gone it is stale by construction, and `GET /api/v1/workers` would
             // otherwise keep handing clients a host remedy for a worker that is no longer there.
+            // The private source-claim inventory is dropped with it: a claim set only means
+            // something for a live worker (see `JobsStoreError::PortableSourceClaimsRequired`).
             &format!(
                 "update workers
-                    set status = 'offline', current_job_id = null, status_reason = null
+                    set status = 'offline', current_job_id = null, status_reason = null,
+                        portable_source_claims_json = null
                   where status != 'offline'
                     and not exists (
                         select 1 from jobs
@@ -3132,6 +3146,25 @@ impl JobsStore {
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
+        let going_offline = request.status == WorkerStatus::Offline;
+        // A row's claims are dropped when it goes offline (stale sweep, startup recovery, worker
+        // termination). A worker that comes back with a heartbeat that omits its claims (it
+        // already acknowledged them to us) would otherwise be revived with none, and every
+        // portable route would stop seeing its local sources. Refuse before writing anything; the
+        // worker answers this code by republishing its full inventory in the same heartbeat.
+        // `typeof` reads only the record header, never the multi-MB claim text.
+        if portable_source_claims.is_none() && !going_offline {
+            let claims_dropped: bool = transaction.query_row(
+                "select typeof(portable_source_claims_json) = 'null' from workers where id = ?1",
+                params![request.worker_id],
+                |row| row.get(0),
+            )?;
+            if claims_dropped {
+                return Err(JobsStoreError::PortableSourceClaimsRequired {
+                    worker_id: request.worker_id,
+                });
+            }
+        }
         let now = utc_now();
         // Reported to the caller so it can publish `job.updated` for the job this
         // heartbeat terminated (sc-18182).
@@ -3175,7 +3208,12 @@ impl JobsStore {
                    loaded_models_json = ?3,
                    utilization_json = ?4,
                    status_reason = ?5,
-                   portable_source_claims_json = coalesce(?6, portable_source_claims_json),
+                   -- A graceful `offline` heartbeat drops the claims like every other path that
+                   -- takes a worker offline: a claim set only means something for a live worker.
+                   portable_source_claims_json = case
+                       when ?1 = 'offline' then null
+                       else coalesce(?6, portable_source_claims_json)
+                   end,
                    last_seen_at = ?7
              where id = ?8
             ",
@@ -3284,9 +3322,12 @@ impl JobsStore {
             .collect())
     }
 
-    /// Preserve worker identity for request-time proof, preventing claims from two hosts from
-    /// jointly satisfying a model closure.
-    pub fn portable_source_claim_sets_for_job_route_with_ids(
+    /// The ids of the workers whose claim sets [`Self::portable_source_claim_sets_for_job_route`]
+    /// would return, without reading or parsing any claim set. Request-time source proof keeps
+    /// worker identity (claims from two hosts must not jointly satisfy a closure) but matches
+    /// against this process's authenticated in-memory claims, so it only needs to know WHICH
+    /// workers could serve the route; their stored claims are MBs of JSON each.
+    pub fn portable_source_claim_worker_ids_for_job_route(
         &self,
         backend: &str,
         platform: &str,
@@ -3294,15 +3335,30 @@ impl JobsStore {
         worker_timeout_seconds: u64,
         job_type: &JobType,
         payload: &Map<String, Value>,
-    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
+    ) -> JobsStoreResult<Vec<String>> {
         let facts = ClaimRoutingFacts::from_parts(job_type, payload);
-        self.portable_source_claim_sets_for_route_with_facts(
+        let connection = self.open_connection()?;
+        let workers = portable_claim_route_workers(
+            &connection,
             backend,
             platform,
             requested_gpu,
             worker_timeout_seconds,
             Some(&facts),
-        )
+        )?;
+        let mut ids = Vec::new();
+        for worker in workers {
+            // `typeof` reads only the record header, never the claim text.
+            let has_claims: bool = connection.query_row(
+                "select typeof(portable_source_claims_json) != 'null' from workers where id = ?1",
+                params![worker.id],
+                |row| row.get(0),
+            )?;
+            if has_claims {
+                ids.push(worker.id);
+            }
+        }
+        Ok(ids)
     }
 
     fn portable_source_claim_sets_for_route_with_facts(
@@ -3314,29 +3370,16 @@ impl JobsStore {
         facts: Option<&ClaimRoutingFacts>,
     ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
         let connection = self.open_connection()?;
-        let cutoff = format_unix_seconds(
-            now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
-        );
-        let mut statement = connection.prepare(
-            "select * from workers where platform = ?1 and last_seen_at >= ?2 and status != 'unhealthy'",
+        let workers = portable_claim_route_workers(
+            &connection,
+            backend,
+            platform,
+            requested_gpu,
+            worker_timeout_seconds,
+            facts,
         )?;
-        let workers =
-            collect_workers(statement.query_map(params![platform, cutoff], row_to_worker)?)?;
-        drop(statement);
         let mut claims = Vec::new();
         for worker in workers {
-            let backend_matches = match backend {
-                "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),
-                "candle" => worker_is_candle(&worker),
-                "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
-                _ => false,
-            };
-            if !backend_matches
-                || (requested_gpu != "auto" && requested_gpu != worker.gpu_id)
-                || facts.is_some_and(|facts| !worker_supports_claim_routing_facts(&worker, facts))
-            {
-                continue;
-            }
             let raw: Option<String> = connection.query_row(
                 "select portable_source_claims_json from workers where id = ?1",
                 params![worker.id],
@@ -3363,13 +3406,13 @@ impl JobsStore {
         let timeout = i64::try_from(timeout_seconds.max(1)).unwrap_or(i64::MAX);
         let cutoff = format_unix_seconds(now.saturating_sub(timeout));
         let now_text = format_unix_seconds(now);
-        let mut statement = transaction.prepare(
+        let mut statement = transaction.prepare(&format!(
             "
-            select * from workers
+            select {WORKER_SNAPSHOT_COLUMNS} from workers
              where status != 'offline'
                and last_seen_at < ?1
-            ",
-        )?;
+            "
+        ))?;
         let stale_workers = collect_workers(statement.query_map(params![cutoff], row_to_worker)?)?;
         if stale_workers.is_empty() {
             return Ok(StaleSweep {
@@ -3432,6 +3475,7 @@ impl JobsStore {
                    set status = 'offline',
                        current_job_id = null,
                        status_reason = null,
+                       portable_source_claims_json = null,
                        last_seen_at = ?1
                  where id in ({worker_placeholders})
                 "
@@ -3553,6 +3597,7 @@ impl JobsStore {
                set status = 'offline',
                    current_job_id = null,
                    status_reason = null,
+                   portable_source_claims_json = null,
                    last_seen_at = ?1
              where id = ?2
             ",
@@ -4480,12 +4525,18 @@ impl JobsStore {
         if worker.platform.as_deref() != Some(route_platform) {
             return Err(unavailable("device_changed", "device"));
         }
-        let worker_claims_json: String = transaction.query_row(
+        // NULL once the row went offline (claims are dropped then). A worker revived by a claim
+        // before its next heartbeat republishes them has no proven sources yet.
+        let worker_claims_json: Option<String> = transaction.query_row(
             "select portable_source_claims_json from workers where id = ?1",
             params![receipt.worker_id],
             |row| row.get(0),
         )?;
-        let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&worker_claims_json)?;
+        let worker_claims: Vec<PortableSourceClaim> = worker_claims_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
         if !candidate_matches_portable_worker_sources(
             &transaction,
             source_job_id,
@@ -5109,7 +5160,9 @@ impl JobsStore {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
         let connection = self.open_connection()?;
-        let mut statement = connection.prepare("select * from workers order by gpu_id, id")?;
+        let mut statement = connection.prepare(&format!(
+            "select {WORKER_SNAPSHOT_COLUMNS} from workers order by gpu_id, id"
+        ))?;
         let workers = collect_workers(statement.query_map([], row_to_worker)?)?;
         Ok(workers)
     }
@@ -5395,7 +5448,7 @@ impl JobsStore {
         }
         let placeholders = placeholders_from(1, worker_ids.len());
         let mut statement = connection.prepare(&format!(
-            "select * from workers where id in ({placeholders}) order by gpu_id, id"
+            "select {WORKER_SNAPSHOT_COLUMNS} from workers where id in ({placeholders}) order by gpu_id, id"
         ))?;
         let workers = collect_workers(statement.query_map(
             params_from_iter(worker_ids.iter().map(String::as_str)),
@@ -5456,7 +5509,7 @@ impl JobsStore {
     ) -> JobsStoreResult<WorkerSnapshot> {
         connection
             .query_row(
-                "select * from workers where id = ?1",
+                &format!("select {WORKER_SNAPSHOT_COLUMNS} from workers where id = ?1"),
                 params![worker_id],
                 row_to_worker,
             )
@@ -5854,6 +5907,82 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
         _ => None,
     }
 }
+
+/// Live, non-unhealthy workers on `platform` that serve `backend` (and `requested_gpu`, and the
+/// job's routing facts when given): the workers whose private claim sets can authorize a portable
+/// route. Reads only the snapshot columns; callers fetch the claim column for the survivors.
+fn portable_claim_route_workers(
+    connection: &Connection,
+    backend: &str,
+    platform: &str,
+    requested_gpu: &str,
+    worker_timeout_seconds: u64,
+    facts: Option<&ClaimRoutingFacts>,
+) -> JobsStoreResult<Vec<WorkerSnapshot>> {
+    let cutoff = format_unix_seconds(
+        now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
+    );
+    let mut statement = connection.prepare(&format!(
+        "select {WORKER_SNAPSHOT_COLUMNS} from workers
+          where platform = ?1 and last_seen_at >= ?2 and status != 'unhealthy'"
+    ))?;
+    let workers = collect_workers(statement.query_map(params![platform, cutoff], row_to_worker)?)?;
+    Ok(workers
+        .into_iter()
+        .filter(|worker| {
+            let backend_matches = match backend {
+                "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),
+                "candle" => worker_is_candle(worker),
+                "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
+                _ => false,
+            };
+            backend_matches
+                && (requested_gpu == "auto" || requested_gpu == worker.gpu_id)
+                && !facts.is_some_and(|facts| !worker_supports_claim_routing_facts(worker, facts))
+        })
+        .collect())
+}
+
+/// Offline worker rows last seen longer ago than this are deleted at startup.
+///
+/// Every app launch registers fresh worker incarnations and never reuses the old ids, so without
+/// this the table only grows (hundreds of rows on a long-lived install), and every queue publish
+/// and `GET /api/v1/workers` ships them all. Nothing holds a foreign key to `workers.id`:
+/// `jobs.worker_id` on a finished job is display-only, and the web resolves a missing worker by the
+/// job's `assigned_gpu` instead (`findWorkerForJob`). An offline row has no `current_job_id`, and a
+/// worker that has not heartbeated for this long is long gone.
+const OFFLINE_WORKER_RETENTION_DAYS: i64 = 30;
+
+/// Startup cleanup of worker incarnations that can never run again.
+///
+/// Drops the private source-claim inventory of every offline row — a claim set only means something
+/// for a live worker, and the paths that take a worker offline now drop it themselves — and deletes
+/// offline rows older than [`OFFLINE_WORKER_RETENTION_DAYS`]. Released pages go to SQLite's
+/// freelist for reuse; there is deliberately no VACUUM on the startup path.
+fn release_dead_worker_rows(connection: &Connection, now_unix: i64) -> JobsStoreResult<()> {
+    connection.execute(
+        "update workers set portable_source_claims_json = null
+          where status = 'offline' and typeof(portable_source_claims_json) != 'null'",
+        [],
+    )?;
+    let cutoff = format_unix_seconds(now_unix - OFFLINE_WORKER_RETENTION_DAYS * 86_400);
+    connection.execute(
+        "delete from workers where status = 'offline' and last_seen_at < ?1",
+        params![cutoff],
+    )?;
+    Ok(())
+}
+
+/// The `workers` columns [`row_to_worker`] reads — and only those. Every query that maps rows
+/// through `row_to_worker` selects this list instead of `*`.
+///
+/// `select *` also pulls `portable_source_claims_json`, a worker's private source-claim inventory
+/// (several MB per live worker), which `WorkerSnapshot` never carries. With an `order by`, SQLite
+/// reads and sorts every row's full record, so on a database with hundreds of worker incarnations
+/// `list_workers` — run by every queue publish — took seconds where the named list takes
+/// milliseconds. Callers that genuinely need the claims (route lookup, claim, replay) read that one
+/// column for the specific worker they kept. `worker_queries_never_select_star` guards this.
+pub(crate) const WORKER_SNAPSHOT_COLUMNS: &str = "id, gpu_id, gpu_name, status, current_job_id,      capabilities_json, loaded_models_json, utilization_json, platform, status_reason,      registered_at, last_seen_at";
 
 fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
     Ok(WorkerSnapshot {
@@ -6287,15 +6416,15 @@ fn should_defer_auto_gpu_claim(
         return Ok(false);
     }
 
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare(&format!(
         "
-        select * from workers
+        select {WORKER_SNAPSHOT_COLUMNS} from workers
          where id != ?1
            and gpu_id != 'cpu'
            and status = 'idle'
          order by gpu_id, id
-        ",
-    )?;
+        "
+    ))?;
     let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
     // Cache the active-GPU-job fact per gpu_id so two idle workers sharing a GPU
     // don't each re-run the same `active_gpu_job_exists` query (sc-4273).
@@ -6476,7 +6605,7 @@ fn portable_mlx_worker_can_claim(
     };
     let mut statement = connection.prepare(&format!(
         "
-        select * from workers
+        select {WORKER_SNAPSHOT_COLUMNS} from workers
          where id != ?1
            and gpu_id = 'mlx'
            {status_filter}
