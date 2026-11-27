@@ -2821,16 +2821,18 @@ export function ImageStudio() {
       restorePlanBodyForRenders({
         width,
         height,
-        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line, resolutionOptions).resolution) : [],
+        resolutions: batchMode
+          ? batchPrompts.map((line) => parsePromptResolution(line, resolutionOptions, sizeEnvelope).resolution)
+          : [],
       }),
-    [batchMode, batchPrompts, height, width, resolutionOptions],
+    [batchMode, batchPrompts, height, width, resolutionOptions, sizeEnvelope],
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
   let batchDimensionAdvice = null;
   if (uiOnlyDimensionAdvice && batchMode && batchTotal > 0) {
     for (const { prompt: directive } of iterateBatch(batchPrompts.map(leadingResolutionTemplate), batchVariables)) {
-      const { resolution: itemResolution } = parsePromptResolution(directive, resolutionOptions);
+      const { resolution: itemResolution } = parsePromptResolution(directive, resolutionOptions, sizeEnvelope);
       const evaluation = evaluateModelDimensions({
         model: selectedModel,
         resolution: `${itemResolution?.width ?? width}x${itemResolution?.height ?? height}`,
@@ -2997,7 +2999,7 @@ export function ImageStudio() {
   if (batchMode && selectedModel && !structuredPromptModel && batchTotal > 0) {
     try {
       portableBatchRevision = JSON.stringify({
-        common: buildBatchJobRequest(""), batchPrompts, batchVariables, resolutionOptions,
+        common: buildBatchJobRequest(""), batchPrompts, batchVariables, resolutionOptions, sizeEnvelope,
       });
     } catch { /* The server checks requests built from this draft. */ }
   }
@@ -3006,7 +3008,8 @@ export function ImageStudio() {
     portableBatchRevision,
     function* batchRequests() {
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        const { prompt: cleanPrompt, resolution: itemResolution } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+        const { prompt: cleanPrompt, resolution: itemResolution } =
+          parsePromptResolution(resolvedPrompt, resolutionOptions, sizeEnvelope);
         yield buildBatchJobRequest(cleanPrompt, { resolution: itemResolution });
       }
     },
@@ -3063,6 +3066,7 @@ export function ImageStudio() {
   batchPrompts,
   batchVariables,
   resolutionOptions,
+  sizeEnvelope,
   structuredPromptModel,
   batchJobCount,
   selectedModel,
@@ -3115,6 +3119,7 @@ export function ImageStudio() {
             onOpenPresets={onOpenPresets}
             batchPromptsText={batchPromptsText}
             resolutionOptions={resolutionOptions}
+            sizeEnvelope={sizeEnvelope}
             setBatchPromptsText={setBatchPromptsText}
             batchVariableValues={batchVariableValues}
             setBatchVariableValues={setBatchVariableValues}

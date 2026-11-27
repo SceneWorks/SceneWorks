@@ -96,7 +96,7 @@ export function createImageBatchRuntime(setBatchRun) {
   // posts independently so the worker runs them serially with its between-image cache
   // release, and progress/cancel read the live jobs feed.
   async function runBatch({
-    BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions,
+    BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions, sizeEnvelope = null,
     structuredPromptModel, batchJobCount, selectedModel, token = "",
     buildBatchJobRequest, onMagicExpand, batchExpansion = null, createImageJob,
   }) {
@@ -123,7 +123,7 @@ export function createImageBatchRuntime(setBatchRun) {
       for (const entry of iterateBatch(batchPrompts, batchVariables)) {
         // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
         // gets that per-prompt resolution.
-        yield parsePromptResolution(entry.prompt, resolutionOptions);
+        yield parsePromptResolution(entry.prompt, resolutionOptions, sizeEnvelope);
       }
     }
     // Prompt expansion runs to the end BEFORE the first image job is queued, so the expander and
@@ -370,11 +370,11 @@ export function useImageBatchRun(options) {
 }
 
 function batchRequestPlan({
-  BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions,
+  BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions, sizeEnvelope,
   structuredPromptModel, batchJobCount, selectedModel, token,
   buildBatchJobRequest, onMagicExpand, batchExpansion, createImageJob,
 }) {
-  return { BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions,
+  return { BATCH_ACTIVE_JOB_LIMIT, batchPrompts, batchVariables, resolutionOptions, sizeEnvelope,
     structuredPromptModel, batchJobCount, selectedModel, token,
     buildBatchJobRequest, onMagicExpand, batchExpansion, createImageJob };
 }

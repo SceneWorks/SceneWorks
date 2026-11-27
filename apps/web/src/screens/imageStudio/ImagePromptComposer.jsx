@@ -25,6 +25,7 @@ export function ImagePromptComposer({
   onOpenPresets,
   batchPromptsText,
   resolutionOptions,
+  sizeEnvelope,
   setBatchPromptsText,
   batchVariableValues,
   setBatchVariableValues,
@@ -188,6 +189,7 @@ export function ImagePromptComposer({
               <BatchPromptPanel
                 promptsText={batchPromptsText}
                 resolutionOptions={resolutionOptions}
+                sizeEnvelope={sizeEnvelope}
                 onPromptsTextChange={setBatchPromptsText}
                 variableValues={batchVariableValues}
                 onVariableValuesChange={setBatchVariableValues}

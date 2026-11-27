@@ -82,6 +82,8 @@ function VariableChips({ label, values, onChange }) {
 export default function BatchPromptPanel({
   promptsText,
   resolutionOptions,
+  // Image Studio's size envelope: `[W:H]` previews the size the run will use (promptBatch.js).
+  sizeEnvelope = null,
   onPromptsTextChange,
   variableValues,
   onVariableValuesChange,
@@ -115,8 +117,8 @@ export default function BatchPromptPanel({
   // whole expansion, which inline alternation can make enormous. Strip any leading [WxH]
   // directive for display and surface the size as a badge (sc-10063).
   const preview = useMemo(
-    () => parsePromptResolution(firstResolvedPrompt(prompts, variables), resolutionOptions),
-    [prompts, variables, resolutionOptions],
+    () => parsePromptResolution(firstResolvedPrompt(prompts, variables), resolutionOptions, sizeEnvelope),
+    [prompts, variables, resolutionOptions, sizeEnvelope],
   );
   const previewPrompt = preview.prompt;
   const previewResolution = preview.resolution;
