@@ -57,7 +57,9 @@ apps/rust-api/src/main.rs sceneworks_worker::WorkerError::Engine
 apps/rust-api/src/main.rs sceneworks_worker::flux3_training_config_witness
 apps/rust-api/src/main.rs sceneworks_worker::iris_rank_entry
 apps/rust-api/src/main.rs sceneworks_worker::run_on_worker_entry_thread
+apps/rust-api/src/models/catalog.rs sceneworks_worker::ImageTextEncoderOption
 apps/rust-api/src/models/catalog.rs sceneworks_worker::image_text_encoder_options
+apps/rust-api/src/models/catalog.rs sceneworks_worker::image_text_encoder_options_for_catalog
 apps/rust-api/src/models/catalog.rs sceneworks_worker::resolve_image_text_encoder_selection
 apps/rust-api/src/models/catalog.rs sceneworks_worker::text_encoder_options_for_adapter
 apps/rust-api/src/models/convert.rs sceneworks_worker::ConvertSourceState::FileMissing
