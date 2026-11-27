@@ -1882,27 +1882,44 @@ async fn place_proven_snapshot_entry(
     link: &Path,
     proven: &gen_core::ArtifactDigestAttestation,
 ) -> bool {
-    if place_proven_entry(blob, rel_target, link, proven)
-        .await
-        .is_none()
-    {
+    let Some(entry_seal) = place_proven_entry(blob, rel_target, link, proven).await else {
         if tokio::fs::symlink_metadata(link).await.is_ok() {
             let _ = tokio::fs::remove_file(link).await;
         }
         return false;
-    }
-    // Admission keys its hash-once record on the entry's real path: the blob itself behind a Unix
-    // symlink (already recorded by the blob's verification), the entry for a Windows hard link.
-    if settings.data_dir.is_absolute() {
-        let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(
-            &settings.data_dir,
-        );
-        if let Ok(observed) = std::fs::canonicalize(link).and_then(|real| cache.observe(&real)) {
-            let digest = sceneworks_core::hashing::hex(proven.content_sha256());
-            let _ = cache.record_hashed(observed, &format!("sha256:{digest}"));
-        }
-    }
+    };
+    record_sealed_entry_for_admission(&settings.data_dir, link, &entry_seal);
     true
+}
+
+/// Record a sealed entry's digest in admission's hash-once record (keyed on the entry's real path:
+/// the blob itself behind a Unix symlink, the entry for a Windows hard link).
+///
+/// The record must describe the SEALED file, not whatever occupies the path when it is stamped, so
+/// the seal is proven unchanged AFTER the observation: a replacement or retarget landing before the
+/// observation fails that check and records nothing, and one landing after it is caught by the
+/// record's own since-observation check. Nothing recorded means admission simply verifies by
+/// reading, as before.
+pub(crate) fn record_sealed_entry_for_admission(
+    data_dir: &Path,
+    entry: &Path,
+    seal: &gen_core::PinnedWeightsFile,
+) -> bool {
+    if !data_dir.is_absolute() {
+        return false;
+    }
+    let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(data_dir);
+    let Ok(observed) = std::fs::canonicalize(entry).and_then(|real| cache.observe(&real)) else {
+        return false;
+    };
+    if seal.ensure_unchanged().is_err() {
+        return false;
+    }
+    let digest = sceneworks_core::hashing::hex(seal.content_sha256());
+    matches!(
+        cache.record_hashed(observed, &format!("sha256:{digest}")),
+        Ok(true)
+    )
 }
 
 async fn place_proven_entry(
@@ -1910,7 +1927,7 @@ async fn place_proven_entry(
     rel_target: &Path,
     link: &Path,
     proven: &gen_core::ArtifactDigestAttestation,
-) -> Option<()> {
+) -> Option<gen_core::PinnedWeightsFile> {
     // The blob must still be exactly the file its download proved.
     let blob_seal = seed_load_seal(blob, proven)?;
     let link = std::path::absolute(link).ok()?;
@@ -1936,9 +1953,11 @@ async fn place_proven_entry(
     if entry.target_fingerprint() != target.target_fingerprint() {
         return None;
     }
+    // A capture that drifted before redemption makes `pin_attested` read the entry instead; only a
+    // seal of the proven bytes may stand in for the snapshot entry's verification.
     gen_core::PinnedWeightsFile::pin_attested(&link, &entry)
         .ok()
-        .map(|_| ())
+        .filter(|seal| seal.content_sha256() == proven.content_sha256())
 }
 
 pub(crate) async fn download_lora_source_url(

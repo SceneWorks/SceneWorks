@@ -656,6 +656,42 @@ async fn download_snapshot_verifies_once_and_its_first_load_seal_hashes_nothing(
     );
 }
 
+/// Admission's hash-once record describes the SEALED snapshot entry, never whatever occupies its
+/// path when the record is stamped: a different file swapped in before the stamp — even one with an
+/// older mtime, which the record's own racy rule would trust — records nothing.
+#[test]
+fn an_entry_replaced_before_admission_stamps_it_is_never_recorded() {
+    let temp = tempdir().expect("tempdir creates");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let entry = temp.path().join("model.safetensors");
+    std::fs::write(&entry, b"proven-bytes").unwrap();
+    let seal = gen_core::PinnedWeightsFile::pin(&entry).expect("the proven entry seals");
+
+    let forged = temp.path().join("forged.safetensors");
+    std::fs::write(&forged, b"forged-bytes").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&forged)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(86_400))
+        .unwrap();
+    std::fs::rename(&forged, &entry).unwrap();
+
+    assert!(
+        !crate::downloads::record_sealed_entry_for_admission(&data_dir, &entry, &seal),
+        "a replaced entry must not inherit the sealed file's digest"
+    );
+    let cache = sceneworks_core::verified_source_cache::VerifiedSourceCache::for_data_dir(&data_dir);
+    assert_eq!(cache.recorded(&std::fs::canonicalize(&entry).unwrap()), None);
+
+    // The same entry, sealed as it now is, records normally.
+    let resealed = gen_core::PinnedWeightsFile::pin(&entry).unwrap();
+    assert!(crate::downloads::record_sealed_entry_for_admission(
+        &data_dir, &entry, &resealed
+    ));
+}
+
 #[tokio::test]
 async fn download_snapshot_resumes_existing_partial_blob() {
     let temp = tempdir().expect("tempdir creates");
