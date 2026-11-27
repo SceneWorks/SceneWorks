@@ -92,6 +92,7 @@ fn style_exclusion_keeps_literal_actions_in_strict_and_recovered_batch_fields() 
         "A woman is drawing the curtains shut.",
         "A worker is painting a door.",
         "A painting of a woman hangs on the wall.",
+        "A person is reading a vintage photograph.",
     ] {
         let raw = reply(&[("description", json!(action)), ("style", json!(""))]);
         for fields in [
