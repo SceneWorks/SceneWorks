@@ -139,6 +139,19 @@ fn legacy_ltx_fallback_refreshes_when_alternate_becomes_valid_or_corrupt() {
 async fn sized_catalog_is_byte_identical_to_the_per_model_encoder_computation() {
     let _env = crate::tests::support::isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
+    // The real embedded builtin catalog (download contexts, variants, commercial-use pointers,
+    // memory guidance), so every field the loop writes is exercised.
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("builtin.models.jsonc"),
+        serde_json::to_vec(
+            &sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    crate::tests::support::write_empty_sibling_manifests(&manifests);
     let (_, state) =
         crate::create_app_with_state(crate::tests::support::test_settings(&temp)).unwrap();
     *state
@@ -156,8 +169,8 @@ async fn sized_catalog_is_byte_identical_to_the_per_model_encoder_computation() 
         .as_ref()
         .clone();
     assert!(
-        !snapshot.is_empty(),
-        "the test settings seed a builtin catalog"
+        snapshot.len() > 50,
+        "the builtin catalog seeds the snapshot"
     );
     snapshot.push(json!({
         "id": "staged_row",
@@ -166,6 +179,7 @@ async fn sized_catalog_is_byte_identical_to_the_per_model_encoder_computation() 
         "catalogScope": "imported",
         "installedPath": staged,
         "adapter": "ltx_video",
+        "variants": [],
     }));
     {
         let mut cache = state.model_catalog_cache.state.lock();
