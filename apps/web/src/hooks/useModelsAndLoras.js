@@ -1,10 +1,9 @@
-import { useResidentState } from "./useResidentState.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useConsentRequestOwner } from "./useConsentRequestOwner.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { modelsApi } from "../api/modelsResources.js";
 import { lorasApi } from "../api/lorasResources.js";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { appConfirm } from "../appConfirm.jsx";
 import {
   borrowedLicenseAcknowledgmentBlocked,
@@ -48,10 +47,16 @@ export function useModelsAndLoras({
   refreshData: refreshModelsOverride,
   refreshDataWithLoraOverlay: refreshWithLorasOverride,
 }) {
-  const [models, setModels] = useResidentState([], resident);
-  const [modelCatalogStatus, setModelCatalogStatus] = useResidentState("idle", resident);
+  // The model catalog is a GLOBAL domain and LoRAs are keyed by the active project (the shell
+  // clears them on a project switch), so both stay resident across page navigation instead of
+  // being evicted with the page. A return visit renders the last catalog at once with its "ready"
+  // status while the route ledger revalidates it in the background (onStart keeps "ready"), rather
+  // than showing Image Studio as initializing until a full `/models` round trip lands. `resident`
+  // still gates request admission: an inactive page starts no catalog request and aborts its own.
+  const [models, setModels] = useState([]);
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
 
-  const [loras, setLoras] = useResidentState([], lorasResident);
+  const [loras, setLoras] = useState([]);
   const captureConsentOwner = useConsentRequestOwner(token, models, loras, activeProject?.id);
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across App's

@@ -166,6 +166,94 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(container.textContent).toContain("Krea 2 Turbo");
   });
 
+  const imageModel = (name) => ({
+    id: "krea_2_turbo",
+    name,
+    type: "image",
+    capabilities: ["text_to_image"],
+    installState: "installed",
+  });
+
+  it("keeps the model catalog ready on a return visit and revalidates it in the background", async () => {
+    let modelsResponse = () => Promise.resolve(response([imageModel("Krea 2 Turbo")]));
+    installFetch({ "/api/v1/models": () => modelsResponse() });
+    await renderApp();
+
+    await navigate("Image");
+    expect(container.textContent).toContain("Krea 2 Turbo");
+    expect(requestCounts()["/api/v1/models"]).toBe(1);
+
+    // Queue does not consume models, so the route ledger releases the domain...
+    await navigate("Queue");
+    expect(requestCounts()["/api/v1/models"]).toBe(1);
+
+    // ...but the catalog itself stays resident: the return visit paints it at once, still "ready",
+    // while a background request revalidates it.
+    const revalidation = deferred();
+    modelsResponse = () => revalidation.promise;
+    await navigate("Image");
+    expect(requestCounts()["/api/v1/models"]).toBe(2);
+    expect(container.textContent).not.toContain("Initializing models");
+    expect(container.querySelector('[aria-label="Initializing models"]')).toBeNull();
+    expect(container.textContent).toContain("Krea 2 Turbo");
+
+    await act(async () => {
+      revalidation.resolve(response([imageModel("Krea 2 Turbo Revalidated")]));
+    });
+    await settle();
+    expect(container.textContent).toContain("Krea 2 Turbo Revalidated");
+    expect(container.textContent).not.toContain("Initializing models");
+  });
+
+  it("refetches the resident catalog for every terminal model install job", async () => {
+    let modelName = "Krea 2 Turbo";
+    installFetch({
+      "/api/v1/models": () => Promise.resolve(response([imageModel(modelName)])),
+    });
+    await renderApp();
+    await navigate("Image");
+    const source = FakeEventSource.instances[0];
+    const emit = async (id, type, status, eventId) => {
+      await act(async () => {
+        source.listeners["job.updated"]({
+          data: JSON.stringify({
+            id, type, status, projectId: "project-a",
+            createdAt: "2026-11-26T01:00:00Z", updatedAt: "2026-11-26T01:00:00Z",
+          }),
+          lastEventId: eventId,
+        });
+      });
+      await settle();
+    };
+    let before = requestCounts()["/api/v1/models"];
+
+    // A running download changes nothing yet.
+    await emit("download", "model_download", "running", "20");
+    expect(requestCounts()["/api/v1/models"]).toBe(before);
+
+    modelName = "Krea 2 Turbo Installed";
+    await emit("download", "model_download", "completed", "21");
+    expect(requestCounts()["/api/v1/models"]).toBe(before + 1);
+    expect(container.textContent).toContain("Krea 2 Turbo Installed");
+
+    // A failed or canceled install can still have moved files; the server invalidates its snapshot
+    // for every terminal status, so the client refetches too.
+    await emit("convert", "model_convert", "failed", "22");
+    await emit("lora", "lora_download", "canceled", "23");
+    expect(requestCounts()["/api/v1/models"]).toBe(before + 3);
+
+    // Off-route, the catalog is kept but no request is admitted; the completed install is picked up
+    // by the revalidation on the next visit.
+    await navigate("Queue");
+    before = requestCounts()["/api/v1/models"];
+    modelName = "Krea 2 Turbo Reinstalled";
+    await emit("download-2", "model_download", "completed", "24");
+    expect(requestCounts()["/api/v1/models"]).toBe(before);
+    await navigate("Image");
+    expect(requestCounts()["/api/v1/models"]).toBe(before + 1);
+    expect(container.textContent).toContain("Krea 2 Turbo Reinstalled");
+  });
+
   it("hydrates and renders character training datasets on first Characters navigation", async () => {
     installFetch({
       "/api/v1/projects/project-a/characters": () =>

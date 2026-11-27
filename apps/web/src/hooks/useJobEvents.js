@@ -207,15 +207,20 @@ export function useJobEvents({
       // exposed the point-at-file import affordance. A completed import upserts a
       // `catalogScope:"user"` model into `user.models.jsonc`, so the refetch below is required for
       // it to appear on the Models page without an app restart.
+      //
+      // Every terminal status refetches, not only "completed": the API invalidates its catalog
+      // snapshot for any terminal model job (`terminal_model_job_changes_catalog`), because a failed
+      // or canceled install can still have moved files. The models catalog stays resident across
+      // navigation, so this is what keeps a cached list from outliving an install it did not see.
       if (
-        job.status === "completed" &&
+        terminalStatuses.has(job.status) &&
         (job.type === "model_download" || job.type === "model_convert" || job.type === "model_import")
       ) {
         refreshers.current.refreshModels?.();
       }
-      // A completed built-in LoRA download (sc-5944) flips the catalog entry to
+      // A finished built-in LoRA download (sc-5944) flips the catalog entry to
       // installed; refresh models+loras so the Models row and any Studio gate update.
-      if (job.status === "completed" && job.type === "lora_download") {
+      if (terminalStatuses.has(job.status) && job.type === "lora_download") {
         refreshers.current.refreshModelAndLoras?.(job.projectId ?? activeProjectRef.current?.id);
       }
       if (job.status === "completed" && job.type === "lora_import") {
