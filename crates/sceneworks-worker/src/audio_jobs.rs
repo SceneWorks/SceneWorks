@@ -3542,6 +3542,9 @@ mod tests {
     struct StubTransform {
         descriptor: gen_core::AudioTransformDescriptor,
         observed_cancel: Arc<AtomicBool>,
+        /// Set the moment `apply` starts, so a cancel stub can hold its cancel until the converter
+        /// is actually running (see `spawn_audio_cancel_stub_after`).
+        started: Arc<AtomicBool>,
     }
 
     impl gen_core::AudioTransform for StubTransform {
@@ -3556,6 +3559,7 @@ mod tests {
             req: &AudioTransformRequest,
             _on_progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<Vec<gen_core::AudioTrack>> {
+            self.started.store(true, Ordering::SeqCst);
             let start = Instant::now();
             while !req.cancel.is_cancelled() {
                 if start.elapsed() > Duration::from_secs(30) {
@@ -3640,7 +3644,19 @@ mod tests {
     #[derive(Clone)]
     struct CancelStubState {
         cancel_requested: bool,
+        /// When set, `cancel_requested` is reported only once this flag is true.
+        cancel_after: Option<Arc<AtomicBool>>,
         progress: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl CancelStubState {
+        fn reports_cancel(&self) -> bool {
+            self.cancel_requested
+                && self
+                    .cancel_after
+                    .as_ref()
+                    .is_none_or(|gate| gate.load(Ordering::SeqCst))
+        }
     }
 
     /// Spawn an API stub whose job GET + progress POST report `cancel_requested` (so the
@@ -3648,13 +3664,30 @@ mod tests {
     /// tick when `true`), records every progress body (so the terminal `Canceled` write is
     /// observable), and answers worker heartbeats.
     async fn spawn_audio_cancel_stub(cancel_requested: bool) -> (String, Arc<Mutex<Vec<Value>>>) {
+        spawn_audio_cancel_stub_with(cancel_requested, None).await
+    }
+
+    /// Like `spawn_audio_cancel_stub(true)`, but the cancel is reported only after `gate` is set.
+    /// A multi-stage job must not be canceled before the stage under test starts: an immediate
+    /// cancel can land during an earlier stage and make the assertion depend on scheduling.
+    async fn spawn_audio_cancel_stub_after(
+        gate: Arc<AtomicBool>,
+    ) -> (String, Arc<Mutex<Vec<Value>>>) {
+        spawn_audio_cancel_stub_with(true, Some(gate)).await
+    }
+
+    async fn spawn_audio_cancel_stub_with(
+        cancel_requested: bool,
+        cancel_after: Option<Arc<AtomicBool>>,
+    ) -> (String, Arc<Mutex<Vec<Value>>>) {
         let progress = Arc::new(Mutex::new(Vec::new()));
         let state = CancelStubState {
             cancel_requested,
+            cancel_after,
             progress: progress.clone(),
         };
         let app = crate::test_api_stub::routes(
-            |state: &CancelStubState, id, _| cancel_job_json(id, state.cancel_requested),
+            |state: &CancelStubState, id, _| cancel_job_json(id, state.reports_cancel()),
             |state, _, value| state.progress.lock().expect("progress lock").push(value),
             |_, _| json!({}),
         )
@@ -4339,7 +4372,11 @@ mod tests {
     /// trap the fix closes — that request previously defaulted `cancel` to a fresh flag).
     #[tokio::test]
     async fn voice_clone_trips_shared_flag_during_the_converter_call() {
-        let (base_url, progress) = spawn_audio_cancel_stub(true).await;
+        // Request the cancel only once the converter is running. An immediate cancel can land
+        // while the base stage is still running, which cancels the job before the converter ever
+        // sees the shared flag; on a loaded host that made this test fail at random.
+        let converter_started = Arc::new(AtomicBool::new(false));
+        let (base_url, progress) = spawn_audio_cancel_stub_after(converter_started.clone()).await;
         let settings = cancel_test_settings(base_url);
         let api = ApiClient::new(&settings);
         let job = audio_test_job("audio-cancel-voiceclone");
@@ -4354,6 +4391,7 @@ mod tests {
                 Ok(Box::new(StubTransform {
                     descriptor: stub_transform_descriptor(),
                     observed_cancel: converter_observed,
+                    started: converter_started,
                 }) as Box<dyn AudioTransform>)
             }
         };
