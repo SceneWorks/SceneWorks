@@ -737,6 +737,19 @@ pub(crate) async fn run_video_generate_job(
     // user-picked (replace-capable) model — the native equivalent of the torch `WanVACEPipeline`
     // path. It errors clearly if the VACE snapshot is unprovisioned rather than degrading to the
     // procedural stub (a stubbed person-replace would be meaningless). It also reports the honest
+    // SW-6132: the lossy attention kernels exist only in the candle runtime; a build without it
+    // (the MLX worker) refuses the opt-in with a typed error instead of rendering the exact path.
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    if request
+        .options()
+        .lossy_attention
+        .as_ref()
+        .is_some_and(|bound| bound.value.any())
+    {
+        return Err(WorkerError::InvalidPayload(
+            sceneworks_core::options::lossy_attention::mlx_refusal(&request.model).detail,
+        ));
+    }
     // `replacementStatus` the asset sidecar folds in (project_store::build_video_sidecar_parts).
     #[cfg(target_os = "macos")]
     let outcome = dispatch::execute_mlx_video_route(
@@ -805,6 +818,14 @@ pub(crate) async fn run_video_generate_job(
     // once here is what makes "the sidecar can lie about clip length" structurally impossible rather
     // than merely fixed for today's models. `video_asset_fact` cannot be called without it.
     let raw_settings = record_veda_outcome(raw_settings, decoded.veda_execution.as_ref());
+    // SW-6132: a job that opted in to a lossy attention kernel records what the engine actually
+    // ran beside the request (`rawAdapterSettings.attentionExecution`).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let raw_settings = {
+        let mut raw_settings = raw_settings;
+        crate::attention_path::record_attention_execution(&mut raw_settings);
+        raw_settings
+    };
     let clip = EncodedClip::measure(&decoded);
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
     // sc-15956: the sanitized workflow, written beside the clip as an `ffmetadata` document for

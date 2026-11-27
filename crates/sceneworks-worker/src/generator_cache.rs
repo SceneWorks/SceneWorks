@@ -1353,6 +1353,9 @@ where
         request_cancel,
         admission: cold_admission,
     } = cold_load;
+    // SW-6132: see `with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared`.
+    crate::inference_runtime::admit_lossy_attention(engine_id)
+        .map_err(|error| crate::classify_engine_error("Lossy attention opt-in refused", error))?;
     // One resident engine across the generator and transform caches (sc-25683). Injected so a test
     // on a local cache worker never touches the process-global transform cache.
     evict_transform.await?;
@@ -1687,6 +1690,10 @@ where
     P: 'static,
     R: Send + 'static,
 {
+    // SW-6132: a lossy-attention opt-in the engine cannot take is the job's typed refusal before
+    // a warm hit renders or a cold miss loads.
+    crate::inference_runtime::admit_lossy_attention(engine_id)
+        .map_err(|error| crate::classify_engine_error("Lossy attention opt-in refused", error))?;
     let GeneratorRequestLoad {
         spec,
         prepared_h3,

@@ -372,7 +372,23 @@ pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegist
 
 pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
     refuse_unverified_portable_sources(spec)?;
+    admit_lossy_attention(id)?;
     media().load(id, spec)
+}
+
+/// SW-6132: refuse the job's `advanced.lossyAttention` opt-in for an engine that cannot take it,
+/// before anything loads (a typed `Unsupported`). Inert when the job requested nothing, and on a
+/// build without the candle runtime (whose routes never see the option: the API refuses it).
+pub(crate) fn admit_lossy_attention(id: &str) -> gen_core::Result<()> {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        crate::attention_path::admit_engine(id)
+    }
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    {
+        let _ = id;
+        Ok(())
+    }
 }
 
 #[cfg(native_lane)]
@@ -394,6 +410,7 @@ pub(crate) fn load_transform(
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn gen_core::Transform>> {
     refuse_unverified_portable_sources(spec)?;
+    admit_lossy_attention(id)?;
     media().load_transform(id, spec)
 }
 
