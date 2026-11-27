@@ -53,6 +53,7 @@ import { stepsMenuFromModel } from "../samplerOptions.js";
 import { minStepsForModel, referenceCaps } from "../videoModelLimits.js";
 
 import { restoreVedaSettings, vedaControlError } from "../vedaControls.js";
+import { lossyAttentionDefaults, resolveLossyAttention } from "../lossyAttention.js";
 
 export function VideoStudio() {
   const {
@@ -121,6 +122,9 @@ export function VideoStudio() {
   const [motion, setMotion] = useState(saved.motion ?? DEFAULT_MOTION);
   // SW-7276: shared candle FlashAttention-2 toggle (default on); only meaningful on the candle backend.
   const [flashAttn, setFlashAttn] = useState(true);
+  // SW-6132: per-job opt-in for the lossy CUDA attention kernels (INT8 QK / Sol-Attn). Off by
+  // default; offered only on candle for a model whose catalog entry advertises `lossyAttention`.
+  const [lossyAttention, setLossyAttention] = useState(lossyAttentionDefaults);
   // Memoize the per-type catalog splits (sc-8939): both feed a dozen pickers/trays and
   // re-filtering the full catalog on every render (including unrelated state churn) is
   // needless. Recompute only when the catalog changes; stable identities also keep the
@@ -638,6 +642,7 @@ export function VideoStudio() {
   setPrecision,
   setEnhancePrompt,
   setFlashAttn,
+  setLossyAttention,
   setTextEncoderModel,
   model,
   setQuantization,
@@ -1003,6 +1008,11 @@ export function VideoStudio() {
   // and `blockedMessage` re-derived the same rules side by side (epic 10644).
   const vedaSteps = finiteNumberOrUndefined(stepsOverride) ?? activeTurboVariant?.sampling?.steps ?? selectedModel?.defaults?.steps ?? 50;
   const vedaBlockMessage = vedaControlError(showTurbo, veda);
+  const { block: outgoingLossyAttention, error: lossyAttentionBlockMessage } = resolveLossyAttention({
+    backend: activeBackend,
+    model: selectedModel,
+    options: lossyAttention,
+  });
   const videoDraft = useMemo(
     () => ({
       activeProject,
@@ -1018,6 +1028,7 @@ export function VideoStudio() {
       replaceReady,
       executionTierBlockMessage,
       vedaBlockMessage,
+      lossyAttentionBlockMessage,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1034,6 +1045,7 @@ export function VideoStudio() {
       replaceReady,
       executionTierBlockMessage,
       vedaBlockMessage,
+      lossyAttentionBlockMessage,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1060,6 +1072,7 @@ export function VideoStudio() {
   } = useVideoSubmission({
     submitting,
     flashAttn,
+    lossyAttention: outgoingLossyAttention,
   executionTierBlockMessage,
   setSubmitting,
   stackActive,
@@ -1341,6 +1354,9 @@ export function VideoStudio() {
             activeBackend={activeBackend}
             flashAttn={flashAttn}
             setFlashAttn={setFlashAttn}
+            lossyAttention={lossyAttention}
+            setLossyAttention={setLossyAttention}
+            lossyAttentionError={lossyAttentionBlockMessage}
             showTurbo={showTurbo}
             veda={veda}
             setVeda={setVeda}

@@ -2,6 +2,7 @@ import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedb
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
+import { AttentionExecutionNote } from "./LossyAttentionControl.jsx";
 import React from "react";
 import { getMediaTicket, isAbortError, subscribeMediaTicket } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
@@ -1433,6 +1434,7 @@ function FullscreenPreviewComponent({
             <span>{asset.recipe?.model}</span>
           </div>
           <AssetVedaOutcome asset={asset} />
+          <AttentionExecutionNote asset={asset} />
           {hasUpscaleVariants ? (
             <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
               <button

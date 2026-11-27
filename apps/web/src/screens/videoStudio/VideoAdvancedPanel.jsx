@@ -1,4 +1,5 @@
 import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx";
+import { LossyAttentionControl } from "../../components/LossyAttentionControl.jsx";
 import { sourcePrecisionLabel } from "../../quantTier.js";
 import { GpuSelect } from "../../components/StudioFields.jsx";
 import { CharacterLookFields } from "../../components/StudioFields.jsx";
@@ -52,6 +53,9 @@ export function VideoAdvancedPanel({
   activeBackend,
   flashAttn,
   setFlashAttn,
+  lossyAttention,
+  setLossyAttention,
+  lossyAttentionError,
   supportsStockPromptEnhancement,
   supportsTextEncoderSelection,
   setTextEncoderModel,
@@ -316,6 +320,15 @@ export function VideoAdvancedPanel({
                 </>
               ) : null}
               <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
+              {setLossyAttention ? (
+                <LossyAttentionControl
+                  backend={activeBackend}
+                  error={lossyAttentionError}
+                  model={selectedModel}
+                  onChange={setLossyAttention}
+                  value={lossyAttention}
+                />
+              ) : null}
               {supportsPromptEnhancement ? (
                 <>
                   <div className="lightning-toggle">

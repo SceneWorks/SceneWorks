@@ -8,6 +8,7 @@ import { orderCaption, validateCaption } from "../../ideogramCaption.js";
 import { workflowPoseRecords } from "../../poseLibrary.js";
 import { noPresetId } from "../../presetUtils.js";
 import { quantizeTier, sourcePrecisionLabel } from "../../quantTier.js";
+import { lossyAttentionFromRecipe } from "../../lossyAttention.js";
 import { finiteRecipeNumber, recipeImageDimensionIntent, recipeLoraSelection, recipeResolution } from "../../recipeFields.js";
 import { irisControlsFromRecord } from "../../irisRestore.js";
 import { h3ImageSamplerFromRecipe, lowResStartFromRecipe, pagFromRecipe } from "./samplingControls.js";
@@ -243,6 +244,8 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
       : (finiteRecipeNumber(value) ?? fallback);
   // SW-7276: only an explicit opt-out is recorded; absent means the default, on.
   values.flashAttn = rawSettings.flashAttn !== false;
+  // SW-6132: the lossy attention opt-in is recorded as requested; absent means off.
+  values.lossyAttention = lossyAttentionFromRecipe(rawSettings.lossyAttention);
   values.enhancePrompt = rawSettings.enhancePrompt === true;
   values.textEncoderModel = { value: rawSettings.textEncoderModel ?? null, modelId: recipe.model ?? model };
   values.usePid = rawSettings.usePid === true;
