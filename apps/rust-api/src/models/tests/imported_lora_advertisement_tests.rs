@@ -477,6 +477,36 @@ fn external_comfyui_surface_uses_exact_candle_registration() {
 }
 
 #[test]
+fn imported_checkpoints_inherit_the_providers_request_size_envelope() {
+    // A Krea 2 fine-tune runs on the Krea engine, so it gets the provider's 256..4096 sides — the
+    // picker then reaches 4 MP at every ratio, not only the square that fits the 2048 preset edge.
+    for (lanes, label) in [((true, false), "mlx"), ((false, true), "candle")] {
+        let mut krea = entry("kreamania_v8", "krea_2");
+        apply_model_manifest_defaults(&mut krea, "image", Some("krea_2"));
+        apply_imported_provider_surface_for_lanes(&mut krea, lanes.0, lanes.1);
+        assert_eq!(krea["limits"]["minDimension"], json!(256), "{label}");
+        assert_eq!(krea["limits"]["maxDimension"], json!(4096), "{label}");
+        // Krea declares no grid or area ceiling, so none is invented.
+        assert!(
+            krea["limits"].get("requiresDimensionsMultipleOf").is_none(),
+            "{label}"
+        );
+        assert!(krea["limits"].get("maxPixels").is_none(), "{label}");
+    }
+    // A grid the provider declares comes along too (Mage-Flow's ÷16 native stride).
+    let mut mage = entry("finetune_9f3c", "mage-flow");
+    apply_model_manifest_defaults(&mut mage, "image", Some("mage-flow"));
+    apply_imported_provider_surface_for_lanes(&mut mage, true, false);
+    assert_eq!(mage["limits"]["requiresDimensionsMultipleOf"], json!(16));
+    // An author's own envelope is never overwritten by the provider's.
+    let mut authored = entry("kreamania_v8", "krea_2");
+    authored.insert("limits".into(), json!({"maxDimension": 2048}));
+    apply_imported_provider_surface_for_lanes(&mut authored, false, true);
+    assert_eq!(authored["limits"]["maxDimension"], json!(2048));
+    assert_eq!(authored["limits"]["minDimension"], json!(256));
+}
+
+#[test]
 fn imported_sampling_menus_follow_the_exact_provider_and_preserve_authored_values() {
     for (family, provider) in [
         ("krea_2", "krea_2_turbo"),

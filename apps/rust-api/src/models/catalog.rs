@@ -1090,6 +1090,33 @@ fn apply_imported_sampling_surface(
             }
         }
     }
+    // The request-size envelope is the PROVIDER's, exactly like its sampler menu: a fine-tune runs
+    // on the same engine, so it has the same per-side bounds, grid and area ceiling. Without these
+    // an imported Krea 2 checkpoint fell back to its preset ladder's 2048 edge in Image Studio's
+    // ratio + megapixel picker, so only a square reached the 4 MP its base model renders. A
+    // backend lane's own value wins over the top-level one; an authored value wins over both.
+    let top_limits = template.get("limits").and_then(Value::as_object);
+    let lane_limits = limits.and_then(Value::as_object);
+    let target = object
+        .entry("limits".to_owned())
+        .or_insert_with(|| json!({}));
+    if let Some(target) = target.as_object_mut() {
+        for key in [
+            "minDimension",
+            "maxDimension",
+            "requiresDimensionsMultipleOf",
+            "maxPixels",
+        ] {
+            if let Some(value) = lane_limits
+                .and_then(|limits| limits.get(key))
+                .or_else(|| top_limits.and_then(|limits| limits.get(key)))
+            {
+                target
+                    .entry(key.to_owned())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+    }
     if let Some(source) = limits.and_then(Value::as_object) {
         let lane = object
             .entry(backend.to_owned())
