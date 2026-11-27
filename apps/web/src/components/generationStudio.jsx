@@ -14,6 +14,7 @@ import {
   clearPresetDefault,
   loraHasResolvableFamily,
   loraMatchesModel,
+  loraModelForMode,
   loraWeight,
   noPresetId,
   presetLoraSeedEntries,
@@ -584,6 +585,9 @@ export function useGenerationStudio({
   );
 
   // ---- LoRA selection (sc-4196: shared by Image + Video studios) ----
+  // The model as the LoRA gate sees it in this mode: a hybrid MiniMax-H3 import narrows to the
+  // partition this mode runs, so a mode switch prunes the other partition's adapters below.
+  const loraModel = useMemo(() => loraModelForMode(selectedModel, mode), [selectedModel, mode]);
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;
@@ -597,19 +601,19 @@ export function useGenerationStudio({
     if (showIncompatibleLoras) {
       return loraHasResolvableFamily(lora);
     }
-    return loraMatchesModel(lora, selectedModel);
-  }), [loras, selectedModel, showIncompatibleLoras]);
+    return loraMatchesModel(lora, loraModel);
+  }), [loras, loraModel, showIncompatibleLoras]);
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
   const selectedLoraValidationResult = useMemo(() => {
-    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, selectedModel)).map((lora) => lora.name ?? lora.id);
+    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, loraModel)).map((lora) => lora.name ?? lora.id);
     return {
       incompatible,
       ok: incompatible.length === 0,
     };
-  }, [selectedLoras, selectedModel]);
-  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
+  }, [selectedLoras, loraModel]);
+  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, loraModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
     : hasPendingCompatibleLoras

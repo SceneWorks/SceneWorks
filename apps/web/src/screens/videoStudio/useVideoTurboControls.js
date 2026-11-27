@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defaultTurboVariant, modelIsMinimaxH3, selectedTurboVariant, turboVariantsForModel } from "../../minimaxH3Turbo.js";
+import { loraModelForMode } from "../../presetUtils.js";
 
 // Extracted from VideoStudio along its existing concern boundary.
 export function useVideoTurboControls({
@@ -8,8 +9,12 @@ export function useVideoTurboControls({
   compatibleLoras,
   selectedLoraIds,
   model,
+  mode,
   setSelectedLoraIds
 }) {
+  // A hybrid MiniMax-H3 import serves both partitions but a render runs one: the partition this
+  // mode runs is the one whose turbo adapter is offered and defaulted (`loraModelForMode`).
+  const loraModel = useMemo(() => loraModelForMode(selectedModel, mode), [selectedModel, mode]);
   // Which MiniMax-H3 models have already had the default-on turbo variant applied (sc-18727).
   //
   // Turbo IS a LoRA selection — the control and the generic LoRA picker write the same
@@ -30,8 +35,8 @@ export function useVideoTurboControls({
   // turbo state to keep in sync. `turboVariants` is already narrowed to installed + compatible by
   // `compatibleLoras`, so the control can only ever offer an adapter that would actually enqueue.
   const turboVariants = useMemo(
-    () => turboVariantsForModel(selectedModel, compatibleLoras),
-    [selectedModel, compatibleLoras],
+    () => turboVariantsForModel(loraModel, compatibleLoras),
+    [loraModel, compatibleLoras],
   );
 
   const activeTurboVariant = selectedTurboVariant(turboVariants, selectedLoraIds);
@@ -54,7 +59,7 @@ export function useVideoTurboControls({
     // asking for different schedules is refused by the worker, so seeding blind here would turn
     // "replay this render" into a hard enqueue failure.
     if (selectedTurboVariant(turboVariants, selectedLoraIds)) return;
-    const preferred = defaultTurboVariant(selectedModel, turboVariants);
+    const preferred = defaultTurboVariant(loraModel, turboVariants);
     if (!preferred) return;
     setSelectedLoraIds((ids) => (ids.includes(preferred.id) ? ids : [...ids, preferred.id]));
   }, [
@@ -62,10 +67,34 @@ export function useVideoTurboControls({
     turboVariants,
     turboSeededModels,
     model,
-    selectedModel,
+    loraModel,
     selectedLoraIds,
     setSelectedLoraIds,
   ]);
+
+  // Partition switch on the SAME model (a hybrid import moving into or out of reference mode).
+  // The shared prune drops the adapter the new partition cannot load, and the one-shot seed above
+  // has already run for this model — so without this a user who had turbo on would silently fall
+  // back to the 50-step base schedule. Turbo stays on: the old partition's adapter is replaced by
+  // this partition's default. Off stays off — nothing is added unless a turbo adapter was selected.
+  // The update drops every turbo id of either partition rather than one specific id, so it composes
+  // with the prune's own queued update in either order.
+  const previousTurbo = useRef({ modelId: selectedModel?.id, partitions: loraModel?.adapterPartitionModels, variantIds: [] });
+  useEffect(() => {
+    const previous = previousTurbo.current;
+    const variantIds = turboVariants.map((variant) => variant.id);
+    const partitions = loraModel?.adapterPartitionModels;
+    previousTurbo.current = { modelId: selectedModel?.id, partitions, variantIds };
+    if (previous.modelId !== selectedModel?.id || String(previous.partitions) === String(partitions)) return;
+    const hadStaleTurbo = selectedLoraIds.some(
+      (id) => previous.variantIds.includes(id) && !variantIds.includes(id),
+    );
+    if (!hadStaleTurbo) return;
+    const preferred = defaultTurboVariant(loraModel, turboVariants);
+    if (!preferred) return;
+    const turboIds = new Set([...previous.variantIds, ...variantIds]);
+    setSelectedLoraIds((ids) => [...ids.filter((id) => !turboIds.has(id)), preferred.id]);
+  }, [selectedModel, loraModel, turboVariants, selectedLoraIds, setSelectedLoraIds]);
 
   // Selecting a variant REPLACES any other turbo adapter rather than stacking: two accelerators ask
   // for two different schedules and the worker refuses the pair by name

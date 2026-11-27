@@ -38,9 +38,22 @@ fn imported_partitions_require_the_verified_plan_shape() {
         .clone();
         apply_last_only_video_capability(&mut entry);
         assert_matches_request_validator(&entry, expected);
+        // Every verified partition renders under H3 semantics, so it carries the turbo surface.
+        assert_eq!(entry["supportsMinimaxH3Turbo"], json!(true), "{partition}");
+        let partition_models = match partition {
+            "fl2va" => json!(["minimax_h3"]),
+            "ref2va" => json!(["minimax_h3_ref"]),
+            _ => json!(["minimax_h3", "minimax_h3_ref"]),
+        };
+        assert_eq!(
+            entry["adapterPartitionModels"], partition_models,
+            "{partition}"
+        );
         entry["importPlan"]["assembly"]["partition"] = json!("forged-partition");
         apply_last_only_video_capability(&mut entry);
         assert_matches_request_validator(&entry, false);
+        assert_eq!(entry["supportsMinimaxH3Turbo"], json!(false), "{partition}");
+        assert!(!entry.contains_key("adapterPartitionModels"), "{partition}");
         entry.remove("importPlan");
         apply_last_only_video_capability(&mut entry);
         assert_matches_request_validator(&entry, false);
@@ -75,6 +88,7 @@ fn the_minimax_h3_turbo_surface_is_the_servers_predicate() {
             .clone();
         apply_last_only_video_capability(&mut entry);
         assert_eq!(entry["supportsMinimaxH3Turbo"], json!(expected), "{id}");
+        assert!(!entry.contains_key("adapterPartitionModels"), "{id}");
         assert_eq!(
             expected,
             sceneworks_core::video_request::is_minimax_h3_model(id),

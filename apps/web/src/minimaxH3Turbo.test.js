@@ -91,6 +91,20 @@ describe("minimaxH3Turbo", () => {
     expect(defaultTurboVariant(MINIMAX, [])).toBeNull();
   });
 
+  it("defaults an imported finetune by the partition it declares", () => {
+    const p768 = accelerator("minimax_h3_turbo_4step_768p", 4, 6.0);
+    const ref2v = accelerator("minimax_h3_ref2v_turbo_4step", 4, 12.0);
+    const finetune = (adapterPartitionModels) => ({
+      id: "my_h3_finetune",
+      supportsMinimaxH3Turbo: true,
+      adapterPartitionModels,
+    });
+    expect(defaultTurboVariant(finetune(["minimax_h3"]), [ref2v, p768])).toBe(p768);
+    expect(defaultTurboVariant(finetune(["minimax_h3_ref"]), [p768, ref2v])).toBe(ref2v);
+    // A hybrid serves both; it defaults like the base partition (its non-reference modes).
+    expect(defaultTurboVariant(finetune(["minimax_h3", "minimax_h3_ref"]), [ref2v, p768])).toBe(p768);
+  });
+
   it("reads the active variant out of the LoRA selection, not a separate flag", () => {
     const p768 = accelerator("minimax_h3_turbo_4step_768p", 4, 6.0);
     const eight = accelerator("minimax_h3_turbo_8step", 8, 12.0);
