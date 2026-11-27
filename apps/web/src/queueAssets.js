@@ -29,7 +29,7 @@ export async function loadQueueAssets(projectId, token, { signal } = {}, jobs = 
   // Old saved jobs can identify outputs only by generation set. Resolve that
   // compatibility shape transiently; never retain the unrelated library rows.
   for (const [owner, sets] of legacySets) {
-    const catalog = await assetsApi.listIncludingHidden(owner, token, { signal });
+    const catalog = await assetsApi.listSummaryIncludingHidden(owner, token, { signal });
     for (const asset of catalog) {
       if (!sets.has(asset.generationSetId)) continue;
       known.set(asset.id, asset);

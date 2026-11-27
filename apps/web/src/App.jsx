@@ -8,6 +8,7 @@ import { navSections, viewTitles, ProjectSwitcher, FirstRunProjectGate } from ".
 import { useThemeAccent } from "./hooks/useThemeAccent.js";
 import { useWebView2RepaintPump } from "./hooks/useWebView2RepaintPump.js";
 import { useShellHydration } from "./hooks/useShellHydration.js";
+import { useFullAssetHydration } from "./hooks/useFullAssetHydration.js";
 import { useJobCreators } from "./hooks/useJobCreators.js";
 import { useJobActions } from "./hooks/useJobActions.js";
 import { useSendToStudio } from "./hooks/useSendToStudio.js";
@@ -1009,6 +1010,15 @@ export function App() {
     () => (previewAsset ? findFoldedAssetById(foldedPreviewAssets, previewAsset.id) ?? previewAsset : null),
     [foldedPreviewAssets, previewAsset],
   );
+  // The catalog holds summary listings; the asset open in the detail panel or the fullscreen
+  // viewer is upgraded in place to its full envelope (recipe, generation set, adapter settings).
+  useFullAssetHydration({
+    assets,
+    assetIds: [selectedAsset?.id, previewAsset?.id],
+    token,
+    setAssets,
+    activeProjectRef,
+  });
   // The ordered, folded set the preview can navigate — restricted to the launch
   // collection so scrolling never escapes into the Library or another character.
   const previewScopeAssets = useMemo(

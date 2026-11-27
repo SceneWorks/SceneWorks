@@ -1,4 +1,5 @@
 import { loadQueueAssets, queueAssetRequestKey } from "../queueAssets.js";
+import { mergeAssetChanges, normalizeAssetChanges } from "../assetCatalog.js";
 import { useAppDomainValue } from "../context/useAppDomainValue.js";
 import { useProjectScopedList } from "../hooks/useProjectScopedList.js";
 import { systemApi } from "../api/systemResources.js";
@@ -35,6 +36,26 @@ export function useShellHydration({
   const previousAssetScopeRef = useRef(assetScope);
   const loadedAssetsRef = useRef(loadedAssets);
   useLayoutEffect(() => { loadedAssetsRef.current = loadedAssets; }, [loadedAssets]);
+  const loadedAssetsProjectIdRef = useRef(loadedAssetsProjectId);
+  useLayoutEffect(() => { loadedAssetsProjectIdRef.current = loadedAssetsProjectId; }, [loadedAssetsProjectId]);
+  // The change cursor of the committed Library catalog (`{ projectId, cursor }`). It advances only
+  // when a load's result is actually applied (onSuccess), so an aborted or superseded refresh
+  // re-asks from the last cursor the catalog really reflects. Every path that empties the catalog
+  // drops it, so the next load is a full read instead of a merge into nothing.
+  const catalogCursorRef = useRef(null);
+  const loadCursorsRef = useRef(new WeakMap());
+  const loadCatalogAssets = useCallback(async (projectId, token, options) => {
+    const known = catalogCursorRef.current;
+    const since = known?.projectId === projectId && loadedAssetsProjectIdRef.current === projectId
+      ? known.cursor
+      : "";
+    const changes = normalizeAssetChanges(
+      await assetsApi.summaryChangesIncludingHidden(projectId, since, token, options),
+    );
+    const items = changes.reset ? changes.assets : mergeAssetChanges(loadedAssetsRef.current, changes);
+    loadCursorsRef.current.set(items, changes.cursor ? { projectId, cursor: changes.cursor } : null);
+    return items;
+  }, []);
 
   const committedHydrationRouteRef = useRef(null);
 
@@ -59,6 +80,7 @@ export function useShellHydration({
           hydrationLedgerRef.current.delete(key);
         }
       }
+      catalogCursorRef.current = null;
       setAssets([]);
       setLoadedAssetsProjectId(null);
       setAssetLoadState({
@@ -208,7 +230,7 @@ export function useShellHydration({
     token, activeProject, activeProjectRef, resident: residentDomains.has("assets"), scopeKey: assetScope,
     load: (projectId, token, options) => queueAssetsRoute
       ? loadQueueAssets(projectId, token, options, jobsRef.current, loadedAssetsRef.current)
-      : assetsApi.listIncludingHidden(projectId, token, options),
+      : loadCatalogAssets(projectId, token, options),
     setItems: setAssets,
     setError: domainErrors.assets,
     onStart: (projectId) => {
@@ -218,6 +240,9 @@ export function useShellHydration({
       return beginAssetRequest();
     },
     onSuccess: (items, projectId) => {
+      // Queue loads (and any result without a cursor) leave no cursor: the next catalog load is
+      // a full read.
+      catalogCursorRef.current = loadCursorsRef.current.get(items) ?? null;
       setLoadedAssetsProjectId(projectId);
       setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
       setAssetLoadState({ projectId, status: "ready", error: "" });
@@ -270,6 +295,7 @@ export function useShellHydration({
       ledger.get(key)?.abort?.();
       ledger.delete(key);
       loadedAssetsRef.current = [];
+      catalogCursorRef.current = null;
       setAssets([]);
       setLoadedAssetsProjectId(null);
       setAssetLoadState({ projectId: activeProject?.id ?? null, status: "loading", error: "" });
@@ -281,6 +307,7 @@ export function useShellHydration({
       }
     }
     if (!residentDomains.has("assets")) {
+      catalogCursorRef.current = null;
       setAssets([]);
       setLoadedAssetsProjectId(null);
       setSelectedAssetId(null);

@@ -8,10 +8,10 @@ use super::{
     read_json, read_registry_payload, upload_extension, upscale_lineage_group, write_json,
     AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput, CharacterLookInput,
     CharacterReferenceInput, FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-    WorkflowScan, ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
-    GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR,
-    PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
-    UPSCALE_LINEAGE_QUERY,
+    WorkflowScan, ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION, ASSET_INDEX_VERSION_KEY,
+    GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY,
+    MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
+    REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -690,6 +690,24 @@ fn project_db_schema_fingerprint(connection: &Connection) -> String {
         .collect();
     lines.extend(indexes);
 
+    // Triggers are schema too: the asset change journal is maintained only by them, so a
+    // dropped or renamed trigger must fail this snapshot like a dropped column would.
+    let mut trigger_query = connection
+        .prepare("select name, tbl_name from sqlite_master where type = 'trigger' order by name")
+        .expect("trigger query");
+    let triggers: Vec<String> = trigger_query
+        .query_map([], |row| {
+            Ok(format!(
+                "trigger {} on {}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?
+            ))
+        })
+        .expect("triggers")
+        .filter_map(Result::ok)
+        .collect();
+    lines.extend(triggers);
+
     lines.join("\n")
 }
 
@@ -697,7 +715,8 @@ fn project_db_schema_fingerprint(connection: &Connection) -> String {
 /// alongside a deliberate schema change — and when you do, you MUST bump
 /// `PROJECT_SCHEMA_VERSION` so the `user_version=` line below changes too.
 const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
-        "user_version=8\n",
+        "user_version=9\n",
+        "table asset_changes: asset_id TEXT notnull=0 default=NULL pk=1, seq INTEGER notnull=1 default=NULL pk=0, deleted INTEGER notnull=1 default=0 pk=0\n",
         "table assets: id TEXT notnull=0 default=NULL pk=1, type TEXT notnull=1 default=NULL pk=0, display_name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, generation_set_id TEXT notnull=0 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, favorite INTEGER notnull=1 default=0 pk=0, rating INTEGER notnull=1 default=0 pk=0, rejected INTEGER notnull=1 default=0 pk=0, trashed INTEGER notnull=1 default=0 pk=0, sidecar_path TEXT notnull=0 default=NULL pk=0, origin TEXT notnull=0 default=NULL pk=0, asset_json TEXT notnull=0 default=NULL pk=0, source_asset_id TEXT notnull=0 default=NULL pk=0, upscaled_from_asset_id TEXT notnull=0 default=NULL pk=0, sidecar_size INTEGER notnull=0 default=NULL pk=0, sidecar_modified_ns TEXT notnull=0 default=NULL pk=0, sidecar_sha256 TEXT notnull=0 default=NULL pk=0, poster_bytes BLOB notnull=0 default=NULL pk=0, poster_sha256 TEXT notnull=0 default=NULL pk=0\n",
         "table character_looks: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, description TEXT notnull=1 default='' pk=0, approved_reference_ids TEXT notnull=1 default='[]' pk=0, recipe_settings TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table character_loras: id TEXT notnull=0 default=NULL pk=1, character_id TEXT notnull=1 default=NULL pk=0, lora_id TEXT notnull=0 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, source_path TEXT notnull=0 default=NULL pk=0, project_path TEXT notnull=0 default=NULL pk=0, copied_into_project INTEGER notnull=1 default=0 pk=0, category TEXT notnull=1 default='character' pk=0, scope TEXT notnull=1 default='project' pk=0, trigger_words TEXT notnull=1 default='[]' pk=0, default_weight REAL notnull=1 default=1.0 pk=0, compatibility TEXT notnull=1 default='{}' pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
@@ -708,9 +727,14 @@ const EXPECTED_PROJECT_DB_SCHEMA: &str = concat!(
         "table saved_voices: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, reference_audio_asset_id TEXT notnull=1 default=NULL pk=0, embedding TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0\n",
         "table timelines: id TEXT notnull=0 default=NULL pk=1, name TEXT notnull=1 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, aspect_ratio TEXT notnull=1 default=NULL pk=0, width INTEGER notnull=1 default=NULL pk=0, height INTEGER notnull=1 default=NULL pk=0, fps INTEGER notnull=1 default=NULL pk=0, duration REAL notnull=1 default=0 pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
         "table training_datasets: id TEXT notnull=0 default=NULL pk=1, project_id TEXT notnull=1 default=NULL pk=0, name TEXT notnull=1 default=NULL pk=0, modality TEXT notnull=1 default=NULL pk=0, status TEXT notnull=1 default=NULL pk=0, version INTEGER notnull=1 default=NULL pk=0, item_count INTEGER notnull=1 default=0 pk=0, character_id TEXT notnull=0 default=NULL pk=0, file_path TEXT notnull=1 default=NULL pk=0, created_at TEXT notnull=1 default=NULL pk=0, updated_at TEXT notnull=1 default=NULL pk=0\n",
+        "index idx_asset_changes_seq on asset_changes\n",
+        "index idx_assets_created_at on assets\n",
         "index idx_assets_source_asset on assets\n",
         "index idx_assets_upscaled_from on assets\n",
-        "index idx_training_datasets_project_updated on training_datasets",
+        "index idx_training_datasets_project_updated on training_datasets\n",
+        "trigger asset_changes_after_delete on assets\n",
+        "trigger asset_changes_after_insert on assets\n",
+        "trigger asset_changes_after_update on assets",
     );
 
 /// Guards the failure mode behind sc-2537: adding a column/table/index to the
@@ -787,7 +811,7 @@ fn completed_asset_index_backfill_retries_after_failure() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(marker, PROJECT_SCHEMA_VERSION.to_string());
+    assert_eq!(marker, ASSET_INDEX_VERSION.to_string());
 }
 
 #[test]
@@ -2610,6 +2634,18 @@ fn list_assets_skips_corrupt_indexed_envelope_without_hiding_healthy_rows() {
         operations.sidecar_reads, 0,
         "invalid JSON and parseable structural corruption fail closed without sidecar IO"
     );
+    // The summary view pre-prunes envelopes in SQL; a malformed one must still be skipped row
+    // by row rather than failing the whole listing.
+    let (summaries, _) = store
+        .list_assets_view_with_filesystem_operations(
+            &project.id,
+            super::AssetListFilter::default(),
+            super::AssetListView::Summary,
+        )
+        .unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0]["id"], json!("healthy"));
+    assert_eq!(summaries[0]["listView"], json!("summary"));
 }
 
 #[test]
@@ -7214,7 +7250,7 @@ fn keypoint_presets_survive_schema_version_and_dirty_reindex() {
             .execute(
                 "update project_metadata set value = ?1 where key = ?2",
                 params![
-                    (PROJECT_SCHEMA_VERSION - 1).to_string(),
+                    (ASSET_INDEX_VERSION - 1).to_string(),
                     ASSET_INDEX_VERSION_KEY
                 ],
             )

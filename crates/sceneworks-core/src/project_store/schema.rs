@@ -30,7 +30,29 @@ use super::*;
 ///
 /// v8: sc-14799 review convergence stores poster bytes and their digest in
 /// `project.db`, so advertised posters need no clean-list filesystem scan.
-pub(super) const PROJECT_SCHEMA_VERSION: i64 = 8;
+///
+/// v9: the `asset_changes` journal (maintained by triggers on `assets`) gives
+/// listings a change cursor, so a client refreshes only the assets that changed
+/// since its last read instead of the whole catalog. Also adds
+/// `idx_assets_created_at` for the listing's `order by created_at desc`. No
+/// indexed-envelope change, so [`ASSET_INDEX_VERSION`] stays at 8 and the bump
+/// does NOT force a rebuild from sidecars — the migration backfills the journal
+/// from the rows already indexed.
+pub(super) const PROJECT_SCHEMA_VERSION: i64 = 9;
+
+/// Version of the derived data the asset index rebuild writes (the indexed
+/// envelopes, posters and lineage keys), stamped under `ASSET_INDEX_VERSION_KEY`.
+/// A mismatch forces [`reindex_project_path`] on the next open. Bump this — not
+/// only [`PROJECT_SCHEMA_VERSION`] — when the rebuild's OUTPUT changes; a pure
+/// schema addition that the migration can backfill on its own must not make
+/// every existing project re-read all of its sidecars.
+pub(super) const ASSET_INDEX_VERSION: i64 = 8;
+
+/// `project_metadata` key holding this database's change-journal epoch. A
+/// cursor names the epoch it was issued under, so a cursor from a deleted and
+/// recreated `project.db` (whose sequence restarted) is answered with a full
+/// reset instead of silently skipping changes.
+pub(super) const ASSET_CHANGE_EPOCH_KEY: &str = "assetChangeEpoch";
 
 #[cfg(test)]
 type EnsureReadyBeforeLockHook = Option<(PathBuf, std::sync::Arc<std::sync::Barrier>)>;
@@ -148,13 +170,71 @@ fn migrate_project_schema(connection: &Connection) -> ProjectStoreResult<()> {
           on assets(source_asset_id);
         create index if not exists idx_assets_upscaled_from
           on assets(upscaled_from_asset_id);
+        create index if not exists idx_assets_created_at
+          on assets(created_at);
         ",
     )?;
+    apply_asset_change_journal(connection)?;
     apply_character_migrations(connection)?;
     apply_training_dataset_migrations(connection)?;
     crate::voice_store::apply_voice_migrations(connection)?;
     // Pragma assignment cannot be parameterized; the version is a trusted const.
     connection.execute_batch(&format!("pragma user_version = {PROJECT_SCHEMA_VERSION}"))?;
+    Ok(())
+}
+
+/// The asset change journal: one row per asset id ever indexed, carrying the
+/// sequence number of its latest insert/update/delete. Triggers keep it current
+/// for EVERY write path (generated-asset persistence, status/tag edits, moves,
+/// generation-set fan-out, purge, orphan pruning and full rebuilds) without any
+/// writer having to remember it. A deleted row stays as a tombstone so an
+/// incremental listing can tell its client to drop the asset.
+///
+/// A full rebuild deletes and re-inserts every row, which re-stamps every asset:
+/// the next incremental read then returns the whole catalog, which is correct.
+fn apply_asset_change_journal(connection: &Connection) -> ProjectStoreResult<()> {
+    connection.execute_batch(
+        "
+        create table if not exists asset_changes (
+          asset_id text primary key,
+          seq integer not null,
+          deleted integer not null default 0
+        );
+        create index if not exists idx_asset_changes_seq on asset_changes(seq);
+        create trigger if not exists asset_changes_after_insert
+          after insert on assets
+        begin
+          insert or replace into asset_changes (asset_id, seq, deleted)
+            values (new.id, (select coalesce(max(seq), 0) + 1 from asset_changes), 0);
+        end;
+        create trigger if not exists asset_changes_after_update
+          after update on assets
+        begin
+          insert or replace into asset_changes (asset_id, seq, deleted)
+            values (new.id, (select coalesce(max(seq), 0) + 1 from asset_changes), 0);
+        end;
+        create trigger if not exists asset_changes_after_delete
+          after delete on assets
+        begin
+          insert or replace into asset_changes (asset_id, seq, deleted)
+            values (old.id, (select coalesce(max(seq), 0) + 1 from asset_changes), 1);
+        end;
+        -- Backfill rows indexed before the journal existed. rowid is unique, so
+        -- every existing asset gets a distinct sequence, placed after anything
+        -- already journaled so a replayed migration can never mint one behind
+        -- a cursor a client already holds.
+        insert or ignore into asset_changes (asset_id, seq, deleted)
+          select id, (select coalesce(max(seq), 0) from asset_changes) + rowid, 0
+            from assets;
+        ",
+    )?;
+    connection.execute(
+        "insert or ignore into project_metadata (key, value) values (?1, ?2)",
+        params![
+            ASSET_CHANGE_EPOCH_KEY,
+            uuid::Uuid::new_v4().simple().to_string()
+        ],
+    )?;
     Ok(())
 }
 
@@ -191,8 +271,7 @@ pub(super) fn connect_project_db_ready_locked(
     // retried even though PRAGMA user_version already reached this version.
     let asset_index_dirty = asset_index_is_dirty(project_path)
         && !current_thread_owns_asset_index_mutation(project_path);
-    if indexed_version.as_deref() != Some(&PROJECT_SCHEMA_VERSION.to_string()) || asset_index_dirty
-    {
+    if indexed_version.as_deref() != Some(&ASSET_INDEX_VERSION.to_string()) || asset_index_dirty {
         drop(connection);
         // Legacy/version-bump rebuilds continue to recover sidecars even when
         // their media is temporarily unavailable. Only dirty-mutation repair

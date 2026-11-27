@@ -88,6 +88,14 @@ pub(crate) struct AssetsQuery {
     /// View scope (sc-2024). `library` excludes Character Studio test outputs;
     /// anything else (the default) returns all assets.
     pub(crate) scope: Option<String>,
+    /// Item shape: `full` (the default — every item is the complete envelope
+    /// `GET .../assets/:asset_id` returns) or `summary` (catalog fields only;
+    /// see `sceneworks_core::project_store::summarize_listed_asset`).
+    pub(crate) view: Option<String>,
+    /// Opt into the incremental envelope `{ cursor, reset, assets, removedIds }`
+    /// instead of a bare array. Empty asks for everything plus a first cursor;
+    /// otherwise it is the `cursor` a previous incremental call returned.
+    pub(crate) since: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
