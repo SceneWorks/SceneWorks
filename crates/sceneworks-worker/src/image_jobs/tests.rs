@@ -644,20 +644,20 @@ use super::reattach_alpha;
 use super::render::build_lane_conditioning;
 #[cfg(native_lane)]
 use super::render::build_lane_conditioning_with_alpha;
+#[cfg(native_lane)]
+use super::render::build_render_request;
+#[cfg(native_lane)]
+use super::render::derive_base_pass_memory_context;
 #[cfg(target_os = "macos")]
 use super::render::generate_one;
 #[cfg(native_lane)]
-use super::render::generate_one_with_hires;
-#[cfg(native_lane)]
-use super::render::hires_first_pass_context;
-#[cfg(native_lane)]
-use super::render::hires_fix_reference_count;
-#[cfg(native_lane)]
 use super::render::lane_reference_count;
 #[cfg(native_lane)]
-use super::render::resolve_hires_fix_plan;
+use super::render::render_hires_multi_pass_on_surface;
 #[cfg(native_lane)]
-use super::render::HiresFixPlan;
+use super::render::HiresRefinement;
+#[cfg(native_lane)]
+use super::render::LaneRgbaSurface;
 use super::resolve_adapter_file;
 use super::resolve_pinned_native_package;
 #[cfg(native_lane)]
@@ -1941,7 +1941,7 @@ fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::Memor
             height: 8,
             batch: 1,
             frames: 1,
-            reference_count: hires_fix_reference_count(),
+            reference_count: HiresRefinement::REFERENCE_COUNT,
         },
         reference_resources: None,
         overlay: None,
@@ -1964,8 +1964,8 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
     let generator = HiresProbeGenerator::new();
     let cancel = CancelFlag::new();
     let mut progress = Vec::new();
-    let output = generate_one_with_hires(
-        &generator,
+    let surface = LaneRgbaSurface::default();
+    let base_request = build_render_request(
         "test",
         4,
         4,
@@ -1984,21 +1984,35 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
         false,
         None,
         None,
+        &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
+        &surface,
+        &cancel,
+    )
+    .expect("base request");
+    let hires = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 8,
+            height: 8,
+            strength: Some(0.3),
+        },
+        steps: 3,
+        guidance: Some(5.5),
+        true_cfg: None,
+    };
+    let output = render_hires_multi_pass_on_surface(
+        &generator,
+        base_request,
+        &hires,
+        None,
         None,
         None,
         None,
         &PromptEnhance::default(),
-        Some(HiresFixPlan {
-            width: 8,
-            height: 8,
-            steps: 3,
-            guidance: Some(5.5),
-            true_cfg: None,
-            provider_reference_strength: 0.3,
-        }),
-        gen_core::PreviewSink::default(),
         gen_core::PromptEnhancementSink::default(),
-        &cancel,
+        &surface,
         &mut |event| progress.push(event),
     )
     .expect("two-pass generation");
@@ -2047,8 +2061,8 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
     let sink = gen_core::PromptEnhancementSink::new(move |report| {
         captured.lock().unwrap().push(report);
     });
-    generate_one_with_hires(
-        &generator,
+    let surface = LaneRgbaSurface::default();
+    let base_request = build_render_request(
         "test",
         4,
         4,
@@ -2067,6 +2081,29 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
         false,
         None,
         None,
+        &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
+        &surface,
+        &cancel,
+    )
+    .expect("base request");
+    let hires = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 8,
+            height: 8,
+            strength: Some(0.3),
+        },
+        steps: 3,
+        guidance: None,
+        true_cfg: None,
+    };
+    render_hires_multi_pass_on_surface(
+        &generator,
+        base_request,
+        &hires,
+        None,
         None,
         None,
         None,
@@ -2075,17 +2112,8 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
             temperature: Some(0.2),
             max_tokens: Some(64),
         },
-        Some(HiresFixPlan {
-            width: 8,
-            height: 8,
-            steps: 3,
-            guidance: None,
-            true_cfg: None,
-            provider_reference_strength: 0.3,
-        }),
-        gen_core::PreviewSink::default(),
         sink,
-        &cancel,
+        &surface,
         &mut |_| {},
     )
     .expect("two-pass enhanced generation");
@@ -2104,13 +2132,16 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
 fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scope() {
     let generator = StrictKreaHiresFallbackGenerator::new();
     let cancel = CancelFlag::new();
-    let hires_fix = HiresFixPlan {
-        width: 8,
-        height: 8,
+    let hires_fix = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 8,
+            height: 8,
+            strength: Some(0.3),
+        },
         steps: 3,
         guidance: None,
         true_cfg: None,
-        provider_reference_strength: 0.3,
     };
     let optimized_context = hires_memory_context(gen_core::MemorySelection {
         strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
@@ -2150,8 +2181,8 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
     );
     let context = optimized_route.then_some(&optimized_context);
 
-    let output = generate_one_with_hires(
-        &generator,
+    let surface = LaneRgbaSurface::default();
+    let base_request = build_render_request(
         "test",
         4,
         4,
@@ -2170,14 +2201,24 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
         false,
         None,
         None,
+        &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
+        &surface,
+        &cancel,
+    )
+    .expect("base request");
+    let output = render_hires_multi_pass_on_surface(
+        &generator,
+        base_request,
+        &hires_fix,
+        None,
+        None,
         None,
         context,
-        None,
         &PromptEnhance::default(),
-        Some(hires_fix),
-        gen_core::PreviewSink::default(),
         gen_core::PromptEnhancementSink::default(),
-        &cancel,
+        &surface,
         &mut |_| {},
     )
     .expect("Krea hires fallback completes without an optimized request scope");
@@ -2225,7 +2266,7 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
         },
     });
     admitted.mode = gen_core::MemoryMode::ImageToImage;
-    let mut first_pass = hires_first_pass_context(&admitted, 4, 4, 0);
+    let mut first_pass = derive_base_pass_memory_context(&admitted, (4, 4), 0);
     first_pass.mode = gen_core::MemoryMode::TextToImage;
     let final_memory = gen_core::GenerationMemory {
         stage_residency: true,
@@ -2239,8 +2280,8 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
         ..Default::default()
     };
 
-    generate_one_with_hires(
-        &generator,
+    let surface = LaneRgbaSurface::default();
+    let base_request = build_render_request(
         "test",
         4,
         4,
@@ -2261,22 +2302,36 @@ fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
         None,
         false,
         None,
-        Some(final_memory),
         Some(first_memory),
-        Some(&admitted),
-        Some(&first_pass),
         &PromptEnhance::default(),
-        Some(HiresFixPlan {
+        gen_core::PromptEnhancementSink::default(),
+        gen_core::PreviewSink::default(),
+        &surface,
+        &cancel,
+    )
+    .expect("base request");
+    let hires = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
             width: 8,
             height: 8,
-            steps: 3,
-            guidance: None,
-            true_cfg: None,
-            provider_reference_strength: 0.3,
-        }),
-        gen_core::PreviewSink::default(),
+            strength: Some(0.3),
+        },
+        steps: 3,
+        guidance: None,
+        true_cfg: None,
+    };
+    render_hires_multi_pass_on_surface(
+        &generator,
+        base_request,
+        &hires,
+        None,
+        Some(final_memory),
+        Some(&first_pass),
+        Some(&admitted),
+        &PromptEnhance::default(),
         gen_core::PromptEnhancementSink::default(),
-        &cancel,
+        &surface,
         &mut |_| {},
     )
     .expect("two-pass generation");
@@ -2385,13 +2440,16 @@ fn imported_krea_hires_closes_each_candle_scope_on_refinement_failure() {
             steps: Some(2),
             ..Default::default()
         },
-        HiresFixPlan {
-            width: 512,
-            height: 512,
+        HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 512,
+                height: 512,
+                strength: Some(0.3),
+            },
             steps: 1,
             guidance: None,
             true_cfg: None,
-            provider_reference_strength: 0.3,
         },
     )
     .expect("both Krea plans compile");
@@ -2459,13 +2517,16 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
         height: 4,
         pixels: vec![pixel; 4 * 4 * 3],
     };
-    let hires = HiresFixPlan {
-        width: 512,
-        height: 512,
+    let hires = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 512,
+            height: 512,
+            strength: Some(0.35),
+        },
         steps: 3,
         guidance: None,
         true_cfg: None,
-        provider_reference_strength: 0.35,
     };
     let selection = gen_core::MemorySelection {
         strategy: gen_core::MemoryStrategy::Resident,
@@ -2481,7 +2542,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
         name: &'static str,
         mode: &'static str,
         conditioning: Vec<Conditioning>,
-        hires_fix: Option<HiresFixPlan>,
+        hires_fix: Option<HiresRefinement>,
         phase_steps: Option<u32>,
         item_count: usize,
         expected_pass_references: &'static [u32],
@@ -2879,12 +2940,12 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
         },
         "modelManifestEntry": { "family": "sdxl" }
     }));
-    let hires = resolve_hires_fix_plan(&req, 6, Some(7.0), None).expect("SDXL hires plan");
-    assert_eq!((hires.width, hires.height), (1024, 1024));
+    let hires = HiresRefinement::from_request(&req, 6, Some(7.0), None).expect("SDXL hires plan");
+    assert_eq!((hires.width(), hires.height()), (1024, 1024));
     assert_eq!(hires.steps, 4);
     assert_eq!(hires.guidance, Some(6.5));
     assert_eq!(hires.true_cfg, None);
-    assert!((hires.provider_reference_strength - 0.45).abs() < 1e-6);
+    assert!((hires.strength().unwrap() - 0.45).abs() < 1e-6);
 
     let disabled_req = request(json!({
         "projectId": "p",
@@ -2894,7 +2955,7 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
         "height": 512,
         "modelManifestEntry": { "family": "sdxl" }
     }));
-    assert!(resolve_hires_fix_plan(&disabled_req, 6, Some(7.0), None).is_none());
+    assert!(HiresRefinement::from_request(&disabled_req, 6, Some(7.0), None).is_none());
 
     validate_sdxl_imported_hires_conditioning(&[], Some(hires))
         .expect("prompt-only hires is admitted");
@@ -3004,7 +3065,7 @@ fn imported_sdxl_hires_compiles_planned_passes_preserves_refusals_and_final_only
     refine_ctx.geometry.height = 1024;
     refine_ctx.geometry.reference_count = 1;
     refine_ctx.use_pid = false;
-    let mut base_ctx = hires_first_pass_context(&refine_ctx, 512, 512, 0);
+    let mut base_ctx = derive_base_pass_memory_context(&refine_ctx, (512, 512), 0);
     base_ctx.use_pid = first_use_pid;
 
     let generator = HiresProbeGenerator::provider("sdxl");
@@ -3125,13 +3186,16 @@ fn imported_sdxl_hires_closes_each_scope_on_refinement_failure() {
             scheduler: Some("karras".into()),
             ..Default::default()
         },
-        HiresFixPlan {
-            width: 1024,
-            height: 1024,
+        HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 1024,
+                height: 1024,
+                strength: Some(0.4),
+            },
             steps: 2,
             guidance: Some(7.0),
             true_cfg: None,
-            provider_reference_strength: 0.4,
         },
         PromptEnhance::default(),
     )
@@ -3152,7 +3216,7 @@ fn imported_sdxl_hires_closes_each_scope_on_refinement_failure() {
     refine.geometry.width = 1024;
     refine.geometry.height = 1024;
     refine.geometry.reference_count = 1;
-    let base = hires_first_pass_context(&refine, 512, 512, 0);
+    let base = derive_base_pass_memory_context(&refine, (512, 512), 0);
 
     let result = prepared.generate(
         &generator,
@@ -3315,13 +3379,16 @@ fn sdxl_imported_load_spec_pins_pid_checkpoint_without_double_counting_candle_fl
 #[cfg(native_lane)]
 #[test]
 fn sdxl_imported_hires_refuses_discrete_scheduler_with_invalid_payload() {
-    let hires = HiresFixPlan {
-        width: 1024,
-        height: 1024,
+    let hires = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 1024,
+            height: 1024,
+            strength: Some(0.45),
+        },
         steps: 4,
         guidance: Some(6.5),
         true_cfg: None,
-        provider_reference_strength: 0.45,
     };
     validate_sdxl_imported_hires_scheduler("sdxl", Some("discrete"), None)
         .expect("non-Hires requests keep the discrete scheduler");
@@ -3377,13 +3444,16 @@ fn imported_sdxl_mlx_driver_evaluates_every_shape_and_scopes_every_pass() {
         height: 4,
         pixels: vec![pixel; 4 * 4 * 3],
     };
-    let hires = HiresFixPlan {
-        width: 1024,
-        height: 1024,
+    let hires = HiresRefinement {
+        produced_reference: gen_core::ProducedReference {
+            from_pass: 0,
+            width: 1024,
+            height: 1024,
+            strength: Some(0.45),
+        },
         steps: 3,
         guidance: Some(6.0),
         true_cfg: None,
-        provider_reference_strength: 0.45,
     };
     let selection = gen_core::MemorySelection {
         strategy: gen_core::MemoryStrategy::Resident,
@@ -3399,7 +3469,7 @@ fn imported_sdxl_mlx_driver_evaluates_every_shape_and_scopes_every_pass() {
         name: &'static str,
         mode: &'static str,
         conditioning: Vec<Conditioning>,
-        hires_fix: Option<HiresFixPlan>,
+        hires_fix: Option<HiresRefinement>,
         use_pid: bool,
         item_count: usize,
         expected_pass_references: &'static [u32],
@@ -3901,13 +3971,16 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
             seed: Some(9),
             ..Default::default()
         },
-        HiresFixPlan {
-            width: 1024,
-            height: 1536,
+        HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 1024,
+                height: 1536,
+                strength: Some(0.4),
+            },
             steps: 4,
             guidance: None,
             true_cfg: None,
-            provider_reference_strength: 0.4,
         },
     )
     .expect("prepare both Krea Hires.fix passes before load");
@@ -5940,11 +6013,12 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let render_surface = between(
         render_source,
         "pub(super) fn render_on_surface(",
-        "pub(super) fn resolve_hires_fix_plan(",
+        "pub(super) fn build_render_request(",
     );
     assert!(
         candle_stream.contains("memory_strategy_context.as_ref()")
-            && candle_stream.contains("generate_one_with_hires_on_surface(")
+            && candle_stream.contains("generate_one_on_surface(")
+            && candle_stream.contains("render_hires_multi_pass_on_surface(")
             && render_source.contains("render_on_surface(")
             && render_surface
                 .contains("crate::memory_strategy::generate_with_scope_execution_report(")
@@ -12762,7 +12836,7 @@ impl Generator for CancelAwareEditProbe {
 /// Every stage here is the production one except the engine: the conditioning comes from
 /// `resolve_generic_lane_inputs` over real assets; the batch runs on
 /// `drive_gen_items_scored_reported` (the carrier `generate_stream` uses) through
-/// `generate_one_with_hires` (the call `generate_stream` makes, which assembles the
+/// `generate_one` (the single-pass surface call `generate_stream` makes, which assembles the
 /// `GenerationRequest`); and the events are consumed by `consume_gen_events` against a stub API
 /// that reports a user cancel. So the assertions are on what the API was actually told:
 ///
@@ -12805,7 +12879,7 @@ async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_can
             tx,
             [11_i64, 12],
             move |_index, seed, preview, prompt_enhancement, on_progress| {
-                let (width, height, pixels) = generate_one_with_hires(
+                let (width, height, pixels) = generate_one(
                     task_generator.as_ref(),
                     "use the second image as the mask",
                     64,
@@ -12826,12 +12900,9 @@ async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_can
                     None,
                     None,
                     None,
-                    None,
-                    None,
                     &PromptEnhance::default(),
-                    None,
-                    preview,
                     prompt_enhancement.for_prompt("use the second image as the mask"),
+                    preview,
                     &task_cancel,
                     on_progress,
                 )?;

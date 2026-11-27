@@ -225,17 +225,13 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
-    /// The exact owner-local plan compiled before the generator was loaded. Only base FLUX.1
-    /// reaches this seam during ENG-1a; other routes retain their existing generator call.
+    /// The exact owner-local plan compiled before the generator was loaded.
     pub(crate) render_plan: Option<&'a gen_core::RenderPlan>,
-    /// The pre-load plan of the Hires.fix refinement pass, compiled together with `render_plan` as
-    /// one multi-pass plan whose second pass consumes the first pass's stretched output.
-    pub(crate) hires_render_plan: Option<&'a gen_core::RenderPlan>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
 #[allow(clippy::too_many_arguments)]
-fn generate_one_on_surface(
+pub(super) fn generate_one_on_surface(
     generator: &dyn Generator,
     prompt: &str,
     width: u32,
@@ -668,118 +664,41 @@ pub(super) fn compile_required_render_plan(
     })
 }
 
-/// The Hires.fix refinement request: the target size, the refinement steps and CFG, and the first
-/// pass's stretched output as `reference` (`None` while planning, where the multi-pass plan supplies
-/// the produced reference). The refinement always decodes through the native VAE, so PiD is off
-/// whatever the first pass used. Execution and the pre-load planner both build it here, so the
-/// plan is compiled from the request that runs.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn build_hires_refinement_request(
-    prompt: &str,
-    seed: i64,
-    hires: &HiresFixPlan,
-    negative_prompt: Option<String>,
-    reference: Option<&(Image, f32)>,
-    sampler: Option<&str>,
-    scheduler: Option<&str>,
-    scheduler_shift: Option<f32>,
-    guidance_method: Option<&str>,
-    text_style_gain: Option<f32>,
-    memory: Option<gen_core::GenerationMemory>,
-    enhance: &PromptEnhance,
-    prompt_enhancement: gen_core::PromptEnhancementSink,
-    preview: gen_core::PreviewSink,
-    surface: &LaneRgbaSurface<'_>,
-    cancel: &CancelFlag,
-) -> WorkerResult<GenerationRequest> {
-    let mut req = build_render_request(
-        prompt,
-        hires.width,
-        hires.height,
-        seed,
-        hires.steps,
-        hires.guidance,
-        negative_prompt,
-        reference,
-        &[],
-        None,
-        hires.true_cfg,
-        sampler,
-        scheduler,
-        scheduler_shift,
-        guidance_method,
-        false,
-        text_style_gain,
-        memory,
-        enhance,
-        prompt_enhancement,
-        preview,
-        surface,
-        cancel,
-    )?;
-    // `low_res_start` and ordinary `source_image` apply once to base pass 0 only (`FEAT-1`, `PIPE-2`).
-    req.features.low_res_start = None;
-    req.source_image = None;
-    req.strength = None;
-    Ok(req)
-}
-
-/// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
-/// refinement pass compiled together with it.
+/// The pre-load plan(s) one generic-lane image renders from: a single-pass [`gen_core::RenderPlan`],
+/// a two-pass Hires.fix [`gen_core::MultiPassRenderPlan`], or `Unplanned` for routes without a
+/// registered pre-load planner.
 #[cfg(native_lane)]
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct PreparedRender {
-    pub(super) pass: Option<gen_core::RenderPlan>,
-    pub(super) hires: Option<gen_core::RenderPlan>,
+pub(super) enum PreparedRender {
+    #[default]
+    Unplanned,
+    Single(Box<gen_core::RenderPlan>),
+    MultiPass(gen_core::MultiPassRenderPlan),
 }
 
-/// Compile a Hires.fix render — the first pass, then a refinement pass whose reference is the first
-/// pass's output stretched to the target size at the refinement strength — as one multi-pass plan
-/// before load. `refine` carries no reference of its own; the plan binds the produced one by size
-/// and strength, because its pixels exist only after the first pass.
 #[cfg(native_lane)]
-pub(super) fn compile_hires_render_plans(
-    registry: &gen_core::ProviderRegistry,
-    engine_id: &str,
-    spec: &gen_core::LoadSpec,
-    first: &GenerationRequest,
-    refine: &GenerationRequest,
-    hires: &HiresFixPlan,
-) -> WorkerResult<(gen_core::RenderPlan, gen_core::RenderPlan)> {
-    compile_optional_hires_render_plans(registry, engine_id, spec, first, refine, hires)?
-        .ok_or_else(|| {
-            WorkerError::Engine(format!(
-                "{engine_id}: Hires.fix route has no registered pre-load render planner"
-            ))
-        })
-}
+impl PreparedRender {
+    pub(super) fn pass(&self) -> Option<&gen_core::RenderPlan> {
+        match self {
+            Self::Unplanned => None,
+            Self::Single(plan) => Some(plan.as_ref()),
+            Self::MultiPass(plan) => plan.passes().first(),
+        }
+    }
 
-/// Compile a two-pass Hires.fix [`gen_core::MultiPassRenderPlan`], returning `Ok(None)` when the
-/// provider has no pre-load planner for pass 0 (e.g. an `ENG-5` non-curated Kolors/SDXL path).
-#[cfg(native_lane)]
-pub(super) fn compile_optional_hires_render_plans(
-    registry: &gen_core::ProviderRegistry,
-    engine_id: &str,
-    spec: &gen_core::LoadSpec,
-    first: &GenerationRequest,
-    refine: &GenerationRequest,
-    hires: &HiresFixPlan,
-) -> WorkerResult<Option<(gen_core::RenderPlan, gen_core::RenderPlan)>> {
-    let Some(plan) =
-        compile_hires_multi_pass_plan(registry, engine_id, spec, first, refine, hires)?
-    else {
-        return Ok(None);
-    };
-    match plan.passes() {
-        [first, refine] => Ok(Some((first.clone(), refine.clone()))),
-        passes => Err(WorkerError::Engine(format!(
-            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
-            passes.len()
-        ))),
+    pub(super) fn multi_pass(&self) -> Option<&gen_core::MultiPassRenderPlan> {
+        match self {
+            Self::MultiPass(plan) => Some(plan),
+            Self::Unplanned | Self::Single(_) => None,
+        }
     }
 }
 
-/// Compile the same two Hires.fix passes as an owned plan for lanes that carry them together.
+/// Compile two Hires.fix passes — the base pass, then a refinement pass whose reference is the
+/// base pass's output stretched to the target size at the refinement strength — as one
+/// [`gen_core::MultiPassRenderPlan`] before load. `refine` carries no reference of its own; the
+/// plan binds `produced_reference` by geometry and strength because its pixels exist only after
+/// pass 0 runs.
 #[cfg(native_lane)]
 pub(super) fn compile_hires_multi_pass_plan(
     registry: &gen_core::ProviderRegistry,
@@ -787,7 +706,7 @@ pub(super) fn compile_hires_multi_pass_plan(
     spec: &gen_core::LoadSpec,
     first: &GenerationRequest,
     refine: &GenerationRequest,
-    hires: &HiresFixPlan,
+    produced_reference: gen_core::ProducedReference,
 ) -> WorkerResult<Option<gen_core::MultiPassRenderPlan>> {
     let passes = [
         gen_core::PlannedPassRequest {
@@ -796,17 +715,22 @@ pub(super) fn compile_hires_multi_pass_plan(
         },
         gen_core::PlannedPassRequest {
             request: refine,
-            produced_reference: Some(gen_core::ProducedReference {
-                from_pass: 0,
-                width: hires.width,
-                height: hires.height,
-                strength: Some(hires.provider_reference_strength),
-            }),
+            produced_reference: Some(produced_reference),
         },
     ];
-    registry
+    let Some(plan) = registry
         .compile_multi_pass_render_plan(engine_id, spec, &passes)
-        .map_err(|error| preload_plan_error(engine_id, error))
+        .map_err(|error| preload_plan_error(engine_id, error))?
+    else {
+        return Ok(None);
+    };
+    if plan.passes().len() != 2 {
+        return Err(WorkerError::Engine(format!(
+            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
+            plan.passes().len()
+        )));
+    }
+    Ok(Some(plan))
 }
 
 /// Compile the single-pass or two-pass [`PreparedRender`] for an `ENG-2` route before loading
@@ -817,32 +741,33 @@ pub(super) fn compile_prepared_render(
     engine_id: &str,
     spec: &gen_core::LoadSpec,
     candidate: &GenerationRequest,
-    refine: Option<(&GenerationRequest, &HiresFixPlan)>,
+    refine: Option<(&GenerationRequest, &HiresRefinement)>,
 ) -> WorkerResult<PreparedRender> {
     let Some((refine_req, hires)) = refine else {
-        return Ok(PreparedRender {
-            pass: compile_render_plan(registry, engine_id, spec, candidate)?,
-            hires: None,
-        });
+        return Ok(
+            match compile_render_plan(registry, engine_id, spec, candidate)? {
+                Some(plan) => PreparedRender::Single(Box::new(plan)),
+                None => PreparedRender::Unplanned,
+            },
+        );
     };
-    if route_allows_optional_preload_plan(engine_id, candidate) {
-        let Some((pass, hires)) = compile_optional_hires_render_plans(
-            registry, engine_id, spec, candidate, refine_req, hires,
-        )?
-        else {
-            return Ok(PreparedRender::default());
-        };
-        return Ok(PreparedRender {
-            pass: Some(pass),
-            hires: Some(hires),
-        });
+    let plan = compile_hires_multi_pass_plan(
+        registry,
+        engine_id,
+        spec,
+        candidate,
+        refine_req,
+        hires.produced_reference,
+    )?;
+    match plan {
+        Some(plan) => Ok(PreparedRender::MultiPass(plan)),
+        None if route_allows_optional_preload_plan(engine_id, candidate) => {
+            Ok(PreparedRender::Unplanned)
+        }
+        None => Err(WorkerError::Engine(format!(
+            "{engine_id}: Hires.fix route has no registered pre-load render planner"
+        ))),
     }
-    let (pass, hires) =
-        compile_hires_render_plans(registry, engine_id, spec, candidate, refine_req, hires)?;
-    Ok(PreparedRender {
-        pass: Some(pass),
-        hires: Some(hires),
-    })
 }
 
 /// Render one image of a bespoke MLX FLUX.1 lane (ControlNet, PuLID) from its pre-load plan inside
@@ -950,53 +875,150 @@ pub(super) fn check_produced_reference(
     }
 }
 
+/// Engine-facing Hires.fix pass-1 refinement contract derived from [`ImageRequest::hires_fix`].
+///
+/// Carries the [`gen_core::ProducedReference`] that pass 1 consumes from pass 0 (stretched RGB
+/// round-trip) together with the refinement pass's step budget and CFG overrides.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct HiresFixPlan {
-    pub(super) width: u32,
-    pub(super) height: u32,
+pub(super) struct HiresRefinement {
+    pub(super) produced_reference: gen_core::ProducedReference,
     pub(super) steps: u32,
     pub(super) guidance: Option<f32>,
     pub(super) true_cfg: Option<f32>,
-    pub(super) provider_reference_strength: f32,
 }
 
-pub(super) fn resolve_hires_fix_plan(
-    request: &ImageRequest,
-    first_pass_steps: u32,
-    first_pass_guidance: Option<f32>,
-    first_pass_true_cfg: Option<f32>,
-) -> Option<HiresFixPlan> {
-    if request.hires_fix.is_disabled() {
-        return None;
+impl HiresRefinement {
+    /// Pass 1 always consumes one [`gen_core::ProducedReference`] (`Conditioning::Reference`, no
+    /// multi-reference or mask).
+    pub(super) const REFERENCE_COUNT: u32 = 1;
+
+    pub(super) fn from_request(
+        request: &ImageRequest,
+        first_pass_steps: u32,
+        first_pass_guidance: Option<f32>,
+        first_pass_true_cfg: Option<f32>,
+    ) -> Option<Self> {
+        if request.hires_fix.is_disabled() {
+            return None;
+        }
+        let upscale_by = request.hires_fix.effective_upscale_by();
+        let denoising_strength = request.hires_fix.effective_denoising_strength();
+        let family = resolve_family(request);
+        // SDXL and Ideogram expose conventional denoising strength (higher means more
+        // regeneration). The other current img2img providers expose reference fidelity (higher
+        // means preserve more), so translate the user-facing A1111 denoising value at this
+        // boundary.
+        let strength = if matches!(family.as_str(), "sdxl" | "ideogram") {
+            denoising_strength
+        } else {
+            (1.0 - denoising_strength).clamp(0.0, 1.0)
+        };
+        let cfg = request
+            .hires_fix
+            .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
+        Some(Self {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: sceneworks_core::image_request::hires_fix_target_dimension(
+                    request.width,
+                    upscale_by,
+                ),
+                height: sceneworks_core::image_request::hires_fix_target_dimension(
+                    request.height,
+                    upscale_by,
+                ),
+                strength: Some(strength),
+            },
+            steps: request.hires_fix.effective_steps(first_pass_steps),
+            guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
+            true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
+        })
     }
-    let upscale_by = request.hires_fix.effective_upscale_by();
-    let denoising_strength = request.hires_fix.effective_denoising_strength();
-    let family = resolve_family(request);
-    // SDXL and Ideogram expose conventional denoising strength (higher means more regeneration).
-    // The other current img2img providers expose reference fidelity (higher means preserve more),
-    // so translate the user-facing A1111 denoising value at this boundary.
-    let provider_reference_strength = if matches!(family.as_str(), "sdxl" | "ideogram") {
-        denoising_strength
-    } else {
-        (1.0 - denoising_strength).clamp(0.0, 1.0)
-    };
-    let cfg = request
-        .hires_fix
-        .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
-    Some(HiresFixPlan {
-        width: sceneworks_core::image_request::hires_fix_target_dimension(
-            request.width,
-            upscale_by,
-        ),
-        height: sceneworks_core::image_request::hires_fix_target_dimension(
-            request.height,
-            upscale_by,
-        ),
-        steps: request.hires_fix.effective_steps(first_pass_steps),
-        guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
-        true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
-        provider_reference_strength,
-    })
+
+    pub(super) fn width(&self) -> u32 {
+        self.produced_reference.width
+    }
+
+    pub(super) fn height(&self) -> u32 {
+        self.produced_reference.height
+    }
+
+    pub(super) fn strength(&self) -> Option<f32> {
+        self.produced_reference.strength
+    }
+
+    /// Build pass 1's [`GenerationRequest`] from pass 0's base request without copying pass-0
+    /// image buffers. Enforces all `PLAN §6.6` pass-1 invariants: target geometry, refinement
+    /// steps/CFG, native VAE decode (no PiD), pass-0-only features stripped (`low_res_start`,
+    /// `source_image`, `flux3` layout, pass-0 conditioning), final-only prompt enhancement, and
+    /// either empty conditioning (pre-load planning, where `MultiPassRenderPlan` binds
+    /// `produced_reference`) or the single stretched RGB `Conditioning::Reference` at runtime.
+    pub(super) fn refinement_request(
+        &self,
+        base: &GenerationRequest,
+        output_channels: gen_core::OutputChannels,
+        memory: Option<gen_core::GenerationMemory>,
+        enhance: &PromptEnhance,
+        prompt_enhancement: gen_core::PromptEnhancementSink,
+        reference_image: Option<Image>,
+    ) -> GenerationRequest {
+        let mut features = base.features.clone();
+        features.pid = None;
+        features.low_res_start = None;
+        let mut extensions = base.extensions.clone();
+        extensions.flux3 = None;
+        let mut req = GenerationRequest {
+            prompt: base.prompt.clone(),
+            negative_prompt: base.negative_prompt.clone(),
+            width: self.produced_reference.width,
+            height: self.produced_reference.height,
+            count: 1,
+            seed: base.seed,
+            steps: Some(self.steps),
+            guidance: self.guidance,
+            true_cfg: self.true_cfg,
+            sampler: base.sampler.clone(),
+            scheduler: base.scheduler.clone(),
+            scheduler_shift: base.scheduler_shift,
+            guidance_method: base.guidance_method.clone(),
+            guidance_eta: base.guidance_eta,
+            guidance_momentum: base.guidance_momentum,
+            guidance_norm_threshold: base.guidance_norm_threshold,
+            cfg_interval: base.cfg_interval,
+            prompt_batch: Vec::new(),
+            caption_overflow: base.caption_overflow,
+            conditioning: match reference_image {
+                Some(image) => vec![Conditioning::Reference {
+                    image,
+                    strength: self.produced_reference.strength,
+                }],
+                None => Vec::new(),
+            },
+            source_image: None,
+            strength: None,
+            control_scale: None,
+            image_guidance: None,
+            frames: None,
+            fps: None,
+            duration: None,
+            video_mode: None,
+            enhance_prompt: false,
+            enhance_max_tokens: None,
+            enhance_temperature: None,
+            prompt_enhancement: gen_core::PromptEnhancementSink::default(),
+            memory,
+            approximation: base.approximation.clone(),
+            audio: None,
+            features,
+            extensions,
+            cancel: base.cancel.clone(),
+            preview: base.preview.clone(),
+            hdr: base.hdr.clone(),
+            output_channels,
+        };
+        enhance.apply(&mut req, prompt_enhancement);
+        req
+    }
 }
 
 /// The conditioning one generic-lane render carries. Split out of [`generate_one`] so
@@ -1071,36 +1093,20 @@ pub(super) fn lane_reference_count(
     u32::try_from(references.saturating_add(usize::from(has_edit_mask))).unwrap_or(u32::MAX)
 }
 
-/// The hires-fix refinement pass conditions on exactly one image: the upscaled first-pass render,
-/// passed as the single `Conditioning::Reference` (no multi-reference, no mask). Derived through
-/// [`lane_reference_count`] rather than written as a literal so it cannot drift from the rule the
-/// request scope grades against.
+/// Derive pass 0's request-scope [`gen_core::MemoryRunContext`] from the admitted pass-1 context
+/// and pass 0's actual geometry `(width, height)` and `reference_count`.
 ///
-/// Shared by the MLX and Candle admission declarations so both backends describe the same final-pass
-/// request identity.
-pub(super) fn hires_fix_reference_count() -> u32 {
-    lane_reference_count(true, 0, false)
-}
-
-/// The request-scope identity of the hires FIRST pass, derived from the admitted (final-pass)
-/// context.
-///
-/// Admission describes the heaviest pass — the upscaled refinement — because that is what sets the
-/// memory ceiling. The first pass renders at the BASE size with the caller's own conditioning, so
-/// running it under the admitted context hands the backend request scope a geometry the request does
-/// not match, and the scope refuses it (`request geometry … does not fit admitted …`) — which failed
-/// the first pass of every hires render on a scope-adopting provider. Only the geometry identity
-/// moves: the memory SELECTION is reused verbatim, since a strategy chosen for the larger pass is
-/// the conservative choice for the smaller one.
-pub(super) fn hires_first_pass_context(
+/// Admission describes the heaviest pass — the upscaled refinement — because that sets the memory
+/// ceiling. Pass 0 renders at the base size with the caller's own conditioning, so only the
+/// geometry identity moves while the conservative memory selection is reused verbatim.
+pub(super) fn derive_base_pass_memory_context(
     admitted: &gen_core::MemoryRunContext,
-    width: u32,
-    height: u32,
+    size: (u32, u32),
     reference_count: u32,
 ) -> gen_core::MemoryRunContext {
     let mut context = admitted.clone();
-    context.geometry.width = width;
-    context.geometry.height = height;
+    context.geometry.width = size.0;
+    context.geometry.height = size.1;
     context.geometry.reference_count = reference_count;
     context.has_reference = reference_count > 0;
     context.mode = if reference_count == 0 {
@@ -1112,139 +1118,43 @@ pub(super) fn hires_first_pass_context(
     context
 }
 
-/// Run the normal first pass followed by an optional high-resolution img2img refinement while
-/// keeping progress monotonic across both denoise schedules.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn generate_one_with_hires(
-    generator: &dyn Generator,
-    prompt: &str,
-    width: u32,
-    height: u32,
-    seed: i64,
-    steps: u32,
-    guidance: Option<f32>,
-    negative_prompt: Option<String>,
-    reference: Option<&(Image, f32)>,
-    multi_references: &[Image],
-    edit_mask: Option<&Image>,
-    true_cfg: Option<f32>,
-    sampler: Option<&str>,
-    scheduler: Option<&str>,
-    scheduler_shift: Option<f32>,
-    guidance_method: Option<&str>,
-    use_pid: bool,
-    text_style_gain: Option<f32>,
-    memory: Option<gen_core::GenerationMemory>,
-    hires_first_pass_memory: Option<gen_core::GenerationMemory>,
-    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
-    hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
-    enhance: &PromptEnhance,
-    hires_fix: Option<HiresFixPlan>,
-    preview: gen_core::PreviewSink,
-    prompt_enhancement: gen_core::PromptEnhancementSink,
-    cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    generate_one_with_hires_on_surface(
-        generator,
-        prompt,
-        width,
-        height,
-        seed,
-        steps,
-        guidance,
-        negative_prompt,
-        reference,
-        multi_references,
-        edit_mask,
-        true_cfg,
-        sampler,
-        scheduler,
-        scheduler_shift,
-        guidance_method,
-        use_pid,
-        text_style_gain,
-        memory,
-        hires_first_pass_memory,
-        memory_strategy_context,
-        hires_first_pass_memory_context,
-        enhance,
-        hires_fix,
-        preview,
-        prompt_enhancement,
-        &LaneRgbaSurface::default(),
-        cancel,
-        on_progress,
-    )
-}
-
-/// [`generate_one_with_hires`] with an explicit [`LaneRgbaSurface`].
+/// Execute a two-pass Hires.fix render on `surface` through the shared [`drive_hires_passes`]
+/// driver and optional pre-load [`gen_core::MultiPassRenderPlan`].
 ///
-/// The disposable Hires.fix BASE pass always decodes RGB: it only exists to become the
-/// three-channel img2img reference of the refinement pass. The surface's `output_channels` applies
-/// to the pass that is persisted.
+/// Enforces all `PLAN §6.6` invariants:
+/// 1. Pass 0 runs with an unenhanced base prompt and decodes RGB.
+/// 2. Prompt enhancement runs and reports only on the final persisted pass 1.
+/// 3. Pass 0's output is stretched to `hires` target size, verified against pass 1's
+///    [`gen_core::ProducedReference`] when planned, and bound as pass 1's single
+///    `Conditioning::Reference`.
+/// 4. Combined outer-step progress stays monotone across pass 0 + pass 1 and suppresses pass 0's
+///    intermediate `Progress::Decoding`.
+/// 5. Neither intermediate artifact nor partial execution report leaks if either pass fails.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn generate_one_with_hires_on_surface(
+pub(super) fn render_hires_multi_pass_on_surface(
     generator: &dyn Generator,
-    prompt: &str,
-    width: u32,
-    height: u32,
-    seed: i64,
-    steps: u32,
-    guidance: Option<f32>,
-    negative_prompt: Option<String>,
-    reference: Option<&(Image, f32)>,
-    multi_references: &[Image],
-    edit_mask: Option<&Image>,
-    true_cfg: Option<f32>,
-    sampler: Option<&str>,
-    scheduler: Option<&str>,
-    scheduler_shift: Option<f32>,
-    guidance_method: Option<&str>,
-    use_pid: bool,
-    text_style_gain: Option<f32>,
-    memory: Option<gen_core::GenerationMemory>,
-    hires_first_pass_memory: Option<gen_core::GenerationMemory>,
-    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
-    hires_first_pass_memory_context: Option<&gen_core::MemoryRunContext>,
+    mut base_request: GenerationRequest,
+    hires: &HiresRefinement,
+    multi_pass_plan: Option<&gen_core::MultiPassRenderPlan>,
+    refine_memory: Option<gen_core::GenerationMemory>,
+    base_memory_context: Option<&gen_core::MemoryRunContext>,
+    refine_memory_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
-    hires_fix: Option<HiresFixPlan>,
-    preview: gen_core::PreviewSink,
     prompt_enhancement: gen_core::PromptEnhancementSink,
     surface: &LaneRgbaSurface<'_>,
-    cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let Some(hires) = hires_fix else {
-        return generate_one_on_surface(
-            generator,
-            prompt,
-            width,
-            height,
-            seed,
-            steps,
-            guidance,
-            negative_prompt,
-            reference,
-            multi_references,
-            edit_mask,
-            true_cfg,
-            sampler,
-            scheduler,
-            scheduler_shift,
-            guidance_method,
-            use_pid,
-            text_style_gain,
-            memory,
-            memory_strategy_context,
-            enhance,
-            prompt_enhancement,
-            preview,
-            surface,
-            cancel,
-            on_progress,
-        );
+    let (first_plan, refine_plan) = match multi_pass_plan {
+        Some(plan) => match plan.passes() {
+            [first, refine] => (Some(first), Some(refine)),
+            passes => {
+                return Err(WorkerError::Engine(format!(
+                    "Hires.fix multi-pass plan has {} passes, expected 2",
+                    passes.len()
+                )));
+            }
+        },
+        None => (None, None),
     };
 
     // A retry may reuse the caller's sink. Publish only after both passes and their handoff succeed.
@@ -1258,22 +1168,42 @@ pub(super) fn generate_one_with_hires_on_surface(
         sink.borrow_mut().take();
     }
 
-    let first_pass_context = hires_first_pass_memory_context.cloned().or_else(|| {
-        memory_strategy_context.map(|context| {
-            hires_first_pass_context(
+    // Defensive PLAN §6.6 invariants: pass 0 always decodes RGB and runs unenhanced.
+    base_request.output_channels = gen_core::OutputChannels::Rgb;
+    base_request.enhance_prompt = false;
+    base_request.enhance_temperature = None;
+    base_request.enhance_max_tokens = None;
+    base_request.prompt_enhancement = gen_core::PromptEnhancementSink::default();
+
+    let first_pass_context = base_memory_context.cloned().or_else(|| {
+        refine_memory_context.map(|context| {
+            let base_reference_count = first_plan
+                .map(gen_core::RenderPlan::reference_count)
+                .unwrap_or_else(|| {
+                    surface.flux3_references.map_or_else(
+                        || base_request.image_reference_count(),
+                        |refs| u32::try_from(refs.conditioning.len()).unwrap_or(u32::MAX),
+                    )
+                });
+            derive_base_pass_memory_context(
                 context,
-                width,
-                height,
-                lane_reference_count(
-                    reference.is_some(),
-                    multi_references.len(),
-                    edit_mask.is_some(),
-                ),
+                (base_request.width, base_request.height),
+                base_reference_count,
             )
         })
     });
-    // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
-    // would produce two reports for one image and could feed two different prompts into one recipe.
+
+    let mut refine_request = hires.refinement_request(
+        &base_request,
+        surface.output_channels,
+        refine_memory,
+        enhance,
+        prompt_enhancement,
+        None,
+    );
+    let base_steps = base_request.steps.unwrap_or(0);
+    let cancel = base_request.cancel.clone();
+
     let base_execution_report = std::cell::RefCell::new(None);
     let base_low_res_report = std::cell::RefCell::new(None);
     let base_surface = LaneRgbaSurface {
@@ -1289,10 +1219,8 @@ pub(super) fn generate_one_with_hires_on_surface(
         low_res_start_report: Some(&base_low_res_report),
         source_image: surface.source_image,
         execution_report: Some(&base_execution_report),
-        // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
-        render_plan: surface.render_plan,
-        hires_render_plan: None,
+        render_plan: first_plan,
     };
     let mut refine_controls = surface.controls.clone();
     refine_controls.low_res_start = None;
@@ -1310,48 +1238,26 @@ pub(super) fn generate_one_with_hires_on_surface(
         low_res_start_report: None,
         source_image: None,
         execution_report: Some(&refine_execution_report),
-        // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
-        render_plan: surface.hires_render_plan,
-        hires_render_plan: None,
+        render_plan: refine_plan,
     };
-    let base_negative_prompt = negative_prompt.clone();
-    let base_preview = preview.clone();
+
     let (base_execution, final_image) = drive_hires_passes(
-        steps,
-        &hires,
-        surface.hires_render_plan,
-        cancel,
+        base_steps,
+        hires.steps,
+        (hires.width(), hires.height()),
+        refine_plan,
+        &cancel,
         on_progress,
         |progress| {
-            let (width, height, pixels) = generate_one_on_surface(
+            let images = render_request_on_surface(
                 generator,
-                prompt,
-                width,
-                height,
-                seed,
-                steps,
-                guidance,
-                base_negative_prompt,
-                reference,
-                multi_references,
-                edit_mask,
-                true_cfg,
-                sampler,
-                scheduler,
-                scheduler_shift,
-                guidance_method,
-                use_pid,
-                text_style_gain,
-                hires_first_pass_memory.or(memory),
+                base_request,
                 first_pass_context.as_ref(),
-                &PromptEnhance::default(),
-                gen_core::PromptEnhancementSink::default(),
-                base_preview,
                 &base_surface,
-                cancel,
                 progress,
             )?;
+            let (width, height, pixels) = exactly_one_image(images)?;
             let base_execution = base_execution_report.take().ok_or_else(|| {
                 WorkerError::Engine(
                     "hires-fix base pass returned no completed execution report".into(),
@@ -1367,29 +1273,18 @@ pub(super) fn generate_one_with_hires_on_surface(
             ))
         },
         |high_res_reference, progress| {
-            let reference = (high_res_reference, hires.provider_reference_strength);
-            let request = build_hires_refinement_request(
-                prompt,
-                seed,
-                &hires,
-                negative_prompt,
-                Some(&reference),
-                sampler,
-                scheduler,
-                scheduler_shift,
-                guidance_method,
-                text_style_gain,
-                memory,
-                enhance,
-                prompt_enhancement,
-                preview,
-                &refine_surface,
-                cancel,
-            )?;
+            let strength = refine_plan
+                .and_then(gen_core::RenderPlan::produced_reference)
+                .and_then(|produced| produced.strength)
+                .or(hires.strength());
+            refine_request.conditioning = vec![Conditioning::Reference {
+                image: high_res_reference,
+                strength,
+            }];
             let images = render_request_on_surface(
                 generator,
-                request,
-                memory_strategy_context,
+                refine_request,
+                refine_memory_context,
                 &refine_surface,
                 progress,
             )?;
@@ -1411,16 +1306,18 @@ pub(super) fn generate_one_with_hires_on_surface(
 }
 
 /// Drive the common RGB handoff, keeping authored progress and exposing only the final decode.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn drive_hires_passes<Base, Final>(
     base_steps: u32,
-    hires: &HiresFixPlan,
+    refine_steps: u32,
+    target_size: (u32, u32),
     refinement_plan: Option<&gen_core::RenderPlan>,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
     first: impl FnOnce(&mut dyn FnMut(Progress)) -> WorkerResult<(Image, Base)>,
     refine: impl FnOnce(Image, &mut dyn FnMut(Progress)) -> WorkerResult<Final>,
 ) -> WorkerResult<(Base, Final)> {
-    let total = base_steps.saturating_add(hires.steps);
+    let total = base_steps.saturating_add(refine_steps);
     let (image, base) = first(&mut |event| match event {
         Progress::Step { current, .. } => on_progress(Progress::Step { current, total }),
         Progress::Decoding => {}
@@ -1429,7 +1326,7 @@ pub(super) fn drive_hires_passes<Base, Final>(
     if cancel.is_cancelled() {
         return Err(WorkerError::Engine("generation cancelled".to_owned()));
     }
-    let reference = fit_engine_image(image, hires.width, hires.height, "stretch")?;
+    let reference = fit_engine_image(image, target_size.0, target_size.1, "stretch")?;
     if let Some(plan) = refinement_plan {
         check_produced_reference(plan, &reference)?;
     }
@@ -2016,8 +1913,11 @@ mod hires_report_tests {
         sink: &std::cell::RefCell<Option<WorkerExecutionReport>>,
         cancel: &CancelFlag,
     ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-        generate_one_with_hires_on_surface(
-            probe,
+        let surface = LaneRgbaSurface {
+            execution_report: Some(sink),
+            ..Default::default()
+        };
+        let base_request = build_render_request(
             "fixture",
             4,
             4,
@@ -2036,25 +1936,34 @@ mod hires_report_tests {
             false,
             None,
             None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &surface,
+            cancel,
+        )?;
+        let hires = HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 8,
+                height: 8,
+                strength: Some(0.5),
+            },
+            steps: 2,
+            guidance: None,
+            true_cfg: None,
+        };
+        render_hires_multi_pass_on_surface(
+            probe,
+            base_request,
+            &hires,
+            None,
             None,
             None,
             None,
             &PromptEnhance::default(),
-            Some(HiresFixPlan {
-                width: 8,
-                height: 8,
-                steps: 2,
-                guidance: None,
-                true_cfg: None,
-                provider_reference_strength: 0.5,
-            }),
-            gen_core::PreviewSink::default(),
             gen_core::PromptEnhancementSink::default(),
-            &LaneRgbaSurface {
-                execution_report: Some(sink),
-                ..Default::default()
-            },
-            cancel,
+            &surface,
             &mut |_| {},
         )
     }
@@ -2482,8 +2391,18 @@ mod hires_report_tests {
         );
         let low_res_sink = std::cell::RefCell::new(None);
         let exec_sink = std::cell::RefCell::new(None);
-        let out = generate_one_with_hires_on_surface(
-            &probe,
+        let cancel = CancelFlag::default();
+        let surface = LaneRgbaSurface {
+            controls: super::super::lane_controls::LaneRequestControls {
+                low_res_start: Some(low_res_spec),
+                ..Default::default()
+            },
+            source_image: Some(&source_img),
+            execution_report: Some(&exec_sink),
+            low_res_start_report: Some(&low_res_sink),
+            ..Default::default()
+        };
+        let base_request = build_render_request(
             "a castle",
             64,
             64,
@@ -2502,31 +2421,35 @@ mod hires_report_tests {
             false,
             None,
             None,
+            &PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &surface,
+            &cancel,
+        )
+        .expect("base request");
+        let hires = HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 128,
+                height: 128,
+                strength: Some(0.4),
+            },
+            steps: 3,
+            guidance: Some(3.5),
+            true_cfg: None,
+        };
+        let out = render_hires_multi_pass_on_surface(
+            &probe,
+            base_request,
+            &hires,
+            None,
             None,
             None,
             None,
             &PromptEnhance::default(),
-            Some(HiresFixPlan {
-                width: 128,
-                height: 128,
-                steps: 3,
-                guidance: Some(3.5),
-                true_cfg: None,
-                provider_reference_strength: 0.4,
-            }),
-            gen_core::PreviewSink::default(),
             gen_core::PromptEnhancementSink::default(),
-            &LaneRgbaSurface {
-                controls: super::super::lane_controls::LaneRequestControls {
-                    low_res_start: Some(low_res_spec),
-                    ..Default::default()
-                },
-                source_image: Some(&source_img),
-                execution_report: Some(&exec_sink),
-                low_res_start_report: Some(&low_res_sink),
-                ..Default::default()
-            },
-            &CancelFlag::default(),
+            &surface,
             &mut |_| {},
         )
         .expect("low_res_start + hires-fix render succeeds");
@@ -2688,9 +2611,9 @@ mod hires_report_tests {
                     panic!("{route}: single-pass low_res_start render plan failed: {error}")
                 });
             let plan = prepared
-                .pass
+                .pass()
                 .unwrap_or_else(|| panic!("{route}: expected Some(RenderPlan)"));
-            assert!(prepared.hires.is_none(), "{route}");
+            assert!(prepared.multi_pass().is_none(), "{route}");
             assert_eq!(plan.pass_index(), 0, "{route}");
             assert_eq!(plan.output_size(), (1024, 1024), "{route}");
             let resolved_low_res = plan
@@ -2711,13 +2634,16 @@ mod hires_report_tests {
 
         // 3. Two-pass Hires.fix MultiPassRenderPlan compilation and ProducedReference validation
         // across all reference-accepting ENG-2 routes (including low_res_start on pass 0 only!).
-        let hires = HiresFixPlan {
-            width: 1280,
-            height: 1280,
+        let hires = HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 1280,
+                height: 1280,
+                strength: Some(0.45),
+            },
             steps: 6,
             guidance: None,
             true_cfg: None,
-            provider_reference_strength: 0.45,
         };
         type TwoPassRouteCase<'a> = (
             &'a str,
@@ -2799,8 +2725,8 @@ mod hires_report_tests {
                 (512, 1024)
             };
             let mut route_hires = hires;
-            route_hires.width = hires_dim;
-            route_hires.height = hires_dim;
+            route_hires.produced_reference.width = hires_dim;
+            route_hires.produced_reference.height = hires_dim;
             route_hires.guidance = guidance;
             route_hires.true_cfg = true_cfg;
             let stretched_hires = gen_core::Image {
@@ -2859,12 +2785,12 @@ mod hires_report_tests {
                     "{route}: two-pass Hires.fix MultiPassRenderPlan compilation failed: {error}"
                 )
             });
-            let first_plan = prepared
-                .pass
-                .unwrap_or_else(|| panic!("{route}: expected pass-0 RenderPlan"));
-            let refine_plan = prepared
-                .hires
-                .unwrap_or_else(|| panic!("{route}: expected pass-1 hires RenderPlan"));
+            let multi_pass = prepared
+                .multi_pass()
+                .unwrap_or_else(|| panic!("{route}: expected two-pass MultiPassRenderPlan"));
+            let [first_plan, refine_plan] = multi_pass.passes() else {
+                panic!("{route}: expected 2 passes");
+            };
 
             assert_eq!(first_plan.pass_index(), 0, "{route}");
             assert_eq!(first_plan.output_size(), (base_dim, base_dim), "{route}");
@@ -2882,20 +2808,15 @@ mod hires_report_tests {
             );
             assert_eq!(
                 refine_plan.produced_reference(),
-                Some(gen_core::ProducedReference {
-                    from_pass: 0,
-                    width: hires_dim,
-                    height: hires_dim,
-                    strength: Some(route_hires.provider_reference_strength),
-                }),
+                Some(route_hires.produced_reference),
                 "{route}"
             );
-            check_produced_reference(&refine_plan, &stretched_hires).unwrap_or_else(|e| {
+            check_produced_reference(refine_plan, &stretched_hires).unwrap_or_else(|e| {
                 panic!("{route}: valid {hires_dim}x{hires_dim} produced reference failed: {e}")
             });
             assert!(
                 matches!(
-                    check_produced_reference(&refine_plan, &wrong_768),
+                    check_produced_reference(refine_plan, &wrong_768),
                     Err(WorkerError::InvalidPayload(_))
                 ),
                 "{route}: mismatched produced reference size must be rejected"
@@ -2921,10 +2842,10 @@ mod hires_report_tests {
             let obj = payload.as_object().unwrap();
             let req = ImageRequest::from_resolved(obj, obj).unwrap();
             let qwen_hires =
-                resolve_hires_fix_plan(&req, 6, None, Some(4.0)).expect("hires fix plan");
+                HiresRefinement::from_request(&req, 6, None, Some(4.0)).expect("hires refinement");
             assert!(
-                (qwen_hires.provider_reference_strength - 0.45).abs() < 1e-6,
-                "{qwen_model}: resolve_hires_fix_plan must translate denoising_strength without silent 1.0 override"
+                (qwen_hires.strength().unwrap() - 0.45).abs() < 1e-6,
+                "{qwen_model}: HiresRefinement::from_request must translate denoising_strength without silent 1.0 override"
             );
             let first = gen_core::GenerationRequest {
                 prompt: "a portrait".to_owned(),
@@ -2948,17 +2869,17 @@ mod hires_report_tests {
             };
             assert!(
                 matches!(
-                    compile_hires_render_plans(
+                    compile_hires_multi_pass_plan(
                         registry,
                         qwen_model,
                         &base_spec,
                         &first,
                         &refine,
-                        &qwen_hires,
+                        qwen_hires.produced_reference,
                     ),
                     Err(WorkerError::InvalidPayload(_))
                 ),
-                "{qwen_model}: compile_hires_render_plans must reject fractional denoising_strength pre-load"
+                "{qwen_model}: compile_hires_multi_pass_plan must reject fractional denoising_strength pre-load"
             );
         }
         for t2i_only_route in ["flux1_dev", "chroma1_hd", "lens", "anima_base"] {
@@ -3040,12 +2961,13 @@ mod hires_report_tests {
             .expect("ENG-5 native Kolors/SDXL must not fail pre-load planning");
             if expects_plan {
                 assert!(
-                    prepared.pass.is_some() && prepared.hires.is_some(),
-                    "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must compile two-pass RenderPlan on SW-6966 FamilyDriver"
+                    prepared.multi_pass().is_some(),
+                    "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must compile two-pass MultiPassRenderPlan on SW-6966 FamilyDriver"
                 );
             } else {
-                assert!(
-                    prepared.pass.is_none() && prepared.hires.is_none(),
+                assert_eq!(
+                    prepared,
+                    PreparedRender::Unplanned,
                     "{eng5_route} ({eng5_sampler:?}/{eng5_scheduler:?}) must defer when backend has no native planner"
                 );
             }
@@ -3220,13 +3142,16 @@ mod hires_report_tests {
             temperature: Some(0.25),
             max_tokens: Some(96),
         };
-        let hires = HiresFixPlan {
-            width: 1024,
-            height: 1024,
+        let hires = HiresRefinement {
+            produced_reference: gen_core::ProducedReference {
+                from_pass: 0,
+                width: 1024,
+                height: 1024,
+                strength: Some(0.4),
+            },
             steps: 6,
             guidance: Some(4.5),
             true_cfg: None,
-            provider_reference_strength: 0.4,
         };
         let controls = super::super::lane_controls::LaneRequestControls {
             low_res_start: Some(low_res_spec),
@@ -3267,29 +3192,14 @@ mod hires_report_tests {
             &cancel,
         )
         .expect("pass-0 planning request");
-        let planned_pass1 = build_hires_refinement_request(
-            "a library in the clouds",
-            77,
-            &hires,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+        let planned_pass1 = hires.refinement_request(
+            &planned_pass0,
+            gen_core::OutputChannels::Rgba,
             None,
             &enhance,
             gen_core::PromptEnhancementSink::default(),
-            gen_core::PreviewSink::default(),
-            &LaneRgbaSurface {
-                output_channels: gen_core::OutputChannels::Rgba,
-                controls: controls.clone(),
-                ..Default::default()
-            },
-            &cancel,
-        )
-        .expect("pass-1 planning request");
+            None,
+        );
 
         let multi_plan = gen_core::MultiPassRenderPlan::compile(
             &[
@@ -3299,12 +3209,7 @@ mod hires_report_tests {
                 },
                 gen_core::PlannedPassRequest {
                     request: &planned_pass1,
-                    produced_reference: Some(gen_core::ProducedReference {
-                        from_pass: 0,
-                        width: hires.width,
-                        height: hires.height,
-                        strength: Some(hires.provider_reference_strength),
-                    }),
+                    produced_reference: Some(hires.produced_reference),
                 },
             ],
             |req| {
@@ -3330,9 +3235,6 @@ mod hires_report_tests {
         )
         .expect("MultiPassRenderPlan compiles")
         .expect("two-pass plan present");
-        let [first_plan, refine_plan] = multi_plan.passes() else {
-            panic!("expected 2 passes");
-        };
 
         let enhancement_reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured_reports = enhancement_reports.clone();
@@ -3343,43 +3245,24 @@ mod hires_report_tests {
         let exec_sink = std::cell::RefCell::new(None);
         let mut progress_events = Vec::new();
 
-        let (out_w, out_h, out_pixels) = generate_one_with_hires_on_surface(
+        let surface = LaneRgbaSurface {
+            output_channels: gen_core::OutputChannels::Rgba,
+            controls,
+            execution_report: Some(&exec_sink),
+            low_res_start_report: Some(&low_res_sink),
+            ..Default::default()
+        };
+        let (out_w, out_h, out_pixels) = render_hires_multi_pass_on_surface(
             &probe,
-            "a library in the clouds",
-            512,
-            512,
-            77,
-            4,
-            Some(4.5),
-            None,
-            None,
-            &[],
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
+            planned_pass0,
+            &hires,
+            Some(&multi_plan),
             None,
             None,
             None,
             &enhance,
-            Some(hires),
-            gen_core::PreviewSink::default(),
             enhancement_sink,
-            &LaneRgbaSurface {
-                output_channels: gen_core::OutputChannels::Rgba,
-                controls,
-                execution_report: Some(&exec_sink),
-                low_res_start_report: Some(&low_res_sink),
-                render_plan: Some(first_plan),
-                hires_render_plan: Some(refine_plan),
-                ..Default::default()
-            },
-            &cancel,
+            &surface,
             &mut |event| progress_events.push(event),
         )
         .expect("planned two-pass Hires.fix render succeeds");
@@ -3458,12 +3341,7 @@ mod hires_report_tests {
                 },
                 gen_core::PlannedPassRequest {
                     request: &planned_pass1,
-                    produced_reference: Some(gen_core::ProducedReference {
-                        from_pass: 0,
-                        width: hires.width,
-                        height: hires.height,
-                        strength: Some(hires.provider_reference_strength),
-                    }),
+                    produced_reference: Some(hires.produced_reference),
                 },
             ],
             |req| {
@@ -3489,45 +3367,23 @@ mod hires_report_tests {
         )
         .expect("multi-ref MultiPassRenderPlan compiles")
         .expect("two-pass plan present");
-        let [multi_first_plan, multi_refine_plan] = multi_ref_plan.passes() else {
-            panic!("expected 2 passes");
-        };
         let multi_exec_sink = std::cell::RefCell::new(None);
-        generate_one_with_hires_on_surface(
+        let multi_surface = LaneRgbaSurface {
+            output_channels: gen_core::OutputChannels::Rgba,
+            execution_report: Some(&multi_exec_sink),
+            ..Default::default()
+        };
+        render_hires_multi_pass_on_surface(
             &probe,
-            "a library in the clouds",
-            512,
-            512,
-            77,
-            4,
-            Some(4.5),
-            None,
-            None,
-            &multi_refs,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
+            multi_ref_pass0,
+            &hires,
+            Some(&multi_ref_plan),
             None,
             None,
             None,
             &enhance,
-            Some(hires),
-            gen_core::PreviewSink::default(),
             gen_core::PromptEnhancementSink::default(),
-            &LaneRgbaSurface {
-                output_channels: gen_core::OutputChannels::Rgba,
-                execution_report: Some(&multi_exec_sink),
-                render_plan: Some(multi_first_plan),
-                hires_render_plan: Some(multi_refine_plan),
-                ..Default::default()
-            },
-            &cancel,
+            &multi_surface,
             &mut |_| {},
         )
         .expect("multi-ref planned two-pass Hires.fix render succeeds");
@@ -3580,8 +3436,8 @@ mod hires_report_tests {
     }
 
     #[test]
-    fn b5_imported_krea_uses_the_shared_planned_hires_driver() {
-        assert_eq!(hires_fix_reference_count(), 1);
+    fn b5_all_hires_lanes_use_the_shared_planned_multipass_driver() {
+        assert_eq!(HiresRefinement::REFERENCE_COUNT, 1);
         let payload = serde_json::json!({
             "projectId": "p",
             "model": "krea_2_raw",
@@ -3597,26 +3453,33 @@ mod hires_report_tests {
         });
         let obj = payload.as_object().unwrap();
         let req = ImageRequest::from_resolved(obj, obj).unwrap();
-        let plan = resolve_hires_fix_plan(&req, 12, Some(3.5), None)
-            .expect("legacy resolve_hires_fix_plan must resolve for B5 cohorts");
-        assert_eq!((plan.width, plan.height), (1024, 1024));
-        assert_eq!(plan.steps, 6);
-        assert!((plan.provider_reference_strength - 0.65).abs() < 1e-6);
+        let refinement = HiresRefinement::from_request(&req, 12, Some(3.5), None)
+            .expect("HiresRefinement::from_request must translate HiresFixRequest");
+        assert_eq!((refinement.width(), refinement.height()), (1024, 1024));
+        assert_eq!(refinement.steps, 6);
+        assert!((refinement.strength().unwrap() - 0.65).abs() < 1e-6);
 
+        let mlx_src = include_str!("mlx.rs");
+        let candle_src = include_str!("candle.rs");
         let krea_imported = include_str!("krea_imported.rs");
         let sdxl_imported = include_str!("sdxl_imported.rs");
         let memory_src = include_str!("memory.rs");
-        assert!(krea_imported.contains("resolve_hires_fix_plan("));
-        assert!(!krea_imported.contains("hires_fix_reference_count()"));
+
+        // All 6 B5 baseline files execute Hires.fix through the shared engine MultiPassRenderPlan
+        // contract (`HiresRefinement`, `compile_hires_multi_pass_plan`, `drive_hires_passes`,
+        // `render_hires_multi_pass_on_surface`).
+        assert!(mlx_src.contains("HiresRefinement::from_request("));
+        assert!(mlx_src.contains("render_hires_multi_pass_on_surface("));
+        assert!(candle_src.contains("HiresRefinement::from_request("));
+        assert!(candle_src.contains("render_hires_multi_pass_on_surface("));
+        assert!(krea_imported.contains("HiresRefinement::from_request("));
         assert!(krea_imported.contains("compile_hires_multi_pass_plan("));
         assert!(krea_imported.contains("drive_hires_passes("));
         assert!(krea_imported.contains("generate_with_scope_report_planned("));
-        assert!(sdxl_imported.contains("resolve_hires_fix_plan("));
-        assert!(!sdxl_imported.contains("generate_one_with_hires_on_surface("));
-        assert!(!sdxl_imported.contains("hires_fix_reference_count()"));
+        assert!(sdxl_imported.contains("HiresRefinement::from_request("));
         assert!(sdxl_imported.contains("compile_hires_multi_pass_plan("));
         assert!(sdxl_imported.contains("drive_hires_passes("));
         assert!(sdxl_imported.contains("generate_with_scope_execution_report_planned("));
-        assert!(memory_src.contains("hires_fix_reference_count()"));
+        assert!(memory_src.contains("HiresRefinement::REFERENCE_COUNT"));
     }
 }

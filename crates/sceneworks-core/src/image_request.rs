@@ -1435,7 +1435,7 @@ fn model_supports_hires_fix(request: &ImageRequest) -> bool {
 }
 
 /// The post-first-pass target side: `dimension × upscale_by`, rounded. Shared by the enqueue
-/// gate above and the worker's HiresFixPlan.
+/// gate above and the worker's Hires.fix multi-pass refinement contract.
 pub use sceneworks_options::image_request::hires_fix_target_dimension;
 
 pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {

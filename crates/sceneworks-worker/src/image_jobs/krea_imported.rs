@@ -54,11 +54,10 @@ use super::load_spec::selected_decoder_component_pin;
 use super::mlx_model;
 #[cfg(not(target_os = "macos"))]
 use super::prepare_cached_candle_base_floor;
-use super::render::drive_hires_passes;
 #[cfg(target_os = "macos")]
-use super::render::hires_first_pass_context;
-use super::render::resolve_hires_fix_plan;
-use super::render::HiresFixPlan;
+use super::render::derive_base_pass_memory_context;
+use super::render::drive_hires_passes;
+use super::render::HiresRefinement;
 use super::resolve_seed;
 #[cfg(all(native_lane, all(not(target_os = "macos"), feature = "backend-candle")))]
 use super::routing::imported_base_snapshot_companions;
@@ -1948,7 +1947,6 @@ pub(super) struct PreparedKreaHires {
     requests: [GenerationRequest; 2],
     plan: gen_core::MultiPassRenderPlan,
     spec: std::sync::Arc<LoadSpec>,
-    hires: HiresFixPlan,
 }
 
 impl PreparedKreaHires {
@@ -1956,17 +1954,24 @@ impl PreparedKreaHires {
         registry: &gen_core::ProviderRegistry,
         spec: std::sync::Arc<LoadSpec>,
         first: GenerationRequest,
-        hires: HiresFixPlan,
+        hires: HiresRefinement,
     ) -> WorkerResult<Self> {
         let engine_id = "krea_2_turbo";
-        let refine = GenerationRequest {
-            width: hires.width,
-            height: hires.height,
-            steps: Some(hires.steps),
-            ..first.clone()
-        };
+        let refine = hires.refinement_request(
+            &first,
+            gen_core::OutputChannels::Rgb,
+            first.memory,
+            &super::PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            None,
+        );
         let plan = super::render::compile_hires_multi_pass_plan(
-            registry, engine_id, &spec, &first, &refine, &hires,
+            registry,
+            engine_id,
+            &spec,
+            &first,
+            &refine,
+            hires.produced_reference,
         )?
         .ok_or_else(|| {
             WorkerError::Engine(format!(
@@ -1977,7 +1982,6 @@ impl PreparedKreaHires {
             requests: [first, refine],
             plan,
             spec,
-            hires,
         })
     }
 
@@ -2093,9 +2097,11 @@ impl PreparedKreaHires {
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<KreaImportedOutput> {
         let (base, _) = self.passes();
-        let (width, height) = base.output_size();
-        let base_context =
-            hires_first_pass_context(&evaluation.context, width, height, base.reference_count());
+        let base_context = derive_base_pass_memory_context(
+            &evaluation.context,
+            base.output_size(),
+            base.reference_count(),
+        );
         self.generate(
             generator,
             loaded_policy,
@@ -2122,7 +2128,6 @@ impl PreparedKreaHires {
             requests,
             plan,
             spec,
-            hires,
         } = self;
         let plan = if let Some(loaded_spec) = loaded_krea_spec(&spec, loaded_policy) {
             plan.rebind_load_placement(&loaded_spec).map_err(|error| {
@@ -2142,9 +2147,11 @@ impl PreparedKreaHires {
         let [first, mut refine] = requests;
         let [first_context, refine_context] = contexts;
         let steps = first.steps.unwrap_or(0);
+        let refine_steps = refine.steps.unwrap_or(0);
         let (_, output) = drive_hires_passes(
             steps,
-            &hires,
+            refine_steps,
+            refine_plan.output_size(),
             Some(refine_plan),
             cancel,
             on_progress,
@@ -2724,7 +2731,7 @@ pub(super) async fn generate_krea_imported_stream(
         || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
         |specs| specs.iter().map(|phase| phase.steps).sum(),
     );
-    let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
+    let hires_fix = HiresRefinement::from_request(request, steps, None, None);
     let text_style_gain = resolve_text_style_gain(request);
     let mut raw_settings =
         krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit));
