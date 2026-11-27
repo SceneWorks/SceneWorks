@@ -72,8 +72,10 @@ fn execution_binding_sha256(
     .map_err(Into::into)
 }
 
+mod maintenance;
 mod result_items;
 mod routing;
+pub use maintenance::{CompactionPolicy, CompactionReport, WalCheckpoint};
 pub(crate) use routing::catalog::video_route_facts;
 
 pub use result_items::{
@@ -5958,7 +5960,9 @@ const OFFLINE_WORKER_RETENTION_DAYS: i64 = 30;
 /// Drops the private source-claim inventory of every offline row — a claim set only means something
 /// for a live worker, and the paths that take a worker offline now drop it themselves — and deletes
 /// offline rows older than [`OFFLINE_WORKER_RETENTION_DAYS`]. Released pages go to SQLite's
-/// freelist for reuse; there is deliberately no VACUUM on the startup path.
+/// freelist for reuse; inside this transaction there is deliberately no VACUUM. The API compacts
+/// the file afterwards only when the freelist is a large share of it
+/// (`JobsStore::compact_if_fragmented` with `CompactionPolicy::STARTUP`).
 fn release_dead_worker_rows(connection: &Connection, now_unix: i64) -> JobsStoreResult<()> {
     connection.execute(
         "update workers set portable_source_claims_json = null

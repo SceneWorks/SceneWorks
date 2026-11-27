@@ -17,11 +17,27 @@ use crate::project_store::{ProjectStoreError, ProjectStoreResult};
 /// use BEGIN IMMEDIATE before reading, since SQLite cannot wait on lock upgrades.
 pub(crate) const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Jobs DB auto-checkpoint interval in WAL pages (4 KiB each): SQLite's default,
+/// stated explicitly so the contract test pins it.
+pub(crate) const JOBS_WAL_AUTOCHECKPOINT_PAGES: u32 = 1000;
+
+/// Size a jobs WAL is truncated back to whenever a checkpoint resets it. Without a
+/// limit SQLite reuses the file from the start but never shrinks it, so one burst
+/// (a multi-MB worker claim rewrite, a retention purge) left a 224 MB WAL behind.
+pub(crate) const JOBS_JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+
 /// Preserve each store's established durability and concurrency policy.
 /// Project (including character, voice and training indexes) keeps SQLite's
 /// rollback journal and default synchronization. Jobs attempts WAL but warns and
-/// continues if unavailable; Catalog requires WAL and uses NORMAL synchronization,
-/// disk-backed temporary sorts and a bounded page cache/checkpoint interval.
+/// continues if unavailable; once in WAL it uses NORMAL synchronization (a power
+/// loss can roll back the last few commits but never corrupts the file — the same
+/// trade the catalog makes), an explicit auto-checkpoint interval, and a
+/// [`JOBS_JOURNAL_SIZE_LIMIT_BYTES`] cap so a WAL inflated by one large burst is
+/// truncated back after its next checkpoint instead of keeping its high-water size
+/// forever. The jobs store also checkpoints with TRUNCATE at startup and
+/// periodically while running (`JobsStore::checkpoint_wal_truncate`). Catalog
+/// requires WAL and uses NORMAL synchronization, disk-backed temporary sorts and a
+/// bounded page cache/checkpoint interval.
 pub(crate) enum Profile<'a> {
     Project,
     Jobs { database_path: &'a Path },
@@ -47,6 +63,15 @@ pub(crate) fn configure_connection(
                 );
             }
             connection.pragma_update(None, "foreign_keys", "on")?;
+            // NORMAL is only crash-safe in WAL mode; a connection left in the
+            // rollback journal by the warning above keeps SQLite's FULL default.
+            let journal_mode: String =
+                connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            if journal_mode.eq_ignore_ascii_case("wal") {
+                connection.pragma_update(None, "synchronous", "normal")?;
+            }
+            connection.pragma_update(None, "wal_autocheckpoint", JOBS_WAL_AUTOCHECKPOINT_PAGES)?;
+            connection.pragma_update(None, "journal_size_limit", JOBS_JOURNAL_SIZE_LIMIT_BYTES)?;
         }
         Profile::Catalog {
             wal_autocheckpoint_pages,
@@ -293,7 +318,7 @@ mod tests {
                 },
                 Some("wal"),
                 Some(1),
-                None,
+                Some(1),
             ),
             (
                 "catalog",
@@ -334,6 +359,20 @@ mod tests {
                     .pragma_query_value(None, pragma, |row| row.get(0))
                     .unwrap();
                 assert_eq!(actual, expected, "{name} {pragma}");
+            }
+            if name == "jobs" {
+                for (pragma, expected) in [
+                    (
+                        "wal_autocheckpoint",
+                        i64::from(super::JOBS_WAL_AUTOCHECKPOINT_PAGES),
+                    ),
+                    ("journal_size_limit", super::JOBS_JOURNAL_SIZE_LIMIT_BYTES),
+                ] {
+                    let actual: i64 = connection
+                        .pragma_query_value(None, pragma, |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(actual, expected, "jobs {pragma}");
+                }
             }
             if name == "catalog" {
                 for (pragma, expected) in [
