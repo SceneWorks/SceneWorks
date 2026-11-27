@@ -367,7 +367,7 @@ impl ProjectStore {
             // immediately erased by an unnecessary rebuild.
             conn.execute(
                 "insert or replace into project_metadata (key, value) values (?1, ?2)",
-                params![ASSET_INDEX_VERSION_KEY, PROJECT_SCHEMA_VERSION.to_string()],
+                params![ASSET_INDEX_VERSION_KEY, ASSET_INDEX_VERSION.to_string()],
             )?;
             conn.commit()?;
             Ok(())

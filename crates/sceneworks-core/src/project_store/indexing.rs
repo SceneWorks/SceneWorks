@@ -147,7 +147,7 @@ pub(super) fn reindex_project_path(
     reindex_characters_on_connection(&transaction, project_path)?;
     transaction.execute(
         "insert or replace into project_metadata (key, value) values (?1, ?2)",
-        params![ASSET_INDEX_VERSION_KEY, PROJECT_SCHEMA_VERSION.to_string()],
+        params![ASSET_INDEX_VERSION_KEY, ASSET_INDEX_VERSION.to_string()],
     )?;
 
     transaction.commit()?;
