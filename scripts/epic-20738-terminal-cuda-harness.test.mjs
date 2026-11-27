@@ -256,8 +256,9 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // digest. SW-F373 adds only the three SenseNova-Loop-9B listings, and the retired Qwen3.6-27B film planner listing is removed (161 keys).
   // SW-F369 adds ostris' MiniMax-H3-Image training adapter listing (162 keys).
   // SW-7203 adds the two Qwen3.8-27B block-draft listings and SW-7202 re-pins three tier listings (164 keys).
+  // MiniMax-H3's Candle-native GGML tiers add the SceneWorks/minimax-h3-candle listing (166 keys).
   assert.equal(current.downloadEvidenceSha256,
-    "16ca87ab35d57ceab8382095b99ee409305b4e5a66fa822f9b5c5f3272e02fe3");
+    "804efda080c3c94e22ea11db86767755852da2530dfab25482e680f8e2734e45");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

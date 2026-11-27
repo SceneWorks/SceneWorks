@@ -19810,7 +19810,9 @@ fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
         ("HF_HOME", ""),
     ]);
     const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
-    const REHOST: &str = "SceneWorks/minimax-h3-mlx";
+    // Off-Mac q4/q8 read the Candle-native GGML tiers, never the MLX-affine rehost (whose packed
+    // projections would be repacked into the saved-quantization cache on first load).
+    const REHOST: &str = crate::video_jobs::minimax_h3::CANDLE_MINIMAX_H3_TIER_REPO;
     const REVISION: &str = "1111111111111111111111111111111111111111";
 
     let data = tempfile::Builder::new()
@@ -19829,7 +19831,12 @@ fn candle_minimax_h3_resolves_exact_installed_roots_for_every_tier() {
     };
     let upstream = stage(UPSTREAM);
     let rehost = stage(REHOST);
+    assert_eq!(REHOST, "SceneWorks/minimax-h3-candle");
+    // A decoy MLX tier: if the resolver still read it, the asserted dirs below would not match.
+    let mlx = stage("SceneWorks/minimax-h3-mlx");
     for tier in ["q4", "q8"] {
+        std::fs::create_dir_all(mlx.join(tier).join("transformer")).expect("mlx transformer");
+        std::fs::write(mlx.join(tier).join("transformer/config.json"), b"{}").expect("config");
         std::fs::create_dir_all(rehost.join(tier).join("transformer")).expect("packed transformer");
         std::fs::write(rehost.join(tier).join("transformer/config.json"), b"{}")
             .expect("transformer config");
@@ -19924,7 +19931,10 @@ fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
         ("HF_HOME", ""),
     ]);
     const UPSTREAM: &str = "MiniMaxAI/MiniMax-H3";
-    const REHOST: &str = "SceneWorks/minimax-h3-mlx";
+    // q4/q8 come from the Candle-native GGML tiers; the dense bf16 Ref2VA pair has no packed form
+    // and stays on the MLX rehost.
+    const REHOST: &str = "SceneWorks/minimax-h3-candle";
+    const BF16_REHOST: &str = "SceneWorks/minimax-h3-mlx";
     const REVISION: &str = "2222222222222222222222222222222222222222";
     let data = tempfile::Builder::new()
         .prefix("sw_candle_minimax_h3_ref_roots_")
@@ -19941,8 +19951,11 @@ fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
     let upstream = stage(UPSTREAM);
     std::fs::create_dir_all(upstream.join("text_encoder")).expect("dense text encoder");
     std::fs::write(upstream.join("text_encoder/config.json"), b"{}").expect("TE config");
-    let rehost = stage(REHOST);
+    let packed = stage(REHOST);
+    let dense = stage(BF16_REHOST);
+    let rehost_for = |tier: &str| if tier == "bf16" { &dense } else { &packed };
     for tier in ["q4", "q8", "bf16"] {
+        let rehost = rehost_for(tier);
         std::fs::create_dir_all(rehost.join(tier).join("transformer")).expect("base transformer");
         std::fs::write(rehost.join(tier).join("transformer/config.json"), b"{}")
             .expect("base transformer config");
@@ -19951,6 +19964,7 @@ fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
         std::fs::write(rehost.join(tier).join("transformer_ref/config.json"), b"{}")
             .expect("reference transformer config");
     }
+    let rehost = &packed;
     for tier in ["q4", "q8"] {
         std::fs::create_dir_all(rehost.join(tier).join("text_encoder"))
             .expect("packed text encoder");
@@ -19978,13 +19992,17 @@ fn candle_minimax_h3_ref_resolves_hosted_partition_and_rejects_torn_tiers() {
         assert_eq!(load.root, upstream);
         assert_eq!(load.tier, tier);
         assert_eq!(load.quant, quant);
-        assert_eq!(load.dit_dir, Some(rehost.join(tier).join("transformer")));
+        let tier_rehost = rehost_for(tier);
+        assert_eq!(
+            load.dit_dir,
+            Some(tier_rehost.join(tier).join("transformer"))
+        );
         assert_eq!(
             load.dit_dir
                 .as_deref()
                 .and_then(std::path::Path::parent)
                 .map(|parent| parent.join("transformer_ref")),
-            Some(rehost.join(tier).join("transformer_ref"))
+            Some(tier_rehost.join(tier).join("transformer_ref"))
         );
         assert_eq!(
             load.text_encoder_dir,

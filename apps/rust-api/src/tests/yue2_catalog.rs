@@ -967,7 +967,11 @@ async fn selected_h3_terms_never_unblock_a_shared_blocked_component() {
     // over every acknowledgment, so declare it on an unregistered sibling row sharing the H3 repo.
     let mut blocker = builtin_model("minimax_h3");
     blocker["id"] = json!("h3_blocked_component_fixture");
-    blocker["conditionalComponents"] = json!([{"componentId":"blocked_fixture","repo":"SceneWorks/minimax-h3-mlx","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}}]);
+    // Both packed-tier rehosts: macOS installs q4 from the MLX one, Windows/Linux from the GGML one.
+    blocker["conditionalComponents"] = json!([
+        {"componentId":"blocked_fixture","repo":"SceneWorks/minimax-h3-mlx","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}},
+        {"componentId":"blocked_fixture_candle","repo":"SceneWorks/minimax-h3-candle","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}}
+    ]);
     let (app, _) = app_with_licensed_models(
         &temp,
         vec![

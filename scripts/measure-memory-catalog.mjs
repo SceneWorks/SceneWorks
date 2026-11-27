@@ -1112,6 +1112,17 @@ export const MINIMAX_TIER_DIT_FILES = Object.freeze([
 ]);
 
 /**
+ * The Candle lane's q4/q8 MiniMax-H3 tiers: `SceneWorks/minimax-h3-candle`, the MLX rehost's
+ * `{q4,q8}/{transformer,transformer_ref,text_encoder}` layout with every packed projection stored as
+ * GGML blocks. Shared by both catalog entries' `artifacts.candle` (the reference entry keeps the MLX
+ * rehost for its dense `bf16` tier, the only place `bf16/transformer_ref/` is published).
+ */
+const MINIMAX_CANDLE_TIERS = Object.freeze({
+  q4: { env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-candle" },
+  q8: { env: "MINIMAX_H3", repo: "SceneWorks/minimax-h3-candle" },
+});
+
+/**
  * The files a required-file declaration demands for `tier`.
  *
  * A declaration is either a flat list (every tier needs the same files — the SenseNova `_fast`
@@ -1476,6 +1487,9 @@ export const PROVIDER_FAMILIES = Object.freeze({
           env: "MINIMAX_H3_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3", layout: "flat",
           requiredTierFiles: MINIMAX_TIER_DIT_FILES,
         },
+        // The Candle-native GGML tiers: the manifest ships the MLX-affine q4/q8 rehost for macOS
+        // only, and Windows/Linux read the same tier layout from this repository instead.
+        ...MINIMAX_CANDLE_TIERS,
       },
     },
     // The reference entry stages the tier tree at EVERY tier, on both lanes, because
@@ -1483,7 +1497,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
     // `bf16` rehost download for `["macos","windows","linux"]` while the base entry's is macOS-only.
     // Dropping the base entry's candle-bf16 override is therefore not a tidy-up: it is the whole
     // difference between the two entries' artifact axes.
-    variants: { minimax_h3_ref: { artifacts: undefined } },
+    variants: { minimax_h3_ref: { artifacts: { candle: MINIMAX_CANDLE_TIERS } } },
   },
   // MiniMax-H3-Image (SW-7100, feature SW-F363). The load ROOT on every tier is the upstream
   // `MiniMaxAI/MiniMax-H3-Image` snapshot (`vae_diffusers/`, `tokenizer/`), whose own
@@ -1513,6 +1527,13 @@ export const PROVIDER_FAMILIES = Object.freeze({
     components: [
       {
         env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER", repo: "SceneWorks/minimax-h3-mlx",
+        arms: ["mlx"],
+        tiers: ["q4", "q8"], subdirByTier: { q4: "q4/text_encoder", q8: "q8/text_encoder" },
+      },
+      // Off-Mac the packed encoder is MiniMax-H3's Candle-native GGML tier (macOS keeps the MLX one).
+      {
+        env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER", repo: "SceneWorks/minimax-h3-candle",
+        arms: ["candle"],
         tiers: ["q4", "q8"], subdirByTier: { q4: "q4/text_encoder", q8: "q8/text_encoder" },
       },
       {

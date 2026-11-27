@@ -9063,10 +9063,27 @@ fn seed_minimax_h3_image_q4_only_install(data_dir: &std::path::Path) -> std::pat
         "6f62669b919bccdbf51b08c696fbb84542000a87",
     );
     touch(rehost.join("q4/transformer_diffusers/config.json"));
+    // The q4 text encoder's rehost is platform-split (MLX-affine on macOS, the Candle-native GGML
+    // tier elsewhere), so take this OS's row from the shipped entry rather than naming one.
+    let os = std::env::consts::OS;
+    let entry = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3_image")
+        .expect("minimax_h3_image is registered");
+    let row = entry["downloads"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row["componentId"] == "text_encoder"
+                    && row["variant"] == "q4"
+                    && row["platforms"]
+                        .as_array()
+                        .is_none_or(|platforms| platforms.iter().any(|p| p == os))
+            })
+        })
+        .expect("a q4 text encoder row installs on this OS");
     let text_encoder = seed_hf_snapshot(
         data_dir,
-        "SceneWorks/minimax-h3-mlx",
-        "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+        row["repo"].as_str().expect("repo"),
+        row["revision"].as_str().expect("revision"),
     );
     touch(text_encoder.join("q4/text_encoder/config.json"));
     rehost.join("q4")
