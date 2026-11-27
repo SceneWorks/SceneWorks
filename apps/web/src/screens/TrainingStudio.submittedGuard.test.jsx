@@ -42,8 +42,21 @@ async function switchProject(id) {
   await act(async () => root.render(withTrainingStudioContext(trainingProps)));
   await settle();
 }
+const startButton = () => [...container.querySelectorAll("button")].find((node) => node.textContent === "Start training");
+// Start training stays disabled while the draft's server options check is pending
+// ("Checking options with the server…"). That check resolves through dynamic imports of the
+// portable validator, which a fixed microtask flush cannot outlast on a cold module graph, so
+// wait for the real signal. Each poll is a whole act() turn, so the feedback update always
+// lands inside act and never between turns.
+async function waitForStartable(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (startButton()?.disabled !== false && Date.now() < deadline) {
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+  return startButton();
+}
 async function submit() {
-  const button = [...container.querySelectorAll("button")].find((node) => node.textContent === "Start training");
+  const button = await waitForStartable();
   expect(button.disabled).toBe(false);
   await act(async () => button.click());
   await settle();
