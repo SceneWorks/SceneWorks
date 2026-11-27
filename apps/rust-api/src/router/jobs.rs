@@ -15,6 +15,9 @@ pub(super) fn routes() -> Router<AppState> {
         // Cancel every pending (queued / pending_caption) item at once (sc-13448).
         // Static segment like `/clear`, so it takes priority over `/jobs/:job_id`.
         .route("/api/v1/jobs/cancel-pending", post(cancel_pending_jobs))
+        // Cancel an explicit id list in one transaction and one queue refresh (Image Studio's
+        // batch Stop). Static segment, so it takes priority over `/jobs/:job_id`.
+        .route("/api/v1/jobs/cancel", post(cancel_jobs))
         // Move selected not-yet-started jobs to the front. This is a static segment and must be
         // registered before the per-job routes below.
         .route("/api/v1/jobs/prioritize", post(prioritize_jobs))

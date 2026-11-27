@@ -1889,6 +1889,71 @@ fn cancel_pending_jobs_preserves_the_selected_newest_first_order() {
     assert_eq!(canceled_ids, vec![newest.id, middle.id, oldest.id]);
 }
 
+#[test]
+fn cancel_jobs_cancels_exactly_the_listed_jobs_in_one_pass() {
+    // Image Studio's batch cancel: an explicit id list, mixing pending and worker-owned
+    // jobs, cancels each one as `cancel_job` would and leaves every other job alone.
+    let store = store("cancel-jobs-listed");
+    register_image_worker(&store);
+    let running = store
+        .create_job(image_job(object(json!({ "prompt": "running" }))))
+        .expect("creates");
+    let claimed = store
+        .claim_portable("worker-1")
+        .expect("claim runs")
+        .expect("claimed");
+    assert_eq!(claimed.id, running.id);
+    let queued = store
+        .create_job(image_job(object(json!({ "prompt": "queued" }))))
+        .expect("creates");
+    let pending_caption = store
+        .create_job(pending_caption_job(
+            json!({ "prompt": "a fox", "model": "ideogram_4" }),
+        ))
+        .expect("creates");
+    let finished = store
+        .create_job(image_job(object(json!({ "prompt": "already" }))))
+        .expect("creates");
+    store.cancel_job(&finished.id).expect("cancels");
+    let untouched = store
+        .create_job(image_job(object(json!({ "prompt": "not in the batch" }))))
+        .expect("creates");
+
+    let listed = vec![
+        queued.id.clone(),
+        running.id.clone(),
+        "missing-job".to_owned(),
+        pending_caption.id.clone(),
+        queued.id.clone(),
+        finished.id.clone(),
+    ];
+    let jobs = store.cancel_jobs(&listed).expect("batch cancels");
+    let ids: Vec<&str> = jobs.iter().map(|job| job.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            queued.id.as_str(),
+            running.id.as_str(),
+            pending_caption.id.as_str(),
+            finished.id.as_str()
+        ],
+        "first-seen order, duplicates once, unknown ids skipped"
+    );
+    for job in [&jobs[0], &jobs[2]] {
+        assert_eq!(job.status, JobStatus::Canceled, "{}", job.id);
+        assert!(job.cancel_requested);
+    }
+    // The worker-owned job asks its worker to stop, exactly like the single route.
+    assert_eq!(jobs[1].status, JobStatus::Preparing);
+    assert!(jobs[1].cancel_requested);
+    assert_eq!(jobs[3].status, JobStatus::Canceled);
+
+    let untouched_after = store.get_job(&untouched.id).expect("reload");
+    assert_eq!(untouched_after.status, JobStatus::Queued);
+    assert!(!untouched_after.cancel_requested);
+    assert!(store.cancel_jobs(&[]).expect("empty batch").is_empty());
+}
+
 /// An Ideogram auto-caption image job (sc-9120). Created NON-claimable in `pending_caption`.
 fn pending_caption_job(payload: Value) -> CreateJob {
     CreateJob {

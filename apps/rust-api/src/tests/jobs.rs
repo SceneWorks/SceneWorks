@@ -10389,6 +10389,108 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
 }
 
 #[tokio::test]
+async fn cancel_jobs_cancels_exactly_the_listed_jobs_with_one_queue_publish() {
+    // Image Studio's batch Stop: POST /api/v1/jobs/cancel with an explicit id list cancels
+    // each listed job like the per-job route (queued -> canceled, worker-owned -> cancel
+    // requested), leaves unlisted jobs alone, and refreshes the queue ONCE.
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut ids = Vec::new();
+    for prompt in ["one", "two", "three", "four"] {
+        let (_, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "image_detail",
+                "projectId": "project-1",
+                "projectName": "Project 1",
+                "payload": { "prompt": prompt },
+                "requestedGpu": "auto"
+            }),
+        )
+        .await;
+        ids.push(job["id"].as_str().expect("job id").to_owned());
+    }
+    let (_, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    let active_id = claimed["job"]["id"].as_str().expect("claimed").to_owned();
+    assert_eq!(active_id, ids[0]);
+
+    let mut events = state.events.subscribe();
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel",
+        json!({ "jobIds": [ids[0], ids[1], "no-such-job", ids[2]] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["canceled"], 3);
+    let jobs = response["jobs"].as_array().expect("jobs array");
+    assert_eq!(
+        jobs.iter().map(|job| job["id"].clone()).collect::<Vec<_>>(),
+        vec![json!(ids[0]), json!(ids[1]), json!(ids[2])]
+    );
+    assert_eq!(jobs[0]["status"], "preparing");
+    assert_eq!(jobs[0]["cancelRequested"], true);
+    for job in &jobs[1..] {
+        assert_eq!(job["status"], "canceled");
+        assert_eq!(job["message"], "Canceled before a worker started.");
+    }
+    let names = drain_event_names(&mut events).await;
+    assert_eq!(
+        names.iter().filter(|name| *name == "job.updated").count(),
+        3,
+        "{names:?}"
+    );
+    assert_eq!(
+        names.iter().filter(|name| *name == "queue.updated").count(),
+        1,
+        "one queue refresh for the whole batch: {names:?}"
+    );
+
+    let (_, untouched) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{}", ids[3]),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(untouched["status"], "queued");
+    assert_eq!(untouched["cancelRequested"], false);
+
+    let too_many = (0..501)
+        .map(|index| format!("job-{index}"))
+        .collect::<Vec<_>>();
+    let (status, _) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/cancel",
+        json!({ "jobIds": too_many }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

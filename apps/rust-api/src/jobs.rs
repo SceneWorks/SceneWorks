@@ -3177,6 +3177,57 @@ pub(crate) async fn cancel_pending_jobs(
     }))
 }
 
+/// Upper bound on `POST /api/v1/jobs/cancel`'s id list (the same cap as prioritize). A larger
+/// batch is sent in several requests by the client.
+const MAX_CANCEL_SELECTION: usize = 500;
+
+/// Cancel an explicit set of jobs in one request — Image Studio's batch Stop. One store
+/// transaction cancels each listed job exactly as [`cancel_job`] would (pending jobs go
+/// straight to `canceled`, worker-owned jobs get a cooperative cancel request, terminal jobs
+/// are returned unchanged, unknown ids are skipped), then one `job.updated` per job and ONE
+/// queue refresh. The batch used to send one `/jobs/:id/cancel` per job, ~6 at a time, each
+/// waiting on its own queue rebuild: a 42-job batch took minutes and starved the browser's
+/// connection pool.
+pub(crate) async fn cancel_jobs(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<CancelJobsRequest>,
+) -> Result<Json<CancelJobsResponse>, ApiError> {
+    if payload.job_ids.len() > MAX_CANCEL_SELECTION {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_CANCEL_SELECTION} jobs can be canceled at once"
+        )));
+    }
+    let job_ids = payload
+        .job_ids
+        .into_iter()
+        .filter(|job_id| !job_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    let jobs = store_call(state.clone(), move |store, _timeout| {
+        store.cancel_jobs(&job_ids)
+    })
+    .await?;
+    let mut cascade_error = None;
+    for job in &jobs {
+        if let Err(error) =
+            crate::generation::cascade_cancel_vector_prompt_workflow(&state, job).await
+        {
+            cascade_error.get_or_insert(error);
+        }
+        publish(&state, "job.updated", job);
+    }
+    if !jobs.is_empty() {
+        request_queue_publish(&state);
+    }
+    if let Some(error) = cascade_error {
+        return Err(error);
+    }
+    Ok(Json(CancelJobsResponse {
+        canceled: jobs.len(),
+        jobs: public_job_snapshots(jobs),
+        extra: Default::default(),
+    }))
+}
+
 /// Move selected not-yet-started jobs to the front of the worker queue. The store applies the
 /// change under the same immediate transaction used for claims, so a worker either claims a job
 /// first (and it is ignored here) or observes its new rank — there is no preemption race. Prompt

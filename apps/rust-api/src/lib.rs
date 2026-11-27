@@ -23,12 +23,12 @@ use axum::{Json, Router};
 use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
-    CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
-    ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject,
-    PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary, RetryJobRequest,
-    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
-    WorkerTerminationRequest,
+    CancelJobsRequest, CancelJobsResponse, CancelPendingJobsRequest, CancelPendingJobsResponse,
+    ClaimRequest, ClaimResponse, ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest,
+    GenerationMetrics, GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType,
+    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
+    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 #[cfg(test)]
 use sceneworks_core::hf_home::huggingface_hub_cache_dir;
@@ -200,10 +200,10 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    append_job_result_items, cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs,
-    create_job, duplicate_job, exact_replay_job, get_execution_receipt, get_job, get_job_metrics,
-    invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs, list_metrics,
-    prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
+    append_job_result_items, cancel_job, cancel_jobs, cancel_pending_jobs, claim_job, clear_job,
+    clear_jobs, create_job, duplicate_job, exact_replay_job, get_execution_receipt, get_job,
+    get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs,
+    list_metrics, prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{

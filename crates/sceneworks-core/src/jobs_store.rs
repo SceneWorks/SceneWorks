@@ -2494,7 +2494,45 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.get_job_on_connection(&transaction, job_id)?;
+        let job = self.cancel_job_on_transaction(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Cancel an explicit set of jobs in ONE transaction, each exactly as [`Self::cancel_job`]
+    /// would: a pending job goes straight to `canceled`, a worker-owned job gets a cooperative
+    /// cancel request, and a terminal job is returned unchanged. Ids that name no job are
+    /// skipped (a batch can race the job's retention or a typo), and duplicates are cancelled
+    /// once. Snapshots come back in first-seen request order so a batch caller can publish one
+    /// `job.updated` per job and a single queue refresh.
+    pub fn cancel_jobs(&self, job_ids: &[String]) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut jobs = Vec::new();
+        for job_id in job_ids {
+            if !seen.insert(job_id.as_str()) {
+                continue;
+            }
+            match self.cancel_job_on_transaction(&transaction, job_id) {
+                Ok(job) => jobs.push(job),
+                Err(JobsStoreError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        transaction.commit()?;
+        Ok(jobs)
+    }
+
+    /// The one cancel transition shared by [`Self::cancel_job`] and [`Self::cancel_jobs`]; the
+    /// caller owns the immediate transaction.
+    fn cancel_job_on_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        job_id: &str,
+    ) -> JobsStoreResult<JobSnapshot> {
+        let job = self.get_job_on_connection(transaction, job_id)?;
         if is_terminal_status(job.status.as_str()) {
             return Ok(job);
         }
@@ -2537,9 +2575,7 @@ impl JobsStore {
                 params![now, job_id],
             )?;
         }
-        let job = self.get_job_on_connection(&transaction, job_id)?;
-        transaction.commit()?;
-        Ok(job)
+        self.get_job_on_connection(transaction, job_id)
     }
 
     /// Bulk-cancel every PENDING (not-yet-worker-owned) job — the fleet analog of the
