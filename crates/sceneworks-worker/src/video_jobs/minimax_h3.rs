@@ -106,6 +106,7 @@ pub(super) fn record_cuda_proof_pool(job_id: &str, stage: &str) -> WorkerResult<
 // components, and they live in a DIFFERENT repo from the rest of the shared floor:
 //
 //     <tier root>/{q4,q8}/{transformer,transformer_ref,text_encoder}/ <- SceneWorks/minimax-h3-mlx
+//                                       (off-Mac: SceneWorks/minimax-h3-candle, GGML blocks)
 //     <tier root>/bf16/{transformer,transformer_ref}/                 <- SceneWorks/minimax-h3-mlx
 //     <base root>/{tokenizer,vae,audio_vae,FL2VA/audio_vae}/          <- MiniMaxAI/MiniMax-H3 (coReq)
 //     <base root>/text_encoder/                                       <- MiniMaxAI (bf16 tier ONLY)
@@ -130,8 +131,16 @@ pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";
+/// The Candle-native q4/q8 tiers: the same `{q4,q8}/{transformer,transformer_ref,text_encoder}`
+/// layout as the MLX rehost, with every packed projection stored as GGML blocks (Q4_1 / Q8_0) so the
+/// load uses them as-is. Reading the MLX tiers here instead made the first render repack every
+/// projection (~130 GB) into the saved-quantization cache.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
+pub(super) const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-candle";
+/// The MLX rehost still serves the off-Mac **bf16** `transformer_ref` (`minimax_h3_ref`'s dense
+/// Ref2VA partition); there is no packed form to convert, and upstream ships no such directory.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MINIMAX_H3_BF16_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
 
 /// The ONE registry id both catalog entries load. See fact 1 above — the partition split is a
 /// directory, not a provider.
@@ -1718,8 +1727,13 @@ pub(super) fn resolve_candle_minimax_h3_load(
     let (tier, quant) = candle_minimax_h3_tier(request);
     let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;
     let is_reference = request.model == "minimax_h3_ref";
+    let tier_repo = if quant.is_some() {
+        CANDLE_MINIMAX_H3_TIER_REPO
+    } else {
+        CANDLE_MINIMAX_H3_BF16_TIER_REPO
+    };
     let tier_root = (quant.is_some() || is_reference)
-        .then(|| candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO))
+        .then(|| candle_minimax_h3_snapshot_dir(settings, tier_repo))
         .transpose()?
         .map(|root| root.join(tier));
     let dit_dir = match (tier_root.as_deref(), is_reference, quant.is_some()) {

@@ -171,6 +171,11 @@ pub const LTX_2_5_REVISION: &str = "081658ce6886cacba20817ce0359bbefef706ff2";
 /// `text_encoder/`. A capture therefore resolves TWO artifact triples, this one and
 /// [`MINIMAX_UPSTREAM_REPOSITORY`], and the record's loadability fingerprint names both.
 pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
+/// The Candle-native `candle:minimax_h3` q4/q8 tiers: the same per-tier `transformer/`,
+/// `transformer_ref/` and `text_encoder/` layout as [`MINIMAX_REPOSITORY`], with every packed
+/// projection stored as GGML blocks. The Candle arm's dense `bf16` reference tier still binds
+/// [`MINIMAX_REPOSITORY`], which is the only place `bf16/transformer_ref/` is published.
+pub const MINIMAX_CANDLE_REPOSITORY: &str = "SceneWorks/minimax-h3-candle";
 /// The upstream `minimax_h3` snapshot the shared partitions come from. It is a DIFFERENT repository
 /// id from [`MINIMAX_REPOSITORY`] with no tier sub-directory, so it is validated through
 /// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
