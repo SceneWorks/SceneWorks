@@ -234,3 +234,29 @@ pub(crate) async fn flush_after_test_request(
         Err(error) => error.into_response(),
     }
 }
+
+/// Request a `queue.updated` publish covering everything this request committed.
+/// Returns immediately: the rebuild runs on the coalescing publisher (see
+/// this module), at most every `QUEUE_PUBLISH_MIN_INTERVAL`, and runs the
+/// stale-worker sweep before reading the summary.
+pub(crate) fn request_queue_publish(state: &AppState) {
+    state.queue_publisher.request(state, true);
+}
+
+/// Like [`request_queue_publish`], but does not ask for the stale-worker sweep
+/// because the caller already ran one in its own transaction this request
+/// (sc-8889 / F-087). The coalesced round still sweeps if any other request it
+/// covers asked for one. Use only right after a `mark_stale_workers_interrupted`
+/// call.
+pub(crate) fn request_queue_publish_skip_sweep(state: &AppState) {
+    state.queue_publisher.request(state, false);
+}
+
+/// Wait until every queue publish requested so far has gone out, skipping the
+/// coalescing interval. Production handlers never need this (no response depends
+/// on the published snapshot); tests use it to observe `queue.updated`
+/// deterministically.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn flush_queue_publishes(state: &AppState) -> Result<(), ApiError> {
+    state.queue_publisher.flush(state).await
+}

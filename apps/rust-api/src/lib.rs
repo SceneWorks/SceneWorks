@@ -108,6 +108,11 @@ use project_files::*;
 use validators::*;
 mod catalog_scan_supervisor;
 mod queue_publisher;
+#[cfg(test)]
+pub(crate) use queue_publisher::flush_queue_publishes;
+pub(crate) use queue_publisher::{request_queue_publish, request_queue_publish_skip_sweep};
+mod jobs_db_maintenance;
+pub(crate) use jobs_db_maintenance::{compact_and_checkpoint_jobs_db, spawn_jobs_wal_checkpoints};
 mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
 mod saved_voices;
@@ -1914,102 +1919,6 @@ async fn create_generation_job_with_status(
         (initial_status, None),
     )
     .await
-}
-
-/// Startup upkeep of the jobs DB file, after retention and recovery have released
-/// whatever rows they release: compact a heavily fragmented file once
-/// ([`CompactionPolicy::STARTUP`]), then truncate the WAL so the server starts from
-/// an empty one. Both are physical-only and best effort — a failure is logged and
-/// startup continues on the uncompacted file.
-fn compact_and_checkpoint_jobs_db(jobs_store: &JobsStore) {
-    match jobs_store.compact_if_fragmented(sceneworks_core::jobs_store::CompactionPolicy::STARTUP) {
-        Ok(report) if report.vacuumed => tracing::info!(
-            event = "jobs_db_compacted",
-            page_size = report.page_size,
-            page_count_before = report.page_count_before,
-            freelist_count_before = report.freelist_count_before,
-            page_count_after = report.page_count_after,
-            elapsed_ms = report.elapsed.as_millis() as u64,
-            "compacted the jobs database"
-        ),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(
-            event = "jobs_db_compaction_failed",
-            error = %error,
-            "could not compact the jobs database; continuing with the existing file"
-        ),
-    }
-    if let Err(error) = jobs_store.checkpoint_wal_truncate(Duration::from_secs(5)) {
-        tracing::warn!(
-            event = "jobs_db_checkpoint_failed",
-            error = %error,
-            "could not checkpoint the jobs database WAL at startup"
-        );
-    }
-}
-
-/// How often the running API truncates the jobs WAL. Checkpoints are cheap when
-/// the WAL is small, and a blocked one (a long reader) simply retries next tick.
-const JOBS_WAL_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
-/// A periodic checkpoint never waits long for readers: it runs on its own
-/// connection and would otherwise hold SQLite's writer lock while it waits.
-const JOBS_WAL_CHECKPOINT_BUSY_TIMEOUT: Duration = Duration::from_millis(100);
-
-/// Truncate the jobs WAL periodically so a burst of writes (a large claim
-/// rewrite, a bulk cancel, a retention purge) does not leave a high-water WAL
-/// behind for the life of the process.
-pub(crate) fn spawn_jobs_wal_checkpoints(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticks = tokio::time::interval(JOBS_WAL_CHECKPOINT_INTERVAL);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticks.tick().await;
-        loop {
-            ticks.tick().await;
-            let result = store_call(state.clone(), |store, _timeout| {
-                store.checkpoint_wal_truncate(JOBS_WAL_CHECKPOINT_BUSY_TIMEOUT)
-            })
-            .await;
-            match result {
-                Ok(checkpoint) if checkpoint.busy => tracing::debug!(
-                    event = "jobs_db_checkpoint_busy",
-                    log_frames = checkpoint.log_frames,
-                    "jobs WAL checkpoint deferred by an active reader"
-                ),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(
-                    event = "jobs_db_checkpoint_failed",
-                    error = %error.detail,
-                    "periodic jobs WAL checkpoint failed"
-                ),
-            }
-        }
-    })
-}
-
-/// Request a `queue.updated` publish covering everything this request committed.
-/// Returns immediately: the rebuild runs on the coalescing publisher (see
-/// [`queue_publisher`]), at most every `QUEUE_PUBLISH_MIN_INTERVAL`, and runs the
-/// stale-worker sweep before reading the summary.
-fn request_queue_publish(state: &AppState) {
-    state.queue_publisher.request(state, true);
-}
-
-/// Like [`request_queue_publish`], but does not ask for the stale-worker sweep
-/// because the caller already ran one in its own transaction this request
-/// (sc-8889 / F-087). The coalesced round still sweeps if any other request it
-/// covers asked for one. Use only right after a `mark_stale_workers_interrupted`
-/// call.
-fn request_queue_publish_skip_sweep(state: &AppState) {
-    state.queue_publisher.request(state, false);
-}
-
-/// Wait until every queue publish requested so far has gone out, skipping the
-/// coalescing interval. Production handlers never need this (no response depends
-/// on the published snapshot); tests use it to observe `queue.updated`
-/// deterministically.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) async fn flush_queue_publishes(state: &AppState) -> Result<(), ApiError> {
-    state.queue_publisher.flush(state).await
 }
 
 fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {

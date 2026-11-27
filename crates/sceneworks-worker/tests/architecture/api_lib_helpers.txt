@@ -49,8 +49,6 @@ preferred_lora_value
 probe_data_dir_writable
 project_call
 publish
-publish_queue
-publish_queue_skip_sweep
 queue_summary_snapshot
 queue_summary_snapshot_inner
 random_image_seeds
