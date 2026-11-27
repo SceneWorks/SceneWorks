@@ -1032,12 +1032,12 @@ mod tests {
             lane,
         );
         let dir = position(body, "weights_dir = plan.weights_dir.clone();", lane);
-        let gate_key = position(body, "let mut tier = candle_resolved_tier_key(", lane);
+        let gate_key = position(body, "let mut tier = candle_stream_tier_key(", lane);
         let tier = position(body, "tier = plan.tier.key();", lane);
         let evidence = position(body, "validate_candle_tier_memory_evidence(", lane);
         let downtier = position(
             body,
-            "if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {",
+            "if convrot.is_none() && w4a8.is_none() && !explicit_pick && flux3_plan.is_none() {",
             lane,
         );
         let quant = position(body, "Some(plan) => plan.quant_and_bits(),", lane);
