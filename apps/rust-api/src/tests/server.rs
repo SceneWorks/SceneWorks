@@ -158,11 +158,15 @@ fn duration_lines(log: &str) -> Vec<&str> {
 }
 
 /// Drives the real timing middleware over routes registered under the production route
-/// labels: fast successes of the challenge poll are silent, a slow quiet-route success and a
-/// liveness failure are logged at WARN, and an ordinary route still logs every request at INFO.
+/// labels: fast successes of the challenge poll are silent, and a slow quiet-route success and a
+/// liveness failure are logged at WARN. That an ordinary route logs every request is pinned on
+/// `should_log_api_request_duration` above instead: its INFO event is hit concurrently by every
+/// other API test, and tracing's process-wide callsite-interest cache can then miss a scoped
+/// capture subscriber (observed on the hosted macOS lane), so a captured INFO count is not a
+/// deterministic assertion.
 #[tokio::test]
 async fn request_timing_middleware_quiets_only_fast_successful_background_polls() {
-    use axum::routing::{get, post};
+    use axum::routing::post;
     let app = axum::Router::new()
         .route(
             "/api/v1/workers/:worker_id/portable-source-challenges",
@@ -179,7 +183,6 @@ async fn request_timing_middleware_quiets_only_fast_successful_background_polls(
             "/api/v1/workers/:worker_id/heartbeat",
             post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
         )
-        .route("/api/v1/jobs/:job_id", get(|| async { StatusCode::OK }))
         .layer(axum::middleware::from_fn(crate::api_request_timing));
     let (capture, _guard) = capture_request_logs();
 
@@ -223,16 +226,9 @@ async fn request_timing_middleware_quiets_only_fast_successful_background_polls(
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    // An ordinary route keeps its INFO line for every successful request.
-    for _ in 0..2 {
-        let (status, _, _) =
-            request_raw(app.clone(), "GET", "/api/v1/jobs/job-1", Body::empty(), &[]).await;
-        assert_eq!(status, StatusCode::OK);
-    }
-
     let log = capture.text();
     let lines = duration_lines(&log);
-    assert_eq!(lines.len(), 4, "{log}");
+    assert_eq!(lines.len(), 2, "{log}");
     assert!(
         lines[0].contains("WARN") && lines[0].contains("/api/v1/jobs/:job_id/progress"),
         "{}",
@@ -245,12 +241,6 @@ async fn request_timing_middleware_quiets_only_fast_successful_background_polls(
         "{}",
         lines[1]
     );
-    for line in &lines[2..] {
-        assert!(
-            line.contains("INFO") && line.contains("\"/api/v1/jobs/:job_id\""),
-            "{line}"
-        );
-    }
     assert!(
         !log.contains("worker-1") && !log.contains("job-1"),
         "route labels, never ids: {log}"
