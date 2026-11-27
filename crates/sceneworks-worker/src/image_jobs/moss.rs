@@ -49,9 +49,9 @@ use serde_json::json;
 // MOSS uses the generic image stream/cache transaction, with its own exact author admission.
 // The same function is reached from the MLX and Candle `_using` loader-injection seams.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::moss_image::memory_strategy as moss_memory;
+use runtime_cuda::memory_helpers::moss_image::memory_strategy as moss_memory;
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::moss_image::memory_strategy as moss_memory;
+use runtime_macos::memory_helpers::moss_image::memory_strategy as moss_memory;
 
 fn moss_live_budget(settings: &Settings) -> WorkerResult<gen_core::MemoryBudget> {
     #[cfg(target_os = "macos")]
@@ -111,7 +111,7 @@ fn moss_execution_asset_selected(
 fn moss_owned_weight_bytes(generator: &dyn Generator, measured_load_delta: u64) -> u64 {
     // A lazy renderer can materialize after the loader delta was measured. The current provider
     // census describes only this serialized cache entry's actually retained weights.
-    measured_load_delta.max(generator.moss_image_owned_weight_bytes().unwrap_or(0))
+    measured_load_delta.max(generator.retained_weight_bytes().unwrap_or(0))
 }
 /// Pins every selected MOSS weight file. `on_file(done, total)` fires before each pin so a cold
 /// seal (a full SHA-256 of a multi-GB file, sc-26610) is visible as progress, not a static stage.
@@ -227,9 +227,15 @@ fn moss_render(
     if request.cancel.is_cancelled() {
         return Err(WorkerError::Canceled("MOSS generation canceled".into()));
     }
-    let receipt = generator.moss_image_execution_report().ok_or_else(|| {
-        WorkerError::Engine("MOSS provider completed without its actual execution receipt".into())
-    })?;
+    let receipt = completed
+        .generation
+        .moss_image_report()
+        .cloned()
+        .ok_or_else(|| {
+            WorkerError::Engine(
+                "MOSS provider completed without its actual execution receipt".into(),
+            )
+        })?;
     let Some(GenerationOutput::Images(images)) = completed.generation.output else {
         return Err(WorkerError::Engine(
             "MOSS provider returned non-image output".into(),
@@ -257,7 +263,7 @@ fn moss_render(
     let mut facts = lane_controls::image_facts(
         &[],
         adapter_identities,
-        &generator.adapter_apply_reports(),
+        &completed.generation.adapter_apply_reports,
         None,
     )
     .unwrap_or_default();
@@ -352,17 +358,23 @@ fn moss_edit_peak(
     options: sceneworks_core::moss_image::EditOptions,
     advanced: gen_core::moss_image::MossImageAdvancedInputs<'_>,
 ) -> WorkerResult<u64> {
-    generator
-        .moss_image_edit_request_peak(
-            request,
+    let mut edit_request = request.clone();
+    edit_request.extensions.moss_image_mut().edit = Some(
+        gen_core::moss_image_edit::MossImageEditRequest::from_inputs(
             gen_core::moss_image_edit::MossImageEditInputs {
                 references,
                 reference_max_edge: options.reference_max_edge,
                 use_kv_cache: options.use_kv_cache,
                 advanced,
             },
-        )
-        .map_err(|e| crate::classify_engine_error("MOSS edit admission", e))
+        ),
+    );
+    generator
+        .request_memory_peak(&edit_request)
+        .map_err(|e| crate::classify_engine_error("MOSS edit admission", e))?
+        .ok_or_else(|| {
+            WorkerError::Engine("MOSS edit provider does not support request memory peak".into())
+        })
 }
 fn moss_edit_render(
     generator: &dyn Generator,
@@ -373,23 +385,27 @@ fn moss_edit_render(
     adapter_identities: &[lane_controls::AdapterIdentity],
     progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(gen_core::moss_image::MossImageAdvancedOutput, JsonObject)> {
-    let completed = generator
-        .generate_moss_image_edit_with_execution_report(
-            request,
+    let mut edit_request = request.clone();
+    edit_request.extensions.moss_image_mut().edit = Some(
+        gen_core::moss_image_edit::MossImageEditRequest::from_inputs(
             gen_core::moss_image_edit::MossImageEditInputs {
                 references,
                 reference_max_edge: options.reference_max_edge,
                 use_kv_cache: options.use_kv_cache,
                 advanced,
             },
-            progress,
-        )
+        ),
+    );
+    let completed = generator
+        .generate_with_execution_report(&edit_request, progress)
         .map_err(|e| crate::classify_engine_error("MOSS edit", e))?;
     if request.cancel.is_cancelled() {
         return Err(WorkerError::Canceled("MOSS edit canceled".into()));
     }
-    let report = generator
-        .moss_image_edit_execution_report()
+    let report = completed
+        .generation
+        .moss_image_edit_report()
+        .cloned()
         .ok_or_else(|| {
             WorkerError::Engine("MOSS edit completed without its actual execution receipt".into())
         })?;
@@ -410,36 +426,21 @@ fn moss_edit_render(
             "MOSS edit receipt differs from actual output/reference provenance".into(),
         ));
     }
-    let output_count = match &completed.output {
-        gen_core::moss_image::MossImageAdvancedOutput::Images(images)
+    let output = match completed.generation.output {
+        Some(GenerationOutput::Images(images))
             if advanced.output == gen_core::moss_image::MossImageOutputKind::Images =>
         {
-            images.len()
-        }
-        gen_core::moss_image::MossImageAdvancedOutput::Latents { values, shape }
-            if advanced.output == gen_core::moss_image::MossImageOutputKind::Latents =>
-        {
-            let expected = shape.iter().try_fold(1usize, |n, d| n.checked_mul(*d));
-            if shape[1..]
-                != [
-                    128,
-                    request.height as usize / 16,
-                    request.width as usize / 16,
-                ]
-                || expected != Some(values.len())
-                || !values.iter().all(|v| v.is_finite())
-            {
-                return Err(WorkerError::Engine(
-                    "MOSS native latent shape/finite mismatch".into(),
-                ));
-            }
-            shape[0]
+            gen_core::moss_image::MossImageAdvancedOutput::Images(images)
         }
         _ => {
             return Err(WorkerError::Engine(
                 "MOSS native output kind differs from authored output".into(),
             ))
         }
+    };
+    let output_count = match &output {
+        gen_core::moss_image::MossImageAdvancedOutput::Images(images) => images.len(),
+        gen_core::moss_image::MossImageAdvancedOutput::Latents { shape, .. } => shape[0],
     };
     if report.base.data().latent_shape
         != [
@@ -463,7 +464,7 @@ fn moss_edit_render(
     let mut facts = lane_controls::image_facts(
         &[],
         adapter_identities,
-        &generator.adapter_apply_reports(),
+        &completed.generation.adapter_apply_reports,
         None,
     )
     .unwrap_or_default();
@@ -479,7 +480,7 @@ fn moss_edit_render(
         "workerExecutionReport".into(),
         serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
     );
-    Ok((completed.output, facts))
+    Ok((output, facts))
 }
 
 fn write_moss_tensor_companion(
@@ -669,7 +670,12 @@ fn prepare_moss_preload_with_check(
         .map_err(|e| crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
     let entry = sceneworks_core::moss_image::selected_components(
         &request.model_manifest_entry,
-        native.moss_image.as_ref().expect("options"),
+        native
+            .extensions
+            .moss_image
+            .as_ref()
+            .and_then(|ext| ext.options.as_ref())
+            .expect("options"),
     )
     .map_err(WorkerError::InvalidPayload)?;
     let runtime = NativeMossStreamRuntime;
@@ -1070,12 +1076,15 @@ pub(super) async fn generate_moss_stream_with_runtime(
             .validate(&native, &resolved)
             .map_err(WorkerError::InvalidPayload)?;
     }
+    let moss_options = native
+        .extensions
+        .moss_image
+        .as_ref()
+        .and_then(|ext| ext.options.as_ref())
+        .expect("options");
     let entry = sceneworks_core::moss_image::selected_components_for_purpose(
         &request.model_manifest_entry,
-        sceneworks_core::moss_image::request_purpose(
-            &job.payload,
-            native.moss_image.as_ref().expect("options"),
-        ),
+        sceneworks_core::moss_image::request_purpose(&job.payload, moss_options),
     )
     .map_err(WorkerError::InvalidPayload)?;
     let prepared = runtime.prepare(
@@ -1103,7 +1112,7 @@ pub(super) async fn generate_moss_stream_with_runtime(
         },
         resolved.steps,
         Some(&gen_core::moss_image::moss_image_pag_capability()),
-        native.pag.as_ref(),
+        native.features.pag.as_ref(),
     );
     let peak = runtime.cold_peak(MossColdRequest {
         variant,
@@ -1140,8 +1149,15 @@ pub(super) async fn generate_moss_stream_with_runtime(
     raw.insert("steps".to_owned(), json!(resolved.steps));
     raw.insert(
         sceneworks_core::moss_image::OPTIONS_KEY.into(),
-        serde_json::to_value(native.moss_image.as_ref().expect("options"))
-            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
+        serde_json::to_value(
+            native
+                .extensions
+                .moss_image
+                .as_ref()
+                .and_then(|ext| ext.options.as_ref())
+                .expect("options"),
+        )
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
     );
     if edit {
         let carriers = json!({"referenceAssetIds":request.reference_asset_ids,"sourceAssetId":request.source_asset_id,"referenceAssetId":request.reference_asset_id});

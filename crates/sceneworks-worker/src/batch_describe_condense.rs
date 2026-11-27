@@ -626,9 +626,9 @@ pub(crate) fn tokenizer_roots(settings: &Settings, entry: &Value) -> Vec<PathBuf
 struct KreaCounter(KreaTokenizer);
 
 #[cfg(not(target_os = "macos"))]
-use runtime_cuda::providers::krea::KreaTokenizer;
+use runtime_cuda::utilities::krea::KreaTokenizer;
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::krea::KreaTokenizer;
+use runtime_macos::converters::krea::KreaTokenizer;
 
 impl KreaCounter {
     fn load(root: &Path) -> Result<Self, String> {

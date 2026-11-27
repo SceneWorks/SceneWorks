@@ -781,3 +781,135 @@ async fn terminal_seam_delegates_to_sanitizer_and_publishes_only_the_pair() {
         "terminal publication leaves no staging residue"
     );
 }
+
+#[test]
+fn starvector_registered_vector_route_drives_typed_request_and_output() {
+    struct StubVectorGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        output: gen_core::VectorOutput,
+    }
+    impl gen_core::Generator for StubVectorGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            request: &gen_core::GenerationRequest,
+            on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            assert!(request.prompt.is_empty());
+            assert!(matches!(
+                request.conditioning.as_slice(),
+                [gen_core::Conditioning::Reference { .. }]
+            ));
+            let ext = request
+                .extensions
+                .vector
+                .as_ref()
+                .expect("vector extension set");
+            assert!(!ext.render_preview);
+            assert!(ext.allow_non_publishable);
+            on_progress(gen_core::Progress::Step {
+                current: 4,
+                total: ext.max_new_tokens.unwrap_or(128),
+            });
+            Ok(gen_core::GenerationOutput::Vector(self.output.clone()))
+        }
+    }
+
+    let identity = *starvector_model_identity("starvector_1b").unwrap();
+    let provider_request = vector_request(VectorMode::ImageToSvg, "");
+    let image = gen_core::Image {
+        width: 1,
+        height: 1,
+        pixels: vec![10, 20, 30],
+    };
+    let gen_request =
+        starvector_generation_request(&provider_request, image, gen_core::CancelFlag::new())
+            .expect("typed vector GenerationRequest");
+
+    let descriptor = gen_core::ModelDescriptor {
+        id: identity.model_id,
+        family: "starvector",
+        backend: "mlx",
+        modality: gen_core::Modality::Vector,
+        capabilities: gen_core::Capabilities::default(),
+        encoder_contract: None,
+        denoiser_output_latent_space: None,
+        required_components: &[],
+        control_kinds: None,
+    };
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>".to_owned();
+    let publishable = StubVectorGenerator {
+        descriptor: descriptor.clone(),
+        output: gen_core::VectorOutput {
+            svg: svg.clone(),
+            preview: None,
+            finish_reason: gen_core::VectorFinishReason::Stop,
+            generated_tokens: 4,
+            prompt_tokens: Some(16),
+            truncated: false,
+            terminal: gen_core::VectorTerminalMetadata {
+                sanitizer_id: Some(gen_core::vector::VECTOR_SANITIZER_VERSION.to_owned()),
+                viewport: Some([1, 1]),
+                svg_sha256: None,
+                element_count: Some(1),
+                provider_finish_reason: Some("complete_root".to_owned()),
+                generated_bytes: Some(svg.len()),
+                provider_id: Some(identity.mlx_provider_id.to_owned()),
+            },
+        },
+    };
+    let (tx, rx) = tokio::sync::watch::channel(0);
+    let (source, terminal, _exec) = generate_via_registered_vector_route(
+        &publishable,
+        identity,
+        "mlx",
+        identity.mlx_provider_id,
+        &gen_request,
+        &tx,
+        Instant::now(),
+    )
+    .expect("publishable registered vector route succeeds");
+    assert_eq!(source.as_deref(), Some(svg.as_str()));
+    assert_eq!(*rx.borrow(), 4);
+    assert_eq!(terminal.finish_reason, "complete_root");
+    assert_eq!(terminal.generated_tokens, 4);
+    assert_eq!(terminal.provider_id, identity.mlx_provider_id);
+
+    // Non-publishable bounded limit returns None source + typed terminal outcome.
+    let limited = StubVectorGenerator {
+        descriptor,
+        output: gen_core::VectorOutput {
+            svg: String::new(),
+            preview: None,
+            finish_reason: gen_core::VectorFinishReason::Length,
+            generated_tokens: 128,
+            prompt_tokens: Some(16),
+            truncated: true,
+            terminal: gen_core::VectorTerminalMetadata {
+                provider_finish_reason: Some("token_limit".to_owned()),
+                generated_bytes: Some(512),
+                provider_id: Some(identity.mlx_provider_id.to_owned()),
+                ..Default::default()
+            },
+        },
+    };
+    let (tx2, _) = tokio::sync::watch::channel(0);
+    let (limited_source, limited_terminal, _) = generate_via_registered_vector_route(
+        &limited,
+        identity,
+        "mlx",
+        identity.mlx_provider_id,
+        &gen_request,
+        &tx2,
+        Instant::now(),
+    )
+    .expect("bounded limit returns typed terminal outcome");
+    assert!(limited_source.is_none());
+    assert!(!limited_terminal.publishable());
+    assert_eq!(limited_terminal.finish_reason, "token_limit");
+}

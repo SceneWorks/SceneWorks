@@ -348,9 +348,10 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         adapters: adapters.clone(),
     };
     let tier = candle_resolved_tier_key(request, &kolors_base, false);
-    let contract =
-        runtime_cuda::providers::kolors::memory_strategy::provider_contract_for_ip(&contract_paths)
-            .map_err(|error| crate::generation_error("Kolors IP memory contract failed", error))?;
+    let contract = runtime_cuda::memory_helpers::kolors::memory_strategy::provider_contract_for_ip(
+        &contract_paths,
+    )
+    .map_err(|error| crate::generation_error("Kolors IP memory contract failed", error))?;
     let overlay_receipt = crate::candle_memory_strategy::kolors_overlay_receipt_identity(
         KOLORS_IPADAPTER_ENGINE,
         &contract,

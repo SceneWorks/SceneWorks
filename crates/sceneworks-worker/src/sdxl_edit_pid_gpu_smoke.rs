@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use gen_core::runtime::CancelFlag;
 use gen_core::{Image, PidWeights, WeightsSource};
-use runtime_cuda::providers::sdxl::{SdxlEdit, SdxlEditPaths, SdxlEditRequest};
+use runtime_cuda::calibration::sdxl::{SdxlEdit, SdxlEditPaths, SdxlEditRequest};
 
 fn env_path(key: &str) -> PathBuf {
     super::smoke_support::env_path(key)

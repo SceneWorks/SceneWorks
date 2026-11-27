@@ -206,7 +206,7 @@ fn krea_turbo_on_raw_generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<BespokeGeneratedOne> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         // CFG off — no negative branch (the distilled regime baked guidance into the weights).
         negative_prompt: sampling.negative_prompt.clone(),
@@ -220,12 +220,14 @@ fn krea_turbo_on_raw_generate_one(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
-        text_style_gain,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
+    request.features.pag = sampling.features.pag.clone();
+    if let Some(gain) = text_style_gain {
+        request.extensions.krea_mut().text_style_gain = Some(gain);
+    }
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("Krea turbo-on-Raw generation failed", error))?;
@@ -345,17 +347,17 @@ pub(super) async fn generate_krea_turbo_on_raw_stream(
 
     let (sampler, scheduler, scheduler_shift) =
         super::sampling::read_resolved_image_sampling_knobs(request);
-    let sampling = GenerationRequest {
-        sampler,
-        scheduler,
+    let mut sampling = GenerationRequest {
+        sampler: sampler.map(Into::into),
+        scheduler: scheduler.map(Into::into),
         scheduler_shift,
         guidance,
-        pag,
         negative_prompt: (guidance.unwrap_or(0.0) != 0.0
             && !request.negative_prompt.trim().is_empty())
         .then(|| request.negative_prompt.clone()),
         ..Default::default()
     };
+    sampling.features.pag = pag;
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,

@@ -557,15 +557,14 @@ fn common_dependencies_inherit_versions_and_preserve_platform_feature_boundaries
         }
         if name == "sceneworks-worker" {
             assert!(
-                manifest["dependencies"]["candle-gen"]
-                    .get("optional")
-                    .is_none(),
-                "candle training contracts are backend-neutral"
+                manifest["dependencies"].get("candle-gen").is_none(),
+                "REG-5: sceneworks-worker must not depend directly on candle-gen"
             );
             assert!(
                 manifest["target"]["cfg(not(target_os = \"macos\"))"]["dependencies"]
                     .get("candle-gen")
-                    .is_none()
+                    .is_none(),
+                "REG-5: sceneworks-worker must not depend directly on candle-gen under target deps"
             );
             let features = manifest["features"]["backend-candle"].as_array().unwrap();
             assert!(!features.contains(&toml::Value::String("dep:candle-gen".into())));
@@ -2086,5 +2085,337 @@ fn api_route_contract_covers_actual_area_builders() {
     assert_eq!(
         actual, expected,
         "update the real router/authentication regression table when route declarations change"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TOOL-4 narrow structural guards (`SW-6983`, `REG-5`, `REG-6`, `DEC-6`)
+// ---------------------------------------------------------------------------
+
+fn is_allowed_inference_dependency(package: &str) -> bool {
+    matches!(
+        package,
+        "runtime-macos"
+            | "runtime-cuda"
+            | "runtime-cpu"
+            | "runtime-ios"
+            | "runtime-catalog"
+            | "sceneworks-gen-core"
+            | "core-llm"
+            | "load-progress"
+    ) || package.starts_with("sceneworks-gen-core-")
+}
+
+fn is_forbidden_direct_inference_family_crate(package: &str) -> bool {
+    package.starts_with("mlx-gen")
+        || package.starts_with("candle-gen")
+        || package.starts_with("candle-audio")
+        || matches!(package, "mlx-llm" | "candle-llm")
+}
+
+fn collect_forbidden_inference_deps_in_table(
+    owner: &str,
+    deps: &toml::value::Table,
+    offenders: &mut Vec<String>,
+) {
+    for (alias, value) in deps {
+        let package = value
+            .as_table()
+            .and_then(|table| table.get("package"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or(alias.as_str());
+        let from_inference_git = value
+            .as_table()
+            .and_then(|table| table.get("git"))
+            .and_then(toml::Value::as_str)
+            .is_some_and(|git| git.contains("SceneWorks/inference"));
+        if is_forbidden_direct_inference_family_crate(package)
+            || (from_inference_git && !is_allowed_inference_dependency(package))
+        {
+            offenders.push(format!("{owner}: `{alias}` -> `{package}`"));
+        }
+    }
+}
+
+fn forbidden_direct_inference_dependencies(
+    workspace_manifest: &toml::Value,
+    member_manifests: &[(String, toml::Value)],
+) -> Vec<String> {
+    let mut offenders = Vec::new();
+    if let Some(workspace_deps) = workspace_manifest
+        .get("workspace")
+        .and_then(|ws| ws.get("dependencies"))
+        .and_then(toml::Value::as_table)
+    {
+        collect_forbidden_inference_deps_in_table(
+            "Cargo.toml [workspace.dependencies]",
+            workspace_deps,
+            &mut offenders,
+        );
+    }
+    for (name, manifest) in member_manifests {
+        for table in dependency_tables(manifest) {
+            collect_forbidden_inference_deps_in_table(name, table, &mut offenders);
+        }
+    }
+    offenders.sort();
+    offenders
+}
+
+#[test]
+fn reg5_workspace_manifests_depend_only_on_inference_bundles_and_contracts() {
+    let root_manifest = read_manifest(&root().join("Cargo.toml"));
+    let members = workspace_manifests();
+    assert!(
+        !members.is_empty(),
+        "workspace_manifests must load member manifests"
+    );
+    let offenders = forbidden_direct_inference_dependencies(&root_manifest, &members);
+    assert!(
+        offenders.is_empty(),
+        "REG-5 violation: SceneWorks manifests must depend only on `runtime-*` bundles and \
+         contract crates (`sceneworks-gen-core*`, `core-llm`, `load-progress`), never direct \
+         family crates: {offenders:?}"
+    );
+}
+
+#[test]
+fn reg5_bundle_only_guard_rejects_synthetic_direct_family_crate_dependencies() {
+    let valid_root: toml::Value = r#"
+[workspace.dependencies]
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+core-llm = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+load-progress = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+
+[patch.crates-io]
+candle-core = { git = "https://github.com/SceneWorks/candle", rev = "deadbeef" }
+"#
+    .parse()
+    .unwrap();
+    let valid_member: toml::Value = r#"
+[package]
+name = "fixture-consumer"
+[dependencies]
+runtime-macos = { workspace = true }
+gen_core = { package = "sceneworks-gen-core", workspace = true }
+"#
+    .parse()
+    .unwrap();
+    assert!(
+        forbidden_direct_inference_dependencies(
+            &valid_root,
+            &[("fixture-consumer".into(), valid_member)],
+        )
+        .is_empty(),
+        "bundle and contract dependencies (plus [patch]) must be accepted"
+    );
+
+    let violating_root: toml::Value = r#"
+[workspace.dependencies]
+mlx-gen-flux = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+"#
+    .parse()
+    .unwrap();
+    let violating_member: toml::Value = r#"
+[package]
+name = "fixture-violator"
+[dependencies]
+krea_alias = { package = "candle-gen-krea", git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mlx-llm = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+[dev-dependencies]
+candle-audio-yue2 = { git = "https://github.com/SceneWorks/inference", rev = "0f1b7aab" }
+"#
+    .parse()
+    .unwrap();
+    let offenders = forbidden_direct_inference_dependencies(
+        &violating_root,
+        &[("fixture-violator".into(), violating_member)],
+    );
+    assert_eq!(
+        offenders.len(),
+        4,
+        "guard must catch direct, aliased, target-scoped, and dev direct family crates: {offenders:?}"
+    );
+}
+
+const RUNTIME_BUNDLE_CRATES: &[&str] = &[
+    "runtime_macos",
+    "runtime_cuda",
+    "runtime_cpu",
+    "runtime_ios",
+];
+
+fn runtime_providers_imports_in_use_tree(
+    tree: &syn::UseTree,
+    prefix: Option<&str>,
+    offenders: &mut Vec<String>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let ident = path.ident.to_string();
+            if let Some(bundle) = prefix {
+                if ident == "providers" {
+                    offenders.push(format!("{bundle}::providers"));
+                    return;
+                }
+            }
+            let next_prefix = if prefix.is_none() && RUNTIME_BUNDLE_CRATES.contains(&ident.as_str())
+            {
+                Some(ident)
+            } else {
+                None
+            };
+            runtime_providers_imports_in_use_tree(&path.tree, next_prefix.as_deref(), offenders);
+        }
+        syn::UseTree::Name(name) => {
+            if let Some(bundle) = prefix {
+                if name.ident == "providers" {
+                    offenders.push(format!("{bundle}::providers"));
+                }
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            if let Some(bundle) = prefix {
+                if rename.ident == "providers" {
+                    offenders.push(format!("{bundle}::providers"));
+                }
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                runtime_providers_imports_in_use_tree(item, prefix, offenders);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn scan_tokens_for_runtime_providers(
+    tokens: proc_macro2::TokenStream,
+    offenders: &mut Vec<String>,
+) {
+    use proc_macro2::TokenTree;
+    let list: Vec<TokenTree> = tokens.into_iter().collect();
+    for window in list.windows(4) {
+        if let [TokenTree::Ident(bundle), TokenTree::Punct(c1), TokenTree::Punct(c2), TokenTree::Ident(member)] =
+            window
+        {
+            let bundle_str = bundle.to_string();
+            if c1.as_char() == ':'
+                && c2.as_char() == ':'
+                && member == "providers"
+                && RUNTIME_BUNDLE_CRATES.contains(&bundle_str.as_str())
+            {
+                offenders.push(format!("{bundle_str}::providers"));
+            }
+        }
+    }
+    for token in list {
+        if let TokenTree::Group(group) = token {
+            scan_tokens_for_runtime_providers(group.stream(), offenders);
+        }
+    }
+}
+
+fn runtime_providers_imports(source: &str) -> Vec<String> {
+    #[derive(Default)]
+    struct UseVisitor(Vec<String>);
+    impl<'ast> Visit<'ast> for UseVisitor {
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            runtime_providers_imports_in_use_tree(&item.tree, None, &mut self.0);
+            visit::visit_item_use(self, item);
+        }
+    }
+
+    let file = parse(source);
+    let mut offenders = Vec::new();
+    let mut visitor = UseVisitor::default();
+    visitor.visit_file(&file);
+    offenders.extend(visitor.0);
+    scan_tokens_for_runtime_providers(file.into_token_stream(), &mut offenders);
+    offenders.sort();
+    offenders.dedup();
+    offenders
+}
+
+fn rust_sources_excluding_build_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return paths;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some("target" | "node_modules" | ".git")
+            ) {
+                continue;
+            }
+            paths.extend(rust_sources_excluding_build_dirs(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+}
+
+#[test]
+fn reg6_providers_import_guard_rejects_violations_and_accepts_facades_and_comments() {
+    for violating in [
+        "use runtime_cuda::providers::kolors;",
+        "use runtime_macos::{utilities, providers::flux};",
+        "use runtime_macos::providers as p;",
+        "fn call() { let _ = runtime_cpu::providers::foo::bar(); }",
+        "fn call() { let _ = runtime_ios::providers::baz(); }",
+    ] {
+        assert!(
+            !runtime_providers_imports(violating).is_empty(),
+            "REG-6 guard must reject `{violating}`"
+        );
+    }
+
+    let clean = r#"
+        // runtime_cuda::providers::kolors must never be imported in code.
+        use runtime_cuda::memory_helpers::flux::memory_strategy;
+        use runtime_macos::utilities::face::FaceAnalysis;
+        use runtime_macos::converters::wan::product_load;
+        use runtime_cuda::calibration::kolors::KolorsControl;
+        fn helper() -> &'static str {
+            "runtime_macos::providers::flux"
+        }
+    "#;
+    assert!(
+        runtime_providers_imports(clean).is_empty(),
+        "REG-6 guard must accept clean bundle facades, comments, and string literals"
+    );
+}
+
+#[test]
+fn reg6_zero_runtime_providers_imports_in_sceneworks() {
+    let repo_root = root();
+    let mut offenders = Vec::new();
+    for subtree in ["crates", "apps"] {
+        for path in rust_sources_excluding_build_dirs(&repo_root.join(subtree)) {
+            let source = std::fs::read_to_string(&path).unwrap();
+            let hits = runtime_providers_imports(&source);
+            if !hits.is_empty() {
+                let rel = path
+                    .strip_prefix(&repo_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                offenders.push(format!("{rel}: {}", hits.join(", ")));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "REG-6 violation: SceneWorks must import bundle facades (`utilities`, `converters`, \
+         `memory_helpers`, `calibration`, `media`) or `catalog()`, never `runtime_*::providers`: \
+         {offenders:#?}"
     );
 }

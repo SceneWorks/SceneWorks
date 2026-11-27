@@ -1216,15 +1216,15 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         width,
                         height,
                         steps: steps as usize,
-                        sampler: sampling.sampler.clone(),
-                        scheduler: sampling.scheduler.clone(),
+                        sampler: sampling.sampler.as_deref().map(str::to_owned),
+                        scheduler: sampling.scheduler.as_deref().map(str::to_owned),
                         scheduler_shift: sampling.scheduler_shift,
                         guidance,
                         seed: seed as u64,
                         lightning,
                         stage_residency: use_sequential,
                         memory: generation_memory,
-                        pag: sampling.pag.clone(),
+                        pag: sampling.features.pag.clone(),
                         cancel: cancel.clone(),
                         // The job's LIVE per-image preview sink (epic 16948, sc-16962), built by
                         // `preview_sink_for` and handed in by `drive_gen_items`. Qwen-Image-Edit emits

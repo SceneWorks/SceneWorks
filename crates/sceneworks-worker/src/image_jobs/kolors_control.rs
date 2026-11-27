@@ -523,11 +523,12 @@ pub(super) async fn generate_candle_kolors_control_stream(
         adapters: adapters.clone(),
     };
     let tier = candle_resolved_tier_key(request, &kolors_base, false);
-    let contract = runtime_cuda::providers::kolors::memory_strategy::provider_contract_for_control(
-        &contract_paths,
-        pid_weights.as_ref(),
-    )
-    .map_err(|error| crate::generation_error("Kolors control memory contract failed", error))?;
+    let contract =
+        runtime_cuda::memory_helpers::kolors::memory_strategy::provider_contract_for_control(
+            &contract_paths,
+            pid_weights.as_ref(),
+        )
+        .map_err(|error| crate::generation_error("Kolors control memory contract failed", error))?;
     let overlay_receipt = crate::candle_memory_strategy::kolors_overlay_receipt_identity(
         KOLORS_CONTROL_ENGINE,
         &contract,

@@ -24,7 +24,7 @@ use gen_core::CancelFlag;
 use runtime_cuda::media::candle_core::{Device, Tensor};
 use runtime_cuda::media::default_device;
 use runtime_cuda::media::gen_core::Quant;
-use runtime_cuda::providers::sam3::{
+use runtime_cuda::utilities::sam3::{
     Sam3ImageSegmenter, Sam3TextConfig, Sam3Tokenizer, Sam3VideoModel, VideoFrameOutput, Weights,
 };
 

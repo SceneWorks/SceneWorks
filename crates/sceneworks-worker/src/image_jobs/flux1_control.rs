@@ -218,7 +218,7 @@ fn flux1_control_request(
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
 ) -> GenerationRequest {
-    GenerationRequest {
+    let mut req = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -233,9 +233,10 @@ fn flux1_control_request(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
         ..Default::default()
-    }
+    };
+    req.features.pag = sampling.features.pag.clone();
+    req
 }
 
 /// Render one FLUX.1-dev strict-control image from the request [`flux1_control_request`] built and
@@ -547,7 +548,7 @@ pub(super) async fn generate_flux1_dev_control_stream(
             1,
             steps,
             model.descriptor.capabilities.pag.as_ref(),
-            sampling.pag.as_ref(),
+            sampling.features.pag.as_ref(),
         ),
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(

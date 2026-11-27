@@ -1738,32 +1738,49 @@ fn validate_weights_free_training_request(
 
     if plan.target.base_model == "ltx_2_5" {
         #[cfg(target_os = "macos")]
-        mlx_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
-            crate::provider_error(error, |error| {
-                WorkerError::InvalidPayload(format!(
-                    "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
-                ))
-            })
-        })?;
+        runtime_macos::converters::ltx::training::validate_ltx25_training_request(request)
+            .map_err(|error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+                    ))
+                })
+            })?;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        candle_gen_ltx::training::validate_ltx25_training_request(request).map_err(|error| {
-            crate::provider_error(error, |error| {
-                WorkerError::InvalidPayload(format!(
-                    "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
-                ))
-            })
-        })?;
+        runtime_cuda::converters::ltx::training::validate_ltx25_training_request(request).map_err(
+            |error| {
+                crate::provider_error(error, |error| {
+                    WorkerError::InvalidPayload(format!(
+                        "{engine_id} trainer rejected the LTX-2.5 plan before model load: {error}"
+                    ))
+                })
+            },
+        )?;
     }
 
     validate_new_family_request(plan, engine_id, request)?;
     Ok(())
 }
 
-/// Validate the exact weights-free contract shared by the new native families. The common flow
-/// parser comes directly from the pinned `candle-gen` crate, including optimizer aliases and
-/// normalized timestep-bias/loss aliases. SD3 deliberately extends only the timestep-type set with
-/// `default`/`logit_normal`; all other flow families use the shared four-value set. This runs for
-/// both MLX and Candle before their backend-specific load path.
+/// Normalize a free-form training config string through the linked runtime bundle's shared
+/// training vocabulary helper (macOS MLX or Candle CUDA).
+#[cfg(native_lane)]
+fn normalize_training_cfg(value: &str) -> String {
+    #[cfg(target_os = "macos")]
+    {
+        runtime_macos::media::train::vocab::normalize_cfg(value)
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        runtime_cuda::media::train::flow_match::normalize_cfg(value)
+    }
+}
+
+/// Validate the exact weights-free contract shared by the new native families through the linked
+/// runtime bundle's shared training validator (`runtime_macos::media::train::vocab` on macOS,
+/// `runtime_cuda::media::train::flow_match` on CUDA). SD3 deliberately extends only the
+/// timestep-type set with `default`/`logit_normal`; all other flow families use the shared
+/// four-value set.
 #[cfg(native_lane)]
 fn validate_new_family_request(
     plan: &TrainingPlan,
@@ -1789,9 +1806,9 @@ fn validate_new_family_request(
     }
 
     if plan.target.kernel == "kolors_lora" {
-        let timestep = candle_gen::train::flow_match::normalize_cfg(&request.config.timestep_type);
-        let bias = candle_gen::train::flow_match::normalize_cfg(&request.config.timestep_bias);
-        let loss = candle_gen::train::flow_match::normalize_cfg(&request.config.loss_type);
+        let timestep = normalize_training_cfg(&request.config.timestep_type);
+        let bias = normalize_training_cfg(&request.config.timestep_bias);
+        let loss = normalize_training_cfg(&request.config.loss_type);
         if timestep != "sigmoid" || bias != "high_noise" || !matches!(loss.as_str(), "mse" | "l2") {
             return Err(WorkerError::InvalidPayload(format!(
                 "Native trainer '{engine_id}' uses its fixed sigmoid/high_noise DDPM schedule and \
@@ -1810,8 +1827,7 @@ fn validate_new_family_request(
         normalized.config.rank = 1;
     }
     if plan.target.kernel == "sd3_lora" {
-        let timestep =
-            candle_gen::train::flow_match::normalize_cfg(&normalized.config.timestep_type);
+        let timestep = normalize_training_cfg(&normalized.config.timestep_type);
         if !matches!(
             timestep.as_str(),
             "default" | "logit_normal" | "sigmoid" | "linear" | "uniform" | "weighted"
@@ -1825,11 +1841,17 @@ fn validate_new_family_request(
         // SD3's two intentional extensions onto a common value only after validating the original.
         normalized.config.timestep_type = "sigmoid".to_owned();
     }
-    candle_gen::train::flow_match::validate_flow_match_request(
-        &normalized,
-        &format!("{engine_id} trainer"),
-    )
-    .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    let label = format!("{engine_id} trainer");
+    #[cfg(target_os = "macos")]
+    {
+        runtime_macos::media::train::vocab::validate_common_request(&label, &normalized)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        runtime_cuda::media::train::flow_match::validate_flow_match_request(&normalized, &label)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    }
 }
 
 #[cfg(all(test, native_lane))]

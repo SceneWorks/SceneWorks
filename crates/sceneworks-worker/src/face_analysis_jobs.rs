@@ -32,7 +32,7 @@ const CANCEL_MESSAGE: &str = "Dataset face analysis canceled by user.";
 #[cfg(all(target_os = "macos", test))]
 use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::face::FaceAnalysis;
+use runtime_macos::utilities::face::FaceAnalysis;
 // candle face stack (off-Mac): `runtime_cuda::providers::face::load` builds an `impl FaceEmbedder`; importing the
 // trait brings `analyze` into scope.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -101,7 +101,7 @@ impl CatalogFaceDetector {
         }
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
-            let analysis = runtime_cuda::providers::face::load(weights_dir)
+            let analysis = runtime_cuda::utilities::face::load(weights_dir)
                 .map_err(|error| crate::generation_error("face stack load", error))?;
             Ok(Self {
                 backend: crate::DeviceOwned::new(CatalogFaceBackend::Candle(Box::new(analysis))),
@@ -246,7 +246,7 @@ fn analyze_faces(
     cancel: CancelFlag,
     tx: tokio::sync::mpsc::Sender<usize>,
 ) -> WorkerResult<Vec<FaceAnalysisRecord>> {
-    let analysis = runtime_cuda::providers::face::load(&weights_dir)
+    let analysis = runtime_cuda::utilities::face::load(&weights_dir)
         .map_err(|error| crate::generation_error("face stack load", error))?;
     // A typed fault classified mid-run must not let this destructor touch the device.
     let analysis = crate::DeviceOwned::new(analysis);

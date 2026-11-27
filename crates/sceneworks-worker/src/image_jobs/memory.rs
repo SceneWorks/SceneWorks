@@ -880,7 +880,7 @@ pub(crate) async fn admit_sdxl_bespoke_memory(
         })
     })?;
     let contract =
-        runtime_cuda::providers::sdxl::provider_contract_for_spec(&spec).map_err(|error| {
+        runtime_cuda::memory_helpers::sdxl::provider_contract_for_spec(&spec).map_err(|error| {
             crate::provider_error(error, |error| {
                 WorkerError::InvalidPayload(format!("SDXL receipt refused: {error}"))
             })

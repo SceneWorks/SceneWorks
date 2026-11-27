@@ -23,7 +23,7 @@ use std::sync::{Mutex, OnceLock};
 
 use gen_core::CancelFlag;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Segmenter in Phase 6.
-use runtime_macos::providers::sam2::{Sam2ModelSize, Sam2VideoPredictor};
+use runtime_macos::utilities::sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
 use crate::{Settings, WorkerError, WorkerResult};
 

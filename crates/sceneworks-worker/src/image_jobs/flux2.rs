@@ -635,7 +635,6 @@ pub(super) fn flux2_edit_generate_one(
         steps: Some(steps),
         guidance,
         image_guidance,
-        use_pid,
         conditioning,
         memory: selected_memory,
         preview,
@@ -643,9 +642,12 @@ pub(super) fn flux2_edit_generate_one(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
         ..Default::default()
     };
+    if use_pid {
+        request.features.pid = Some(gen_core::PidParams::enabled());
+    }
+    request.features.pag = sampling.features.pag.clone();
     enhance.apply(&mut request, prompt_enhancement);
     let provider_memory_context = if use_provider_memory_safety {
         let contract = generator.memory_strategy_contract().ok_or_else(|| {
@@ -871,7 +873,7 @@ pub(super) async fn generate_flux2_edit_stream(
         // macOS: the MLX provider crate maps the catalog model onto this route (`product_load`),
         // refusing a model the route does not serve rather than recording it as resolved.
         #[cfg(target_os = "macos")]
-        let resolved_route = runtime_macos::providers::flux2::product_load::resolved_route(
+        let resolved_route = runtime_macos::converters::flux2::product_load::resolved_route(
             engine_id,
             &request.model,
         )
@@ -982,7 +984,7 @@ pub(super) async fn generate_flux2_edit_stream(
             1,
             steps,
             model.descriptor.capabilities.pag.as_ref(),
-            sampling.pag.as_ref(),
+            sampling.features.pag.as_ref(),
         ),
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
@@ -1337,9 +1339,9 @@ pub(super) fn flux2_control_generate_one_scoped(
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
         ..Default::default()
     };
+    request.features.pag = sampling.features.pag.clone();
     // sc-20799: this lane used to call `generator.generate` directly — no request scope, no
     // provider safety decision, no admission of any kind. Route it through the shared scope like
     // every other admitted MLX control lane so the uncalibrated dev-control contract gets its
@@ -1618,7 +1620,7 @@ pub(super) async fn generate_flux2_dev_control_stream(
             1,
             steps,
             model.descriptor.capabilities.pag.as_ref(),
-            sampling.pag.as_ref(),
+            sampling.features.pag.as_ref(),
         ),
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(

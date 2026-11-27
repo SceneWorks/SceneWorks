@@ -933,13 +933,13 @@ impl PreparedSdxlHires {
             height: hires.height,
             steps: Some(hires.steps),
             guidance: hires.guidance,
-            use_pid: false,
             conditioning: Vec::new(),
-            low_res_start: None,
             source_image: None,
             strength: None,
             ..first.clone()
         };
+        refine.features.pid = None;
+        refine.features.low_res_start = None;
         enhance.apply(&mut refine, gen_core::PromptEnhancementSink::default());
         let plan = super::render::compile_hires_multi_pass_plan(
             registry, engine_id, &spec, &first, &refine, &hires,
@@ -989,7 +989,7 @@ impl PreparedSdxlHires {
             &[],
             None,
             self.enhance.enabled,
-            self.requests[0].use_pid,
+            self.requests[0].use_pid(),
             0,
             0,
             0,
@@ -1031,7 +1031,7 @@ impl PreparedSdxlHires {
         let (width, height) = base.output_size();
         let mut base_context =
             hires_first_pass_context(&evaluation.context, width, height, base.reference_count());
-        base_context.use_pid = self.requests[0].use_pid;
+        base_context.use_pid = self.requests[0].use_pid();
         self.generate(
             generator,
             loaded_policy,
@@ -1543,20 +1543,22 @@ pub(super) async fn generate_sdxl_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = attach_imported_sdxl_components(spec, &descriptor, api, settings, job).await?;
 
-    let prototype = GenerationRequest {
+    let mut prototype = GenerationRequest {
         negative_prompt,
         width,
         height,
         count: 1,
         steps: Some(steps),
         guidance: Some(guidance),
-        sampler,
-        scheduler,
+        sampler: sampler.map(Into::into),
+        scheduler: scheduler.map(Into::into),
         scheduler_shift,
-        guidance_method,
-        use_pid,
+        guidance_method: guidance_method.map(Into::into),
         ..Default::default()
     };
+    if use_pid {
+        prototype.features.pid = Some(gen_core::PidParams::enabled());
+    }
     let work: Vec<(i64, SdxlImportedItem)> = if let Some(hires) = hires_fix {
         let shared_spec = std::sync::Arc::new(spec.clone());
         work.into_iter()

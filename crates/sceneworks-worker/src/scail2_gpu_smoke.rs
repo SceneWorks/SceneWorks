@@ -181,7 +181,7 @@ fn scail2_candle_gpu_smoke() {
         guidance,
         seed: Some(42),
         conditioning,
-        video_mode: Some(mode.clone()),
+        video_mode: Some(gen_core::VideoMode::from(mode.as_str())),
         ..Default::default()
     };
     // Optional inference LoRA (sc-6838): SCAIL2_LORA=<.safetensors> merges into the dense DiT before

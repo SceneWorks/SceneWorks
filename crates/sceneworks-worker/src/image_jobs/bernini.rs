@@ -226,7 +226,7 @@ fn bernini_image_generate_one_with_memory(
         memory,
         // A single still: `frames == 1` makes the engine return `GenerationOutput::Images`.
         frames: Some(1),
-        video_mode: Some(task.to_owned()),
+        video_mode: Some(task.into()),
         preview,
         cancel: cancel.clone(),
         ..Default::default()

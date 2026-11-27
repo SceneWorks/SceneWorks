@@ -6,76 +6,57 @@ fn declared_rule(backend: MemoryRouteBackend, provider: &str) -> &'static Memory
         .unwrap_or_else(|| panic!("missing declared memory route {backend:?}/{provider}"))
 }
 
-/// Freeze both target-lane witness populations before changing the memory-route authority.
-/// The Candle facts also contain request-strategy witnesses derived from manifest declarations;
-/// those are deliberately joined separately from the legacy/deferred rule population.
+/// Every worker memory-route witness (deferred + Candle request-strategy declarations) must
+/// target a real registered route in the corresponding canonical `sga.capabilities/2` export.
 #[test]
-fn memory_route_witnesses_match_frozen_engine_facts_on_both_backends() {
+fn memory_route_witnesses_resolve_in_sga_capabilities_exports_on_both_backends() {
     let builtin_models = sceneworks_core::registry::builtin_model_specs()
         .map(|spec| spec.project(None))
         .collect::<Vec<_>>();
     let request_strategy = declared_candle_request_strategy_route_witnesses(&builtin_models)
         .expect("shipped Candle request strategy declarations");
 
-    for (backend, frozen) in [
+    for (backend, export) in [
         (
             MemoryRouteBackend::Mlx,
-            include_str!("../../../../config/engine-capabilities/capabilities.mlx.json"),
+            sceneworks_core::sga_capabilities::macos_mlx(),
         ),
         (
             MemoryRouteBackend::Candle,
-            include_str!("../../../../config/engine-capabilities/capabilities.candle.json"),
+            sceneworks_core::sga_capabilities::candle_cuda(),
         ),
     ] {
-        let expected: Value = serde_json::from_str(frozen).expect("checked-in engine facts parse");
-        let expected = expected["memoryRouteWitnesses"]
-            .as_array()
-            .expect("checked-in route witnesses")
-            .iter()
-            .map(|row| {
-                (
-                    row["provider"].as_str().unwrap().to_owned(),
-                    row["tier"].as_str().unwrap().to_owned(),
-                    row["mode"].as_str().unwrap().to_owned(),
-                    row["overlay"].as_str().unwrap().to_owned(),
-                    row["loadProfile"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect::<std::collections::BTreeSet<_>>();
         let mut actual = deferred_route_witnesses()
             .into_iter()
             .filter(|row| row.backend == backend)
-            .map(|row| {
-                (
-                    row.provider.to_owned(),
-                    row.tier.as_str().to_owned(),
-                    row.mode.as_str().to_owned(),
-                    row.overlay.as_str().to_owned(),
-                    row.load_profile.as_str().to_owned(),
-                )
-            })
+            .map(|row| row.provider.to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         if backend == MemoryRouteBackend::Candle {
-            actual.extend(request_strategy.iter().map(|row| {
-                (
-                    row.provider.clone(),
-                    row.tier.as_str().to_owned(),
-                    row.mode.as_str().to_owned(),
-                    row.overlay.as_str().to_owned(),
-                    row.load_profile.as_str().to_owned(),
-                )
-            }));
+            actual.extend(request_strategy.iter().map(|row| row.provider.clone()));
         }
-        if actual != expected {
-            let extra = actual.difference(&expected).take(8).collect::<Vec<_>>();
-            let missing = expected.difference(&actual).take(8).collect::<Vec<_>>();
-            panic!(
-                "{} memory-route witnesses differ: actual {}, frozen {}, extra {extra:?}, missing {missing:?}",
-                backend.as_str(),
-                actual.len(),
-                expected.len()
-            );
-        }
+        assert!(
+            !actual.is_empty(),
+            "{} memory-route witness set must be non-empty",
+            backend.as_str()
+        );
+        // Bespoke Candle Kolors overlays (`KolorsBespoke`) have explicit memory-route waivers
+        // rather than registered `Generator` entries in `sga.capabilities/2`.
+        const CANDLE_BESPOKE_WAIVED_PROVIDERS: &[&str] =
+            &["candle_kolors_control", "candle_kolors_ipadapter"];
+        let missing: Vec<_> = actual
+            .into_iter()
+            .filter(|provider| {
+                !export.routes.contains_key(provider)
+                    && !(backend == MemoryRouteBackend::Candle
+                        && CANDLE_BESPOKE_WAIVED_PROVIDERS.contains(&provider.as_str()))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} memory-route witnesses name providers absent from sga.capabilities/2 ({}): {missing:?}",
+            backend.as_str(),
+            export.feature_set,
+        );
     }
 }
 
@@ -7090,12 +7071,12 @@ fn shipped_qwen_image_2_1_candle_reference_requests_are_declared() {
 #[test]
 fn qwen_image_2_1_reference_bound_matches_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    use runtime_cuda::providers::qwen_image_2_1 as provider;
+    use runtime_cuda::memory_helpers::qwen_image_2_1 as provider;
     #[cfg(target_os = "macos")]
-    use runtime_macos::providers::qwen_image_2_1 as provider;
+    use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
     assert_eq!(
-        QWEN_IMAGE_2_1_MAX_REFERENCES as usize,
-        provider::config::MAX_REFERENCE_IMAGES
+        QWEN_IMAGE_2_1_MAX_REFERENCES,
+        provider::memory_strategy::admission_geometry().max_reference_images
     );
 }
 

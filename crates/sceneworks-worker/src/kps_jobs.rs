@@ -30,7 +30,7 @@ use gen_core::Image;
 #[cfg(target_os = "macos")]
 use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::face::{detector_blob, Scrfd};
+use runtime_macos::utilities::face::{detector_blob, Scrfd};
 // Candle SCRFD/ArcFace face stack (off-Mac, sc-5497): `FaceEmbedder` brings the `detect` trait method
 // into scope; `runtime_cuda::providers::face::load` builds it from the staged `face_dir`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -208,7 +208,7 @@ thread_local! {
     /// symmetric and sidesteps any Send question on the candle analysis/device. `detect(&self, …)` is
     /// a pure forward pass, so reuse across kps jobs is byte-identical.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    static CANDLE_FACE: RefCell<Option<(PathBuf, runtime_cuda::providers::face::CandleFaceAnalysis)>> =
+    static CANDLE_FACE: RefCell<Option<(PathBuf, runtime_cuda::utilities::face::CandleFaceAnalysis)>> =
         const { RefCell::new(None) };
 }
 
@@ -281,7 +281,7 @@ fn detect_largest_kps_candle(face_dir: &Path, image: &Image) -> WorkerResult<Kps
             cell,
             |(dir, _)| dir.as_path() == face_dir,
             || {
-                let analysis = runtime_cuda::providers::face::load(face_dir).map_err(|error| {
+                let analysis = runtime_cuda::utilities::face::load(face_dir).map_err(|error| {
                     crate::generation_error(&format!("face stack {face_dir:?}"), error)
                 })?;
                 Ok((face_dir.to_path_buf(), analysis))
