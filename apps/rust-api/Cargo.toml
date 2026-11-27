@@ -82,6 +82,8 @@ parquet = { workspace = true }
 # Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
 # pinned version as crates/sceneworks-mcp — client features are additive.
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+# Captures the request-timing middleware's tracing output in the request-log tests.
+tracing-subscriber = { workspace = true }
 [lints]
 workspace = true
 

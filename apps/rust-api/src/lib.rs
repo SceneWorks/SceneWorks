@@ -1216,23 +1216,38 @@ fn normalized_api_route(path: &str, matched_path: Option<&str>) -> Option<String
     None
 }
 
-/// Worker claim is a one-second idle poll, so logging every successful sub-millisecond response
-/// floods the session ring buffer and pushes actionable events out of the Logs screen. Keep the
-/// Server-Timing header on every response, but emit the duration event for this route only when the
-/// request fails or is unexpectedly slow. Worker heartbeats are the same kind of liveness traffic,
-/// and a successful one is never logged at all; only failures surface. All other API/MCP routes
-/// retain per-request timing logs.
-const SLOW_CLAIM_REQUEST_MS: f64 = 1_000.0;
+/// Worker background traffic: the claim, portable-source-challenge, and progress routes are
+/// polled or reported many times a second across a host's workers (the challenge poll alone was
+/// ~70% of a 1 GB `api.log`). Logging every fast success floods the session ring buffer and the
+/// desktop's `api.log`, pushing actionable events out of the Logs screen. Keep the Server-Timing
+/// header on every response, but emit the duration event for these routes only when the request
+/// fails or is unexpectedly slow. Worker heartbeats are the same kind of liveness traffic, and a
+/// successful one is never logged at all; only failures surface. Every other API/MCP route
+/// retains per-request timing logs.
+const SLOW_BACKGROUND_REQUEST_MS: f64 = 1_000.0;
+
+/// Background routes whose fast successes are not logged (see [`SLOW_BACKGROUND_REQUEST_MS`]).
+/// Deliberately an explicit list of matched route labels, never a prefix or a global level.
+const QUIET_ON_FAST_SUCCESS_ROUTES: &[&str] = &[
+    "/api/v1/jobs/claim",
+    "/api/v1/workers/:worker_id/portable-source-challenges",
+    "/api/v1/jobs/:job_id/progress",
+];
+
+/// Liveness routes whose successes are never logged, however slow.
+const QUIET_ON_SUCCESS_ROUTES: &[&str] = &["/api/v1/workers/:worker_id/heartbeat"];
 
 fn should_log_api_request_duration(route: &str, status: StatusCode, elapsed_ms: f64) -> bool {
     if !status.is_success() {
         return true;
     }
-    match route {
-        "/api/v1/workers/:worker_id/heartbeat" => false,
-        "/api/v1/jobs/claim" => elapsed_ms >= SLOW_CLAIM_REQUEST_MS,
-        _ => true,
+    if QUIET_ON_SUCCESS_ROUTES.contains(&route) {
+        return false;
     }
+    if QUIET_ON_FAST_SUCCESS_ROUTES.contains(&route) {
+        return elapsed_ms >= SLOW_BACKGROUND_REQUEST_MS;
+    }
+    true
 }
 
 async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
@@ -1256,14 +1271,29 @@ async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
                 .insert(HeaderName::from_static("server-timing"), value);
         }
         if should_log_api_request_duration(&route, response.status(), elapsed_ms) {
-            tracing::info!(
-                event = "api_request_duration",
-                method = %method,
-                route,
-                status = response.status().as_u16(),
-                duration_ms = elapsed_ms,
-                "SceneWorks API response completed"
-            );
+            // A quiet background route only reaches here when it failed or was slow, which is
+            // the anomaly worth surfacing; every other route keeps its ordinary info line.
+            if QUIET_ON_FAST_SUCCESS_ROUTES.contains(&route.as_str())
+                || QUIET_ON_SUCCESS_ROUTES.contains(&route.as_str())
+            {
+                tracing::warn!(
+                    event = "api_request_duration",
+                    method = %method,
+                    route,
+                    status = response.status().as_u16(),
+                    duration_ms = elapsed_ms,
+                    "SceneWorks API background request failed or was slow"
+                );
+            } else {
+                tracing::info!(
+                    event = "api_request_duration",
+                    method = %method,
+                    route,
+                    status = response.status().as_u16(),
+                    duration_ms = elapsed_ms,
+                    "SceneWorks API response completed"
+                );
+            }
         }
     }
 

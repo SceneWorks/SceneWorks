@@ -73,40 +73,32 @@ pub fn init_logging_with_buffer(buffer: &'static SessionLog) {
 /// recurrences: the WebView2 resilience handler's `tracing::error!`s of the kill /
 /// reload outcomes all vanished, leaving the incident undiagnosable). This adds a
 /// file layer writing the same envelope to `path`, so the next incident is
-/// diagnosable. Idempotent, fail-soft: an unopenable path logs a line to stdout
-/// (best-effort) and leaves the stdout-only subscriber in place.
+/// diagnosable. Idempotent, fail-soft: an unopenable path drops file output (and re-tries the
+/// open later) while the stdout layer keeps running.
+///
+/// The file is size-rotated through the process-wide [`crate::log_rotation::shared_log_file`]
+/// writer for `path`, so `desktop.log` stays bounded like the sidecar logs the desktop writes.
 ///
 /// Only the DESKTOP SHELL needs this; sidecars keep their stdout captured (into
 /// `%LOCALAPPDATA%\SceneWorks\logs\api.log` etc. by `setup.rs`).
 pub fn init_logging_with_file(path: &std::path::Path) {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path);
-    match file {
-        Ok(file) => install_with_file(Some(file), None),
-        Err(error) => {
-            // Fail-soft: keep the stdout subscriber rather than losing all logging.
-            eprintln!(
-                "sceneworks: could not open log file {}; staying on stdout-only logging: {error}",
-                path.display()
-            );
-            install(None);
-        }
-    }
+    install_with_file(Some(crate::log_rotation::shared_log_file(path)), None);
 }
 
 /// The stdout (+ optional session buffer) installer. See [`install_with_file`] —
 /// the file layer is only added through that entry point.
 fn install(buffer: Option<&'static SessionLog>) {
-    install_with_file(None::<std::fs::File>, buffer);
+    install_with_file(None, buffer);
 }
 
 /// The shared installer: stdout + optional session buffer + optional file layer.
 /// `INIT` gates the whole setup — the first call wins and later calls are no-ops
 /// — so each process picks ONE shape at startup (the API adds the session
 /// buffer; the desktop shell adds the file layer; sidecars are stdout-only).
-fn install_with_file(file: Option<std::fs::File>, buffer: Option<&'static SessionLog>) {
+fn install_with_file(
+    file: Option<std::sync::Arc<crate::log_rotation::SharedLogFile>>,
+    buffer: Option<&'static SessionLog>,
+) {
     INIT.call_once(|| {
         let filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
@@ -121,7 +113,7 @@ fn install_with_file(file: Option<std::fs::File>, buffer: Option<&'static Sessio
                 let file_layer = file.map(|file| {
                     fmt::layer()
                         .with_ansi(false)
-                        .with_writer(std::sync::Mutex::new(file))
+                        .with_writer(file)
                         .event_format(SceneworksJsonFormat)
                 });
                 let _ = tracing_subscriber::registry()
@@ -137,11 +129,7 @@ fn install_with_file(file: Option<std::fs::File>, buffer: Option<&'static Sessio
                     .try_init();
             }
             OutputFormat::Pretty => {
-                let file_layer = file.map(|file| {
-                    fmt::layer()
-                        .with_ansi(false)
-                        .with_writer(std::sync::Mutex::new(file))
-                });
+                let file_layer = file.map(|file| fmt::layer().with_ansi(false).with_writer(file));
                 let _ = tracing_subscriber::registry()
                     .with(filter)
                     .with(SpanFieldsLayer)

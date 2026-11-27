@@ -57,6 +57,7 @@ pub mod jobs_store;
 pub mod jsonc;
 pub mod license_acknowledgments;
 pub mod limits;
+pub mod log_rotation;
 pub mod loop_utility;
 pub mod lora_family;
 pub mod lora_url;

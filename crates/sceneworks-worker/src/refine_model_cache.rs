@@ -516,6 +516,11 @@ pub(crate) mod tests {
         }
     }
 
+    /// Upper bound on waiting for the cache thread to answer a seed or state probe. Only a hang
+    /// guard: a reply returns at once, but a freshly spawned thread on a loaded CI host can take
+    /// longer than a second to get scheduled (both idle-eviction tests timed out at 1 s).
+    const ACK_WAIT: Duration = Duration::from_secs(30);
+
     fn stub_key() -> RefineModelCacheKey {
         RefineModelCacheKey::new(&spec("/models/stub"), &ModelRequirements::default())
     }
@@ -538,9 +543,7 @@ pub(crate) mod tests {
             seed_tx.send(()).expect("ack cache seed");
         }))
         .expect("seed cache entry");
-        seed_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("cache seed ack");
+        seed_rx.recv_timeout(ACK_WAIT).expect("cache seed ack");
 
         // Poll for eviction: the worker only evicts when its `recv_timeout(idle)` actually TIMES
         // OUT, and under CI load the thread can be starved past a fixed wait. Each poll sleeps
@@ -553,10 +556,7 @@ pub(crate) mod tests {
                 reply_tx.send(cache.is_empty()).expect("send cache state");
             }))
             .expect("check cache state");
-            if reply_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("cache state reply")
-            {
+            if reply_rx.recv_timeout(ACK_WAIT).expect("cache state reply") {
                 evicted = true;
                 break;
             }
@@ -581,9 +581,7 @@ pub(crate) mod tests {
             seed_tx.send(()).expect("ack cache seed");
         }))
         .expect("seed cache entry");
-        seed_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("cache seed ack");
+        seed_rx.recv_timeout(ACK_WAIT).expect("cache seed ack");
 
         thread::sleep(Duration::from_millis(80));
 
@@ -593,9 +591,7 @@ pub(crate) mod tests {
         }))
         .expect("check cache state");
         assert!(
-            reply_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("cache state reply"),
+            reply_rx.recv_timeout(ACK_WAIT).expect("cache state reply"),
             "expected disabled idle timeout to keep the resident refine model"
         );
         drop(tx);

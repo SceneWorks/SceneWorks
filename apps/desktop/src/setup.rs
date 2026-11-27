@@ -652,22 +652,26 @@ fn seed_builtin_manifests() -> Result<(), String> {
 
 use crate::settings::resolved_data_dir;
 
+/// Append `line` to the desktop-owned log at `path` and mirror it into the session buffer.
+///
+/// Every desktop log (`api.log`, `<label>-worker.log`, `desktop.log`) is written through ONE
+/// process-wide size-rotating handle per path (`sceneworks_core::log_rotation`), so the files
+/// stay bounded and a rotation by one writer is never undone by another writer's stale handle
+/// appending into the renamed backup.
 fn append_log(path: &Path, line: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok();
-    append_log_with_handle(path, line, file.as_mut());
+    let file = sceneworks_core::log_rotation::shared_log_file(path);
+    append_log_with_handle(path, line, Some(&file));
 }
 
-fn append_log_with_handle(path: &Path, line: &str, file: Option<&mut std::fs::File>) {
+/// [`append_log`] through a writer the caller already holds. `None` writes nothing to disk and
+/// only mirrors into the in-app session buffer (tests use this to stay off the filesystem).
+fn append_log_with_handle(
+    path: &Path,
+    line: &str,
+    file: Option<&sceneworks_core::log_rotation::SharedLogFile>,
+) {
     if let Some(file) = file {
-        let _ = file.write_all(line.as_bytes());
-        let _ = file.flush();
+        let _ = file.append(line.as_bytes());
     }
     // Mirror into the in-app session buffer (sc-3451), tagged by the log's file stem
     // ("worker.log" -> "worker", "mlx-worker.log" -> "mlx-worker").
@@ -1503,14 +1507,11 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     }
 
     let log_path = logs_dir().join("api.log");
-    let _ = std::fs::create_dir_all(logs_dir());
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .ok();
+        // The shared size-rotating writer for api.log (opened once per process; an oversized
+        // legacy file is rotated out on first open).
+        let file = sceneworks_core::log_rotation::shared_log_file(&log_path);
         while let Some(event) = events.recv().await {
             let entry = match event {
                 CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
@@ -1549,12 +1550,9 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
                 }
                 _ => continue,
             };
-            if let Some(file) = file.as_mut() {
-                let _ = file.write_all(entry.as_bytes());
-                let _ = file.flush();
-            }
+            let _ = file.append(entry.as_bytes());
             // Mirror the API sidecar's output into the in-app session buffer (sc-3451);
-            // this loop writes its own file handle so it doesn't go through append_log.
+            // this loop holds the shared writer so it doesn't go through append_log.
             session_log().push_line("api", &entry);
         }
     });
@@ -1997,7 +1995,7 @@ fn report_worker_terminated(
     worker_id: &str,
     exit: AbnormalExit,
     log_path: &Path,
-    log_file: Option<&mut std::fs::File>,
+    log_file: Option<&sceneworks_core::log_rotation::SharedLogFile>,
     label: &str,
     // Injected rather than read here (sc-18182) so exercising this function in a test
     // does not touch the developer's real remote-access settings or the keychain.
@@ -2205,12 +2203,9 @@ fn supervise_worker(
             let started = Instant::now();
             // Keep one append handle for this worker lifetime. Stdout/stderr can
             // emit thousands of events per generation; reopening the same file
-            // for every chunk needlessly hits the filesystem hot path.
-            let mut log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .ok();
+            // for every chunk needlessly hits the filesystem hot path. It is the
+            // process-wide size-rotating writer for this log, shared with append_log.
+            let log_file = sceneworks_core::log_rotation::shared_log_file(&log_path);
             // How the child died, when it died abnormally (sc-18182). Reported to the
             // API below, after the shutdown check, so an app quit never attributes a
             // failure to a job.
@@ -2221,7 +2216,7 @@ fn supervise_worker(
                         append_log_with_handle(
                             &log_path,
                             &String::from_utf8_lossy(&bytes),
-                            log_file.as_mut(),
+                            Some(&log_file),
                         );
                     }
                     Some(CommandEvent::Terminated(payload)) => {
@@ -2231,7 +2226,7 @@ fn supervise_worker(
                                 "[desktop] {label} worker terminated: code={:?} signal={:?}\n",
                                 payload.code, payload.signal
                             ),
-                            log_file.as_mut(),
+                            Some(&log_file),
                         );
                         abnormal_exit = AbnormalExit::classify(payload.code, payload.signal);
                         break;
@@ -2240,7 +2235,7 @@ fn supervise_worker(
                         append_log_with_handle(
                             &log_path,
                             &format!("[desktop] {label} worker error: {error}\n"),
-                            log_file.as_mut(),
+                            Some(&log_file),
                         );
                         // Deliberately leaves `abnormal_exit` as `None` (sc-18182): a
                         // pipe/IO error carries neither a signal nor an exit code, so
@@ -2291,7 +2286,7 @@ fn supervise_worker(
                         &worker_id,
                         exit,
                         &log_path,
-                        log_file.as_mut(),
+                        Some(&log_file),
                         label,
                         lan_access_token(),
                     ),
@@ -2306,7 +2301,7 @@ fn supervise_worker(
                             "[desktop] could not report {label} worker termination: \
                              no API port published\n"
                         ),
-                        log_file.as_mut(),
+                        Some(&log_file),
                     ),
                     SupervisorAction::Exit => append_log_with_handle(
                         &log_path,
@@ -2314,7 +2309,7 @@ fn supervise_worker(
                             "[desktop] skipped reporting {label} worker termination: \
                              the app is shutting down\n"
                         ),
-                        log_file.as_mut(),
+                        Some(&log_file),
                     ),
                 }
             }
@@ -5116,7 +5111,7 @@ mod abnormal_exit_tests {
             )
         });
 
-        // Passing `None` for the file handle means `append_log_with_handle` writes
+        // Passing `None` for the file writer means `append_log_with_handle` writes
         // NOTHING to disk — it only mirrors into the in-app session buffer — so this
         // path is never created and there is no temp file to leak on the failure
         // path (the sc-17791 class). It only supplies the log's `file_stem` tag.
