@@ -23,6 +23,13 @@ use crate::model_artifacts::portable_binding::{
 use crate::store_util::{ensure_column, parse_string_enum, random_hex, sql_int, unsigned_int};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
+/// One worker's parsed private source claims, shared rather than copied: a set can hold
+/// thousands of claims (MBs of JSON), and admission consults it several times per submission.
+pub type PortableClaimSet = std::sync::Arc<Vec<PortableSourceClaim>>;
+
+/// Parsed claim sets kept at most; see `JobsStore::portable_claim_cache`.
+const PORTABLE_CLAIM_CACHE_MAX_WORKERS: usize = 64;
+
 /// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
 pub const IMPORT_CLAIM_CAPABILITY_KEY: &str = "importClaimCapability";
 
@@ -503,6 +510,12 @@ pub struct JobsStore {
     /// Deterministic evidence that the platform-reachability sweep only
     /// hydrated rows its durable headers had already identified as candidates.
     last_platform_reachability_sweep: Mutex<PlatformReachabilitySweepStats>,
+    /// Parsed private claim sets keyed by worker id, each with the `worker_claim_versions`
+    /// token it was parsed under. A set is reused only while its token is unchanged.
+    portable_claim_cache: Mutex<HashMap<String, (Vec<u8>, PortableClaimSet)>>,
+    /// Deterministic evidence of how many claim sets were actually parsed (not served from
+    /// `portable_claim_cache`); a count, like `last_claim_hydration`, not a duration.
+    portable_claim_parses: std::sync::atomic::AtomicU64,
     /// When the owning API process started, as a stored-timestamp string. A stale worker whose
     /// last heartbeat predates it never reported to this process at all, so the stale sweep can
     /// say the app (or the machine) stopped mid-job instead of blaming a quiet worker. `None`
@@ -764,6 +777,8 @@ impl JobsStore {
             lock: Mutex::new(None),
             last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
             last_platform_reachability_sweep: Mutex::new(PlatformReachabilitySweepStats::default()),
+            portable_claim_cache: Mutex::new(HashMap::new()),
+            portable_claim_parses: std::sync::atomic::AtomicU64::new(0),
             session_started_at: None,
             busy_timeout: crate::store_util::SQLITE_BUSY_TIMEOUT,
         }
@@ -881,6 +896,48 @@ impl JobsStore {
             "workers",
             "source_proof_authenticated",
             "integer not null default 0",
+        )?;
+        // A change token per worker claim set, so admission can reuse a parsed set until it
+        // changes instead of re-reading and re-parsing MBs of claim JSON per worker on every
+        // submission (`portable_source_claim_sets_for_route_with_facts`). It lives in its own
+        // table so bumping it never rewrites the `workers` row and its claim text, and triggers
+        // maintain it on every write path (register upsert, heartbeat, offline/cleanup writes,
+        // deletes) without each statement having to remember it. A heartbeat that re-sends the
+        // stored claims (or omits them) leaves the token alone. The triggers upsert rather than
+        // `insert or replace`: an outer statement's conflict policy (the register UPSERT's ABORT)
+        // overrides a trigger's `or replace`.
+        transaction.execute_batch(
+            "
+            create table if not exists worker_claim_versions (
+              worker_id text primary key,
+              token blob not null
+            );
+            insert or ignore into worker_claim_versions (worker_id, token)
+              select id, randomblob(16) from workers;
+            drop trigger if exists workers_claim_version_after_insert;
+            create trigger workers_claim_version_after_insert
+            after insert on workers
+            begin
+              insert into worker_claim_versions (worker_id, token)
+                values (new.id, randomblob(16))
+                on conflict(worker_id) do update set token = excluded.token;
+            end;
+            drop trigger if exists workers_claim_version_after_update;
+            create trigger workers_claim_version_after_update
+            after update of portable_source_claims_json on workers
+            when new.portable_source_claims_json is not old.portable_source_claims_json
+            begin
+              insert into worker_claim_versions (worker_id, token)
+                values (new.id, randomblob(16))
+                on conflict(worker_id) do update set token = excluded.token;
+            end;
+            drop trigger if exists workers_claim_version_after_delete;
+            create trigger workers_claim_version_after_delete
+            after delete on workers
+            begin
+              delete from worker_claim_versions where worker_id = old.id;
+            end;
+            ",
         )?;
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
@@ -3352,14 +3409,15 @@ impl JobsStore {
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<Vec<PortableSourceClaim>> {
         Ok(self
-            .portable_source_claim_sets_for_route(
+            .portable_source_claim_sets_for_route_with_facts(
                 backend,
                 platform,
                 requested_gpu,
                 worker_timeout_seconds,
+                None,
             )?
             .into_iter()
-            .flatten()
+            .flat_map(|(_, claims)| claims.as_ref().clone())
             .collect())
     }
 
@@ -3381,7 +3439,7 @@ impl JobsStore {
                 None,
             )?
             .into_iter()
-            .map(|(_, claims)| claims)
+            .map(|(_, claims)| claims.as_ref().clone())
             .collect())
     }
 
@@ -3394,7 +3452,7 @@ impl JobsStore {
         worker_timeout_seconds: u64,
         job_type: &JobType,
         payload: &Map<String, Value>,
-    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+    ) -> JobsStoreResult<Vec<PortableClaimSet>> {
         let facts = ClaimRoutingFacts::from_parts(job_type, payload);
         Ok(self
             .portable_source_claim_sets_for_route_with_facts(
@@ -3455,8 +3513,10 @@ impl JobsStore {
         requested_gpu: &str,
         worker_timeout_seconds: u64,
         facts: Option<&ClaimRoutingFacts>,
-    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
-        let connection = self.open_connection()?;
+    ) -> JobsStoreResult<Vec<(String, PortableClaimSet)>> {
+        let mut connection = self.open_connection()?;
+        // One read snapshot, so a claim set is always cached under the token it was written with.
+        let connection = connection.transaction()?;
         let workers = portable_claim_route_workers(
             &connection,
             backend,
@@ -3467,19 +3527,59 @@ impl JobsStore {
         )?;
         let mut claims = Vec::new();
         for worker in workers {
-            let raw: Option<String> = connection.query_row(
+            // `typeof` reads only the record header, never the multi-MB claim text.
+            let Some(token) = connection
+                .query_row(
+                    "select v.token from workers w
+                       left join worker_claim_versions v on v.worker_id = w.id
+                      where w.id = ?1 and typeof(w.portable_source_claims_json) != 'null'",
+                    params![worker.id],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()?
+            else {
+                continue;
+            };
+            let cached = token.as_ref().and_then(|token| {
+                self.portable_claim_cache
+                    .lock()
+                    .get(&worker.id)
+                    .filter(|(cached_token, _)| cached_token == token)
+                    .map(|(_, claims)| claims.clone())
+            });
+            if let Some(worker_claims) = cached {
+                claims.push((worker.id, worker_claims));
+                continue;
+            }
+            let raw: String = connection.query_row(
                 "select portable_source_claims_json from workers where id = ?1",
                 params![worker.id],
                 |row| row.get(0),
             )?;
-            if let Some(raw) = raw {
-                let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
-                validate_portable_source_claims(&worker_claims)
-                    .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
-                claims.push((worker.id, worker_claims));
+            let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
+            validate_portable_source_claims(&worker_claims)
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+            self.portable_claim_parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let worker_claims = PortableClaimSet::new(worker_claims);
+            if let Some(token) = token {
+                let mut cache = self.portable_claim_cache.lock();
+                // Worker incarnations are not reused, so drop the dead ones wholesale
+                // rather than growing with every app launch.
+                if cache.len() >= PORTABLE_CLAIM_CACHE_MAX_WORKERS {
+                    cache.clear();
+                }
+                cache.insert(worker.id.clone(), (token, worker_claims.clone()));
             }
+            claims.push((worker.id, worker_claims));
         }
         Ok(claims)
+    }
+
+    /// How many worker claim sets admission has parsed (rather than reused) so far.
+    pub fn portable_claim_parses(&self) -> u64 {
+        self.portable_claim_parses
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn mark_stale_workers_interrupted(
