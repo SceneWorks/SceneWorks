@@ -5229,6 +5229,41 @@ fn mac_rust_supported_classifies_every_sensenova_id_as_the_same_strict_pose_gap(
 }
 
 #[test]
+fn a_lossy_attention_job_is_a_typed_mac_gap_and_candle_supported() {
+    // SW-6132: the INT8 QK / Sol-Attn kernels exist only in the candle runtime. An image or video
+    // job that opts in is never MLX-claimed and is a named Mac gap for every model (including one
+    // MLX otherwise serves), while the candle oracle still serves it.
+    for (job_type, model) in [
+        (JobType::ImageGenerate, "krea_2_turbo"),
+        (JobType::ImageGenerate, "flux_dev"),
+        (JobType::VideoGenerate, "wan_2_2"),
+    ] {
+        let store = store(&format!("lossy-attention-{model}"));
+        let lossy = job_of(
+            &store,
+            job_type.clone(),
+            json!({
+                "model": model,
+                "prompt": "p",
+                "advanced": { "lossyAttention": { "int8": {} } }
+            }),
+        );
+        let reason = mac_rust_supported(&lossy).expect_err("lossy attention is CUDA-only");
+        assert_eq!(reason.model.as_deref(), Some(model));
+        assert_eq!(reason.feature, "lossy attention (advanced.lossyAttention)");
+        // The same job without the opt-in is not this gap.
+        let plain = job_of(
+            &store,
+            job_type,
+            json!({ "model": model, "prompt": "p", "advanced": {} }),
+        );
+        if let Err(reason) = mac_rust_supported(&plain) {
+            assert_ne!(reason.feature, "lossy attention (advanced.lossyAttention)");
+        }
+    }
+}
+
+#[test]
 fn candle_supported_flags_a_torch_only_image_model() {
     // `pulid_flux_dev` plain txt2img is unsupported off-Mac: its ONLY candle lane is the bespoke
     // character-reference path (`pulid_flux_candle_eligible`, which needs character_image + a

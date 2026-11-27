@@ -389,3 +389,135 @@ fn image_prompt_ceiling_follows_the_declared_token_window() {
         "prompt must be between 1 and 4000 characters"
     );
 }
+
+/// SW-6132: `advanced.lossyAttention` is validated against the catalog's `lossyAttention`
+/// capability, which `sceneworks-core` projects from the checked-in copy of inference's
+/// `SHARED_ATTENTION_ROUTING` (the candle worker's test pins the copy to the linked table).
+#[test]
+fn lossy_attention_is_admitted_only_where_the_shared_routing_serves_it() {
+    let int8 = json!({ "int8": {} });
+    let sol = json!({ "sol": { "topkRatio": 0.5 } });
+    let resolve = |model: &str, lossy: &Value| {
+        let entry = facts(model, "text_to_image");
+        let payload = json!({"projectId":"p","model":model,"prompt":"tree",
+                             "advanced":{"lossyAttention": lossy}});
+        options::request_validation::resolve(
+            "image",
+            payload.as_object().unwrap(),
+            entry.as_object().unwrap(),
+        )
+    };
+    for model in ["krea_2_turbo", "flux_dev"] {
+        let capability = &facts(model, "text_to_image")["lossyAttention"];
+        assert_eq!(capability["int8"]["served"], json!(true), "{model}");
+        assert_eq!(capability["sol"]["served"], json!(true), "{model}");
+        for lossy in [&int8, &sol] {
+            let resolved = resolve(model, lossy).unwrap_or_else(|e| panic!("{model}: {e:?}"));
+            // The effective options carry the same configuration, with inference's defaults
+            // materialized for the requested kernel (and nothing for the one not requested).
+            let parse = options::lossy_attention::parse_wire_value;
+            let effective = parse(&resolved["advanced"]["lossyAttention"]).unwrap();
+            let authored = parse(lossy).unwrap();
+            assert_eq!(effective.int8.is_some(), authored.int8.is_some(), "{model}");
+            assert_eq!(effective.sol.is_some(), authored.sol.is_some(), "{model}");
+            if let (Some(effective), Some(authored)) = (effective.int8, authored.int8) {
+                assert_eq!(effective.pv_precision(), authored.pv_precision(), "{model}");
+                assert_eq!(effective.k_centering(), authored.k_centering(), "{model}");
+            }
+            if let (Some(effective), Some(authored)) = (effective.sol, authored.sol) {
+                assert_eq!(
+                    effective.selection().unwrap(),
+                    authored.selection().unwrap()
+                );
+                assert_eq!(effective.sink_blocks(), authored.sink_blocks());
+                assert_eq!(effective.sink_q(), authored.sink_q());
+                assert_eq!(effective.tail(), authored.tail());
+                assert_eq!(
+                    effective.query_chunk_blocks(),
+                    authored.query_chunk_blocks()
+                );
+            }
+        }
+    }
+    // INT8 only: block-causal attention gives Sol-Attn no self-attention to route.
+    assert!(resolve("qwen_image_2_1", &int8).is_ok());
+    let refused = resolve("qwen_image_2_1", &sol).unwrap_err();
+    assert_eq!(refused.field, "advanced.lossyAttention.sol");
+    assert!(
+        refused.detail.contains("block-causally"),
+        "{}",
+        refused.detail
+    );
+    // Neither: 256-wide heads.
+    let refused = resolve("ideogram_4", &int8).unwrap_err();
+    assert!(refused.detail.contains("256-wide"), "{}", refused.detail);
+    // Bespoke attention: no capability is projected, so the option is refused.
+    for model in ["sana_1600m", "moss_image_base", "supra2_img"] {
+        assert!(
+            facts(model, "text_to_image")
+                .get("lossyAttention")
+                .is_none(),
+            "{model}"
+        );
+        assert!(resolve(model, &int8).is_err(), "{model}");
+    }
+    // Out of range is a shape refusal whatever the model.
+    let refused = resolve("krea_2_turbo", &json!({ "sol": { "topkRatio": 0 } })).unwrap_err();
+    assert_eq!(refused.field, "advanced.lossyAttention.sol.topkRatio");
+    // Absent stays absent (no injected default).
+    let entry = facts("krea_2_turbo", "text_to_image");
+    let bare = json!({"projectId":"p","model":"krea_2_turbo","prompt":"tree"});
+    let resolved = options::request_validation::resolve(
+        "image",
+        bare.as_object().unwrap(),
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    assert!(resolved["advanced"].get("lossyAttention").is_none());
+}
+
+/// SW-6132: the typed image request carries the option to the worker unchanged, and the
+/// provider wire (the recipe's raw settings) records it.
+#[test]
+fn lossy_attention_round_trips_through_the_typed_image_request() {
+    let entry = facts("krea_2_turbo", "text_to_image");
+    let lossy = json!({ "int8": { "pvPrecision": "int8", "kCentering": "always" } });
+    let payload = json!({"projectId":"p","model":"krea_2_turbo","prompt":"tree",
+                         "advanced":{"lossyAttention": lossy}});
+    let resolved = options::request_validation::resolve(
+        "image",
+        payload.as_object().unwrap(),
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+        payload.as_object().unwrap(),
+        &resolved,
+    )
+    .unwrap();
+    let wire = request.lossy_attention().expect("typed lossy attention");
+    assert_eq!(serde_json::to_value(wire).unwrap(), lossy);
+    assert_eq!(request.effective_advanced_wire()["lossyAttention"], lossy);
+}
+
+/// SW-6132: video models take the option per engine; the capability is every mode's engines.
+#[test]
+fn lossy_attention_is_validated_for_video_models() {
+    let entry = facts("wan_2_2", "text_to_video");
+    assert_eq!(entry["lossyAttention"]["sol"]["served"], json!(true));
+    let payload = json!({"projectId":"p","model":"wan_2_2","prompt":"a fox","mode":"text_to_video",
+                         "advanced":{"lossyAttention":{"sol":{"topkRatio":0.25}}}});
+    options::request_validation::validate(
+        "video",
+        payload.as_object().unwrap(),
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    let request = sceneworks_core::video_request::VideoRequest::from_resolved(
+        payload.as_object().unwrap(),
+        payload.as_object().unwrap(),
+    )
+    .unwrap();
+    let bound = request.options().lossy_attention.as_ref().expect("bound");
+    assert_eq!(bound.value.sol.unwrap().topk_ratio, Some(0.25));
+}

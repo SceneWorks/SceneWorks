@@ -80,6 +80,11 @@ fn image_request_mlx_eligible_with_context(
     context: &crate::jobs_store::routing::RouteContext<'_>,
 ) -> bool {
     let payload = context.payload;
+    // SW-6132: the lossy attention kernels (INT8 QK / Sol-Attn) are CUDA-only; an MLX worker never
+    // claims a request that opted in to one and renders the exact path in its place.
+    if sceneworks_options::lossy_attention::payload_requests_lossy_attention(payload) {
+        return false;
+    }
     // sc-26241: no MLX descriptor advertises the publisher FP8 rowwise tier (it is a CUDA format),
     // so an `advanced.quantTier: "fp8r"` request is `mlx_unsupported` for EVERY model rather than
     // reaching a per-family predicate that might not read `quantTier` and render dense instead. A
@@ -204,7 +209,13 @@ pub(crate) fn image_detail_native_eligible(job: &JobSnapshot) -> bool {
 
 /// Whether the in-process MLX worker can serve this GPU job (image_generate or image_detail).
 pub(crate) fn job_is_mlx_eligible(job: &JobSnapshot) -> bool {
-    image_job_is_mlx_eligible(job) || image_detail_native_eligible(job)
+    image_job_is_mlx_eligible(job)
+        // SW-6132: the lossy attention kernels are CUDA-only (the image predicate refuses them
+        // itself); a detail job that opted in is never MLX-claimed either.
+        || (image_detail_native_eligible(job)
+            && !sceneworks_options::lossy_attention::payload_requests_lossy_attention(
+                &job.payload,
+            ))
 }
 
 /// Epic 3180 / sc-3905 routing — does this understanding job (`image_vqa` / `image_interleave`)
@@ -1027,6 +1038,10 @@ pub(crate) fn video_request_is_mlx_eligible(
             | JobType::VideoBridge
             | JobType::PersonReplace
     ) {
+        return false;
+    }
+    // SW-6132: the lossy attention kernels are CUDA-only (see the image twin above).
+    if sceneworks_options::lossy_attention::payload_requests_lossy_attention(payload) {
         return false;
     }
     let Some(model) = payload.get("model").and_then(Value::as_str) else {

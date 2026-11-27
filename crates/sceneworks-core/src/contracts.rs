@@ -1070,6 +1070,11 @@ pub struct GenerationMetrics {
     /// Provider-owned post-generation H3 attention observations; absent on historical/unadopted jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub veda_execution: Option<Value>,
+    /// The candle worker's per-job attention path receipt (SW-6132): FlashAttention / INT8 /
+    /// Sol-Attn calls, lossy refusals by reason and operand adaptations, plus the job's
+    /// `advanced.lossyAttention` request. Absent on MLX and historical jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_execution: Option<Value>,
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

@@ -230,6 +230,12 @@ pub(crate) async fn create_job(
         sceneworks_core::request_validation::validate(kind, &payload.payload, &entry)
             .map_err(ApiError::from)?;
     }
+    // SW-6132: no MLX worker can run a lossy attention opt-in (image detail and the other generic
+    // job types reach the queue through here).
+    crate::generation::refuse_lossy_attention_off_candle(
+        crate::generation::enqueue_backend(&state),
+        &payload.payload,
+    )?;
     if matches!(payload.job_type, JobType::ImageDetail) {
         validate_job_lora_compatibility(
             &state,
