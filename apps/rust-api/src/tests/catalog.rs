@@ -7695,7 +7695,10 @@ async fn license_acknowledgment_model_download_proceeds_once_asserted() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(
+        job["payload"]["repo"],
+        registered_minimax_primary("minimax_h3", "q4")["repo"]
+    );
 
     // The gate is scoped to the entries that declare it. A model with no license requirement must
     // still download from a body that says nothing about a license — otherwise this would be a
@@ -8595,7 +8598,10 @@ async fn license_acknowledgment_survives_a_typed_download_retry() {
         StatusCode::CREATED,
         "an authorized download must stay retryable: {retry_job:?}",
     );
-    assert_eq!(retry_job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(
+        retry_job["payload"]["repo"],
+        registered_minimax_primary("minimax_h3", "q4")["repo"]
+    );
 }
 
 /// Deleting a model must reconcile the resolved-model hot cache (sc-19710). Without this the

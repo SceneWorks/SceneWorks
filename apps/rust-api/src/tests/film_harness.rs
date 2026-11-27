@@ -3118,9 +3118,14 @@ async fn two_shot_run_renders_imports_assembles_and_exports_through_the_real_rou
     assert_eq!(model.backend_observed.as_deref(), Some("mlx"));
     assert_eq!(model.hardware.worker_id.as_deref(), Some(WORKER_ID));
     assert_eq!(model.hardware.host_memory_gb, Some(128.0));
+    // The q4 tier's rehost is platform-split: MLX-affine on macOS, Candle-native GGML elsewhere.
     assert_eq!(
         model.weights.as_ref().and_then(|w| w["repo"].as_str()),
-        Some("SceneWorks/minimax-h3-mlx")
+        Some(if cfg!(target_os = "macos") {
+            "SceneWorks/minimax-h3-mlx"
+        } else {
+            "SceneWorks/minimax-h3-candle"
+        })
     );
 
     // The timeline holds the two takes back to back and the export ran through timeline_export.
