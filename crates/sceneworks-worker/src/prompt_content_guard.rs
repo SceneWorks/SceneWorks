@@ -376,6 +376,208 @@ fn clothing_term_claim(text: &str, term: &str) -> bool {
     })
 }
 
+/// Hard-reject style keywords only when they describe an image medium/aesthetic.
+/// Literal scene actions and depicted objects remain permitted; ambiguous wording is
+/// handled by the semantic editor rather than a context-free word ban.
+fn style_term_claim(text: &str, term: &str) -> bool {
+    let plural = format!("{term}s");
+    let media = [
+        "photograph",
+        "photographs",
+        "photography",
+        "photo",
+        "illustration",
+        "painting",
+        "drawing",
+        "render",
+        "sketch",
+    ];
+    let scope = [
+        "image",
+        "picture",
+        "scene",
+        "artwork",
+        "rendering",
+        "style",
+        "medium",
+        "aesthetic",
+        "treatment",
+        "look",
+        "lighting",
+        "composition",
+        "portrait",
+        "appearance",
+        "effect",
+        "texture",
+        "quality",
+        "tone",
+        "contrast",
+        "it",
+        "this",
+    ];
+    let intro = ["a", "an", "the", "this", "that", "whole", "entire", "in"];
+    let modifiers = [
+        "a",
+        "an",
+        "the",
+        "in",
+        "as",
+        "with",
+        "and",
+        "black",
+        "white",
+        "color",
+        "colour",
+        "digital",
+        "digitally",
+        "oil",
+        "acrylic",
+        "watercolor",
+        "watercolour",
+        "pencil",
+        "charcoal",
+        "graphite",
+        "ink",
+        "pastel",
+        "vector",
+        "3d",
+        "hand",
+        "drawn",
+        "fine",
+        "art",
+        "realistic",
+        "detailed",
+        "loose",
+        "quick",
+        "rough",
+        "simple",
+        "beautiful",
+        "staged",
+        "studio",
+        "fashion",
+        "editorial",
+        "formal",
+        "vintage",
+        "timeless",
+        "painterly",
+        "surreal",
+        "cinematic",
+        "high",
+        "contrast",
+        "monochrome",
+        "rendered",
+        "presented",
+        "shown",
+        "captured",
+        "depicted",
+    ];
+    text.split(['.', ';', '!', '?', '\n', ',']).any(|clause| {
+        let normalized = normalize_text(clause);
+        let words: Vec<_> = normalized.split_whitespace().collect();
+        words.iter().enumerate().any(|(index, word)| {
+            if *word != term && *word != plural {
+                return false;
+            }
+            let before = &words[..index];
+            let after = &words[index + 1..];
+            // An artwork held by someone or explicitly displayed on a surface is
+            // scene content, not a claim about the current image's rendering.
+            let object_prefix = before.iter().rev().take(6).any(|word| {
+                ["holding", "holds", "held", "carrying", "carries", "framed"].contains(word)
+            });
+            // A finite display predicate belongs to the artwork, even when an
+            // "of ..." subject intervenes: "a painting of a woman hangs ...".
+            // A relative clause about the depicted subject must not hide a style claim.
+            let displayed_object = after.iter().take(20).enumerate().any(|(position, word)| {
+                let display = ["hangs", "hang"].contains(word)
+                    || (["hanging", "displayed", "mounted", "framed"].contains(word)
+                        && position.checked_sub(1).is_some_and(|before| {
+                            ["is", "are", "was", "were"].contains(&after[before])
+                        }));
+                display
+                    && !after[..position]
+                        .iter()
+                        .any(|word| ["who", "that", "which"].contains(word))
+            });
+            let object_suffix = displayed_object
+                || after
+                    .first()
+                    .is_some_and(|word| ["hangs", "hanging"].contains(word))
+                || (after
+                    .first()
+                    .is_some_and(|word| ["on", "in", "inside"].contains(word))
+                    && after
+                        .iter()
+                        .skip(1)
+                        .take(3)
+                        .find(|word| !["a", "an", "the"].contains(word))
+                        .is_some_and(|word| {
+                            [
+                                "wall", "table", "desk", "album", "book", "frame", "screen", "page",
+                            ]
+                            .contains(word)
+                        }));
+            if object_prefix || object_suffix {
+                return false;
+            }
+            let medium_tail = after.is_empty()
+                || after.first().is_some_and(|word| {
+                    [
+                        "of",
+                        "depicting",
+                        "portraying",
+                        "showing",
+                        "shows",
+                        "depicts",
+                        "portrays",
+                        "captures",
+                        "featuring",
+                        "with",
+                        "style",
+                        "look",
+                        "aesthetic",
+                    ]
+                    .contains(word)
+                });
+            // "Drawing water" and "painting a door" have direct objects, unlike
+            // "a drawing of ...". Do not infer an image-style claim from those verbs.
+            if media.contains(&term) && !medium_tail {
+                return false;
+            }
+            let image_predicate = before.iter().enumerate().any(|(anchor, word)| {
+                scope.contains(word)
+                    && before[..anchor].iter().all(|word| intro.contains(word))
+                    && before[anchor + 1..].iter().all(|word| {
+                        modifiers.contains(word)
+                            || [
+                                "is",
+                                "are",
+                                "was",
+                                "were",
+                                "has",
+                                "have",
+                                "uses",
+                                "looks",
+                                "like",
+                                "appears",
+                                "s",
+                                "style",
+                                "medium",
+                                "rendering",
+                            ]
+                            .contains(word)
+                    })
+            });
+            let medium_phrase = medium_tail && before.iter().all(|word| modifiers.contains(word));
+            let adjective_scope = !media.contains(&term)
+                && after.first().is_some_and(|word| {
+                    scope.contains(word) || ["shot", "photograph", "photo"].contains(word)
+                });
+            image_predicate || medium_phrase || adjective_scope
+        })
+    })
+}
+
 pub(crate) fn known_leaks(text: &str, exclusions: &[PromptExclusion]) -> Vec<String> {
     if exclusions.is_empty() {
         return Vec::new();
@@ -397,6 +599,8 @@ pub(crate) fn known_leaks(text: &str, exclusions: &[PromptExclusion]) -> Vec<Str
                         && !parts.iter().any(|part| person_trait_claim(part, term)) { continue; }
                     if category == PromptExclusion::ClothingAndAccessories
                         && !parts.iter().any(|part| clothing_term_claim(part, term)) { continue; }
+                    if category == PromptExclusion::Style
+                        && !parts.iter().any(|part| style_term_claim(part, term)) { continue; }
                     leaks.push(term.to_owned());
                 }
             }
@@ -1080,6 +1284,68 @@ mod tests {
             "1girl, black_hair",
         ] {
             assert!(!known_leaks(excluded, &[ALL[0]]).is_empty(), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn style_checks_preserve_literal_actions_and_objects_but_reject_image_medium_claims() {
+        for allowed in [
+            "A person is drawing water from a well.",
+            "A woman is drawing the curtains shut.",
+            "A worker is painting a door.",
+            "A person is drawing a portrait while a friend watches.",
+            "Workers render plaster onto a wall.",
+            "Two people sketch at a table.",
+            "A person reads an editorial.",
+            "A woman wears a vintage coat.",
+            "A framed painting hangs on the wall.",
+            "A painting of a woman hangs on the wall.",
+            "A photograph of a dog is displayed on the wall.",
+            "A woman holds an oil painting.",
+            "The scene contains black and white tiles.",
+            r#"{"description":"A person is drawing water.","style":""}"#,
+        ] {
+            assert!(known_leaks(allowed, &[ALL[3]]).is_empty(), "{allowed}");
+        }
+        for excluded in [
+            "A pencil drawing of a woman.",
+            "The image is a 3d render of a room.",
+            "An oil painting of a person drawing water.",
+            "A painting of a woman who hangs from a rope.",
+            "A black-and-white photograph of a woman.",
+            "Cinematic lighting frames the figure.",
+            "A person is drawing water. The image is an oil painting.",
+            "1girl, oil_painting, cinematic_lighting",
+            "The image has a vintage look.",
+            r#"{"description":"A person is drawing water.","style":"pencil drawing"}"#,
+        ] {
+            assert!(!known_leaks(excluded, &[ALL[3]]).is_empty(), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn native_style_edit_does_not_repeatedly_correct_valid_scene_actions() {
+        for text in [
+            "A person is drawing water from a well.",
+            "A woman is drawing the curtains shut.",
+            "A worker is painting a door.",
+        ] {
+            let mut request =
+                TextLlmRequest::new(vec![Message::user("Describe the visible scene.")], 512);
+            let original = request.messages.clone();
+            let mut calls = 0;
+            let output = generate_checked(&mut request, &[ALL[3]], "fixture", false, |_| {
+                calls += 1;
+                assert!(calls <= 2, "valid literal action must not trigger repairs");
+                Ok(TextLlmOutput {
+                    text: text.to_owned(),
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+            assert_eq!(output.text, text);
+            assert_eq!(calls, 2);
+            assert_eq!(request.messages, original);
         }
     }
 

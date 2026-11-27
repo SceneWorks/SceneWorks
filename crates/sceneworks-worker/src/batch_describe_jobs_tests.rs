@@ -84,6 +84,38 @@ fn parsed_or_recovered_fields_cannot_bypass_selected_exclusions() {
     }
 }
 
+#[test]
+fn style_exclusion_keeps_literal_actions_in_strict_and_recovered_batch_fields() {
+    use sceneworks_core::options::prompt_content::PromptExclusion::Style;
+    for action in [
+        "A person is drawing water from a well.",
+        "A woman is drawing the curtains shut.",
+        "A worker is painting a door.",
+        "A painting of a woman hangs on the wall.",
+    ] {
+        let raw = reply(&[("description", json!(action)), ("style", json!(""))]);
+        for fields in [
+            parse_described_fields(&raw).unwrap(),
+            parse_lenient_described_fields(&raw).unwrap(),
+        ] {
+            assert!(check_described_exclusions(fields, &[Style]).is_ok());
+        }
+    }
+    let raw = reply(&[
+        (
+            "description",
+            json!("An oil painting of a person drawing water."),
+        ),
+        ("style", json!("")),
+    ]);
+    for fields in [
+        parse_described_fields(&raw).unwrap(),
+        parse_lenient_described_fields(&raw).unwrap(),
+    ] {
+        assert!(check_described_exclusions(fields, &[Style]).is_err());
+    }
+}
+
 // ── The describing prompt ─────────────────────────────────────────────────────────────────────
 
 #[test]
