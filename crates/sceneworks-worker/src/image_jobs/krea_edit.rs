@@ -165,14 +165,18 @@ pub(super) fn krea_edit_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
-        use_pid,
         conditioning,
-        text_style_gain,
         memory: Some(memory_evaluation.memory),
         preview,
         cancel: cancel.clone(),
         ..sampling_controls.clone()
     };
+    if use_pid {
+        request.features.pid = Some(gen_core::PidParams::enabled());
+    }
+    if let Some(gain) = text_style_gain {
+        request.extensions.krea_mut().text_style_gain = Some(gain);
+    }
     let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
@@ -354,7 +358,7 @@ pub(super) async fn generate_krea_edit_stream(
             1,
             steps,
             model.descriptor.capabilities.pag.as_ref(),
-            sampling_controls.pag.as_ref(),
+            sampling_controls.features.pag.as_ref(),
         ),
     };
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),

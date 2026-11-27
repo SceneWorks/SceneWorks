@@ -536,7 +536,7 @@ fn sdxl_control_flash_attn(request: &ImageRequest) -> bool {
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn apply_sdxl_control_flash_attn(enabled: bool) {
-    runtime_cuda::providers::sdxl::set_flash_attn(enabled);
+    runtime_cuda::memory_helpers::sdxl::set_flash_attn(enabled);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -562,8 +562,8 @@ fn sdxl_control_generate_one(
         seed: Some(seed as u64),
         steps: Some(sampling.steps),
         guidance: sampling.guidance,
-        sampler: sampling.sampler.clone(),
-        scheduler: sampling.scheduler.clone(),
+        sampler: sampling.sampler.clone().map(Into::into),
+        scheduler: sampling.scheduler.clone().map(Into::into),
         conditioning,
         preview,
         cancel: cancel.clone(),
@@ -1106,9 +1106,9 @@ mod sdxl_control_tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         apply_sdxl_control_flash_attn(true);
-        assert!(runtime_cuda::providers::sdxl::flash_attn_enabled());
+        assert!(runtime_cuda::memory_helpers::sdxl::flash_attn_enabled());
         apply_sdxl_control_flash_attn(false);
-        assert!(!runtime_cuda::providers::sdxl::flash_attn_enabled());
+        assert!(!runtime_cuda::memory_helpers::sdxl::flash_attn_enabled());
         // Restore the process default for any later SDXL test.
         apply_sdxl_control_flash_attn(true);
     }

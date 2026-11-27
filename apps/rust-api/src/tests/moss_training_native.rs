@@ -868,8 +868,8 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 assert_eq!(zero_shape, before_shape);
                 assert_eq!(zero, before, "zero-strength negative control must reproduce the baseline");
                 let generator = fixture.generator(variant, vec![adapter]).unwrap();
-                let output = generator.generate(&generation, &mut |_| {}).unwrap();
-                match output {
+                let report = generator.generate_with_report(&generation, &mut |_| {}).unwrap();
+                match report.output {
                     GenerationOutput::Images(images) => {
                         assert_eq!(images.len(), 1);
                         assert_eq!((images[0].width, images[0].height), (32, 32));
@@ -877,8 +877,8 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                     }
                     _ => panic!("actual MOSS Generator must return an image"),
                 }
-                assert_installed_adapter(&generator.adapter_apply_reports(), &saved_path);
-                assert!(generator.moss_image_execution_report().is_none(), "synthetic fixtures must not mint published-author provenance");
+                assert_installed_adapter(&report.adapter_apply_reports, &saved_path);
+                assert!(report.moss_image_report().is_none(), "synthetic fixtures must not mint published-author provenance");
                 prepared.ensure_unchanged().unwrap();
     }).catch_unwind().await;
     diagnostic["phase"] = json!("case_body_returned");

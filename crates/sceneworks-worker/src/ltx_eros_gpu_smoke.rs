@@ -212,8 +212,8 @@ fn ltx_eros_candle_gpu_smoke() {
     let render_started = Instant::now();
     let mut last_step = 0_u32;
     let mut saw_decode = false;
-    let output = generator
-        .generate(&request(), &mut |progress| match progress {
+    let report = generator
+        .generate_with_report(&request(), &mut |progress| match progress {
             Progress::Step { current, total } => {
                 assert!(current >= last_step, "LTX progress moved backwards");
                 assert!(current <= total, "LTX progress exceeded its total");
@@ -238,7 +238,7 @@ fn ltx_eros_candle_gpu_smoke() {
     assert!(last_step > 0, "LTX emitted no denoise progress");
     assert!(saw_decode, "LTX emitted no decode progress");
 
-    let GenerationOutput::Video { frames, fps, audio } = output else {
+    let Some(GenerationOutput::Video { frames, fps, audio }) = report.output else {
         panic!("Candle LTX Eros returned a non-video output")
     };
     assert_eq!(fps, FPS, "Candle LTX changed the requested playback fps");
@@ -307,8 +307,8 @@ fn ltx_eros_candle_gpu_smoke() {
     )
     .expect("write synchronized LTX audio");
 
-    let adapter_reports = generator
-        .adapter_apply_reports()
+    let adapter_reports = report
+        .adapter_apply_reports
         .into_iter()
         .map(|report| {
             json!({

@@ -95,7 +95,7 @@ pub(crate) fn render_reference_request(
             )
         })?;
     request.conditioning = references.conditioning.clone();
-    request.flux3_reference_output = Some(references.output_size);
+    request.extensions.flux3_mut().reference_output = Some(references.output_size);
     crate::memory_strategy::generate_with_scope_execution_report(
         generator,
         request,
@@ -194,8 +194,9 @@ pub(crate) struct ResolvedLayout {
 
 impl ResolvedLayout {
     pub(crate) fn apply(&self, request: &mut gen_core::GenerationRequest) {
-        request.flux3_layout = Some(self.layout.clone());
-        request.flux3_layout_bindings = self.bindings.clone();
+        let flux3 = request.extensions.flux3_mut();
+        flux3.layout = Some(self.layout.clone());
+        flux3.layout_bindings = self.bindings.clone();
     }
     pub(crate) fn image_fact(&self) -> serde_json::Value {
         self.fact.clone()
@@ -523,9 +524,9 @@ mod tests {
             width: references.plan.output.canvas.0,
             height: references.plan.output.canvas.1,
             conditioning: references.conditioning.clone(),
-            flux3_reference_output: Some(references.output_size),
             ..Default::default()
         };
+        native.extensions.flux3_mut().reference_output = Some(references.output_size);
         layout.apply(&mut native);
         let input = gen_core_flux3::references::upsampler_input(&native).unwrap();
         assert_eq!(
@@ -544,7 +545,16 @@ mod tests {
             .caption
             .contains("\"src_bbox\": [123, 200, 700, 800]"));
         assert!(outcome.caption.contains("\"tgt_bbox\": null"));
-        assert_eq!(native.flux3_layout.as_ref().unwrap().to_json(), &document);
+        assert_eq!(
+            native
+                .extensions
+                .flux3
+                .as_ref()
+                .and_then(|ext| ext.layout.as_ref())
+                .unwrap()
+                .to_json(),
+            &document
+        );
         let (width, height) = references.plan.output.canvas;
         for adapter in ["mlx_flux3", "candle_flux3"] {
             let mut raw = caller_raw_settings(&request.advanced);

@@ -489,8 +489,8 @@ mod tests {
                 seed: req.seed,
                 steps: req.steps,
                 guidance: req.guidance,
-                sampler: req.sampler.clone(),
-                scheduler: req.scheduler.clone(),
+                sampler: req.sampler.as_ref().map(|s| s.as_str().to_owned()),
+                scheduler: req.scheduler.as_ref().map(|s| s.as_str().to_owned()),
                 scheduler_shift: req.scheduler_shift,
                 cfg_interval: req.cfg_interval,
                 caption_overflow: req.caption_overflow,
@@ -525,19 +525,6 @@ mod tests {
     impl Generator for IrisArmProbe {
         fn descriptor(&self) -> &gen_core::ModelDescriptor {
             &self.descriptor
-        }
-
-        /// One report per loaded adapter, the way the Iris engine publishes its install outcome:
-        /// everything applied, one stem skipped.
-        fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
-            self.adapters
-                .iter()
-                .map(|adapter| gen_core::AdapterApplyReport {
-                    adapter_path: adapter.path.clone(),
-                    applied: 24,
-                    skipped: vec!["pixel.blocks.0.attn".to_owned()],
-                })
-                .collect()
         }
 
         #[cfg(target_os = "macos")]
@@ -641,6 +628,15 @@ mod tests {
         ) -> gen_core::Result<gen_core::GenerationReport> {
             let mut report =
                 gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
+            report.adapter_apply_reports = self
+                .adapters
+                .iter()
+                .map(|adapter| gen_core::AdapterApplyReport {
+                    adapter_path: adapter.path.clone(),
+                    applied: 24,
+                    skipped: vec!["pixel.blocks.0.attn".to_owned()],
+                })
+                .collect();
             if self.behavior == ArmBehavior::Completes {
                 report.warnings.push(gen_core::GenerationWarning {
                     code: "caption_truncated".to_owned(),

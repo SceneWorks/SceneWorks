@@ -372,7 +372,7 @@ pub(super) const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef1
 #[cfg(native_lane)]
 mod lightning_policy {
     #[cfg(target_os = "macos")]
-    pub(super) use runtime_macos::providers::wan::product_load::{
+    pub(super) use runtime_macos::converters::wan::product_load::{
         lightning_default, lightning_subdir, LIGHTNING_GUIDANCE, LIGHTNING_STEPS,
     };
 
@@ -534,7 +534,7 @@ pub(super) fn wan_load_quant(
     request: &VideoRequest,
     packed_tier: bool,
 ) -> WorkerResult<Option<Quant>> {
-    runtime_macos::providers::wan::product_load::load_quant(
+    runtime_macos::converters::wan::product_load::load_quant(
         engine_id,
         resolve_wan_quant(request),
         packed_tier,
@@ -653,7 +653,7 @@ pub(super) fn resolve_lightning_loras(
     // macOS: the MLX provider crate names the per-architecture pair (the product's single source).
     #[cfg(target_os = "macos")]
     {
-        runtime_macos::providers::wan::product_load::lightning_lora_files(engine_id, &snapshot)
+        runtime_macos::converters::wan::product_load::lightning_lora_files(engine_id, &snapshot)
             .map_err(|error| {
                 crate::provider_error(error, |error| {
                     WorkerError::InvalidPayload(error.to_string())
@@ -728,7 +728,7 @@ pub(super) fn resolve_wan_adapters(
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
         // macOS: the MLX provider crate builds the product's pair (strength 1.0, high/low experts).
         #[cfg(target_os = "macos")]
-        for adapter in runtime_macos::providers::wan::product_load::lightning_adapters(high, low) {
+        for adapter in runtime_macos::converters::wan::product_load::lightning_adapters(high, low) {
             specs.push(settings, adapter)?;
         }
         #[cfg(not(target_os = "macos"))]
@@ -1264,7 +1264,7 @@ pub(super) fn scail2_sampling(
 pub(super) fn scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
     adapters
         .iter()
-        .any(|a| runtime_macos::providers::scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
+        .any(|a| runtime_macos::converters::scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
 }
 
 /// In-place ComfyUI Wan2.2 A14B experts for the sc-10671 base lane (epic 10451 Phase 2c). When set on a
@@ -2417,8 +2417,7 @@ pub(super) fn take_video_request(
     input: &mut VideoGenInput,
     cancel: &CancelFlag,
 ) -> GenerationRequest {
-    GenerationRequest {
-        veda: input.veda.take(),
+    let mut req = GenerationRequest {
         prompt: std::mem::take(&mut input.prompt),
         negative_prompt: input.negative_prompt.take(),
         width: input.width,
@@ -2427,40 +2426,64 @@ pub(super) fn take_video_request(
         // opted-in LTX-2.5 request so the duration head is actually reached.
         frames: input.auto_duration.is_none().then_some(input.frames),
         fps: Some(input.fps),
-        auto_duration: input.auto_duration,
-        temporal_upsample_rounds: input.temporal_upsample_rounds,
-        // sc-23402. `None` ⇒ gen-core's own `REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`; an out-of-range
-        // value never reaches here, because the parse that produced it refused it.
-        reference_image_short_edge: input.reference_image_short_edge,
-        // sc-26691. `None` ⇒ gen-core's `match`; a misspelt mode never reaches here, because the
-        // parse that produced it refused it.
-        reference_image_resize_mode: input.reference_image_resize_mode,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
         // Per-generation sampler / scheduler (sc-7127), already N3-guarded against the engine's
         // advertised surface in `generate_video`, so an unsupported name was dropped to `None` (the
         // engine default) before reaching here — `validate_request` only ever sees an advertised name.
-        sampler: input.sampler.take(),
-        scheduler: input.scheduler.take(),
+        sampler: input.sampler.take().map(Into::into),
+        scheduler: input.scheduler.take().map(Into::into),
         seed: Some(input.seed),
         conditioning: std::mem::take(&mut input.conditioning),
         control_scale: input.control_scale,
-        video_mode: input.video_mode.clone(),
+        video_mode: input.video_mode.clone().map(Into::into),
         enhance_prompt: input.enhance_prompt,
-        use_uncensored_enhancer: input.use_uncensored_enhancer,
         enhance_max_tokens: input.enhance_max_tokens,
         enhance_temperature: input.enhance_temperature,
-        motion_bucket_id: input.motion_bucket_id,
-        noise_aug_strength: input.noise_aug_strength,
-        decode_chunk_size: input.decode_chunk_size,
-        conditioning_fps: input.conditioning_fps,
-        softness: input.softness,
         #[cfg(test)]
         memory: input.memory,
         cancel: cancel.clone(),
         ..Default::default()
+    };
+    let veda = input.veda.take();
+    if veda.is_some()
+        || input.reference_image_short_edge.is_some()
+        || input.reference_image_resize_mode.is_some()
+    {
+        let h3 = req.extensions.h3_mut();
+        h3.veda = veda;
+        // sc-23402. `None` ⇒ gen-core's own `REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`; an out-of-range
+        // value never reaches here, because the parse that produced it refused it.
+        h3.reference_image_short_edge = input.reference_image_short_edge;
+        // sc-26691. `None` ⇒ gen-core's `match`; a misspelt mode never reaches here, because the
+        // parse that produced it refused it.
+        h3.reference_image_resize_mode = input.reference_image_resize_mode;
     }
+    if input.auto_duration.is_some()
+        || input.temporal_upsample_rounds.is_some()
+        || input.use_uncensored_enhancer
+    {
+        let ltx = req.extensions.ltx_mut();
+        ltx.auto_duration = input.auto_duration;
+        ltx.temporal_upsample_rounds = input.temporal_upsample_rounds;
+        ltx.use_uncensored_enhancer = input.use_uncensored_enhancer;
+    }
+    if input.motion_bucket_id.is_some()
+        || input.noise_aug_strength.is_some()
+        || input.decode_chunk_size.is_some()
+        || input.conditioning_fps.is_some()
+    {
+        let svd = req.extensions.svd_mut();
+        svd.motion_bucket_id = input.motion_bucket_id;
+        svd.noise_aug_strength = input.noise_aug_strength;
+        svd.decode_chunk_size = input.decode_chunk_size;
+        svd.conditioning_fps = input.conditioning_fps;
+    }
+    if let Some(softness) = input.softness {
+        req.extensions.seedvr2_mut().softness = Some(softness);
+    }
+    req
 }
 
 #[cfg(native_lane)]
@@ -2553,6 +2576,12 @@ fn run_prepared_video_generation_with_receipts(
         None => generate(),
     }
     .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
+    let veda_execution = completed
+        .generation
+        .veda_report()
+        .filter(|report| report.requested)
+        .map(|report| report.outcome_json());
+    let adapter_apply_reports = completed.generation.adapter_apply_reports;
     let output = completed
         .generation
         .output
@@ -2573,11 +2602,8 @@ fn run_prepared_video_generation_with_receipts(
                 sample_rate: track.sample_rate,
                 channels: track.channels,
             }),
-            adapter_apply_reports: generator.adapter_apply_reports(),
-            veda_execution: generator
-                .veda_execution_report()
-                .filter(|report| report.requested)
-                .map(|report| report.outcome_json()),
+            adapter_apply_reports,
+            veda_execution,
             execution_report: Some(completed.execution),
         }),
         // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
@@ -2593,6 +2619,9 @@ fn run_prepared_video_generation_with_receipts(
         )),
         GenerationOutput::Interleaved { .. } => Err(WorkerError::Engine(
             "video model returned interleaved output, expected video frames".to_owned(),
+        )),
+        GenerationOutput::Vector(_) => Err(WorkerError::Engine(
+            "video model returned vector output, expected video frames".to_owned(),
         )),
     }
 }
@@ -3543,28 +3572,28 @@ pub(super) async fn generate_video_using(
                     )?;
                     unplanned_overlay.as_deref()
                 };
+                let mut workspace_req = request.clone();
+                workspace_req.width = input.width;
+                workspace_req.height = input.height;
+                workspace_req.frames = Some(input.frames);
+                workspace_req.count = 1;
                 let sparse_bound = generator
-                    .veda_workspace_bound(gen_core_h3::veda::workspace::Request {
-                        veda: request.veda.as_ref(),
-                        width: input.width,
-                        height: input.height,
-                        frames: input.frames,
-                        count: 1,
-                        prompt: &request.prompt,
-                        conditioning: &request.conditioning,
-                        reference_image_short_edge: input.reference_image_short_edge,
-                        reference_image_resize_mode: input.reference_image_resize_mode,
-                    })
+                    .request_workspace_bound(&workspace_req)
                     .map_err(|e| {
                         crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string()))
-                    })?;
+                    })?
+                    .and_then(gen_core::RequestWorkspaceBound::into_sparse_attention);
                 let native_quant_request = generator
                     .memory_strategy_contract()
                     .and_then(|contract| contract.phase_facts.as_ref())
                     .and_then(|phase| phase.native_quant.as_ref())
                     .map(|_| crate::video_admission::NativeQuantRequest {
                         shape: gen_core_h3::veda::workspace::Request {
-                            veda: request.veda.as_ref(),
+                            veda: request
+                                .extensions
+                                .h3
+                                .as_ref()
+                                .and_then(|ext| ext.veda.as_ref()),
                             width: input.width,
                             height: input.height,
                             frames: input.frames,
@@ -3593,7 +3622,11 @@ pub(super) async fn generate_video_using(
                     width: geometry.map_or(input.width, |g| g.width),
                     height: geometry.map_or(input.height, |g| g.height),
                     frames: geometry.map_or(input.frames, |g| g.frames),
-                    decode_chunk_size: request.decode_chunk_size,
+                    decode_chunk_size: request
+                        .extensions
+                        .svd
+                        .as_ref()
+                        .and_then(|ext| ext.decode_chunk_size),
                     fps: input.fps,
                     runtime: None,
                     headroom_bytes: spec_headroom_bytes,
@@ -3646,10 +3679,14 @@ pub(super) async fn generate_video_using(
                             "H3 CUDA source allocation facts or the current GPU budget are unavailable; refusing before tensor materialization.".into()));
                     }
                     let host_bytes =
-                        runtime_cuda::providers::minimax_h3::memory_strategy::host_peak_bytes(
+                        runtime_cuda::memory_helpers::minimax_h3::memory_strategy::host_peak_bytes(
                             &admission_spec,
                             gen_core_h3::veda::workspace::Request {
-                                veda: request.veda.as_ref(),
+                                veda: request
+                                    .extensions
+                                    .h3
+                                    .as_ref()
+                                    .and_then(|h3| h3.veda.as_ref()),
                                 width: input.width,
                                 height: input.height,
                                 frames: input.frames,
@@ -3857,7 +3894,7 @@ pub(super) async fn generate_video_using(
                     crate::generator_cache::with_uncached_generator(
                         move || {
                             receipts.scope.with_prepared(|| {
-                                runtime_cuda::providers::wan::wan14b::load_from_comfyui_experts_with_offload(
+                                runtime_cuda::converters::wan::wan14b::load_from_comfyui_experts_with_offload(
                                     experts.high_file,
                                     experts.low_file,
                                     experts.te_file,

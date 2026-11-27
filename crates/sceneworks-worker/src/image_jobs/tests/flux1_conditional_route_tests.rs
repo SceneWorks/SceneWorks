@@ -421,7 +421,7 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
         height: side,
         pixels: vec![96; (side * side * 3) as usize],
     };
-    let first = GenerationRequest {
+    let mut first = GenerationRequest {
         prompt: "a portrait".to_owned(),
         width: 512,
         height: 512,
@@ -429,13 +429,13 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
         seed: Some(7),
         steps: Some(4),
         guidance: Some(3.5),
-        use_pid: true,
         conditioning: vec![Conditioning::Reference {
             image: image(512),
             strength: Some(0.7),
         }],
         ..Default::default()
     };
+    first.features.pid = Some(gen_core::PidParams::enabled());
     let hires = super::HiresFixPlan {
         width: 1024,
         height: 1024,
@@ -469,7 +469,7 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
     };
     let planned_refinement = refinement(None);
     assert!(
-        !planned_refinement.use_pid,
+        !planned_refinement.use_pid(),
         "the refinement decodes without PiD"
     );
 
@@ -496,7 +496,7 @@ fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
         .expect("the refinement runs the request its plan was compiled from");
 
     let mut kept_pid = executed_refinement;
-    kept_pid.use_pid = true;
+    kept_pid.features.pid = Some(gen_core::PidParams::enabled());
     assert!(
         refine_plan.check_request(&descriptor, &kept_pid).is_err(),
         "a refinement that kept PiD would not match its plan"

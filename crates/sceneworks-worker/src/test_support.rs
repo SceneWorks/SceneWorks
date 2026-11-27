@@ -370,10 +370,10 @@ fn moss_acceptance_device(
 fn moss_acceptance_device(
     memory_limit_bytes: Option<u64>,
     memory_limit_fraction: Option<f32>,
-) -> gen_core::Result<(serde_json::Value, candle_gen::candle_core::Device)> {
+) -> gen_core::Result<(serde_json::Value, runtime_cuda::media::candle_core::Device)> {
     let unsupported =
         |error: &dyn std::fmt::Display| gen_core::Error::Unsupported(error.to_string());
-    let device = candle_gen::default_device().map_err(|error| unsupported(&error))?;
+    let device = runtime_cuda::media::default_device().map_err(|error| unsupported(&error))?;
     if !device.is_cuda() {
         return Err(gen_core::Error::Unsupported(
             "Candle acceptance refuses a CPU/non-CUDA allocator device".into(),
@@ -457,7 +457,10 @@ pub fn real_moss_trainer_with_probe(
             request.config.memory_limit_bytes,
             request.config.memory_limit_fraction,
         )?;
-        let mut trainer = mlx_gen_moss_image::training::MossImageTrainer::load(variant, spec)
+        let mut trainer =
+            runtime_macos::memory_helpers::moss_image::training::MossImageTrainer::load(
+                variant, spec,
+            )
             .map_err(|error| unsupported(&error))?;
         trainer.set_test_probe(Some(probe));
         let plan = trainer
@@ -476,10 +479,11 @@ pub fn real_moss_trainer_with_probe(
             request.config.memory_limit_bytes,
             request.config.memory_limit_fraction,
         )?;
-        let mut trainer = candle_gen_moss_image::training::MossImageTrainer::load_on_device(
-            variant, spec, device,
-        )
-        .map_err(|error| unsupported(&error))?;
+        let mut trainer =
+            runtime_cuda::memory_helpers::moss_image::training::MossImageTrainer::load_on_device(
+                variant, spec, device,
+            )
+            .map_err(|error| unsupported(&error))?;
         trainer.set_test_probe(Some(probe));
         let plan = trainer
             .test_memory_plan(request)

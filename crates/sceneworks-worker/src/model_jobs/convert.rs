@@ -141,7 +141,7 @@ fn convert_flux2_klein_diffusers(
     out_dir: &Path,
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    runtime_macos::providers::flux2::convert_and_assemble(source_file, base_dir, out_dir)
+    runtime_macos::converters::flux2::convert_and_assemble(source_file, base_dir, out_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -158,7 +158,7 @@ fn convert_flux2_klein_diffusers(
     out_dir: &Path,
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720 / sc-7459): backend-specific weight converter; not a registry contract.
-    runtime_cuda::providers::flux2::convert_and_assemble(source_file, base_dir, out_dir)
+    runtime_cuda::converters::flux2::convert_and_assemble(source_file, base_dir, out_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -260,8 +260,8 @@ fn convert_ltx_native(
     let (converter_dir, _alias) =
         selected_ltx_converter_upscaler_dir(upscaler_dir, upscaler_file, out_dir)?;
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    let opts = runtime_macos::providers::ltx::LtxConvertOpts::audio_quant(bits);
-    runtime_macos::providers::ltx::convert_and_assemble(
+    let opts = runtime_macos::converters::ltx::LtxConvertOpts::audio_quant(bits);
+    runtime_macos::converters::ltx::convert_and_assemble(
         source_file,
         Some(&converter_dir),
         out_dir,
@@ -303,14 +303,14 @@ fn convert_flux2_dev_prequant(
 ) -> Result<(), String> {
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
-    runtime_macos::providers::flux2::quantize_flux2_dit(
+    runtime_macos::converters::flux2::quantize_flux2_dit(
         &source_dir.join("transformer"),
         &out_dir.join("transformer"),
         bits,
         group_size,
     )
     .map_err(|error| format!("quantize FLUX.2-dev transformer: {error}"))?;
-    runtime_macos::providers::flux2::quantize_flux2_text_encoder_dir(
+    runtime_macos::converters::flux2::quantize_flux2_text_encoder_dir(
         &source_dir.join("text_encoder"),
         &out_dir.join("text_encoder"),
         bits,
@@ -366,9 +366,9 @@ fn convert_sd3_prequant(
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     let arch = match variant {
         Sd3Variant::Large | Sd3Variant::LargeTurbo => {
-            runtime_macos::providers::sd3::Sd3Arch::large()
+            runtime_macos::converters::sd3::Sd3Arch::large()
         }
-        Sd3Variant::Medium => runtime_macos::providers::sd3::Sd3Arch::medium(),
+        Sd3Variant::Medium => runtime_macos::converters::sd3::Sd3Arch::medium(),
     };
     std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
     let src_transformer = source_dir.join("transformer");
@@ -381,7 +381,7 @@ fn convert_sd3_prequant(
         );
     }
     // Quantize the MMDiT transformer/ on disk (validates the arch first, writes a packed dir).
-    runtime_macos::providers::sd3::quantize_sd3_dir(
+    runtime_macos::converters::sd3::quantize_sd3_dir(
         &arch,
         &src_transformer,
         &out_dir.join("transformer"),
@@ -517,7 +517,7 @@ fn convert_anima_prequant(
             }
             // Packed: quantize ONLY the Cosmos DiT (the bundled conditioner stays dense) via the
             // crate's install-time quantizer — the single source of the quant policy (sc-10580).
-            Some(bits) => runtime_macos::providers::anima::quantize_anima_dit(
+            Some(bits) => runtime_macos::converters::anima::quantize_anima_dit(
                 dit_source, &dit_dst, bits, group_size,
             )
             .map_err(|error| format!("quantize Anima DiT: {error}"))?,

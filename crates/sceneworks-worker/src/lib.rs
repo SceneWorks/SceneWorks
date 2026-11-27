@@ -1445,6 +1445,14 @@ pub async fn run() -> WorkerResult<()> {
         &settings,
         utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
     )?;
+    // REG-3: the linked engine is authoritative at runtime — fail closed on startup if the
+    // embedded sga.capabilities/2 export disagrees with this build's linked registry.
+    #[cfg(native_lane)]
+    engine_capability_facts::verify_linked_runtime_against_embedded_export().map_err(|error| {
+        WorkerError::Engine(format!(
+            "REG-3 runtime capability authority check failed: {error}"
+        ))
+    })?;
     // Only the top-level worker process performs conversion recovery. It runs before any utility
     // children are spawned, and the lifecycle lock excludes independently running finalizers.
     // Child restarts must never sweep while sibling utility workers may be converting.

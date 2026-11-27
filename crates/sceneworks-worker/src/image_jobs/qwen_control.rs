@@ -382,12 +382,12 @@ impl QwenStrictControl {
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
-            sampler: self.sampling.sampler.clone(),
-            scheduler: self.sampling.scheduler.clone(),
+            sampler: self.sampling.sampler.as_deref().map(str::to_owned),
+            scheduler: self.sampling.scheduler.as_deref().map(str::to_owned),
             scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             control_scale: self.control_scale,
-            pag: self.sampling.pag.clone(),
+            pag: self.sampling.features.pag.clone(),
             seed,
             cancel: cancel.clone(),
             preview: preview.clone(),
@@ -433,7 +433,7 @@ impl CandleStrictControl for QwenStrictControl {
                 1,
                 self.steps,
                 None,
-                self.sampling.pag.as_ref(),
+                self.sampling.features.pag.as_ref(),
             )
         });
         let footprint = if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {

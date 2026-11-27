@@ -131,7 +131,12 @@ impl Control {
         let options: gen_core::moss_image::MossImageOptions =
             serde_json::from_value(expected["advanced"]["mossImage"].clone()).unwrap();
         assert_eq!(
-            request.moss_image.as_ref().unwrap(),
+            request
+                .extensions
+                .moss_image
+                .as_ref()
+                .and_then(|ext| ext.options.as_ref())
+                .unwrap(),
             &options,
             "all authored native options"
         );
@@ -226,7 +231,13 @@ impl MossStreamRuntime for FixtureRuntime {
                 .unwrap();
             let request = gen_core_moss_image::moss_image_edit::edit_request(input.native).unwrap();
             assert_eq!(
-                request.moss_image.unwrap().acceleration,
+                request
+                    .extensions
+                    .moss_image
+                    .as_ref()
+                    .and_then(|ext| ext.options.as_ref())
+                    .unwrap()
+                    .acceleration,
                 MossImageAcceleration::Off
             );
             self.control
@@ -256,20 +267,25 @@ impl Generator for TransactionProbe {
     fn validate(&self, request: &GenerationRequest) -> gen_core::Result<()> {
         self.inner.validate(request)
     }
-    fn moss_image_owned_weight_bytes(&self) -> Option<u64> {
+    fn retained_weight_bytes(&self) -> Option<u64> {
         Some(20)
     }
-    fn moss_image_edit_request_peak(
-        &self,
-        request: &GenerationRequest,
-        inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
-    ) -> gen_core::Result<u64> {
+    fn request_memory_peak(&self, request: &GenerationRequest) -> gen_core::Result<Option<u64>> {
+        let Some(edit_req) = request
+            .extensions
+            .moss_image
+            .as_ref()
+            .and_then(|ext| ext.edit.as_ref())
+        else {
+            return Ok(None);
+        };
+        let inputs = edit_req.as_inputs();
         if self
             .control
             .check_recording_request(request, inputs, false)?
         {
             self.control.warm.fetch_add(1, Ordering::SeqCst);
-            return Ok(73);
+            return Ok(Some(73));
         }
         assert_eq!(
             inputs.advanced.negative_prompts.unwrap(),
@@ -281,7 +297,7 @@ impl Generator for TransactionProbe {
         *self.inner.expected_edit_inputs.borrow_mut() =
             self.control.expected_references.lock().unwrap().clone();
         self.inner.expected_edit_cache.set(inputs.use_kv_cache);
-        self.inner.moss_image_edit_request_peak(request, inputs)
+        self.inner.edit_request_peak(request, inputs).map(Some)
     }
     fn generate(
         &self,
@@ -293,12 +309,23 @@ impl Generator for TransactionProbe {
             "ordinary fallback must never serve this edit".into(),
         ))
     }
-    fn generate_moss_image_edit(
+    fn generate_with_report(
         &self,
         request: &GenerationRequest,
-        inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
         progress: &mut dyn FnMut(Progress),
-    ) -> gen_core::Result<MossImageAdvancedOutput> {
+    ) -> gen_core::Result<gen_core::GenerationReport> {
+        let Some(edit_req) = request
+            .extensions
+            .moss_image
+            .as_ref()
+            .and_then(|ext| ext.edit.as_ref())
+        else {
+            self.control.ordinary.fetch_add(1, Ordering::SeqCst);
+            return Err(gen_core::Error::Unsupported(
+                "ordinary fallback must never serve this edit".into(),
+            ));
+        };
+        let inputs = edit_req.as_inputs();
         if self
             .control
             .check_recording_request(request, inputs, true)?
@@ -318,9 +345,7 @@ impl Generator for TransactionProbe {
         let attempt = *self.control.attempt.lock().unwrap();
         self.inner.failure.set(attempt == Attempt::Fail);
         self.inner.cancel.set(attempt == Attempt::CancelAfterOutput);
-        let mut output = self
-            .inner
-            .generate_moss_image_edit(request, inputs, progress)?;
+        let mut output = self.inner.run_edit(request, inputs, progress)?;
         match attempt {
             Attempt::MissingReport => *self.inner.edit_report.borrow_mut() = None,
             Attempt::WrongReferenceReceipt => {
@@ -352,13 +377,21 @@ impl Generator for TransactionProbe {
             }
             _ => {}
         }
-        Ok(output)
-    }
-    fn moss_image_edit_execution_report(
-        &self,
-    ) -> Option<gen_core::moss_image_edit::MossImageEditExecutionReport> {
-        self.control.reads.fetch_add(1, Ordering::SeqCst);
-        self.inner.moss_image_edit_execution_report()
+        let MossImageAdvancedOutput::Images(images) = output else {
+            return Err(gen_core::Error::Unsupported(
+                "generic MOSS generation requires image output".into(),
+            ));
+        };
+        let mut report = gen_core::GenerationReport::from_output(GenerationOutput::Images(images));
+        if !request.cancel.is_cancelled() {
+            self.control.reads.fetch_add(1, Ordering::SeqCst);
+            report.family_report = self
+                .inner
+                .take_edit_report()
+                .map(|r| gen_core::FamilyExecutionReport::MossImageEdit(Box::new(r)));
+            report.adapter_apply_reports = self.inner.take_adapter_reports();
+        }
+        Ok(report)
     }
 }
 

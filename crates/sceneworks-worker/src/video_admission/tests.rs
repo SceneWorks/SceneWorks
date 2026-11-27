@@ -5589,16 +5589,16 @@ fn the_packaged_cuda_encode_profile_prices_each_engines_encode_on_every_rung() {
 #[test]
 fn veda_queued_admission_uses_complete_bound_and_current_budget() {
     let contract = fixture_contract(4, 1, &[MemoryStrategy::StagedResidency]);
-    let req = gen_core::GenerationRequest {
+    let mut req = gen_core::GenerationRequest {
         width: 576,
         height: 320,
         frames: Some(124),
-        veda: Some(gen_core::VedaRequest {
-            enabled: true,
-            ..Default::default()
-        }),
         ..Default::default()
     };
+    req.extensions.h3_mut().veda = Some(gen_core::VedaRequest {
+        enabled: true,
+        ..Default::default()
+    });
     for backend in [
         gen_core_h3::veda::workspace::Backend::Mlx,
         gen_core_h3::veda::workspace::Backend::Cuda,
@@ -5643,16 +5643,16 @@ fn veda_sparse_admission_selects_the_dense_strategy_with_the_bound_on_top() {
         4,
         &[MemoryStrategy::StagedResidency],
     )));
-    let req = gen_core::GenerationRequest {
+    let mut req = gen_core::GenerationRequest {
         width: 576,
         height: 320,
         frames: Some(124),
-        veda: Some(gen_core::VedaRequest {
-            enabled: true,
-            ..Default::default()
-        }),
         ..Default::default()
     };
+    req.extensions.h3_mut().veda = Some(gen_core::VedaRequest {
+        enabled: true,
+        ..Default::default()
+    });
     let mut bound =
         gen_core_h3::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Mlx)
             .unwrap()
@@ -5724,16 +5724,16 @@ fn veda_sparse_admission_selects_the_dense_strategy_with_the_bound_on_top() {
 fn historical_veda_cold_fixture_prices_device_pool_and_preserves_off_baseline() {
     let dense = 43.25f64;
     assert_eq!(veda_cold_peak_gb(dense, None).to_bits(), dense.to_bits());
-    let req = gen_core::GenerationRequest {
+    let mut req = gen_core::GenerationRequest {
         width: 576,
         height: 320,
         frames: Some(124),
-        veda: Some(gen_core::VedaRequest {
-            enabled: true,
-            ..Default::default()
-        }),
         ..Default::default()
     };
+    req.extensions.h3_mut().veda = Some(gen_core::VedaRequest {
+        enabled: true,
+        ..Default::default()
+    });
     let bound =
         gen_core_h3::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
             .unwrap()
@@ -5752,16 +5752,16 @@ fn historical_veda_cold_fixture_prices_device_pool_and_preserves_off_baseline() 
 
 #[test]
 fn veda_cuda_host_pool_is_checked_independently_and_fail_closed() {
-    let req = gen_core::GenerationRequest {
+    let mut req = gen_core::GenerationRequest {
         width: 576,
         height: 320,
         frames: Some(124),
-        veda: Some(gen_core::VedaRequest {
-            enabled: true,
-            ..Default::default()
-        }),
         ..Default::default()
     };
+    req.extensions.h3_mut().veda = Some(gen_core::VedaRequest {
+        enabled: true,
+        ..Default::default()
+    });
     let b =
         gen_core_h3::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
             .unwrap()

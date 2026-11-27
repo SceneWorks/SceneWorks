@@ -45,10 +45,11 @@ use std::path::{Path, PathBuf};
 
 use gen_core::runtime::CancelFlag;
 use gen_core::{Image, LoadSpec, PidWeights, WeightsSource};
-use runtime_cuda::providers::instantid::{
-    BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, SdxlComponents,
-    COMPONENT_TOKENIZER_CLIP_BIGG, COMPONENT_TOKENIZER_CLIP_L, COMPONENT_VAE_FP16_FIX,
+use runtime_cuda::calibration::instantid::{
+    InstantId, InstantIdPaths, InstantIdRequest, SdxlComponents, COMPONENT_TOKENIZER_CLIP_BIGG,
+    COMPONENT_TOKENIZER_CLIP_L, COMPONENT_VAE_FP16_FIX,
 };
+use runtime_cuda::utilities::instantid_geometry::BodyPoint;
 
 /// The InstantID identity-preservation floor. InstantID's target envelope is ArcFace-cosine ~0.82
 /// @1024²; a conservative 0.35 floor proves the reference identity clearly transferred (an unrelated

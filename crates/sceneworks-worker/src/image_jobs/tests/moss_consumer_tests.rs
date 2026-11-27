@@ -621,17 +621,25 @@ fn moss_png_recipe_roundtrip_preserves_requested_mode_and_complete_actual_receip
         MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16),
         MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32),
     ] {
-        let native = GenerationRequest {
+        let mut native = GenerationRequest {
             width: 16,
             height: 16,
-            moss_image: Some(MossImageOptions {
-                acceleration: mode,
-                ..Default::default()
-            }),
             ..Default::default()
         };
+        native.extensions.moss_image_mut().options = Some(MossImageOptions {
+            acceleration: mode,
+            ..Default::default()
+        });
         let report = completed_receipt(&native);
-        let options = serde_json::to_value(native.moss_image.unwrap()).unwrap();
+        let options = serde_json::to_value(
+            native
+                .extensions
+                .moss_image
+                .as_ref()
+                .and_then(|ext| ext.options.as_ref())
+                .unwrap(),
+        )
+        .unwrap();
         let payload=json!({"model":"moss_image_sft","mode":"text_to_image","prompt":"日本語 <tag> {\"items\":[]}","count":1,"width":16,"height":16,"modelManifestEntry":{"limits":{"minDimension":16}},"advanced":{"mossImage":options}}).as_object().unwrap().clone();
         let request = resolved_request(&payload);
         let plan = ImagePlan::with_count_and_adapter(
@@ -744,8 +752,8 @@ impl Probe {
         }
     }
 }
-impl Generator for Probe {
-    fn moss_image_edit_request_peak(
+impl Probe {
+    pub(super) fn edit_request_peak(
         &self,
         request: &GenerationRequest,
         inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
@@ -793,7 +801,7 @@ impl Generator for Probe {
         );
         Ok(73)
     }
-    fn generate_moss_image_edit(
+    pub(super) fn run_edit(
         &self,
         req: &GenerationRequest,
         inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
@@ -960,11 +968,34 @@ impl Generator for Probe {
             ))
         }
     }
-    fn moss_image_edit_execution_report(
+    pub(super) fn take_edit_report(
         &self,
     ) -> Option<gen_core::moss_image_edit::MossImageEditExecutionReport> {
         self.reads.set(self.reads.get() + 1);
         self.edit_report.borrow().clone()
+    }
+    pub(super) fn take_adapter_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+        self.adapter_report_reads
+            .set(self.adapter_report_reads.get() + 1);
+        self.adapter_reports.borrow().clone()
+    }
+    pub(super) fn take_report(&self) -> Option<MossImageExecutionReport> {
+        self.reads.set(self.reads.get() + 1);
+        self.report.borrow().clone()
+    }
+}
+impl Generator for Probe {
+    fn request_memory_peak(&self, request: &GenerationRequest) -> gen_core::Result<Option<u64>> {
+        let Some(edit_req) = request
+            .extensions
+            .moss_image
+            .as_ref()
+            .and_then(|ext| ext.edit.as_ref())
+        else {
+            return Ok(None);
+        };
+        self.edit_request_peak(request, edit_req.as_inputs())
+            .map(Some)
     }
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         &self.descriptor
@@ -972,17 +1003,45 @@ impl Generator for Probe {
     fn validate(&self, _: &GenerationRequest) -> gen_core::Result<()> {
         Ok(())
     }
-    fn moss_image_owned_weight_bytes(&self) -> Option<u64> {
+    fn retained_weight_bytes(&self) -> Option<u64> {
         Some(self.owned_weight_bytes.get())
     }
-    fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
-        self.adapter_report_reads
-            .set(self.adapter_report_reads.get() + 1);
-        self.adapter_reports.borrow().clone()
-    }
-    fn moss_image_execution_report(&self) -> Option<MossImageExecutionReport> {
-        self.reads.set(self.reads.get() + 1);
-        self.report.borrow().clone()
+    fn generate_with_report(
+        &self,
+        req: &GenerationRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::GenerationReport> {
+        if let Some(edit_req) = req
+            .extensions
+            .moss_image
+            .as_ref()
+            .and_then(|ext| ext.edit.as_ref())
+        {
+            let output = self.run_edit(req, edit_req.as_inputs(), progress)?;
+            let MossImageAdvancedOutput::Images(images) = output else {
+                return Err(gen_core::Error::Unsupported(
+                    "generic MOSS generation requires image output".into(),
+                ));
+            };
+            let mut report =
+                gen_core::GenerationReport::from_output(GenerationOutput::Images(images));
+            if !req.cancel.is_cancelled() {
+                report.family_report = self
+                    .take_edit_report()
+                    .map(|r| gen_core::FamilyExecutionReport::MossImageEdit(Box::new(r)));
+                report.adapter_apply_reports = self.take_adapter_reports();
+            }
+            return Ok(report);
+        }
+        let output = self.generate(req, progress)?;
+        let mut report = gen_core::GenerationReport::from_output(output);
+        if !req.cancel.is_cancelled() {
+            report.family_report = self
+                .take_report()
+                .map(|r| gen_core::FamilyExecutionReport::MossImage(Box::new(r)));
+            report.adapter_apply_reports = self.take_adapter_reports();
+        }
+        Ok(report)
     }
     fn generate(
         &self,
@@ -1370,13 +1429,24 @@ fn cold_edit_uses_native_typed_validation_before_provider_loading() {
             moss_edit_cold_peak(variant, &spec, &request, &[], options, Default::default())
                 .is_err()
         );
-        request.moss_image.as_mut().unwrap().acceleration =
-            MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16);
+        request
+            .extensions
+            .moss_image_mut()
+            .options
+            .as_mut()
+            .unwrap()
+            .acceleration = MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16);
         assert!(
             moss_edit_cold_peak(variant, &spec, &request, &refs, options, Default::default())
                 .is_err()
         );
-        request.moss_image.as_mut().unwrap().acceleration = MossImageAcceleration::Off;
+        request
+            .extensions
+            .moss_image_mut()
+            .options
+            .as_mut()
+            .unwrap()
+            .acceleration = MossImageAcceleration::Off;
     }
 }
 

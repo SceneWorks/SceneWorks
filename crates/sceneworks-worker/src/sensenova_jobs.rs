@@ -57,7 +57,7 @@ use runtime_macos::providers::sensenova::{
 // drive directly (they assert loader/tier behavior, not admission). Production now goes through the
 // provider-owned `load_runtime`, so these are test-only.
 #[cfg(all(target_os = "macos", test))]
-use runtime_macos::providers::sensenova::{load_raw, load_tokenizer, NeoChatConfig, T2iModel};
+use runtime_macos::utilities::sensenova::{load_raw, load_tokenizer, NeoChatConfig, T2iModel};
 
 // Candle (Windows/CUDA) understanding path (sc-5501). `Image` is the neutral `gen_core::Image`
 // (`load_reference_image`'s return); the source-image preprocessing + tensor construction live in
@@ -2637,7 +2637,7 @@ mod tests {
     /// rather than copied, so a pin bump that moves them moves these tests too.
     #[cfg(target_os = "macos")]
     fn test_contract(streamable: bool) -> gen_core::MemoryProviderContract {
-        use runtime_macos::providers::sensenova::memory_strategy::{
+        use runtime_macos::memory_helpers::sensenova::memory_strategy::{
             ATTENTION_CHUNK_SIZE, TRANSFORMER_WINDOW_SIZE,
         };
         let mut contract = gen_core::MemoryProviderContract::compatibility_default(
@@ -2768,7 +2768,9 @@ mod tests {
             );
             assert_eq!(
                 context.selection.parameters.attention_chunk_size,
-                Some(runtime_macos::providers::sensenova::memory_strategy::ATTENTION_CHUNK_SIZE),
+                Some(
+                    runtime_macos::memory_helpers::sensenova::memory_strategy::ATTENTION_CHUNK_SIZE
+                ),
             );
             assert_eq!(context.selection.parameters.transformer_window_size, None);
             assert_eq!(
@@ -2808,7 +2810,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_deferred_contract_admits_bounded_transformer_residency_for_interleave() {
-        use runtime_macos::providers::sensenova::memory_strategy::{
+        use runtime_macos::memory_helpers::sensenova::memory_strategy::{
             ATTENTION_CHUNK_SIZE, TRANSFORMER_WINDOW_SIZE,
         };
         let contract = test_contract(true);

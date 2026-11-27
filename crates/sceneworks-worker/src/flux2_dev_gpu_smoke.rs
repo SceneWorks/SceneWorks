@@ -196,7 +196,7 @@ fn flux2_dev_candle_gpu_smoke() {
 #[test]
 #[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev diffusers snapshot + a CUDA device (cap=120)"]
 fn flux2_dev_edit_candle_gpu_smoke() {
-    use runtime_cuda::providers::flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
+    use runtime_cuda::calibration::flux2::{Flux2Edit, Flux2EditPaths, Flux2EditRequest};
 
     let weights_dir = env_path("FLUX2_DEV_DIR");
     assert!(
@@ -304,7 +304,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
 #[test]
 #[ignore = "real-weight GPU smoke; needs the dense FLUX.2-dev snapshot + the Fun-Controlnet-Union ckpt + a CUDA device (cap=120)"]
 fn flux2_dev_control_candle_gpu_smoke() {
-    use runtime_cuda::providers::flux2::{Flux2Control, Flux2ControlPaths, Flux2ControlRequest};
+    use runtime_cuda::calibration::flux2::{Flux2Control, Flux2ControlPaths, Flux2ControlRequest};
 
     let weights_dir = env_path("FLUX2_DEV_DIR");
     let control = env_path("FLUX2_CONTROL");

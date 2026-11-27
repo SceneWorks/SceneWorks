@@ -641,10 +641,12 @@ mod tests {
             ("flux3_klein_base", 3_584),
         ] {
             assert_eq!(crate::prompt_enhancement_max_tokens(model), limit);
-            assert_eq!(
-                u64::from(gen_core::generator::max_enhance_tokens_for_model(model)),
-                limit
-            );
+            let export_limit = sceneworks_core::sga_capabilities::macos_mlx()
+                .routes
+                .get(model)
+                .and_then(|route| route.capabilities.max_enhance_tokens)
+                .unwrap_or(gen_core::generator::MAX_ENHANCE_TOKENS);
+            assert_eq!(u64::from(export_limit), limit);
             for tokens in [0, 2_048, 2_049, 3_584, 3_585] {
                 let advanced = json!({"enhancePrompt": true, "enhanceMaxTokens": tokens});
                 let parsed = parse_prompt_enhancement_fields(model, advanced.as_object().unwrap());

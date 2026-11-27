@@ -371,7 +371,11 @@ fn run_with_scope<T>(
 ) -> gen_core::Result<T> {
     // A reference render may never take the legacy no-context shortcut: that would erase the
     // provider's pre-load bound and bypass its safety check and request lifecycle.
-    let has_flux3_references = request.flux3_reference_output.is_some()
+    let has_flux3_references = request
+        .extensions
+        .flux3
+        .as_ref()
+        .is_some_and(|ext| ext.reference_output.is_some())
         || (sceneworks_core::image_request::flux3::is_model(generator.descriptor().id)
             && !request.conditioning.is_empty());
     if has_flux3_references
@@ -2875,6 +2879,8 @@ mod tests {
                 }),
                 pag: None,
                 low_res_start: None,
+                adapter_apply_reports: Vec::new(),
+                family_report: None,
             })
         }
     }

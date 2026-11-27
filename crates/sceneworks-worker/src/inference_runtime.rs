@@ -58,6 +58,21 @@ pub(crate) fn capability_snapshot_json() -> Option<serde_json::Value> {
     }
 }
 
+/// Canonical `sga.capabilities/2` capability export assembled live from the linked platform
+/// runtime catalog (`SW-6983`, `REG-3`). Returns `None` on builds without a linked tensor backend.
+pub(crate) fn linked_capabilities_export(
+) -> Option<Result<sceneworks_core::sga_capabilities::CapabilitiesExportV2, String>> {
+    #[cfg(native_lane)]
+    {
+        Some(platform_runtime::capabilities_export().map_err(|error| error.to_string()))
+    }
+
+    #[cfg(not(native_lane))]
+    {
+        None
+    }
+}
+
 pub(crate) fn media() -> &'static ProviderRegistry {
     #[cfg(native_lane)]
     {
