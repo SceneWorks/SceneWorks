@@ -143,13 +143,17 @@ fn expand_seed(
     seed: &Path,
     scope: &str,
 ) {
-    if seed.is_file() {
+    // One followed stat answers both `is_file` and `is_dir`.
+    let Ok(metadata) = std::fs::metadata(seed) else {
+        return;
+    };
+    if metadata.is_file() {
         if is_safetensors(seed) {
             push_source(sources, WeightsSource::File(seed.to_path_buf()), scope);
         }
         return;
     }
-    if !seed.is_dir() {
+    if !metadata.is_dir() {
         return;
     }
 
@@ -164,16 +168,24 @@ fn expand_seed(
     };
     let mut children = entries
         .flatten()
-        .map(|entry| entry.path())
+        .map(|entry| (entry.path(), entry.file_type().ok()))
         .collect::<Vec<_>>();
-    children.sort();
+    children.sort_by(|left, right| left.0.cmp(&right.0));
     children.truncate(MAX_SHALLOW_ENTRIES);
-    for child in children {
-        if child.is_file() && is_safetensors(&child) {
+    for (child, file_type) in children {
+        // The enumeration already carries each entry's type; only a link (or an entry whose type
+        // could not be read) needs the followed stat `is_file`/`is_dir` would have made.
+        let (is_file, is_dir) = match file_type {
+            Some(file_type) if !file_type.is_symlink() => (file_type.is_file(), file_type.is_dir()),
+            _ => std::fs::metadata(&child)
+                .map(|metadata| (metadata.is_file(), metadata.is_dir()))
+                .unwrap_or((false, false)),
+        };
+        if is_file && is_safetensors(&child) {
             push_source(sources, WeightsSource::File(child), scope);
             continue;
         }
-        if !child.is_dir() {
+        if !is_dir {
             continue;
         }
         push_source(sources, WeightsSource::Dir(child.clone()), scope);
@@ -184,9 +196,24 @@ fn expand_seed(
     }
 }
 
+/// [`expand_seed`] at most once per seed path. Rows routinely share an install path (a model and
+/// its variants, a tier family); a repeat expansion of the same path in the same pass could only
+/// re-offer keys that are already present, which `push_source` keeps with their first scope.
+fn expand_seed_once(
+    sources: &mut SourceMap,
+    expanded: &mut std::collections::HashSet<PathBuf>,
+    seed: &Path,
+    scope: &str,
+) {
+    if expanded.insert(seed.to_path_buf()) {
+        expand_seed(sources, seed, scope);
+    }
+}
+
 fn collect_model_seeds(
     model: &Value,
     sources: &mut BTreeMap<(u8, PathBuf), (WeightsSource, String)>,
+    expanded: &mut std::collections::HashSet<PathBuf>,
 ) {
     let scope = model
         .get("catalogScope")
@@ -194,7 +221,7 @@ fn collect_model_seeds(
         .unwrap_or("builtin");
     for key in ["installedPath", "modelPath"] {
         if let Some(path) = model.get(key).and_then(Value::as_str) {
-            expand_seed(sources, Path::new(path), scope);
+            expand_seed_once(sources, expanded, Path::new(path), scope);
         }
     }
     if let Some(path) = model
@@ -203,12 +230,12 @@ fn collect_model_seeds(
         .and_then(|paths| paths.get("model"))
         .and_then(Value::as_str)
     {
-        expand_seed(sources, Path::new(path), scope);
+        expand_seed_once(sources, expanded, Path::new(path), scope);
     }
     if let Some(variants) = model.get("variants").and_then(Value::as_array) {
         for variant in variants {
             if let Some(path) = variant.get("installedPath").and_then(Value::as_str) {
-                expand_seed(sources, Path::new(path), scope);
+                expand_seed_once(sources, expanded, Path::new(path), scope);
             }
         }
     }
@@ -218,7 +245,7 @@ fn collect_model_seeds(
                 continue;
             }
             if let Some(path) = component.get("path").and_then(Value::as_str) {
-                expand_seed(sources, Path::new(path), scope);
+                expand_seed_once(sources, expanded, Path::new(path), scope);
             }
         }
     }
@@ -262,12 +289,13 @@ fn collect_sources_within(
     roots: &[PathBuf],
 ) -> SourceMap {
     let mut sources = BTreeMap::new();
+    let mut expanded = std::collections::HashSet::new();
     for model in catalog {
-        collect_model_seeds(model, &mut sources);
+        collect_model_seeds(model, &mut sources, &mut expanded);
     }
     for (subdir, path) in sceneworks_core::external_roots::comfyui_base_dirs(external_roots) {
         if subdir == "text_encoders" {
-            expand_seed(&mut sources, &path, "external");
+            expand_seed_once(&mut sources, &mut expanded, &path, "external");
         }
     }
 
