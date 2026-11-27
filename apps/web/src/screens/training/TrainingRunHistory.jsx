@@ -46,7 +46,14 @@ export function TrainingRunHistory({ projectId, token, refreshKey, renderRuns })
     setRemoving((current) => new Set(current).add(job.id));
     try {
       await trainingApi.removeSavedRun(projectId, job.id, token);
-      setPage((current) => ({ ...current, jobs: current.jobs.filter((item) => item.id !== job.id), error: "" }));
+      // The server pages the saved list by SQL OFFSET, so every unseen run moved up one place:
+      // without this, "Load more runs" would skip the first of them.
+      setPage((current) => ({
+        ...current,
+        jobs: current.jobs.filter((item) => item.id !== job.id),
+        nextOffset: current.nextOffset == null ? null : Math.max(0, current.nextOffset - 1),
+        error: "",
+      }));
     } catch (error) {
       setPage((current) => ({ ...current, error: error.message || "Could not remove the saved run." }));
     } finally {

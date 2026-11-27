@@ -178,3 +178,21 @@ it("keeps a saved run listed and reports the error when removal fails", async ()
   expect(history().querySelector('[role="alert"]').textContent).toBe("Record not found: saved");
   expect(history().textContent).toContain("Saved LoRA");
 });
+
+it("loads the next page from the shifted offset after a removal", async () => {
+  trainingApi.savedRuns
+    .mockResolvedValueOnce({ jobs: [run("first", "First LoRA"), run("second", "Second LoRA")], nextOffset: 2 })
+    .mockResolvedValueOnce({ jobs: [run("third", "Third LoRA")], nextOffset: null });
+  trainingApi.removeSavedRun.mockResolvedValue(null);
+  // The removed run was already cleared from the Queue, so no live job change triggers a reload.
+  await render(context());
+  await click("Continue training");
+  const removeFirst = [...history().querySelectorAll("button")].find((button) => button.textContent === "Remove");
+  await act(async () => removeFirst.click());
+  await settle({ microtasks: 10 });
+  expect(history().textContent).not.toContain("First LoRA");
+  await click("Load more runs", history());
+  expect(trainingApi.savedRuns.mock.calls[1][2]).toEqual({ offset: 1 });
+  expect(history().textContent).toContain("Second LoRA");
+  expect(history().textContent).toContain("Third LoRA");
+});
