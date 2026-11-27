@@ -3213,7 +3213,7 @@ pub(crate) async fn cancel_jobs(
         {
             cascade_error.get_or_insert(error);
         }
-        publish(&state, "job.updated", job);
+        publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     }
     if !jobs.is_empty() {
         request_queue_publish(&state);
