@@ -1,7 +1,8 @@
 import { useImageBatchController } from "../../hooks/useImageBatchController.js";
 export { useImageBatchController };
 import { iterateBatch, parsePromptResolution } from "../../promptBatch.js";
-import { batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summarizeBatchRun } from "../../batchOps.js";
+import { BATCH_SUBMISSION_CONCURRENCY, batchItemStatus, recordBatchEnqueueFailure, settlePromptBatchRun, summarizeBatchRun } from "../../batchOps.js";
+import { createJobSubmissionGroup } from "../../createJob.js";
 import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
 import { promptBatchSize } from "./samplingControls.js";
 import { PROMPT_REFINE_MODEL_ID, terminalStatuses } from "../../constants.js";
@@ -36,9 +37,9 @@ export function createImageBatchRuntime(setBatchRun) {
   }
 
   async function waitForBatchSlot(owner, activeJobLimit) {
-    while (!owner.stopped && batchProjectRef.current === owner.projectId) {
+    while (!owner.stopped && !owner.enqueueStopped && batchProjectRef.current === owner.projectId && batchOwnerRef.current === owner) {
       const activeJobIds = batchRunRef.current?.activeJobIds ?? [];
-      if (activeJobIds.length < activeJobLimit) return;
+      if (activeJobIds.length + owner.submissions.size < activeJobLimit) return;
       await new Promise((resolve) => batchSlotWaitersRef.current.push(resolve));
     }
   }
@@ -101,7 +102,8 @@ export function createImageBatchRuntime(setBatchRun) {
     buildBatchJobRequest, onMagicExpand, batchExpansion = null, createImageJob,
   }) {
     if (batchRunRef.current?.submitting || !batchProjectRef.current) return;
-    const owner = { stopped: false, projectId: batchProjectRef.current, jobs: new Map(), controller: new AbortController() };
+    const owner = { stopped: false, enqueueStopped: false, projectId: batchProjectRef.current,
+      jobs: new Map(), submissions: new Set(), submissionGroup: createJobSubmissionGroup(), controller: new AbortController() };
     batchOwnerRef.current = owner;
     const stopped = () => owner.stopped || batchProjectRef.current !== owner.projectId || batchOwnerRef.current !== owner;
     batchObservedJobsRef.current.clear();
@@ -198,17 +200,15 @@ export function createImageBatchRuntime(setBatchRun) {
       }
       return prepared;
     }
-    let prepared = [];
-    while (!stopped() && (prepared.length || !nextChunk.done)) {
-      await waitForBatchSlot(owner, BATCH_ACTIVE_JOB_LIMIT);
-      if (stopped()) break;
-      if (!prepared.length) prepared = await prepareValidationBatch();
-      if (stopped() || !prepared.length) break;
-      const entry = prepared.shift();
+    function stopEnqueue() {
+      owner.enqueueStopped = true;
+      releaseBatchSlotWaiters();
+    }
+    async function submitEntry(entry) {
       const { n, request, portable } = entry;
       try {
         if ("error" in entry) throw entry.error;
-        if (stopped()) break;
+        if (stopped()) return;
         if (portable.state !== "valid") {
           const error = new Error(portable.state === "invalid"
             ? portable.refusal.detail
@@ -217,9 +217,10 @@ export function createImageBatchRuntime(setBatchRun) {
           throw error;
         }
         const result = createImageJob.withResult
-          ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal })
+          ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal,
+              submissionGroup: owner.submissionGroup })
           : { job: await createImageJob(request) };
-        if (result.cancelled) break;
+        if (result.cancelled) { stopEnqueue(); return; }
         const { job } = result;
         const failure = result.error || "Job creation returned no job ID.";
         if (stopped()) {
@@ -236,11 +237,11 @@ export function createImageBatchRuntime(setBatchRun) {
               }
             }
           }
-          break;
+          return;
         }
         if (job?.id) owner.jobs.set(job.id, job);
         const current = batchRunRef.current;
-        if (!current) break;
+        if (!current) return;
         replaceBatchRun(
           job?.id
             ? {
@@ -251,15 +252,35 @@ export function createImageBatchRuntime(setBatchRun) {
               }
             : recordBatchEnqueueFailure(current, n, failure),
         );
-        if (result.stop) break;
+        if (result.stop) stopEnqueue();
       } catch (error) {
-        if (owner.disposed || batchOwnerRef.current !== owner || batchProjectRef.current !== owner.projectId) break;
+        if (owner.disposed || batchOwnerRef.current !== owner || batchProjectRef.current !== owner.projectId) return;
         const current = batchRunRef.current;
-        if (!current) break;
+        if (!current) return;
         replaceBatchRun(recordBatchEnqueueFailure(current, n, error?.message || (typeof error === "string" ? error : "Could not enqueue image job.")));
-        if (stopped() || error?.portableStop) break;
+        if (stopped() || error?.portableStop) stopEnqueue();
       }
     }
+    let prepared = [];
+    const submissionLimit = structuredPromptModel ? 1 : BATCH_SUBMISSION_CONCURRENCY;
+    while (!stopped() && !owner.enqueueStopped && (prepared.length || !nextChunk.done)) {
+      if (owner.submissions.size >= submissionLimit) await Promise.race(owner.submissions);
+      await waitForBatchSlot(owner, BATCH_ACTIVE_JOB_LIMIT);
+      if (stopped() || owner.enqueueStopped) break;
+      if (!prepared.length) prepared = await prepareValidationBatch();
+      if (stopped() || owner.enqueueStopped || !prepared.length) break;
+      // A response may have opened recovery while we awaited validation or a queue slot.
+      if (owner.submissionGroup.recovery) await owner.submissionGroup.recovery.promise;
+      if (stopped() || owner.enqueueStopped) break;
+      const submission = submitEntry(prepared.shift()).finally(() => {
+        owner.submissions.delete(submission);
+        releaseBatchSlotWaiters();
+      });
+      owner.submissions.add(submission);
+    }
+    // A POST already in flight may commit after Stop. Drain every response so its id
+    // is accounted for (or cancelled) before releasing this run's submission ownership.
+    await Promise.all(owner.submissions);
     const current = batchRunRef.current;
     if (current && !stopped()) replaceBatchRun({ ...current, submitting: false, expanding: null });
     else if (current && !owner.disposed && batchOwnerRef.current === owner && batchProjectRef.current === owner.projectId) replaceBatchRun({ ...current, submitting: false, expanding: null });
