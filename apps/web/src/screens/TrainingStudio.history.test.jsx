@@ -196,3 +196,30 @@ it("loads the next page from the shifted offset after a removal", async () => {
   expect(history().textContent).toContain("Second LoRA");
   expect(history().textContent).toContain("Third LoRA");
 });
+
+it("does not page while a removal is pending, nor remove while a page loads", async () => {
+  let finishRemoval;
+  let finishPage;
+  trainingApi.savedRuns
+    .mockResolvedValueOnce({ jobs: [run("first", "First LoRA"), run("second", "Second LoRA")], nextOffset: 2 })
+    .mockImplementationOnce(() => new Promise((resolve) => { finishPage = resolve; }));
+  trainingApi.removeSavedRun.mockImplementationOnce(() => new Promise((resolve) => { finishRemoval = resolve; }));
+  await render(context());
+  await click("Continue training");
+  const button = (label) => [...history().querySelectorAll("button")].find((item) => item.textContent === label);
+  await act(async () => button("Remove").click());
+  await settle({ microtasks: 10 });
+  expect(button("Removing…").disabled).toBe(true);
+  expect(button("Load more runs").disabled).toBe(true);
+  expect(button("Refresh runs").disabled).toBe(true);
+  await act(async () => finishRemoval(null));
+  await settle({ microtasks: 10 });
+  expect(button("Load more runs").disabled).toBe(false);
+  await click("Load more runs", history());
+  expect(trainingApi.savedRuns.mock.calls[1][2]).toEqual({ offset: 1 });
+  expect(button("Remove").disabled).toBe(true);
+  await act(async () => finishPage({ jobs: [run("third", "Third LoRA")], nextOffset: null }));
+  await settle({ microtasks: 10 });
+  expect(button("Remove").disabled).toBe(false);
+  expect(history().textContent).toContain("Third LoRA");
+});

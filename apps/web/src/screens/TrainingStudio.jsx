@@ -286,7 +286,7 @@ function LiveIrisMetrics({ job, token, live = true }) {
   return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live })} />;
 }
 
-function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRetry, onRemove, removing, onPreview, token, completed = false }) {
+function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRetry, onRemove, removing, removeDisabled = false, onPreview, token, completed = false }) {
   return (
       <div className="training-live-list worker-progress-card-stack">
         {jobs.map((job) => {
@@ -305,7 +305,7 @@ function TrainingRunCards({ jobs, projectId, onCancel, onContinueTraining, onRet
                 onContinueTraining={onContinueTraining}
                 onRetry={onRetry}
                 extraActions={onRemove ? (
-                  <button className="secondary-action danger" type="button" disabled={removing?.has(job.id)}
+                  <button className="secondary-action danger" type="button" disabled={removeDisabled || removing?.has(job.id)}
                     onClick={() => onRemove(job)}>{removing?.has(job.id) ? "Removing…" : "Remove"}</button>
                 ) : null}
                 onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
@@ -2464,9 +2464,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
             ) : trainingAction === "continue" ? (
               <TrainingRunHistory key={activeProject.id} projectId={activeProject.id} token={token}
                 refreshKey={savedTrainingRefreshKey}
-                renderRuns={(savedJobs, { onRemove, removing }) => (
+                renderRuns={(savedJobs, { onRemove, removing, removeDisabled }) => (
                   <TrainingRunCards jobs={savedJobs} projectId={activeProject.id} token={token} completed
-                    onRemove={onRemove} removing={removing}
+                    onRemove={onRemove} removing={removing} removeDisabled={removeDisabled}
                     onPreview={setPreviewAsset}
                     onContinueTraining={jobAction ? (job, additionalSteps) => jobAction(job, "continue-training", { body: { additionalSteps } }) : undefined}
                     onRetry={jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined} />

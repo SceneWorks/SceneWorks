@@ -64,6 +64,9 @@ export function TrainingRunHistory({ projectId, token, refreshKey, renderRuns })
       });
     }
   }, [projectId, token]);
+  // Removal and paging never overlap. A page fetched while a DELETE is pending could read the
+  // old offsets after the delete commits and skip a run that no later offset shift recovers.
+  const removalPending = removing.size > 0;
 
   return (
     <WorkPanel className="training-live-panel" aria-label="Saved training runs"
@@ -72,11 +75,11 @@ export function TrainingRunHistory({ projectId, token, refreshKey, renderRuns })
       {page.loading ? <p role="status">Loading saved training runs…</p> : null}
       {page.error ? <p role="alert">{page.error}</p> : null}
       {!page.loading && !page.error && page.jobs.length === 0 ? <p>No completed, canceled or interrupted LoRA runs in this workspace yet.</p> : null}
-      {renderRuns(page.jobs, { onRemove: remove, removing })}
+      {renderRuns(page.jobs, { onRemove: remove, removing, removeDisabled: page.loading })}
       <div className="training-run-actions">
-        <button className="secondary-action" type="button" disabled={page.loading} onClick={() => load()}>Refresh runs</button>
+        <button className="secondary-action" type="button" disabled={page.loading || removalPending} onClick={() => load()}>Refresh runs</button>
         {page.nextOffset != null ? (
-          <button className="secondary-action" type="button" disabled={page.loading}
+          <button className="secondary-action" type="button" disabled={page.loading || removalPending}
             onClick={() => load(page.nextOffset, true)}>Load more runs</button>
         ) : null}
       </div>
