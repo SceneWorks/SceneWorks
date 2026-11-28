@@ -1872,6 +1872,14 @@
                   "character"
                 ]
               },
+              "lossyAttention": {
+                "int8": {
+                  "served": true
+                },
+                "sol": {
+                  "served": true
+                }
+              },
               "mlx": {
                 "limits": {
                   "guidanceMethods": [
@@ -2588,6 +2596,14 @@
               "enhance",
               "character"
             ]
+          },
+          "lossyAttention": {
+            "int8": {
+              "served": true
+            },
+            "sol": {
+              "served": true
+            }
           },
           "mlx": {
             "calibrations": "<registry-evidence>",
@@ -3436,6 +3452,14 @@
           "enhance",
           "character"
         ]
+      },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
       },
       "macSupport": {
         "features": {
@@ -4376,6 +4400,14 @@
             "character",
             "enhance"
           ]
+        },
+        "lossyAttention": {
+          "int8": {
+            "served": true
+          },
+          "sol": {
+            "served": true
+          }
         },
         "mlx": {
           "limits": {
