@@ -3521,6 +3521,13 @@ pub(super) async fn generate_video_using(
                         "Imported H3 acquired a generator with its sealed file closure; not an executed-tensor or peak-memory receipt"
                     );
                 }
+                let sparse_bound = query_video_workspace_bound(
+                    generator,
+                    &mut request,
+                    input.width,
+                    input.height,
+                    input.frames,
+                )?;
                 let planned = plan
                     .as_ref()
                     .map(|reservation| {
@@ -3577,17 +3584,6 @@ pub(super) async fn generate_video_using(
                     )?;
                     unplanned_overlay.as_deref()
                 };
-                let mut workspace_req = request.clone();
-                workspace_req.width = input.width;
-                workspace_req.height = input.height;
-                workspace_req.frames = Some(input.frames);
-                workspace_req.count = 1;
-                let sparse_bound = generator
-                    .request_workspace_bound(&workspace_req)
-                    .map_err(|e| {
-                        crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string()))
-                    })?
-                    .and_then(gen_core::RequestWorkspaceBound::into_sparse_attention);
                 let native_quant_request = generator
                     .memory_strategy_contract()
                     .and_then(|contract| contract.phase_facts.as_ref())
@@ -4226,4 +4222,26 @@ pub(super) async fn generate_video_using(
     });
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
+}
+
+/// Query a generator's optional sparse-attention workspace bound for the effective video geometry
+/// without cloning `request.conditioning` (which can carry full decoded multi-clip video frames).
+#[cfg(native_lane)]
+pub(super) fn query_video_workspace_bound(
+    generator: &dyn Generator,
+    request: &mut GenerationRequest,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> WorkerResult<Option<gen_core_h3::veda::workspace::WorkspaceBound>> {
+    let saved = (request.width, request.height, request.frames, request.count);
+    request.width = width;
+    request.height = height;
+    request.frames = Some(frames);
+    request.count = 1;
+    let result = generator.request_workspace_bound(request);
+    (request.width, request.height, request.frames, request.count) = saved;
+    result
+        .map_err(|e| crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))
+        .map(|bound| bound.and_then(gen_core::RequestWorkspaceBound::into_sparse_attention))
 }

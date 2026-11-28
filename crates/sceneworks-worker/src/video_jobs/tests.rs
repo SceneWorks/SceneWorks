@@ -23637,3 +23637,143 @@ async fn seedvr2_streaming_probe_uses_the_shared_process_lifecycle_for_long_logs
     );
     assert_eq!(timing.frames, Seedvr2Timing::Constant { num: 30, den: 1 });
 }
+
+#[cfg(native_lane)]
+#[test]
+fn video_workspace_pricing_borrows_multi_clip_conditioning_without_cloning_pixels() {
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct ObservedWorkspaceQuery {
+        width: u32,
+        height: u32,
+        frames: Option<u32>,
+        count: u32,
+        ptrs: Vec<usize>,
+    }
+
+    struct InspectingWorkspaceGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        seen: Mutex<Option<ObservedWorkspaceQuery>>,
+    }
+
+    impl gen_core::Generator for InspectingWorkspaceGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn request_workspace_bound(
+            &self,
+            req: &gen_core::GenerationRequest,
+        ) -> gen_core::Result<Option<gen_core::RequestWorkspaceBound>> {
+            let ptrs: Vec<usize> = req
+                .conditioning
+                .iter()
+                .filter_map(|cond| match cond {
+                    gen_core::Conditioning::VideoClip { frames, .. } => {
+                        frames.first().map(|frame| frame.pixels.as_ptr() as usize)
+                    }
+                    _ => None,
+                })
+                .collect();
+            *self.seen.lock().unwrap() = Some(ObservedWorkspaceQuery {
+                width: req.width,
+                height: req.height,
+                frames: req.frames,
+                count: req.count,
+                ptrs,
+            });
+            Ok(None)
+        }
+
+        fn generate(
+            &self,
+            _req: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            unreachable!("workspace query test must not run generation")
+        }
+    }
+
+    let clip_a = gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: vec![1u8; 8 * 8 * 3],
+    };
+    let clip_b = gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: vec![2u8; 8 * 8 * 3],
+    };
+    let expected_ptrs = vec![
+        clip_a.pixels.as_ptr() as usize,
+        clip_b.pixels.as_ptr() as usize,
+    ];
+    let mut request = gen_core::GenerationRequest {
+        prompt: "multi clip edit".into(),
+        width: 640,
+        height: 360,
+        frames: Some(17),
+        count: 2,
+        conditioning: vec![
+            gen_core::Conditioning::VideoClip {
+                frames: vec![clip_a],
+                frame_idx: 0,
+                strength: 1.0,
+            },
+            gen_core::Conditioning::VideoClip {
+                frames: vec![clip_b],
+                frame_idx: 1,
+                strength: 1.0,
+            },
+        ],
+        ..Default::default()
+    };
+    let generator = InspectingWorkspaceGenerator {
+        descriptor: gen_core::ModelDescriptor {
+            id: "bernini",
+            family: "bernini",
+            backend: "mlx",
+            modality: gen_core::Modality::Video,
+            capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
+            required_components: &[],
+            control_kinds: None,
+        },
+        seen: Mutex::new(None),
+    };
+
+    let bound = wan::query_video_workspace_bound(&generator, &mut request, 832, 480, 49)
+        .expect("workspace pricing succeeds");
+    assert!(bound.is_none());
+
+    let observed = generator
+        .seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("generator observed request");
+    assert_eq!(
+        (
+            observed.width,
+            observed.height,
+            observed.frames,
+            observed.count
+        ),
+        (832, 480, Some(49), 1)
+    );
+    assert_eq!(
+        observed.ptrs, expected_ptrs,
+        "workspace pricing must borrow original VideoClip pixel buffers without cloning"
+    );
+    assert_eq!(
+        (request.width, request.height, request.frames, request.count),
+        (640, 360, Some(17), 2),
+        "scalar geometry fields must be restored after workspace query"
+    );
+}
