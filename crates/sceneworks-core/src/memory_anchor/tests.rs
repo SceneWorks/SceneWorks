@@ -2390,11 +2390,18 @@ fn an_overstated_whole_vae_component_is_still_refused_by_the_anchor_domain_guard
     let anchor = store()
         .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
         .expect("the z_image_turbo q4 MLX anchor is packaged");
+    // Shape, not a pinned measurement (gate teardown: a re-capture must not trip a fixed count).
+    // The overstated component is the measured conditioning level's whole headroom over the
+    // text encoder and DiT, PLUS the 67,041,088-byte encoder half folded back into the decoder,
+    // so it contradicts the measurement by exactly that encoder half on every re-capture.
+    const VAE_ENCODER_HALF: u64 = 164_624_710 - 97_583_622;
+    let measured = anchor.phase_active_peak_bytes.conditioning;
+    let base = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
     let whole_vae = ComponentBytes {
-        decoder: 164_624_710,
-        ..Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS
+        decoder: measured - base.conditioning - base.transformer + VAE_ENCODER_HALF,
+        ..base
     };
-    assert!(anchor.phase_active_peak_bytes.conditioning < whole_vae.total());
+    assert!(measured < whole_vae.total());
     assert!(anchor
         .derive_phase_peaks(
             &at(768, 768, RequestRegime::resident()),
