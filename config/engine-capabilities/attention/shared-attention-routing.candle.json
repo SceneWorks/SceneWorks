@@ -119,7 +119,34 @@
         "served": true
       }
     },
+    "flux1_dev_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux1_dev_ip_adapter": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
     "flux1_schnell": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux1_schnell_ip_adapter": {
       "routing": "shared_helpers",
       "int8": {
         "served": true
@@ -137,7 +164,34 @@
         "served": true
       }
     },
+    "flux2_dev_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_dev_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
     "flux2_klein_9b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_klein_9b_edit": {
       "routing": "shared_helpers",
       "int8": {
         "served": true
@@ -214,6 +268,24 @@
       }
     },
     "kolors": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "kolors_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "kolors_ip_adapter": {
       "routing": "shared_helpers",
       "int8": {
         "served": true
@@ -430,6 +502,51 @@
         "reason": "attends block-causally: every unmasked call attends a query slice to a longer key prefix (Sq != Sk), and Sol-Attn routes only a token sequence attending to itself"
       }
     },
+    "qwen_image_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit_2509": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit_2511": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit_2511_lightning": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
     "sana_1600m": {
       "routing": "bespoke"
     },
@@ -473,6 +590,42 @@
       }
     },
     "sdxl": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_detail": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_ip_adapter": {
       "routing": "shared_helpers",
       "int8": {
         "served": true
@@ -596,7 +749,25 @@
         "served": true
       }
     },
+    "z_image_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
     "z_image_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "z_image_turbo_control": {
       "routing": "shared_helpers",
       "int8": {
         "served": true
