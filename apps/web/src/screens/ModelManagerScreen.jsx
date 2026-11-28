@@ -261,7 +261,7 @@ function deleteResultText(result, name) {
 // highest first) so the panel lists the biggest/best at the top. `suggestTier` already orders on
 // this basis; we surface the same order to the user. Each entry is the raw `variants[]` object.
 // "training" (sc-8797) is the extra flat-diffusers LoRA-training-base artifact a tiered model can
-// host (lens on macOS); it renders last so the quant tiers stay the visual focus. It is not in
+// host; it renders last so the quant tiers stay the visual focus. It is not in
 // API-served suggestion order, so it is never the suggested/preselected download.
 const TIER_DISPLAY_ORDER = ["bf16", "q8", "q4", "training"];
 

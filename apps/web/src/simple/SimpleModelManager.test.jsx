@@ -44,7 +44,7 @@ beforeEach(() => {
 
 // Real catalog numbers from config/manifests/builtin.models.jsonc.
 const Z_IMAGE_Q4_BYTES = 20852069456; // 19.42 GiB — z_image's ONLY measured tier
-const LENS_TURBO_Q4_BYTES = 32749818036; // 30.50 GiB
+const LANE_MODEL_Q4_BYTES = 32749818036; // 30.50 GiB
 const KREA_RT_Q4_BYTES = 29957689344; // 27.90 GiB
 const KREA_RT_Q8_BYTES = 36980832256; // 34.44 GiB
 const KREA_RT_BF16_BYTES = 50154536960; // 46.71 GiB
@@ -56,7 +56,7 @@ const KREA_RT_BF16_BYTES = 50154536960; // 46.71 GiB
 // one field the fill consumes.
 const Z_IMAGE_DISK = { q4: 5907321677, q8: 10996438540, bf16: 20538412852 };
 const KREA_RT_DISK = { q4: 20265258499, q8: 27290719452, bf16: 40463370856 };
-const LENS_TURBO_DISK = { q4: 21830326407, q8: 32753474289, bf16: 30651441376 };
+const LANE_MODEL_DISK = { q4: 21830326407, q8: 32753474289, bf16: 30651441376 };
 const FLUX_DEV_DISK = { q4: 9617334683, q8: 18010071290, bf16: 33746402173 };
 const SENSENOVA_DISK = { q4: 11824472971, q8: 19927870461, bf16: 35121691427 };
 
@@ -80,7 +80,7 @@ function variant(key, installState, peakMemoryBytes, diskSizeBytes) {
   };
 }
 
-// z_image as shipped: blanket mlx floor 48, a q4/q8/bf16 matrix, real disk sizes on all three, and a
+// z_image fixture: blanket mlx floor 48, a q4/q8/bf16 matrix, real disk sizes on all three, and a
 // measured footprint on q4 only.
 // Note it declares NO candle block at all — which is what makes it the candle-lane silence case below.
 function zImage({ installState = "missing", variants } = {}) {
@@ -410,7 +410,7 @@ describe("SimpleModelManager memory label", () => {
     // model that does not exist cannot be checked against anything.
     await render(root, {
       models: [
-        // flux2_klein_9b_true_v2 as shipped: ONE download with no `variant` key, so the "default"
+        // flux2_klein_9b_true_v2 fixture: ONE download with no `variant` key, so the "default"
         // pseudo-tier is not a quant tier, `installedTiers` is empty, and the blanket floor stands. It also
         // ships no `footprint`, so there is nothing for the fill to read even in principle.
         {
@@ -422,7 +422,7 @@ describe("SimpleModelManager memory label", () => {
           hasVariantMatrix: false,
           variants: [variant("default", "installed", null, null)],
         },
-        // chroma1_hd as shipped: a q4/q8/bf16 matrix with real disk sizes, NO measured peak on any tier,
+        // chroma1_hd fixture: a q4/q8/bf16 matrix with real disk sizes, NO measured peak on any tier,
         // and no `minMemoryGb` on either lane (`mlx` carries only `quantize`/`standardTierLayout`; there is
         // no `candle` block). Nothing installed, so this is the "from" branch — which reads MEASURED
         // per-tier evidence only and is deliberately NOT filled from disk, because an uninstalled model has
@@ -452,7 +452,7 @@ describe("SimpleModelManager memory label", () => {
 // describes Apple unified memory. A discrete CUDA card does not share system RAM, so that number does not
 // describe the VRAM it must hold — the candle lane has its own measured corpus in `candle.vramGbByTier`.
 //
-// Crossing them UNDER-states, which is the direction that OOMs: lens_turbo measures 30.50 GiB on MLX and
+// Crossing them UNDER-states, which is the direction that OOMs: test_lane_model measures 30.50 GiB on MLX and
 // needs 37.3 GB of VRAM at the SAME q4 tier.
 describe("SimpleModelManager memory label: lanes are never crossed", () => {
   let container;
@@ -468,16 +468,20 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
     vi.clearAllMocks();
   });
 
-  // lens_turbo as shipped: a q4 download served on all three OSes that carries an MLX footprint, PLUS a
+  // test_lane_model fixture: a q4 download served on all three OSes that carries an MLX footprint, PLUS a
   // full candle VRAM ladder. The one entry where reading the wrong lane is silently plausible.
-  function lensTurbo({ installState = "installed" } = {}) {
+  function laneModel({ installState = "installed" } = {}) {
     return {
-      id: "lens_turbo",
-      name: "Lens Turbo",
+      id: "test_lane_model",
+      name: "Lane fixture",
       type: "image",
       installState,
+      memoryGuidance: servedGuidance({}, {
+        mlx: { tiers: { q4: { installedHostGb: 34, measuredHostGb: 34 } } },
+        candle: { tiers: { q4: { installedHostGb: 44, measuredHostGb: 44 } } },
+      }),
       mlx: { minMemoryGb: 60 },
-      // `measured: false` is what the manifest ACTUALLY ships for this entry. An earlier version of this
+      // `measured: false` is what this cross-lane fixture declares. An earlier version of this
       // fixture said `true` and the PR body called 37.3 "a measured VRAM requirement"; per the schema the
       // flag means "false when ESTIMATED (scaled from weight size + a measured sibling)", and it covers
       // `minMemoryGb` and `vramGbByTier` together. So neither number here is a measurement, and the row
@@ -488,17 +492,17 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
         variant(
           "q4",
           installState === "installed" ? "installed" : "missing",
-          LENS_TURBO_Q4_BYTES,
-          LENS_TURBO_DISK.q4,
+          LANE_MODEL_Q4_BYTES,
+          LANE_MODEL_DISK.q4,
         ),
-        variant("q8", "missing", null, LENS_TURBO_DISK.q8),
-        variant("bf16", "missing", null, LENS_TURBO_DISK.bf16),
+        variant("q8", "missing", null, LANE_MODEL_DISK.q8),
+        variant("bf16", "missing", null, LANE_MODEL_DISK.bf16),
       ],
     };
   }
 
   it("reads candle.vramGbByTier on a CUDA host, NOT the MLX footprint", async () => {
-    const model = lensTurbo();
+    const model = laneModel();
     // MLX lane: the measured 30.50 GiB footprint ⇒ ceil(30.50 / 0.9) = 34.
     await render(root, { models: [model], macCapabilities: { macGatingActive: true } });
     expect(metaText(container)).toEqual(["needs 34 GB"]);
@@ -512,7 +516,7 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
   });
 
   it("uses the candle ladder for the uninstalled 'from' floor too", async () => {
-    const model = lensTurbo({ installState: "missing" });
+    const model = laneModel({ installState: "missing" });
     await render(root, { models: [model], macCapabilities: { macGatingActive: false } });
     // Cheapest candle tier is q4 at 37.3 ⇒ 40, floored at the estimated-lane blanket 44; MLX said 34.
     expect(metaText(container)).toEqual(["from 44 GB"]);

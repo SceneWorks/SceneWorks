@@ -63,13 +63,13 @@ describe("samplerOptions", () => {
     expect(samplerOptionsFromModel(model, "candle")).toEqual(["default", "ddim"]);
     // No / unknown backend falls back to the base menu.
     expect(samplerOptionsFromModel(model)).toEqual(["default", "euler", "dpmpp_2m"]);
-    // Lens-shaped asymmetry: default-only on MLX (base), curated on candle.
-    const lens = {
+    // Backend-asymmetric sampler menus: default-only on MLX (base), curated on candle.
+    const asymmetric = {
       limits: { samplers: ["default"] },
       candle: { limits: { samplers: ["default", "euler", "heun"] } },
     };
-    expect(samplerOptionsFromModel(lens, "mlx")).toEqual(["default"]);
-    expect(samplerOptionsFromModel(lens, "candle")).toEqual(["default", "euler", "heun"]);
+    expect(samplerOptionsFromModel(asymmetric, "mlx")).toEqual(["default"]);
+    expect(samplerOptionsFromModel(asymmetric, "candle")).toEqual(["default", "euler", "heun"]);
   });
 
   it("default helpers read defaults block with sensible fallbacks", () => {

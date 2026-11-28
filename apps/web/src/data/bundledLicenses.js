@@ -85,7 +85,6 @@ import clapHtsatApache from "../../../desktop/licenses/clap-htsat-unfused/Apache
 // restrictions, or revenue-threshold community licenses) and are surfaced as such.
 import animaCircleStoneLabsNonCommercialLicense from "../../../desktop/licenses/anima/CircleStone-Labs-Non-Commercial-License.txt?url&no-inline";
 import berniniApache20 from "../../../desktop/licenses/bernini/Apache-2.0.txt?url&no-inline";
-import booguImageApache20 from "../../../desktop/licenses/boogu-image/Apache-2.0.txt?url&no-inline";
 import chroma1Apache20 from "../../../desktop/licenses/chroma1/Apache-2.0.txt?url&no-inline";
 import flux1DevFLUX1DevNonCommercialLicense from "../../../desktop/licenses/flux1-dev/FLUX.1-dev-Non-Commercial-License.txt?url&no-inline";
 import flux1SchnellApache20 from "../../../desktop/licenses/flux1-schnell/Apache-2.0.txt?url&no-inline";
@@ -96,7 +95,6 @@ import illustriousXlV1CreativeMLOpenRAILM from "../../../desktop/licenses/illust
 import illustriousXlV2CreativeMLOpenRAILM from "../../../desktop/licenses/illustrious-xl-v2/CreativeML-Open-RAIL-M.txt?url&no-inline";
 import kolorsKolorsModelLicense from "../../../desktop/licenses/kolors/Kolors-Model-License.txt?url&no-inline";
 import krea2NOTICE from "../../../desktop/licenses/krea-2/NOTICE.txt?url&no-inline";
-import lensMIT from "../../../desktop/licenses/lens/MIT.txt?url&no-inline";
 import qwenImageApache20 from "../../../desktop/licenses/qwen-image/Apache-2.0.txt?url&no-inline";
 import qwenImage21ResearchLicense from "../../../desktop/licenses/qwen-image-2-1/Qwen-RESEARCH-LICENSE-AGREEMENT.txt?url&no-inline";
 import realvisxlCreativeMLOpenRAILM from "../../../desktop/licenses/realvisxl/CreativeML-Open-RAIL++-M.txt?url&no-inline";
@@ -256,7 +254,6 @@ const DOCUMENT_URL = {
   "clap-htsat-unfused-apache": clapHtsatApache,
   "anima-circlestone-labs-non-commercial-license": animaCircleStoneLabsNonCommercialLicense,
   "bernini-apache": berniniApache20,
-  "boogu-image-apache": booguImageApache20,
   "chroma1-apache": chroma1Apache20,
   "flux1-dev-flux-1-dev-non-commercial-license": flux1DevFLUX1DevNonCommercialLicense,
   "flux1-schnell-apache": flux1SchnellApache20,
@@ -267,7 +264,6 @@ const DOCUMENT_URL = {
   "illustrious-xl-v2-creativeml-open-rail-m": illustriousXlV2CreativeMLOpenRAILM,
   "kolors-kolors-model-license": kolorsKolorsModelLicense,
   "krea-2-notice": krea2NOTICE,
-  "lens-mit": lensMIT,
   "qwen-image-apache": qwenImageApache20,
   "qwen-image-2-1-research": qwenImage21ResearchLicense,
   "realvisxl-creativeml-open-rail-m": realvisxlCreativeMLOpenRAILM,

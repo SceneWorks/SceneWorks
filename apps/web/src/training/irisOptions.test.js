@@ -41,7 +41,7 @@ describe("Iris option schema", () => {
 
   it("recognizes the Iris kernel only", () => {
     expect(isIrisTarget(irisTarget())).toBe(true);
-    expect(isIrisTarget({ kernel: "mage_flow_lora" })).toBe(false);
+    expect(isIrisTarget({ kernel: "anima_lora" })).toBe(false);
     expect(isIrisTarget(null)).toBe(false);
   });
 });

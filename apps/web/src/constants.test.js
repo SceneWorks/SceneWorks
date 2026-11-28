@@ -11,6 +11,16 @@ const manifest = JSON5.parse(
 );
 const manifestModels = Array.isArray(manifest) ? manifest : manifest.models;
 
+describe("retired image families (SW-F384)", () => {
+  it.each([
+    "boogu_image", "boogu_image_turbo", "boogu_image_edit", "lens", "lens_turbo",
+    "mage_flow_base", "mage_flow", "mage_flow_turbo", "mage_flow_edit_base", "mage_flow_edit", "mage_flow_edit_turbo",
+  ])("does not offer %s in either catalog projection", (id) => {
+    expect(manifestModels.some((model) => model.id === id)).toBe(false);
+    expect(fallbackModels.some((model) => model.id === id)).toBe(false);
+  });
+});
+
 describe("model catalog truthful no-op removal surface (sc-18481)", () => {
   const containsRetiredStyleMode = (value) => {
     if (value === "style_variations") return true;
@@ -25,7 +35,7 @@ describe("model catalog truthful no-op removal surface (sc-18481)", () => {
     }
   });
 
-  it.each(["lens", "lens_turbo", "chroma1_hd", "chroma1_base", "chroma1_flash", "qwen_image"])(
+  it.each(["chroma1_hd", "chroma1_base", "chroma1_flash", "qwen_image"])(
     "%s does not restore the removed hidden style-variation no-op",
     (id) => {
       const model = fallbackModels.find((entry) => entry.id === id);
@@ -35,8 +45,6 @@ describe("model catalog truthful no-op removal surface (sc-18481)", () => {
   );
 
   it.each([
-    "lens",
-    "lens_turbo",
     "chroma1_hd",
     "chroma1_base",
     "chroma1_flash",
@@ -79,9 +87,6 @@ describe("model catalog truthful no-op removal surface (sc-18481)", () => {
     "anima_base",
     "anima_aesthetic",
     "anima_turbo",
-    "boogu_image",
-    "boogu_image_turbo",
-    "boogu_image_edit",
   ])("builtin %s describes both native backends", (id) => {
     const model = manifestModels.find((entry) => entry.id === id);
     expect(model, `${id} must be present in builtin.models.jsonc`).toBeTruthy();

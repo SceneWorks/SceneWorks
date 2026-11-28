@@ -189,7 +189,6 @@ it("renders a target-seeded logit-normal timestep schedule", () => {
 
 it.each([
   ["Anima", "anima_lora"],
-  ["Mage", "mage_flow_lora"],
 ])("does not offer SD3-only logit-normal scheduling for %s", (_name, kernel) => {
   const selectedTarget = {
     ...TARGET,
@@ -1859,10 +1858,10 @@ describe("ConfigureJobPanel technique toggles on a refused combination", () => {
   // E-LatentLPIPS: refused only by the full fine-tune (it decodes no video stream).
   const LPIPS = ["E-LatentLPIPS loss", "supportsLatentLpipsLoss"];
   const supports = Object.fromEntries([...SECTIONS, LPIPS].map(([, limit]) => [limit, true]));
-  const MAGE = {
-    id: "mage_flow_base_lora",
-    name: "Mage-Flow Base LoRA",
-    baseModel: "mage_flow_base",
+  const FULL_BASE = {
+    id: "test_full_base_lora",
+    name: "Full-base training fixture",
+    baseModel: "test_full_base",
     limits: { networkTypes: ["lora", "lokr", "full"], ...supports },
   };
   const LTX25 = {
@@ -1897,7 +1896,7 @@ describe("ConfigureJobPanel technique toggles on a refused combination", () => {
   }
 
   for (const [scenario, target, extra, reason, refused] of [
-    ["a Mage full base fine-tune", MAGE, { networkType: "full" }, "not a full fine-tune", [...SECTIONS, LPIPS]],
+    ["a full base fine-tune", FULL_BASE, { networkType: "full" }, "not a full fine-tune", [...SECTIONS, LPIPS]],
     ["an LTX-2.5 no-video workflow", LTX25, { ltxWorkflow: "t2a_lora" }, "generates none", SECTIONS],
   ]) {
     it(`keeps every toggle clickable on ${scenario} and unblocks Start once it is unticked`, () => {

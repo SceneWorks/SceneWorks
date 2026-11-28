@@ -149,7 +149,7 @@ it("scopes the SD3 timestep extensions without dropping the shared uniform mode"
     "uniform",
     "weighted",
   ]);
-  expect(timestepTypeOptionsForTarget({ kernel: "mage_flow_lora" })).not.toContain(
+  expect(timestepTypeOptionsForTarget({ kernel: "anima_lora" })).not.toContain(
     "logit_normal",
   );
   expect(timestepTypeOptionsForTarget({ kernel: "sd3_lora" })).toEqual([

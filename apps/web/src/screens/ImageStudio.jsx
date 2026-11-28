@@ -632,16 +632,13 @@ export function ImageStudio() {
   // the prompt before encoding — text-only for txt2img, reference-aware for edit. Per-payload
   // (`advanced.enhancePrompt`); only flux2_dev acts on it. Sticky pref (persisted), default off.
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
-  // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
-  // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
-  const [pickedBf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
   const [savedRecipeTierRequest, setRecipeTierRequest] = useState(null);
   // Transparency / RGBA output (sc-24113): on emits `advanced.transparentBackground: true`, which
   // the worker's `qwen_alpha` adapter turns into a four-channel decode and the sc-24111 egress path
   // writes as a genuinely transparent PNG. Sticky pref, default off; the toggle only RENDERS when
   // the selected model advertises alpha output, so a stale `true` carried over from Qwen 2.1 to a
   // model that cannot serve it is inert — `transparencyAdvanced` re-checks the capability against
-  // the CURRENTLY selected model at payload-build time, exactly like `bf16Precision`/`usePid`.
+  // the CURRENTLY selected model at payload-build time, exactly like `usePid`.
   const [transparentBackground, setTransparentBackground] = useState(
     saved.transparentBackground ?? false,
   );
@@ -659,7 +656,7 @@ export function ImageStudio() {
   // `advanced.usePid: true`, routing decode through the optional PiD pixel-diffusion decoder
   // (decode + 2K/4K super-resolve, non-commercial output). Sticky pref, default off; the
   // toggle only renders + emits when the model is PiD-eligible AND its checkpoint is installed
-  // (showPidToggle), so a stale `true` on a non-eligible model is inert — mirrors bf16Precision.
+  // (showPidToggle), so a stale `true` on a non-eligible model is inert.
   // PiD output tier (epic 7840, sc-10054): PiD always super-resolves the base latent 4×, so this picks
   // the effective base — "4k" keeps the requested base (~4096 output, the pre-tier behavior), "2k" caps
   // it (~2048 output, faster + less GPU memory). Sticky pref, default "4k". Rides `advanced.pidTarget`
@@ -943,14 +940,16 @@ export function ImageStudio() {
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
   );
-  // When the mode change filters out the current model (e.g. Lens-Turbo is the
+  // When the mode change filters out the current model (e.g. a text-only model is the
   // text default but isn't edit-capable), snap to the first available model so
   // the dropdown's displayed option matches the value actually submitted.
   useEffect(() => {
+    // Catalog removal must not silently run saved work on a different model.
+    if (model === launchRequest?.recipe?.model && !imageModels.some((item) => item.id === model)) return;
     if (pickerModels.length && !pickerModels.some((item) => item.id === model)) {
       setModel(pickerModels[0].id);
     }
-  }, [pickerModels, model]);
+  }, [pickerModels, model, imageModels, launchRequest?.recipe?.model]);
   // Resolve only through the current mode's capability-filtered set. A restored
   // selection can be stale until the snap effect runs; it must never become the
   // effective model for either rendering defaults or submitting a job.
@@ -1089,9 +1088,6 @@ export function ImageStudio() {
     setBatchConfirmPending(false);
   }, [batchTotal, setBatchConfirmPending]);
   // Whether the model exposes its built-in prompt upsampler ("Enhance prompt" toggle) — FLUX.2-dev.
-  // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
-  // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
-  const fixedSource = Boolean(sourcePrecisionLabel(selectedModel));
   const fixedRecipeSource = Boolean(savedRecipeTierRequest && sourcePrecisionLabel(
     imageModels.find((entry) => entry.id === savedRecipeTierRequest.model),
   ));
@@ -1099,18 +1095,13 @@ export function ImageStudio() {
   useEffect(() => {
     if (fixedRecipeSource) setRecipeTierRequest(null);
   }, [fixedRecipeSource]);
-  const precisionToggle = !fixedSource && Boolean(selectedModel?.ui?.precisionToggle);
-  const precisionReplay = precisionToggle && recipeTierRequest?.model === model &&
-    ["bf16", "q8"].includes(recipeTierRequest?.tier);
-  const bf16Precision = precisionReplay ? recipeTierRequest.tier === "bf16" : pickedBf16Precision;
   // Quant-tier picker state (sc-8515, generalized). `availableTiers` is the SELECTABLE set — tiers that
   // are installed AND complete on disk, and the ONLY tiers we ever send to the worker (the user's bottom
   // line: never generate off a tier that isn't in the cache). `possibleTiers` is the FULL display set —
   // every tier the model can have, installed or not — so an un-downloaded tier renders disabled rather
   // than silently missing. The picker shows whenever there is MORE THAN ONE possible tier (so a user with
   // one installed tier still sees the others, greyed), provided at least one is actually installed to
-  // select. Boogu's `precisionToggle` is orthogonal — those models have no tier matrix, so `possibleTiers`
-  // is empty and this stays hidden for them.
+  // select.
   const availableTiers = useMemo(
     () => installedTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
@@ -1167,7 +1158,7 @@ export function ImageStudio() {
   const { quantTier: pickedTier, tierSwitching, handleTierChange: pickTier, tierExplicit: pickedExplicit, tierSuggested, confirmTier } =
     useQuantTierPicker({
       screen: TIER_SCREEN,
-      resolvedTier: precisionReplay ? null : recipeTierRequest?.tier,
+      resolvedTier: recipeTierRequest?.tier,
       model,
       selectedModel,
       availableTiers,
@@ -1180,7 +1171,7 @@ export function ImageStudio() {
   // stay blocked until an explicit new pick; no worker or missing artifact can silently change it.
   const quantTier = pickedTier;
   const tierExplicit = Boolean(recipeTierRequest) || pickedExplicit;
-  const replayTierUnavailable = recipeTierRequest && !precisionReplay &&
+  const replayTierUnavailable = recipeTierRequest &&
     (recipeTierRequest.model !== model || !availableTiers.includes(quantTier));
   const handleTierChange = (tier) => {
     if (!availableTiers.includes(tier)) return;
@@ -1217,9 +1208,6 @@ export function ImageStudio() {
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
   const multiReference = Boolean(selectedModel?.ui?.multiReference);
-  // Mage Edit keeps its required source distinct from its optional ordered reference set. Unlike
-  // `multiReference`, this never replaces `sourceAssetId`; it adds `referenceAssetIds` alongside it.
-  const sourceWithMultiReference = Boolean(selectedModel?.ui?.sourceWithMultiReference);
   // sc-25908: the model's declared reference cap (`limits.maxReferenceAssets` — 10 for the Qwen
   // Image 2.1 family) on the multi-reference picker, which replaces the source, so the count is
   // exactly the list sent. Null for a model that declares none (FLUX.2-dev): no cap is shown and
@@ -1570,7 +1558,7 @@ export function ImageStudio() {
   // Sampler / scheduler menus declared by the model, gated to the ACTIVE backend
   // (epic 7114 P5): `macGatingActive` is the worker `mlx_required` master switch, so
   // it picks the manifest's `mlx.limits` override on Mac/MLX and the `candle.limits`
-  // override on the Windows/Linux candle build (e.g. Lens exposes the curated menu
+  // override on the Windows/Linux candle build (a model exposes the curated menu
   // only on candle; SDXL only on MLX). The advanced panel hides the dropdowns when
   // the menu has fewer than 2 options (epic 1753 §7.4).
   const { samplerOptions, schedulerOptions, samplerDefault, schedulerDefault } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler, emptyValue: "default" });
@@ -1835,6 +1823,7 @@ export function ImageStudio() {
     model,
     setModel,
     fallbackModelId: "z_image_turbo",
+    preserveMissingModel: model === launchRequest?.recipe?.model,
     characters,
     characterId,
     setCharacterId: changeCharacterId,
@@ -2097,7 +2086,7 @@ export function ImageStudio() {
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
   // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
-  const jobReferences = imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
+  const jobReferences = imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
   // The pictures the render will condition on, taken from the SAME canonical references
@@ -2543,7 +2532,7 @@ export function ImageStudio() {
     guidanceScale: guidanceOverride,
     flashAttn,
     enhancePrompt,
-    bf16Precision,
+
     transparentBackground,
     usePid,
     pidTarget,
@@ -2738,7 +2727,6 @@ export function ImageStudio() {
       characterLookId,
       multiReference,
       orderedCharacterReferences,
-      sourceWithMultiReference,
       editSecondPair,
       sourceAssetId: mossEdit ? undefined : sourceAssetId,
       controlPreprocessSourceId,
@@ -2783,8 +2771,8 @@ export function ImageStudio() {
       flashAttn,
       promptEnhance,
       enhancePrompt,
-      precisionToggle,
-      bf16Precision,
+
+
       selectedModel,
       transparentBackground,
       showTierPicker,
@@ -3449,29 +3437,6 @@ export function ImageStudio() {
                         ) : null}
                       </>
                     ) : null}
-                    {sourceWithMultiReference ? (
-                      <div className="span-2 studio-input-cell"><ImageEditSourcePickerField
-                        assets={editImageAssets}
-                        buttonLabel="Select references"
-                        changeLabel="Edit references"
-                        characters={characters}
-                        emptyLabel="No additional references selected (optional)"
-                        importAsset={importAsset}
-                        label="Additional references (optional)"
-                        multiple
-                        onChange={changeReferenceAssetIds}
-                        projectId={activeProject?.id}
-                        values={referenceAssetIds}
-                      /></div>
-                    ) : null}
-                    {sourceWithMultiReference ? (
-                      <div className="span-2 studio-input-cell"><OrderedReferenceList
-                        assetIds={referenceAssetIds}
-                        labelFor={assetLabelFor}
-                        onChange={changeReferenceAssetIds}
-                        onRemove={(index) => changeReferenceAssetIds(referenceAssetIds.filter((_, at) => at !== index))}
-                      /></div>
-                    ) : null}
                   </>
                 )}
                 <div className="span-2 studio-input-cell"><FitModeControl
@@ -3757,10 +3722,9 @@ export function ImageStudio() {
                     promptEnhance={promptEnhance}
                     enhancePrompt={enhancePrompt}
                     setEnhancePrompt={setEnhancePrompt}
-                    precisionToggle={precisionToggle}
-                    bf16Precision={bf16Precision}
-                    setRecipeTierRequest={setRecipeTierRequest}
-                    setBf16Precision={setBf16Precision}
+
+
+
                   />
                 ),
               },

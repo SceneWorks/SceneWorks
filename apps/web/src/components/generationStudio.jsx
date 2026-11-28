@@ -390,6 +390,7 @@ export function useGenerationStudio({
   model,
   setModel,
   fallbackModelId,
+  preserveMissingModel = false,
   characters,
   characterId,
   setCharacterId,
@@ -425,13 +426,13 @@ export function useGenerationStudio({
   // restored model to the fallback — permanently, since the fallback IS in the catalog
   // once it lands. Only snap once there is a real catalog to validate against.
   useEffect(() => {
-    if (!models.length) {
+    if (!models.length || preserveMissingModel) {
       return;
     }
     if (!models.some((item) => item.id === model)) {
       setModel(models[0]?.id ?? fallbackModelId);
     }
-  }, [models, model, setModel, fallbackModelId]);
+  }, [models, model, setModel, fallbackModelId, preserveMissingModel]);
 
   // Raise the model-library prompt at SELECTION time, not only at submit (sc-19709): picking a
   // model whose library is disconnected should say so immediately rather than after the user has

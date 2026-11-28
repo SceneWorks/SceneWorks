@@ -2827,7 +2827,7 @@ describe("ModelManagerScreen LoRA declared adapter metadata (sc-14057)", () => {
       .find((row) => row.querySelector("strong")?.textContent === name)
       ?.querySelector("small")?.textContent ?? "";
 
-  it("shows the declared network type, rank and alpha for a Mage-Flow adapter", async () => {
+  it("shows the declared network type, rank and alpha for a saved adapter from the retired Mage-Flow family", async () => {
     await render([
       {
         id: "mage_flow_my_style",

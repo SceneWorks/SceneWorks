@@ -63,9 +63,9 @@ export function buildImageJobAdvanced(state) {
     // from an alpha-capable model can never leak onto one that would refuse it.
     selectedModel,
     transparentBackground,
-    // Boogu precision (sc-6568) + quant-tier A/B (sc-8515).
-    precisionToggle,
-    bf16Precision,
+    // Generation quant-tier selection.
+
+
     showTierPicker,
     quantTier,
     tierExplicit,
@@ -212,15 +212,6 @@ export function buildImageJobAdvanced(state) {
     // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
     // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
     ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),
-    // Boogu precision (sc-6568): emit mlxQuantize:0 (full-precision bf16) only when the model
-    // exposes the precision toggle AND bf16 is selected; the default Q8 emits nothing (the
-    // worker reads manifest mlx.quantize and fetches the `<variant>-bf16/` subfolder on demand).
-    // `!showTierPicker` is a defensive guard: Boogu downloads via `base/`-style subfolder globs
-    // (no `downloads[].variant` keys), so `hasVariantMatrix` — and therefore `showTierPicker` —
-    // is always false for the precisionToggle set; the two controls are disjoint. The guard
-    // makes that invariant load-bearing so a future manifest change can never emit both
-    // mlxQuantize spreads for one model (the tier picker below would win the object-spread
-    // race, but we never render/emit both).
     // Transparency (sc-24113). Emits `transparentBackground: true` ONLY for a genuine request on
     // an alpha-capable model; an opaque render puts nothing new on the wire, so every existing
     // lane's payload stays byte-identical.
@@ -236,14 +227,12 @@ export function buildImageJobAdvanced(state) {
     ...(transparentBackground && modelSupportsAlphaOutput(selectedModel)
       ? { transparentBackground: true }
       : {}),
-    ...(selectablePrecision && precisionToggle && bf16Precision && !showTierPicker ? { mlxQuantize: 0 } : {}),
     // Quant-tier A/B (sc-8515) + on-disk tier fidelity (sc-12090): send the resolved tier's
     // mlxQuantize (bf16→0, q8→8, q4→4) whenever the tier state maps to a known quant value —
     // NOT only when the picker is shown. A single installed tier hides the picker, but the tier
     // the state resolved (e.g. q4-only) must still ride the payload so the worker budgets/loads
     // that tier instead of defaulting to q8 against a tier the user never downloaded (#1516). A
-    // non-matrix model keeps `quantTier` empty (`tierQuantize("") === null`), so this stays
-    // disjoint from the Boogu precisionToggle above — no `showTierPicker` guard needed.
+    // non-matrix model keeps `quantTier` empty (`tierQuantize("") === null`), so no tier is emitted.
     ...(selectablePrecision && tierQuantize(quantTier) !== null
       ? {
           mlxQuantize: tierQuantize(quantTier),

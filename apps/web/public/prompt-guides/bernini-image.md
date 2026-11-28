@@ -9,7 +9,7 @@ more than terse ones.
 
 > Bernini is heavy: the planner runs many passes before rendering, so a single image takes several
 > minutes and a lot of unified memory. For everyday stills the fast native image models (Z-Image,
-> FLUX, SDXL, Kolors, Lens, Chroma, Qwen-Image, SenseNova) are quicker. Reach for Bernini when you
+> FLUX, SDXL, Kolors, Chroma, Qwen-Image, SenseNova) are quicker. Reach for Bernini when you
 > want planner-driven composition or to stay consistent with a Bernini video look.
 
 ## Task Modes

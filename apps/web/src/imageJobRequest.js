@@ -53,7 +53,7 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText,
 
 // Canonical emitted references, also used by Studio geometry eligibility. Hidden picker state
 // must never grant a reference-only sizing policy to a request that does not emit that input.
-export function imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences = false, sourceWithMultiReference, editSecondPair,
+export function imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences = false, editSecondPair,
   sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
   supportsImg2img, img2imgReferenceAssetId, mossEdit = false, mossReferences = null }) {
   if (mossEdit) {
@@ -67,7 +67,7 @@ export function imageJobReferences({ selectedModel, mode, multiReference, ordere
   return {
     sourceAssetId: edit && !multiReference
       ? editSecondPair ? null : sourceAssetId || null : controlPreprocessSourceId,
-    referenceAssetIds: edit && (multiReference || sourceWithMultiReference) && referenceAssetIds.length
+    referenceAssetIds: edit && multiReference && referenceAssetIds.length
       ? referenceAssetIds : editSecondPair ?? undefined,
     referenceAssetId: mode === "character_image" ? referenceAssetId || null
       : supportsImg2img ? img2imgReferenceAssetId || null : null,
@@ -154,8 +154,8 @@ export function buildImageJobRequest(state) {
     flashAttn,
     promptEnhance,
     enhancePrompt,
-    precisionToggle,
-    bf16Precision,
+
+
     // sc-24113 — the transparency toggle + the model it is judged against.
     selectedModel,
     transparentBackground,
@@ -343,8 +343,8 @@ export function buildImageJobRequest(state) {
       flashAttn,
       promptEnhance,
       enhancePrompt,
-      precisionToggle,
-      bf16Precision,
+
+
       selectedModel,
       transparentBackground,
       showTierPicker,

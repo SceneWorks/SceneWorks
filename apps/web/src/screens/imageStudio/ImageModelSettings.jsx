@@ -62,10 +62,9 @@ export function ImageModelSettings({
   promptEnhance,
   enhancePrompt,
   setEnhancePrompt,
-  precisionToggle,
-  bf16Precision,
-  setRecipeTierRequest,
-  setBf16Precision,
+
+
+
 }) {
   return (
     <div className="studio-grid image-model-settings">
@@ -78,12 +77,20 @@ export function ImageModelSettings({
           <StudioUpdateBadge item={selectedModel} />
         </span>
         <select onChange={(event) => setModel(event.target.value)} value={model}>
+          {model && pickerModels.length > 0 && !pickerModels.some((item) => item.id === model) ? (
+            <option value={model} disabled>Unavailable model: {model}</option>
+          ) : null}
           {pickerModels.map((item) => (
             <option key={item.id} value={item.id}>
               {updateOptionLabel(item)}
             </option>
           ))}
         </select>
+        {model && !pickerModels.some((item) => item.id === model) && pickerModels.length > 0 ? (
+          <span className="field-hint" role="status">
+            This saved model is no longer available. Choose a supported model to generate again.
+          </span>
+        ) : null}
         {!pickerModels.length ? (
           <span className="field-hint" role="status">
             No installed model supports {modeLabel} generation.{" "}
@@ -196,19 +203,6 @@ export function ImageModelSettings({
           Enhance prompt
           <InfoTip label="About Enhance prompt">
             Have the model's native prompt enhancer rewrite your prompt before generating. FLUX 3 uses its separately installed optional upsampler. The saved recipe records the original and effective prompts, including any safe fallback. Distinct from Refine; off by default.
-          </InfoTip>
-        </label>
-      ) : null}
-      {precisionToggle && !showTierPicker ? (
-        <label className="checkline boogu-precision-toggle">
-          <input
-            checked={bf16Precision}
-            onChange={(event) => { setRecipeTierRequest(null); setBf16Precision(event.target.checked); }}
-            type="checkbox"
-          />
-          Full precision (bf16)
-          <InfoTip label="About Full precision">
-            Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac).
           </InfoTip>
         </label>
       ) : null}
