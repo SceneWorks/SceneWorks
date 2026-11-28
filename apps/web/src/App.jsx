@@ -1361,7 +1361,7 @@ export function App() {
 
   useWebView2RepaintPump();
 
-  const { refreshAssets, hydrateLaunchDomains, context: shellHydrationContext } = useShellHydration({
+  const { refreshAssets, hydrateLaunchDomains, assetCatalogComplete, context: shellHydrationContext } = useShellHydration({
     residentDomains, jobsRef, loadedAssets, ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
   });
   // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
@@ -1723,6 +1723,8 @@ export function App() {
       activeAssetLoadState.status === "ready"
     ),
     assetsLoading: activeAssetLoadState.status === "loading",
+    // False while a Library-sliced catalog is being widened for this route (see useShellHydration).
+    assetCatalogComplete,
     assetsError: activeAssetLoadState.error,
     selectedAsset,
     selectedAssetId,

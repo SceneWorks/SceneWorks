@@ -7,7 +7,7 @@ import { trainingApi } from "../api/trainingResources.js";
 import { assetsApi } from "../api/assetsResources.js";
 import { projectsApi } from "../api/projectsResources.js";
 import { jobsApi } from "../api/jobsResources.js";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { isAbortError } from "../api.js";
 import { beginAssetRequest, settleAssetRequest } from "../startupTiming.js";
 import { sortWorkers } from "../sorters.js";
@@ -55,6 +55,9 @@ export function useShellHydration({
   // drops it, so the next load is a full read instead of a merge into nothing.
   const catalogCursorRef = useRef(null);
   const wideningProjectIdRef = useRef(null);
+  // The scope of the catalog the shell last committed (`{ projectId, scope }`), as render state so
+  // `assetCatalogComplete` below follows it. `scope` is null for a cursor-less (Queue) load.
+  const [committedCatalogScope, setCommittedCatalogScope] = useState(null);
   const loadCursorsRef = useRef(new WeakMap());
   const loadCatalogAssets = useCallback(async (projectId, token, options) => {
     const known = catalogCursorRef.current;
@@ -262,6 +265,7 @@ export function useShellHydration({
       // Queue loads (and any result without a cursor) leave no cursor: the next catalog load is
       // a full read.
       catalogCursorRef.current = loadCursorsRef.current.get(items) ?? null;
+      setCommittedCatalogScope({ projectId, scope: catalogCursorRef.current?.scope ?? null });
       setLoadedAssetsProjectId(projectId);
       setSelectedAssetId((current) => reconcileSelectedAssetId(items, current));
       setAssetLoadState({ projectId, status: "ready", error: "" });
@@ -608,5 +612,15 @@ export function useShellHydration({
   const context = useAppDomainValue({
     refreshMacCapabilities
   });
-  return { ...context, refreshAssets, hydrateLaunchDomains, context };
+  // False while this route needs the full catalog but the shell still holds only the Library slice
+  // (it is being widened). A non-empty catalog is then NOT the whole catalog, so any one-shot
+  // "drop restored ids the catalog does not hold" validation must wait for this — otherwise a
+  // restored Character Studio reference is discarded before the full catalog lands.
+  const assetCatalogComplete = !(
+    routeCatalogScope === "all" &&
+    committedCatalogScope?.projectId === (activeProject?.id ?? null) &&
+    committedCatalogScope?.scope === "library"
+  );
+
+  return { ...context, refreshAssets, hydrateLaunchDomains, assetCatalogComplete, context };
 }

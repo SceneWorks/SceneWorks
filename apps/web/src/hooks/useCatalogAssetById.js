@@ -21,8 +21,14 @@ export function useCatalogAssetById({ assets, assetId, projectId, token }) {
       .then((asset) => {
         if (!controller.signal.aborted && asset?.id === assetId) setFetched({ projectId, asset });
       })
-      .catch(() => {
-        // Not found or unreachable: there is nothing to compare against, as before.
+      .catch((error) => {
+        // A definitive not-found (purged since an earlier lookup) drops the cached copy, so a
+        // reopened preview never compares against a deleted source. A transient failure keeps
+        // whatever was last known, as the catalog-only lookup kept its last listing.
+        if (controller.signal.aborted || error?.status !== 404) return;
+        setFetched((current) =>
+          current?.projectId === projectId && current.asset.id === assetId ? null : current,
+        );
       });
     return () => controller.abort();
   }, [assetId, needsFetch, projectId, token]);

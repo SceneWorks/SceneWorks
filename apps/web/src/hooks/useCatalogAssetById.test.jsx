@@ -53,6 +53,34 @@ it("resolves a purged asset to null", async () => {
   expect(result.current).toBeNull();
 });
 
+it("forgets a fetched source that a later lookup finds purged", async () => {
+  const fetched = { id: "source", projectId: "p", origin: "character_studio" };
+  global.fetch = vi.fn(async () => respond(200, fetched));
+  await act(async () => root.render(<Probe assets={[]} assetId="source" projectId="p" token="" />));
+  await vi.waitFor(() => expect(result.current).toEqual(fetched));
+
+  // The preview closes, the source is purged, and the same edit is reopened.
+  await act(async () => root.render(<Probe assets={[]} assetId={null} projectId="p" token="" />));
+  global.fetch = vi.fn(async () => respond(404, { detail: "Asset not found" }));
+  await act(async () => root.render(<Probe assets={[]} assetId="source" projectId="p" token="" />));
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+  await vi.waitFor(() => expect(result.current).toBeNull());
+});
+
+it("keeps the last known source through a transient lookup failure", async () => {
+  const fetched = { id: "source", projectId: "p" };
+  global.fetch = vi.fn(async () => respond(200, fetched));
+  await act(async () => root.render(<Probe assets={[]} assetId="source" projectId="p" token="" />));
+  await vi.waitFor(() => expect(result.current).toEqual(fetched));
+
+  await act(async () => root.render(<Probe assets={[]} assetId={null} projectId="p" token="" />));
+  global.fetch = vi.fn(async () => respond(503, { detail: "busy" }));
+  await act(async () => root.render(<Probe assets={[]} assetId="source" projectId="p" token="" />));
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+  await act(async () => {});
+  expect(result.current).toEqual(fetched);
+});
+
 it("never returns a fetch made for another asset", async () => {
   global.fetch = vi.fn(async (url) => respond(200, { id: new URL(url).pathname.split("/").pop(), projectId: "p" }));
   await act(async () => root.render(<Probe assets={[]} assetId="first" projectId="p" token="" />));

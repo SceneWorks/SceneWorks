@@ -105,6 +105,7 @@ export function SimpleImageStudio() {
     rememberLocalGenerationJob,
     imageLocalJobs = [],
     assets = [],
+    assetCatalogComplete = true,
     recentImageAssets = [],
     visibleWorkers = [],
     loras = [],
@@ -264,14 +265,16 @@ export function SimpleImageStudio() {
   // edit mode stays submittable and sends a dangling reference the job then fails on.
   const restoredReferenceValidated = useRef(false);
   useEffect(() => {
-    if (mossEdit || restoredReferenceValidated.current || !assets.length) {
+    // ...and on the WHOLE catalog: a Library slice still being widened would drop a restored
+    // Character Studio reference as missing.
+    if (mossEdit || restoredReferenceValidated.current || !assets.length || !assetCatalogComplete) {
       return;
     }
     restoredReferenceValidated.current = true;
     setReferenceAssetId((current) =>
       current && !assets.some((asset) => asset.id === current) ? null : current,
     );
-  }, [assets, setReferenceAssetId, mossEdit]);
+  }, [assetCatalogComplete, assets, setReferenceAssetId, mossEdit]);
 
   // "Use as reference" from an asset preview lands here. Keyed on the request token so a
   // repeat pick of the SAME asset still re-arms after the user cleared it.

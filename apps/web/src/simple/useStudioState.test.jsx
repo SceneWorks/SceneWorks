@@ -316,9 +316,9 @@ describe("Simple studio state across navigation", () => {
 
     // Each phase reads the snapshot AFTER an unmount, because the write-through is debounced
     // and the unmount flush is what makes the stored value observable.
-    const runWith = async (assets) => {
+    const runWith = async (assets, assetCatalogComplete = true) => {
       ({ container, root } = mountRoot());
-      await renderShell(root, baseContext({ assets }), { preferencesHydrated: true });
+      await renderShell(root, baseContext({ assets, assetCatalogComplete }), { preferencesHydrated: true });
       await unmountRoot(root, container);
       return readSimpleStudioSnapshot("project-1").image.referenceAssetId;
     };
@@ -330,9 +330,13 @@ describe("Simple studio state across navigation", () => {
     // Catalog loaded and the asset is still there: kept.
     expect(await runWith([REFERENCE])).toBe("asset-9");
 
+    // Only the Library slice is held while the shell widens it to the full catalog: non-empty,
+    // but a Character Studio reference is simply not in it yet. Kept until the catalog is whole.
+    const other = { id: "asset-1", type: "image", projectId: "project-1", url: "/m/b.png" };
+    expect(await runWith([other], false)).toBe("asset-9");
+
     // Catalog loaded and the asset is gone: dropped, so the Generate gate and the tile agree
     // instead of submitting a reference the job would fail on.
-    const other = { id: "asset-1", type: "image", projectId: "project-1", url: "/m/b.png" };
     expect(await runWith([other])).toBeNull();
 
     // Leave afterEach a live root to tear down.

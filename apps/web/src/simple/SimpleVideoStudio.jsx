@@ -52,6 +52,7 @@ export function SimpleVideoStudio() {
     rememberLocalGenerationJob,
     videoLocalJobs = [],
     assets = [],
+    assetCatalogComplete = true,
     recentImageAssets = [],
     loras = [],
     jobs = [],
@@ -135,14 +136,16 @@ export function SimpleVideoStudio() {
   // stays submittable with a reference that no longer exists. Guarded on a LOADED catalog.
   const restoredSourceValidated = useRef(false);
   useEffect(() => {
-    if (restoredSourceValidated.current || !assets.length) {
+    // ...and on the WHOLE catalog: a Library slice still being widened would drop a restored
+    // Character Studio source as missing.
+    if (restoredSourceValidated.current || !assets.length || !assetCatalogComplete) {
       return;
     }
     restoredSourceValidated.current = true;
     setSourceAssetId((current) =>
       current && !assets.some((asset) => asset.id === current) ? null : current,
     );
-  }, [assets, setSourceAssetId]);
+  }, [assetCatalogComplete, assets, setSourceAssetId]);
 
   // User-picked LoRAs (epic 15404) — same hook, same eligibility and cap as the Image studio;
   // the video lane just has no auto-applied managed LoRA to exclude.

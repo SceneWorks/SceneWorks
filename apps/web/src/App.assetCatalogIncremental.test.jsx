@@ -193,3 +193,32 @@ it("starts a full-catalog route with the full catalog", async () => {
   expect(catalogRequests()[0].searchParams.get("scope")).toBe("all");
   expect(captures.current.assets.map((asset) => asset.id)).toEqual(["portrait"]);
 });
+
+it("reports the catalog incomplete until a widening read lands", async () => {
+  const library = fullAsset("library", "2026-10-24T00:00:02Z");
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  let releaseFull;
+  const fullCatalog = new Promise((resolve) => { releaseFull = resolve; });
+  stubApi({
+    details: { library, portrait },
+    catalog: (params) => (params.get("scope") === "library"
+      ? { cursor: "epoch.2", reset: true, assets: [summaryOf(library)], removedIds: [] }
+      : fullCatalog),
+  });
+  await act(async () => root.render(<App />));
+  await settle();
+  // The Library route needs only the Library slice, so what it holds is complete for it.
+  expect(captures.current.assetCatalogComplete).toBe(true);
+
+  // On a full-catalog route the held slice is non-empty but NOT the whole catalog: restored-id
+  // validations read this flag instead of treating "non-empty" as "loaded".
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library"]);
+  expect(captures.current.assetCatalogComplete).toBe(false);
+
+  await act(async () => releaseFull({ cursor: "epoch.3", reset: true, assets: [summaryOf(library), summaryOf(portrait)], removedIds: [] }));
+  await settle();
+  await vi.waitFor(() => expect(captures.current.assetCatalogComplete).toBe(true));
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]);
+});
