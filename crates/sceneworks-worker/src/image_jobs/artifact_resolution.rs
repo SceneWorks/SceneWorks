@@ -1484,20 +1484,98 @@ pub(super) fn resolve_krea_convrot(
     if !wants_krea_convrot(request) {
         return None;
     }
-    // The bf16 base surface: the `bf16/` subdir of the shared `krea-2-turbo-mlx` turnkey (the SAME dir
-    // the bf16 tier ships), a candle-readable `transformer/ text_encoder/ vae/ tokenizer/` root. The
-    // ConvRot DiT replaces only the transformer at load, but the pipeline still reads the dense TE/VAE/
-    // tokenizer/config from here.
-    let base_dir = huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO)
-        .map(|root| root.join("bf16"))
-        .filter(|dir| {
-            dir.join("model_index.json").is_file()
-                && dir.join("text_encoder").is_dir()
-                && dir.join("vae").is_dir()
-        })?;
+    let base_dir = resolve_krea_dense_base(settings)?;
     // The ConvRot DiT single-file inside the private repo's snapshot.
     let convrot_dit = resolve_krea_convrot_dit(settings)?;
     Some((base_dir, convrot_dit))
+}
+
+/// The dense bf16 base surface the transformer-only Krea tiers (INT8-ConvRot, W4A8) load their
+/// tokenizer / Qwen3-VL TE / Qwen-Image VAE / config from: the `bf16/` subdir of the shared
+/// `krea-2-turbo-mlx` turnkey (the SAME dir the bf16 tier ships). `None` until it is complete.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_krea_dense_base(settings: &Settings) -> Option<PathBuf> {
+    huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO)
+        .map(|root| root.join("bf16"))
+        .filter(|dir| krea_dense_base_complete(dir))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn krea_dense_base_complete(dir: &Path) -> bool {
+    dir.join("model_index.json").is_file()
+        && dir.join("text_encoder").is_dir()
+        && dir.join("vae").is_dir()
+}
+
+/// The published repo of the Krea 2 Turbo W4A8 transformer (SW-6135, feature SW-F287).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_W4A8_REPO: &str = sceneworks_core::portable_sources::KREA_W4A8_REPO;
+
+/// The W4A8 transformer single-file inside [`KREA_W4A8_REPO`]. The catalog row downloads the whole
+/// repo (`files: []`); this is the one weight file in it.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const KREA_W4A8_DIT_FILE: &str = "krea2_turbo_w4a8.safetensors";
+
+/// Whether this Krea 2 request selected the candle-only W4A8 tier (SW-6135): `advanced.quantTier:
+/// "w4a8"`, or a top-level `variant: "w4a8"` (bound into `quantTier`). Candle lane only, like
+/// [`wants_krea_convrot`]; the sm_80 floor is the worker's `w4a8` capability and the loader's own
+/// typed refusal. Confined to `krea_2_turbo`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn wants_krea_w4a8(request: &ImageRequest) -> bool {
+    request.model == "krea_2_turbo"
+        && std::env::consts::OS != "macos"
+        && request
+            .advanced_text("quantTier")
+            .is_some_and(sceneworks_core::image_request::is_w4a8_tier)
+}
+
+/// Resolve the W4A8 LoadSpec inputs for a Krea 2 request (SW-6135): the dense bf16 base DIR (the
+/// `base_snapshot` component — tokenizer / TE / VAE / transformer `config.json`) and the W4A8
+/// transformer FILE (the primary `weights`, the inference native-file route that detects the tier
+/// from its header). `None` when the request did not select W4A8 or either artifact is absent;
+/// the caller fetches the base on demand first ([`ensure_krea_dense_base_present`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_krea_w4a8(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<(PathBuf, PathBuf)> {
+    if !wants_krea_w4a8(request) {
+        return None;
+    }
+    let base_dir = resolve_krea_dense_base(settings)?;
+    let dit = resolve_krea_w4a8_dit(settings)?;
+    Some((base_dir, dit))
+}
+
+/// The W4A8 inputs for every Krea route that can run the tier (SW-6135): `Ok(None)` when the request
+/// did not select W4A8, the (bf16 base DIR, W4A8 transformer FILE) pair when it did and both are
+/// installed, and a typed refusal otherwise — a W4A8 pick is never rendered at another installed
+/// tier. Callers fetch the base on demand first ([`ensure_krea_dense_base_present`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn require_krea_w4a8(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<(PathBuf, PathBuf)>> {
+    if !wants_krea_w4a8(request) {
+        return Ok(None);
+    }
+    resolve_krea_w4a8(request, settings)
+        .map(Some)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Krea 2 Turbo W4A8 tier is not installed: download the W4A8 variant \
+             (SceneWorks/krea-2-turbo-w4a8) and its bf16 base, or pick another tier"
+                    .to_owned(),
+            )
+        })
+}
+
+/// Resolve only the immutable W4A8 transformer single-file.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_krea_w4a8_dit(settings: &Settings) -> Option<PathBuf> {
+    huggingface_snapshot_dir(&settings.data_dir, KREA_W4A8_REPO)
+        .map(|root| root.join(KREA_W4A8_DIT_FILE))
+        .filter(|file| file.is_file())
 }
 
 /// Resolve only the immutable ConvRot DiT single-file. Strict-pose routing uses this narrower probe so
@@ -1521,22 +1599,23 @@ const KREA_MLX_TURNKEY_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) const KREA_MLX_TURNKEY_REVISION: &str = "d009674080cc1bccf2b629d834c34bf5eccdb723";
 
-/// On-demand fetch of the canonical bf16 Krea 2 base surface for the INT8-ConvRot tier (sc-9300),
+/// On-demand fetch of the canonical bf16 Krea 2 base surface for the transformer-only Krea tiers
+/// (INT8-ConvRot, sc-9300; W4A8, SW-6135),
 /// the sibling of [`ensure_boogu_tier_present`]. The ConvRot catalog download pulls only the DiT
 /// single-file; the bf16 `bf16/` subdir of the `krea-2-turbo-mlx` turnkey (tokenizer / Qwen3-VL TE /
 /// Qwen-Image VAE / config) is fetched here when the ConvRot tier is selected and it isn't present —
 /// so q4/q8 users are never forced to download the 35 GB bf16 base (it isn't a global co-requisite).
 /// No-op when the request isn't a ConvRot job or the bf16 base is already complete; a real download
-/// error fails loud (otherwise `resolve_krea_convrot` loads the freshly fetched base).
+/// error fails loud (otherwise `resolve_krea_convrot` / `resolve_krea_w4a8` load the fetched base).
 /// Fails loud on a real download error — fast, before any compute.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) async fn ensure_krea_convrot_base_present(
+pub(super) async fn ensure_krea_dense_base_present(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<()> {
-    if !wants_krea_convrot(request) {
+    if !wants_krea_convrot(request) && !wants_krea_w4a8(request) {
         return Ok(());
     }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, KREA_MLX_TURNKEY_REPO) else {
@@ -1544,12 +1623,8 @@ pub(super) async fn ensure_krea_convrot_base_present(
         // (If the repo is entirely absent, the fetch below installs the requested bf16 leaf dirs.)
         return fetch_krea_convrot_base(api, settings, job).await;
     };
-    let bf16 = root.join("bf16");
     // Present already (dense sharded transformer index + the dense TE/VAE) → no fetch.
-    if bf16.join("model_index.json").is_file()
-        && bf16.join("text_encoder").is_dir()
-        && bf16.join("vae").is_dir()
-    {
+    if krea_dense_base_complete(&root.join("bf16")) {
         return Ok(());
     }
     fetch_krea_convrot_base(api, settings, job).await

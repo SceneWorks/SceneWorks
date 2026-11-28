@@ -85,6 +85,7 @@ fn persist(fixture: &Fixture, asset_id: &str, created_at: &str) {
                 "rawAdapterSettings": {
                     "faceLikeness": { "score": 0.91, "detected": true },
                     "vedaExecution": { "applied": true },
+                    "attentionExecution": { "int8": 228, "sol": 0, "total": 264 },
                     "promptBatch": ["y".repeat(4096)],
                     "mossImageEditExecutionReport": { "samples": ["z".repeat(4096)] },
                 },
@@ -167,6 +168,7 @@ fn summary_view_drops_replay_bulk_but_keeps_catalog_fields_and_detail_stays_full
         "/recipe/normalizedSettings",
         "/recipe/rawAdapterSettings/faceLikeness",
         "/recipe/rawAdapterSettings/vedaExecution",
+        "/recipe/rawAdapterSettings/attentionExecution",
     ] {
         assert_eq!(
             summary.pointer(pointer),

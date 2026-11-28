@@ -513,10 +513,158 @@ pub fn image_quant_tier_refusal(model: &str, advanced: &JsonObject) -> Option<St
             .err()
             .map(|reason| format!("{model}: {reason}"));
     }
+    if requests_w4a8_tier(advanced) {
+        let mlx_quantize = advanced.get("mlxQuantize").filter(|value| !value.is_null());
+        let has_poses = advanced
+            .get("poses")
+            .and_then(Value::as_array)
+            .is_some_and(|poses| !poses.is_empty());
+        let rung = advanced
+            .get("memoryStrategy")
+            .and_then(|strategy| strategy.get("rung"))
+            .and_then(Value::as_str);
+        return w4a8_tier_refusal(model, mlx_quantize.is_some(), has_poses, rung);
+    }
     requests_fp8r_tier(advanced).then(|| {
         format!(
             "advanced.quantTier \"{FP8R_QUANT_TIER}\" selects a publisher FP8 rowwise package, and \
              {model} ships none (only {FLUX3_TIERED_MODEL_IDS:?} do)"
         )
     })
+}
+
+/// The Krea 2 Turbo **W4A8** tier (SW-6135, feature SW-F287): ConvRot-rotated int4 weights with
+/// int8 activations, a prebuilt CUDA-only (sm_80+) transformer published at
+/// `SceneWorks/krea-2-turbo-w4a8`. It has no honest `mlxQuantize` bit count (`4` names the
+/// int4-affine q4 tier), so it rides this `advanced.quantTier` / top-level `variant` label.
+pub const W4A8_QUANT_TIER: &str = "w4a8";
+
+/// The only catalog model that ships the [`W4A8_QUANT_TIER`] package.
+pub const W4A8_TIER_MODEL_ID: &str = "krea_2_turbo";
+
+/// The memory rung that streams transformer blocks (`advanced.memoryStrategy.rung`, as an exact
+/// replay authors it). A W4A8 transformer loads resident; its packed projections have no
+/// block-streaming form.
+pub const BLOCK_STREAMING_RUNG: &str = "bounded_transformer_residency";
+
+/// Whether `advanced.quantTier` names the W4A8 tier (trimmed, ASCII case-insensitive).
+pub fn requests_w4a8_tier(advanced: &JsonObject) -> bool {
+    advanced
+        .get("quantTier")
+        .and_then(Value::as_str)
+        .is_some_and(is_w4a8_tier)
+}
+
+/// Whether a tier name is the W4A8 tier (trimmed, ASCII case-insensitive).
+pub fn is_w4a8_tier(tier: &str) -> bool {
+    tier.trim().eq_ignore_ascii_case(W4A8_QUANT_TIER)
+}
+
+/// The request-shape refusals of the W4A8 tier, shared by API validation (raw `advanced`) and
+/// the resolved routing probe so the two cannot disagree. `None` = acceptable.
+///
+/// * Only [`W4A8_TIER_MODEL_ID`] ships the package.
+/// * A W4A8 transformer cannot be requantized: any `mlxQuantize` bit count alongside it names a
+///   q4/q8/bf16 load of a packed int4 checkpoint the loader refuses.
+/// * Krea pose control runs on its composable training trunk, which has no W4A8 projection.
+/// * The transformer loads resident (whole or staged); an explicit block-streaming rung has no
+///   W4A8 form.
+pub fn w4a8_tier_refusal(
+    model: &str,
+    has_mlx_quantize: bool,
+    has_poses: bool,
+    requested_rung: Option<&str>,
+) -> Option<String> {
+    if model != W4A8_TIER_MODEL_ID {
+        return Some(format!(
+            "advanced.quantTier \"{W4A8_QUANT_TIER}\" selects the Krea 2 Turbo W4A8 transformer,              and {model} ships none (only {W4A8_TIER_MODEL_ID} does)"
+        ));
+    }
+    if has_mlx_quantize {
+        return Some(format!(
+            "{model}: the W4A8 tier is prebuilt int4-weight / int8-activation and cannot be              requantized; drop advanced.mlxQuantize or pick the q4, q8 or bf16 tier"
+        ));
+    }
+    if has_poses {
+        return Some(format!(
+            "{model}: Krea pose control does not run on the W4A8 tier; select the bf16, q8, q4 or              INT8-ConvRot tier for pose control"
+        ));
+    }
+    if requested_rung.is_some_and(|rung| rung.trim() == BLOCK_STREAMING_RUNG) {
+        return Some(format!(
+            "{model}: a W4A8 transformer loads resident (whole or staged); its packed projections              have no transformer block-streaming form ({BLOCK_STREAMING_RUNG} is unsupported for              this tier)"
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod w4a8_tier_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn advanced(value: Value) -> JsonObject {
+        value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn w4a8_is_accepted_only_on_krea_2_turbo_in_its_own_shape() {
+        assert!(requests_w4a8_tier(&advanced(
+            json!({"quantTier": " W4A8 "})
+        )));
+        assert!(!requests_w4a8_tier(&advanced(json!({"quantTier": "q4"}))));
+        assert_eq!(
+            image_quant_tier_refusal("krea_2_turbo", &advanced(json!({"quantTier": "w4a8"}))),
+            None
+        );
+        // A null bit count is the studio's "no bits carrier", not a requantization request.
+        assert_eq!(
+            image_quant_tier_refusal(
+                "krea_2_turbo",
+                &advanced(json!({"quantTier": "w4a8", "mlxQuantize": null, "poses": []}))
+            ),
+            None
+        );
+        for model in ["krea_2_raw", "z_image", "flux3_klein_base"] {
+            let reason =
+                image_quant_tier_refusal(model, &advanced(json!({"quantTier": "w4a8"}))).unwrap();
+            assert!(reason.contains(model), "{reason}");
+        }
+    }
+
+    #[test]
+    fn w4a8_refuses_requantization_pose_control_and_block_streaming() {
+        for (fields, needle) in [
+            (
+                json!({"quantTier": "w4a8", "mlxQuantize": 4}),
+                "requantized",
+            ),
+            (
+                json!({"quantTier": "w4a8", "mlxQuantize": "8"}),
+                "requantized",
+            ),
+            (
+                json!({"quantTier": "w4a8", "poses": [{"id": "p"}]}),
+                "pose control",
+            ),
+            (
+                json!({"quantTier": "w4a8", "memoryStrategy": {"rung": BLOCK_STREAMING_RUNG}}),
+                "block-streaming",
+            ),
+        ] {
+            let reason = image_quant_tier_refusal("krea_2_turbo", &advanced(fields.clone()))
+                .unwrap_or_else(|| panic!("{fields} must be refused"));
+            assert!(reason.contains(needle), "{fields}: {reason}");
+        }
+        // Resident and staged rungs stay admissible.
+        for rung in ["resident", "staged_residency"] {
+            assert_eq!(
+                image_quant_tier_refusal(
+                    "krea_2_turbo",
+                    &advanced(json!({"quantTier": "w4a8", "memoryStrategy": {"rung": rung}}))
+                ),
+                None
+            );
+        }
+    }
 }

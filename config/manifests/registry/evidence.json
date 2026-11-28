@@ -26041,14 +26041,16 @@
         "q4": 25.7,
         "q8": 35.2,
         "bf16": 47.2,
-        "int8-convrot": 34.7
+        "int8-convrot": 34.7,
+        "w4a8": 34.4
       },
       "vramMeasuredPixels": 1048576,
       "sequentialPeakGb": {
         "q4": 21.9,
         "q8": 29.4,
         "bf16": 39.4,
-        "int8-convrot": 28.6
+        "int8-convrot": 28.6,
+        "w4a8": 26.6
       },
       "turboFit": {
         "calibrationAbi": 3,

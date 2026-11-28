@@ -1,0 +1,780 @@
+{
+  "backend": "candle",
+  "source": "runtime_cuda::attention::SHARED_ATTENTION_ROUTING",
+  "providers": {
+    "anima_aesthetic": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "anima_base": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "anima_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "bernini": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "bernini_renderer": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "boogu_image": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "boogu_image_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "boogu_image_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "chroma1_base": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "chroma1_flash": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "chroma1_hd": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "clip_vit_l14": {
+      "routing": "bespoke"
+    },
+    "clip_vit_l14_text": {
+      "routing": "bespoke"
+    },
+    "fancyfeast/llama-joycaption-beta-one-hf-llava": {
+      "routing": "bespoke"
+    },
+    "flux1_dev": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux1_dev_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux1_dev_ip_adapter": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux1_schnell": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux1_schnell_ip_adapter": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_dev": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_dev_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_dev_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_klein_9b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux2_klein_9b_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux3_klein": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "flux3_klein_base": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "ideogram_4": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": false,
+        "reason": "has 256-wide attention heads: the INT8 kernel is compiled for head dim 64 / 128 and Sol-Attn for 128, and a wider head cannot be zero-padded down"
+      },
+      "sol": {
+        "served": false,
+        "reason": "has 256-wide attention heads: the INT8 kernel is compiled for head dim 64 / 128 and Sol-Attn for 128, and a wider head cannot be zero-padded down"
+      }
+    },
+    "ideogram_4_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": false,
+        "reason": "has 256-wide attention heads: the INT8 kernel is compiled for head dim 64 / 128 and Sol-Attn for 128, and a wider head cannot be zero-padded down"
+      },
+      "sol": {
+        "served": false,
+        "reason": "has 256-wide attention heads: the INT8 kernel is compiled for head dim 64 / 128 and Sol-Attn for 128, and a wider head cannot be zero-padded down"
+      }
+    },
+    "instantid": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "iris_3b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "iris_3b_restore": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "kolors": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "kolors_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "kolors_ip_adapter": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "krea_2_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "krea_2_raw": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "krea_2_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "krea_2_turbo_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "krea_2_turbo_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "lens": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "lens_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "ltx_2_3_distilled": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "ltx_2_5_distilled": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mage_flow": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mage_flow_base": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mage_flow_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mage_flow_edit_base": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mage_flow_edit_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mage_flow_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "minimax_h3": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "minimax_h3_image": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "mochi_1": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": false,
+        "reason": "attends under its text padding mask on every call (joint and pooled attention), and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+      },
+      "sol": {
+        "served": false,
+        "reason": "attends under its text padding mask on every call (joint and pooled attention), and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+      }
+    },
+    "moss_image_base": {
+      "routing": "bespoke"
+    },
+    "moss_image_sft": {
+      "routing": "bespoke"
+    },
+    "pulid_flux": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_2_1": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": false,
+        "reason": "attends block-causally: every unmasked call attends a query slice to a longer key prefix (Sq != Sk), and Sol-Attn routes only a token sequence attending to itself"
+      }
+    },
+    "qwen_image_2_1_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": false,
+        "reason": "attends block-causally: every unmasked call attends a query slice to a longer key prefix (Sq != Sk), and Sol-Attn routes only a token sequence attending to itself"
+      }
+    },
+    "qwen_image_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit_2509": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit_2511": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "qwen_image_edit_2511_lightning": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sana_1600m": {
+      "routing": "bespoke"
+    },
+    "sana_sprint_1600m": {
+      "routing": "bespoke"
+    },
+    "scail2_14b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sd3_5_large": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sd3_5_large_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sd3_5_medium": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_detail": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_edit": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sdxl_ip_adapter": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "seedvr2": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "seedvr2_3b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "seedvr2_7b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "sensenova_u1_8b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": false,
+        "reason": "attends under its block-causal mask on every call, and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+      },
+      "sol": {
+        "served": false,
+        "reason": "attends under its block-causal mask on every call, and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+      }
+    },
+    "sensenova_u1_8b_fast": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": false,
+        "reason": "attends under its block-causal mask on every call, and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+      },
+      "sol": {
+        "served": false,
+        "reason": "attends under its block-causal mask on every call, and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+      }
+    },
+    "supra2_img": {
+      "routing": "bespoke"
+    },
+    "svd_xt": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "wan2_2_i2v_14b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "wan2_2_t2v_14b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "wan2_2_ti2v_5b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "wan2_2_vace_fun_14b": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "wan_vace": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "z_image": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "z_image_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "z_image_turbo": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    },
+    "z_image_turbo_control": {
+      "routing": "shared_helpers",
+      "int8": {
+        "served": true
+      },
+      "sol": {
+        "served": true
+      }
+    }
+  }
+}

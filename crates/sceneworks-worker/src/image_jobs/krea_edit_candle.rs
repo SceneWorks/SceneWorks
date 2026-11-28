@@ -1,6 +1,8 @@
 use super::adapters::resolve_adapters;
 use super::admit_candle_base;
+use super::artifact_resolution::require_krea_w4a8;
 use super::artifact_resolution::resolve_weights_dir;
+use super::artifact_resolution::wants_krea_w4a8;
 use super::conditioning::load_reference_image;
 use super::conditioning::resolve_text_style_gain;
 use super::events::consume_gen_events;
@@ -9,6 +11,7 @@ use super::load_spec::attach_manifest_text_encoder;
 use super::load_spec::attach_required_components;
 use super::load_spec::attach_selected_decoder;
 use super::load_spec::candle_certified_load_spec;
+use super::load_spec::krea_w4a8_load_spec;
 use super::load_spec::load_spec;
 use super::memory::candle_resolved_tier_key;
 use super::memory::optimized_shared_memory_context;
@@ -143,7 +146,11 @@ fn krea_edit_candle_distilled(request: &ImageRequest) -> bool {
 /// `flux2_edit_candle_available` (Krea resolves through the shared `resolve_weights_dir` → the
 /// `krea_2_raw` tier subdir).
 pub(super) fn krea_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
-    krea_edit_candle_mode(request) && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+    // SW-6135: a W4A8 edit is claimed whatever is installed, so the lane resolves the W4A8 pair (or
+    // refuses it by type) instead of the job falling to a route that would flatten the edit.
+    krea_edit_candle_mode(request)
+        && (wants_krea_w4a8(request)
+            || matches!(resolve_weights_dir(request, settings), Ok(Some(_))))
 }
 
 /// Resolve denoise steps: `advanced.steps` (clamped 1..=100) → manifest `steps` → the per-variant default
@@ -322,8 +329,17 @@ pub(super) async fn generate_candle_krea_edit_stream(
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).
     let text_style_gain = resolve_text_style_gain(request);
-    let weights_dir = resolve_weights_dir(request, settings)?
-        .ok_or_else(|| WorkerError::InvalidPayload("Krea 2 Raw weights not found".to_owned()))?;
+    // SW-6135: an explicit W4A8 pick loads the W4A8 transformer over the dense bf16 base (the same
+    // shared resolution and spec substitution as the generic stream), or is refused — never the
+    // q8/q4/bf16 turnkey `resolve_weights_dir` would pick. A render fetches nothing (epic 17625):
+    // the portable admission froze the base as the tier's co-requisite, so both are installed.
+    let w4a8 = require_krea_w4a8(request, settings)?;
+    let weights_dir = match w4a8.as_ref() {
+        Some((base_dir, _)) => base_dir.clone(),
+        None => resolve_weights_dir(request, settings)?.ok_or_else(|| {
+            WorkerError::InvalidPayload("Krea 2 Raw weights not found".to_owned())
+        })?,
+    };
 
     // R5 (epic 10871): the base cannot edit without the edit LoRA — its in-context/grounded source
     // conditioning is inert without the trained weights (a VAE-only render is off-distribution, not
@@ -360,6 +376,9 @@ pub(super) async fn generate_candle_krea_edit_stream(
     let use_pid = pid_weights.is_some();
     let mut strategy_spec = load_spec(weights_dir.clone(), None, adapters.clone(), None)
         .with_resolved_route(request.model.clone());
+    if let Some((base_dir, w4a8_dit)) = w4a8.as_ref() {
+        strategy_spec = krea_w4a8_load_spec(strategy_spec, base_dir, w4a8_dit);
+    }
     if let Some(pid) = pid_weights.as_ref() {
         strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }

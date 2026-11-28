@@ -1,6 +1,6 @@
 import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEditJobAdvanced } from "./mossImage.js";
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier, sourcePrecisionLabel } from "./quantTier.js";
+import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier, isW4a8Tier, sourcePrecisionLabel } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 import { isFlux3ImageModel } from "./modelEligibility.js";
 
@@ -55,6 +55,9 @@ export function buildImageJobAdvanced(state) {
     defaultTextEncoderId,
     // Flash attention (sc-3674).
     flashAttn,
+    // SW-6132: lossy CUDA attention opt-in (`{ int8 }` / `{ sol: { topkRatio } }`), already resolved
+    // by the studio (`null` / `undefined` when off, unsupported, or not on candle).
+    lossyAttention,
     // Caption upsampling (sc-6135).
     promptEnhance,
     enhancePrompt,
@@ -209,6 +212,8 @@ export function buildImageJobAdvanced(state) {
     // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
     // Only the candle (Windows/CUDA) SDXL backend reads it; every other backend ignores it.
     ...(moss || flashAttn ? {} : { flashAttn: false }),
+    // SW-6132: only an explicit opt-in rides the request; absent is the exact attention path.
+    ...(!moss && lossyAttention ? { lossyAttention } : {}),
     // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
     // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
     ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),
@@ -272,9 +277,11 @@ export function buildImageJobAdvanced(state) {
     // Emitted ONLY when the picker is shown AND the user explicitly picked nvfp4 — disjoint from both
     // spreads above. This is the SC#5 opt-in at the payload layer: absent this deliberate pick no
     // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
-    // FP8R must identify even a single installed tier (including Simple's hidden picker).
-    // Unlike the legacy NVFP4 opt-in, omitting it would request a different dense format.
-    ...(selectablePrecision && (isFp8rTier(quantTier) || ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier)))
+    // FP8R and W4A8 (SW-6135) must identify even a single installed tier (including Simple's hidden
+    // picker). Unlike the legacy NVFP4 opt-in, omitting either would request a different format.
+    ...(selectablePrecision &&
+      (isFp8rTier(quantTier) || isW4a8Tier(quantTier) ||
+        ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier)))
       ? { quantTier } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native

@@ -642,6 +642,42 @@
           }
         }
       },
+    "coTenantCensus": {
+      "$comment": "SW-6138: the shared-card admission a Candle capture ran under, written by scripts/measure-memory-catalog.mjs. The card admitted the capture because its free memory covered the cell's requirement plus the dedicated-VRAM reserve and no co-tenant was computing; every pure-compute co-tenant on the card at admission is listed (an idle desktop app holding a context, say), so a peak measured beside one is auditable. Additive and OPTIONAL, outside the record identity: bundles written before it stay valid and no record id moves.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "gpu", "observedAt", "totalBytes", "usedBytes", "freeBytes", "utilizationPercent", "requirementBytes", "requirementSource", "reserveBytes", "admission", "coTenants"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "gpu": { "type": "string", "minLength": 1 },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "totalBytes": { "type": "integer", "exclusiveMinimum": 0 },
+        "usedBytes": { "type": "integer", "minimum": 0 },
+        "freeBytes": { "type": "integer", "minimum": 0 },
+        "utilizationPercent": { "type": ["integer", "null"], "minimum": 0 },
+        "requirementBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "requirementSource": { "type": "string", "minLength": 1 },
+        "reserveBytes": { "type": "integer", "minimum": 0 },
+        "admission": { "const": "fits" },
+        "coTenants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pid", "name", "type", "usedBytes", "sm", "mem", "active"],
+            "properties": {
+              "pid": { "type": "integer", "minimum": 0 },
+              "name": { "type": "string", "minLength": 1 },
+              "type": { "type": "string", "minLength": 1 },
+              "usedBytes": { "type": ["integer", "null"], "minimum": 0 },
+              "sm": { "type": "string", "minLength": 1 },
+              "mem": { "type": "string", "minLength": 1 },
+              "active": { "const": false }
+            }
+          }
+        }
+      }
+    },
     "exceededBound": {
       "$comment": "sc-22738 (epic 22723): a MEASURED LOWER BOUND. The capture reached observedFootprintBytes of kernel physical footprint on a host of hardware.memoryBytes and was terminated by scripts/memory-calibration-watchdog.py before it completed, so the cell's peak is AT LEAST that at this geometry. It is not a record: there is no phase decomposition, no quality comparison and no admission scenario, because the render never got that far. It carries exactly the identity a record carries plus the figures the inequality is made of, so config/memory-anchors.json can bind it byte-for-byte the way it binds an anchor. Additive and OPTIONAL, which is why schemaVersion does not move: every bundle written before this def is still valid, and no consumer that partitions a bundle by record status sees a new status.",
       "type": "object",
@@ -948,6 +984,7 @@
         },
         "derivation": { "$ref": "#/$defs/derivation" },
         "sourceProvenance": { "enum": ["physical_mlx_v1"] },
+        "coTenantCensus": { "$ref": "#/$defs/coTenantCensus" },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "type": "string", "pattern": "^sceneworks-memory-v[1-9][0-9]*$" }

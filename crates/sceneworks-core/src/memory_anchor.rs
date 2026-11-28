@@ -1472,6 +1472,34 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "docs/calibration/sw-f287/flux-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/flux-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sw-f287/flux2-klein-9b-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/flux2-klein-9b-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sw-f287/krea-2-turbo-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/krea-2-turbo-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sw-f287/krea-2-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/krea-2-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sw-f287/z-image-turbo-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/z-image-turbo-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sw-f287/z-image-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/z-image-turbo-q4-mlx-evidence.json"),
+    ),
+    (
         "docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json",
         include_str!(
             "../../../docs/calibration/sw-f363-candle/minimax-h3-image-bf16-candle-evidence.json"

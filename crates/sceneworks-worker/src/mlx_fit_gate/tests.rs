@@ -16154,13 +16154,22 @@ fn the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contra
         "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
     );
 
-    // The mutation: the pre-c6d6a4db whole-directory decoder floors the cell again.
+    // The mutation: a decoder leg overstated past what the measurement allows floors the cell
+    // again. Shape, not a pinned measurement (gate teardown): the overstated decoder is the
+    // measured conditioning level's whole headroom over the text encoder and DiT PLUS the
+    // reference-encoder auxiliary folded back in, so it contradicts every re-capture by exactly
+    // `overlay_bytes`. (The sw-f287 re-capture's conditioning level now clears the literal
+    // whole-`vae/` sum, so a fixed whole-directory figure no longer contradicts it.)
+    let measured = anchor.phase_active_peak_bytes.conditioning;
+    let overstated_decoder =
+        measured - facts.conditioning_bytes - facts.transformer_bytes + facts.overlay_bytes;
     let whole_vae = crate::video_admission::anchor_component_bytes(gen_core::MemoryAssetFacts {
-        base_bytes: facts.base_bytes + facts.overlay_bytes,
-        decoder_bytes: facts.decoder_bytes + facts.overlay_bytes,
+        base_bytes: facts.conditioning_bytes + facts.transformer_bytes + overstated_decoder,
+        decoder_bytes: overstated_decoder,
         overlay_bytes: 0,
         ..facts
     });
+    assert!(whole_vae.total() > measured);
     assert!(
         anchor
             .derive_mlx_image_phase_peaks(request, whole_vae)

@@ -69,7 +69,7 @@ it.each([
   ["nvfp4", "NVFP4"],
 ])("uses the %s source even with saved conversion controls", (format, label) => {
   const selectedModel = { sourcePrecision: { format, label } };
-  for (const quantTier of ["q4", "q8", "bf16", "int8-convrot", "nvfp4", "fp8r"]) {
+  for (const quantTier of ["q4", "q8", "bf16", "int8-convrot", "nvfp4", "fp8r", "w4a8"]) {
     const advanced = buildImageJobAdvanced(offState({
       selectedModel, quantTier, tierExplicit: true, showTierPicker: true,
     }));
@@ -115,6 +115,15 @@ describe("buildImageJobAdvanced", () => {
   it("emits flashAttn:false only when flash attention is toggled off", () => {
     expect(buildImageJobAdvanced(offState({ flashAttn: true }))).not.toHaveProperty("flashAttn");
     expect(buildImageJobAdvanced(offState({ flashAttn: false })).flashAttn).toBe(false);
+  });
+
+  it("emits lossyAttention only as an explicit, resolved opt-in (SW-6132)", () => {
+    expect(buildImageJobAdvanced(offState())).not.toHaveProperty("lossyAttention");
+    expect(buildImageJobAdvanced(offState({ lossyAttention: null }))).not.toHaveProperty("lossyAttention");
+    expect(buildImageJobAdvanced(offState({ lossyAttention: { int8: {} } })).lossyAttention).toEqual({ int8: {} });
+    expect(
+      buildImageJobAdvanced(offState({ lossyAttention: { sol: { topkRatio: 0.5 } } })).lossyAttention,
+    ).toEqual({ sol: { topkRatio: 0.5 } });
   });
 
   it("omits sampler/scheduler when default and includes them otherwise", () => {
@@ -342,6 +351,17 @@ describe("buildImageJobAdvanced", () => {
     expect(
       buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "nvfp4" })),
     ).not.toHaveProperty("quantTier");
+  });
+
+  it("emits quantTier (never mlxQuantize or convRot) for the W4A8 tier, picker shown or not (SW-6135)", () => {
+    for (const showTierPicker of [true, false]) {
+      const advanced = buildImageJobAdvanced(offState({ showTierPicker, quantTier: "w4a8" }));
+      expect(advanced.quantTier).toBe("w4a8");
+      // int4 weights: `4` would select the int4-affine q4 tier, so no bit count may ride along.
+      expect(advanced).not.toHaveProperty("mlxQuantize");
+      expect(advanced).not.toHaveProperty("mlxQuantizeExplicit");
+      expect(advanced).not.toHaveProperty("convRot");
+    }
   });
 
   // epic 11037 SC#5: no existing tier's payload changes. A q4/q8/bf16 pick never carries the NVFP4

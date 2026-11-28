@@ -4,6 +4,7 @@ import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../
 import { SourcePrecisionField, TierPickerField } from "../../components/generationStudio.jsx";
 import { GpuSelect } from "../../components/StudioFields.jsx";
 import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx";
+import { LossyAttentionControl } from "../../components/LossyAttentionControl.jsx";
 import { tierLabel } from "../../quantTier.js";
 import { mossAccelerationAvailable, mossAccelerationMode } from "../../mossImage.js";
 import { AspectResolutionPicker } from "./AspectResolutionPicker.jsx";
@@ -59,6 +60,9 @@ export function ImageModelSettings({
   activeBackend,
   flashAttn,
   setFlashAttn,
+  lossyAttention,
+  setLossyAttention,
+  lossyAttentionError,
   promptEnhance,
   enhancePrompt,
   setEnhancePrompt,
@@ -185,6 +189,15 @@ export function ImageModelSettings({
       ) : null}
       {!moss ? (
         <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
+      ) : null}
+      {setLossyAttention ? (
+        <LossyAttentionControl
+          backend={activeBackend}
+          error={lossyAttentionError}
+          model={selectedModel}
+          onChange={setLossyAttention}
+          value={lossyAttention}
+        />
       ) : null}
       {promptEnhance ? (
         <label className="checkline prompt-enhance-toggle">

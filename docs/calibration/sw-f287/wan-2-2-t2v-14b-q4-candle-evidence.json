@@ -1,0 +1,221 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/wan2.2-t2v-a14b-candle",
+        "resolvedRevision": "da1909b66b360e1ea8cdeb3e39e40dca172cfa32",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q4-v1",
+      "capturedAt": "2026-11-28T12:50:44Z",
+      "coTenantCensus": {
+        "admission": "fits",
+        "coTenants": [
+          {
+            "active": false,
+            "mem": "-",
+            "name": "C:\\Users\\Michael\\AppData\\Local\\Programs\\SceneWorks\\sceneworks-api.exe",
+            "pid": 55100,
+            "sm": "-",
+            "type": "C",
+            "usedBytes": 0
+          }
+        ],
+        "freeBytes": 101650006016,
+        "gpu": "0",
+        "observedAt": "2026-11-28T11:40:38.806Z",
+        "requirementBytes": 22130000000,
+        "requirementSource": "manifest candle.vramGbByTier.q4",
+        "reserveBytes": 2147483648,
+        "schemaVersion": 1,
+        "totalBytes": 102641958912,
+        "usedBytes": 522190848,
+        "utilizationPercent": 0
+      },
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:wan-2-2-t2v-a14b",
+        "blockers": [
+          "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12015632384
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 27417116672
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 27383562240
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 27417116672
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 77
+          },
+          {
+            "name": "requestedFrames",
+            "unit": "count",
+            "value": 77
+          },
+          {
+            "name": "renderedFps",
+            "unit": "fps",
+            "value": 16
+          },
+          {
+            "name": "referenceCount",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "wan-2-2-t2v-a14b-candle-q4-1280x720-f77-fps16-seed22736",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "0",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-5d7b09000cf98eca0b0b",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/wan2.2-t2v-a14b-candle@da1909b66b360e1ea8cdeb3e39e40dca172cfa32:q4:f77:1280x720:fps16:seed22736",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-d04fd1607206b22c7a06",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12015632384,
+          "allocatorBytes": 12015632384,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 27383562240,
+          "allocatorBytes": 27383562240,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 27417116672,
+          "allocatorBytes": 27417116672,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 27417116672,
+          "allocatorBytes": 27417116672,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "d93e14682839dc84b957fa29f9794ff9fcdbe48647562eb10b00e3dd68063d5b",
+          "dirty": false,
+          "revision": "292d49ff77bf2d8293e131f61a1e478998bf94b9"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:265903d777590cd25d41098f48dcc9e6b6c4e9257f5f89c14dfab5958b5f1733",
+          "revision": "2050011390f325c9a90f864ea7b0c24b0c2a3532"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "this arm drives the provider's own request scope for one measured render; it runs no warm repeat and injects no calibration fault, so the determinism, cancellation and authorized-error scenarios are unexecuted and this record claims nothing about them. The A14B render is measured with NO adapters at the native multi-step recipe (steps: 40): the Lightning distill the worker attaches DEFAULT-ON is OFF here, so this record does not price the default Lightning composition",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Wan2.2 T2V-A14B dual-expert text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 77,
+          "height": 720,
+          "width": 1280
+        },
+        "mode": "text_to_video",
+        "modelId": "wan_2_2_t2v_14b",
+        "overlay": "none",
+        "provider": "wan2_2_t2v_14b",
+        "tier": "q4"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

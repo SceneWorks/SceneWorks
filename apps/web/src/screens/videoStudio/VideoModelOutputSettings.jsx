@@ -1,6 +1,7 @@
 import { ltx25VideoModelId } from "./videoTierHelpers.js";
 import React from "react";
 import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx";
+import { LossyAttentionControl } from "../../components/LossyAttentionControl.jsx";
 import { GpuSelect } from "../../components/StudioFields.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../components/StudioUpdateNotice.jsx";
 import { SourcePrecisionField, TierPickerField } from "../../components/generationStudio.jsx";
@@ -48,6 +49,9 @@ export function VideoModelOutputSettings({
   activeBackend,
   flashAttn,
   setFlashAttn,
+  lossyAttention,
+  setLossyAttention,
+  lossyAttentionError,
   supportsPromptEnhancement,
   enhancePrompt,
   setEnhancePrompt,
@@ -212,6 +216,15 @@ export function VideoModelOutputSettings({
         </label>
       ) : null}
       <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
+      {setLossyAttention ? (
+        <LossyAttentionControl
+          backend={activeBackend}
+          error={lossyAttentionError}
+          model={selectedModel}
+          onChange={setLossyAttention}
+          value={lossyAttention}
+        />
+      ) : null}
       {supportsPromptEnhancement ? (
         <div className="studio-field span-2 video-checkline-field">
           <label className="checkline">

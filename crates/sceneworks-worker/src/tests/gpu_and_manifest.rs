@@ -76,6 +76,23 @@ fn selected_compute_capability_never_borrows_a_later_gpu_row() {
     assert_eq!(parse_selected_compute_cap("N/A\n"), None);
 }
 
+/// SW-6135: the W4A8 tier floors at compute cap **8.0** (Ampere sm_80, the int8 `mma.sync`
+/// instruction its fused GEMM issues) — lower than INT8-ConvRot's sm_89 and NVFP4's sm_120.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn w4a8_gate_floors_at_ampere_sm_80() {
+    use crate::gpu::{compute_cap_meets_w4a8, W4A8_CAPABILITY};
+
+    assert_eq!(W4A8_CAPABILITY, "w4a8");
+    for eligible in [8.0, 8.6, 8.9, 9.0, 12.0] {
+        assert!(compute_cap_meets_w4a8(Some(eligible)), "{eligible}");
+    }
+    // Turing (7.5) and Volta (7.0) have no int8 m16n8k32 MMA.
+    assert!(!compute_cap_meets_w4a8(Some(7.5)));
+    assert!(!compute_cap_meets_w4a8(Some(7.0)));
+    assert!(!compute_cap_meets_w4a8(None));
+}
+
 /// sc-11042 (epic 11037): the NVFP4 tier's Blackwell gate floors at compute cap **12.0** (consumer
 /// Blackwell sm_120 — the FP4 tensor cores the cuBLASLt NVFP4 GEMM dispatches on).
 ///
@@ -1414,6 +1431,15 @@ fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
     // together (a future pin bump BELOW #67 would re-break it — the runtime would run the 42.9 resident
     // peak while the worker predicts 30.6).
     assert!((predicted_sequential_peak_gb(entry, "int8-convrot").unwrap() - 30.6).abs() < 1e-6);
+    // SW-6135: the W4A8 tier's own measured rows (sm_120, 1024²/8-step): 34.4 GB resident and
+    // 26.6 GB staged, plus the gate's 2 GB headroom. Never the bf16 rows its base surface would alias to.
+    assert!((predicted_peak_gb(entry, "w4a8").unwrap() - 36.4).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(entry, "w4a8").unwrap() - 28.6).abs() < 1e-6);
+    // No pose-control row: control refuses the tier by type rather than pricing it.
+    assert_eq!(
+        crate::krea_control_fit::predicted_control_peak_gb(entry, "w4a8"),
+        None
+    );
 
     // A 27 GB card cannot hold resident q4 but can run staged, so the registry bit selects Offload.
     let card27 = apply_vram_cap(None, Some(27.0));
@@ -3165,6 +3191,49 @@ fn cuda_preflight_runs_on_the_candle_gpu_worker_and_no_other_lane() {
 // ---------------------------------------------------------------------------
 // sc-16260: an unusable GPU must change what the worker CLAIMS, not just what it logs.
 // ---------------------------------------------------------------------------
+
+/// The typed routing matrix and route coverage evaluate Candle cells against
+/// `route_bindings::platform_worker_capabilities("candle")`, so every capability a healthy
+/// sm_120 candle worker advertises (including the compute-cap-gated precision markers such as
+/// `w4a8`) must be listed there, or a served tier reads as served nowhere.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn every_advertised_candle_capability_is_a_declared_platform_capability() {
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = true;
+    settings.gpu_id = "0".to_owned();
+    // The same bare GPU descriptor the runtime descriptor facts dump uses, so only what the
+    // candle lane adds is compared (not the nvidia-smi probe's vendor/placeholder tags).
+    let descriptor = crate::DiscoveredGpu {
+        id: "0".to_owned(),
+        name: "Test GPU".to_owned(),
+        capabilities: vec![sceneworks_core::contracts::WorkerCapability::Gpu],
+        utilization: None,
+    };
+    let healthy = crate::gpu::with_candle_capabilities(
+        descriptor,
+        &settings,
+        Some(12.0),
+        &crate::GpuHealth::Usable,
+    );
+    let declared = sceneworks_core::registry::route_bindings::platform_worker_capabilities("candle");
+    let advertised: Vec<String> = crate::gpu::worker_capabilities_with_utility(&healthy, true)
+        .iter()
+        .map(|capability| capability.as_str().to_owned())
+        .collect();
+    assert!(
+        advertised.iter().any(|value| value == "w4a8"),
+        "an sm_120 candle worker advertises the w4a8 marker: {advertised:?}"
+    );
+    let undeclared: Vec<&String> = advertised
+        .iter()
+        .filter(|value| !declared.contains(&value.as_str()))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "advertised candle capabilities missing from platform_worker_capabilities: {undeclared:?}"
+    );
+}
 
 /// The routing half of the story. sc-16247 shipped the loud startup log; a driver-mismatch host
 /// still registered, still advertised its full candle capability set, and so still claimed and

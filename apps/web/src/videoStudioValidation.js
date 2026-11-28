@@ -43,6 +43,8 @@ export function videoGenerateValidation({
   // here so the visible summary and Generate gate remain one authority.
   executionTierBlockMessage = null,
   vedaBlockMessage = null,
+  // SW-6132: an out-of-range lossy attention setting (Sol-Attn top-k ratio).
+  lossyAttentionBlockMessage = null,
   modelName,
   // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
@@ -91,6 +93,9 @@ export function videoGenerateValidation({
   }
   if (vedaBlockMessage) {
     issues.push(issue.error(null, vedaBlockMessage));
+  }
+  if (lossyAttentionBlockMessage) {
+    issues.push(issue.error(null, lossyAttentionBlockMessage));
   }
   if (executionTierBlockMessage) {
     issues.push(issue.error(null, executionTierBlockMessage));

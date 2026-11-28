@@ -1540,6 +1540,14 @@
         "candleVideoVace": false,
         "candleVideoLora": false
       },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
+      },
       "pag": {
         "numBlocks": 57,
         "blockDomain": "flux_blocks",
@@ -2648,6 +2656,15 @@
         "candleVideoVace": false,
         "candleVideoLora": false
       },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": false,
+          "reason": "attends block-causally: every unmasked call attends a query slice to a longer key prefix (Sq != Sk), and Sol-Attn routes only a token sequence attending to itself"
+        }
+      },
       "pag": {
         "numBlocks": 32,
         "blockDomain": "blocks",
@@ -3015,6 +3032,14 @@
         "candleVideoVace": false,
         "candleVideoLora": false
       },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
+      },
       "pag": {
         "numBlocks": 33,
         "blockDomain": "flux3_blocks",
@@ -3336,6 +3361,14 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": true
+      },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
       }
     },
     "wan_2_2_i2v_14b": {
@@ -3613,6 +3646,14 @@
         "candleVideoI2v": true,
         "candleVideoVace": true,
         "candleVideoLora": true
+      },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
       }
     },
     "kokoro_82m": {
@@ -4190,6 +4231,16 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "lossyAttention": {
+        "int8": {
+          "served": false,
+          "reason": "attends under its block-causal mask on every call, and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+        },
+        "sol": {
+          "served": false,
+          "reason": "attends under its block-causal mask on every call, and neither the INT8 nor the Sol-Attn kernel takes an attention mask"
+        }
       }
     },
     "scail2_14b": {
@@ -4366,6 +4417,14 @@
         "candleVideoI2v": false,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
       }
     },
     "svd": {
@@ -4470,6 +4529,14 @@
         "candleVideoI2v": true,
         "candleVideoVace": false,
         "candleVideoLora": false
+      },
+      "lossyAttention": {
+        "int8": {
+          "served": true
+        },
+        "sol": {
+          "served": true
+        }
       }
     },
     "moss_image_base": {
@@ -6723,6 +6790,14 @@
           "candleVideoI2v": false,
           "candleVideoVace": false,
           "candleVideoLora": false
+        },
+        "lossyAttention": {
+          "int8": {
+            "served": true
+          },
+          "sol": {
+            "served": true
+          }
         },
         "pag": {
           "numBlocks": 57,

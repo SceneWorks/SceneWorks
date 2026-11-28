@@ -832,6 +832,56 @@ pub struct PortableArtifactOptions {
     pub yue2_decoder: Option<String>,
 }
 
+/// A Krea 2 Turbo transformer-only tier (INT8-ConvRot, W4A8) together with the pinned dense
+/// `SceneWorks/krea-2-turbo-mlx` `bf16/` base it loads its tokenizer, text encoder, VAE and config
+/// from, marked as a co-requisite under `component_id`.
+fn krea_tier_with_dense_base(
+    model: &Value,
+    platform: &str,
+    variant: &str,
+    repo: &str,
+    component_id: &str,
+    label: &str,
+) -> Result<Value, String> {
+    let mut available = model.clone();
+    retain_downloads_for_os(&mut available, platform);
+    let base = available
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|row| {
+            row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-mlx")
+                && row.get("variant").and_then(Value::as_str) == Some("bf16")
+                && row.get("revision").and_then(Value::as_str).is_some()
+                && row.get("files").and_then(Value::as_array).is_some()
+        })
+        .ok_or_else(|| format!("{label} has no pinned bf16 base declaration"))?;
+    let mut base = base.clone();
+    let fields = base
+        .as_object_mut()
+        .ok_or_else(|| format!("{label} base declaration is invalid"))?;
+    fields.insert("coRequisite".to_owned(), Value::Bool(true));
+    fields.insert(
+        "componentId".to_owned(),
+        Value::String(component_id.to_owned()),
+    );
+    let mut selected = selected_model_artifact_closure(model, platform, Some(variant));
+    let downloads = selected
+        .get_mut("downloads")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| format!("{label} has no selected downloads"))?;
+    if !downloads.iter().any(|row| {
+        row.get("repo").and_then(Value::as_str) == Some(repo)
+            && row.get("variant").and_then(Value::as_str) == Some(variant)
+            && !is_co_requisite_download(row)
+    }) {
+        return Err(format!("{label} checkpoint is unavailable on this route"));
+    }
+    downloads.push(base);
+    Ok(selected)
+}
+
 pub fn selected_portable_model_artifact_closure_resolved(
     model: &Value,
     backend: &str,
@@ -849,43 +899,34 @@ pub fn selected_portable_model_artifact_closure_resolved(
             options.conv_rot,
         )
     {
-        let mut available = model.clone();
-        retain_downloads_for_os(&mut available, platform);
-        let base = available
-            .get("downloads")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|row| {
-                row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-mlx")
-                    && row.get("variant").and_then(Value::as_str) == Some("bf16")
-                    && row.get("revision").and_then(Value::as_str).is_some()
-                    && row.get("files").and_then(Value::as_array).is_some()
-            })
-            .ok_or("Krea ConvRot has no pinned bf16 base declaration")?;
-        let mut base = base.clone();
-        let fields = base
-            .as_object_mut()
-            .ok_or("Krea ConvRot base declaration is invalid")?;
-        fields.insert("coRequisite".to_owned(), Value::Bool(true));
-        fields.insert(
-            "componentId".to_owned(),
-            Value::String("krea_convrot_base".to_owned()),
+        return krea_tier_with_dense_base(
+            model,
+            platform,
+            crate::portable_sources::KREA_CONVROT_VARIANT,
+            "SceneWorks/krea-2-turbo-int8-convrot",
+            "krea_convrot_base",
+            "Krea ConvRot",
         );
-        let mut selected = selected_model_artifact_closure(model, platform, Some("int8-convrot"));
-        let downloads = selected
-            .get_mut("downloads")
-            .and_then(Value::as_array_mut)
-            .ok_or("Krea ConvRot has no selected downloads")?;
-        if !downloads.iter().any(|row| {
-            row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-int8-convrot")
-                && row.get("variant").and_then(Value::as_str) == Some("int8-convrot")
-                && !is_co_requisite_download(row)
-        }) {
-            return Err("Krea ConvRot checkpoint is unavailable on this route".to_owned());
-        }
-        downloads.push(base);
-        return Ok(selected);
+    }
+    // SW-6135: the W4A8 tier is the same shape as ConvRot — a transformer-only checkpoint whose
+    // tokenizer / Qwen3-VL text encoder / VAE / config come from the pinned dense bf16 base — so it
+    // freezes its checkpoint together with that base as a co-requisite.
+    if model_id == payload.get("model").and_then(Value::as_str)
+        && crate::portable_sources::krea_w4a8_requested_resolved(
+            model_id.unwrap_or_default(),
+            backend,
+            platform,
+            requested_variant,
+        )
+    {
+        return krea_tier_with_dense_base(
+            model,
+            platform,
+            crate::portable_sources::KREA_W4A8_VARIANT,
+            crate::portable_sources::KREA_W4A8_REPO,
+            "krea_w4a8_base",
+            "Krea W4A8",
+        );
     }
     if model.get("id").and_then(Value::as_str) != Some("yue2") {
         return Ok(selected_model_artifact_closure(
@@ -2436,6 +2477,61 @@ mod tests {
             .unwrap()
             .iter()
             .any(|row| row["componentId"] == "krea_convrot_base"));
+    }
+
+    #[test]
+    fn portable_candle_krea_w4a8_freezes_checkpoint_and_dense_base() {
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+        let model = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .unwrap();
+        for request in [
+            json!({"model":"krea_2_turbo","variant":"w4a8"}),
+            json!({"model":"krea_2_turbo","advanced":{"quantTier":" W4A8 "}}),
+        ] {
+            let requested = requested_runtime_variant(request.as_object().unwrap());
+            assert_eq!(requested.as_deref(), Some("w4a8"), "{request}");
+            for platform in ["windows", "linux"] {
+                let selected = selected_portable_model_artifact_closure(
+                    model,
+                    "candle",
+                    platform,
+                    requested.as_deref(),
+                    request.as_object().unwrap(),
+                )
+                .unwrap();
+                let rows = selected["downloads"].as_array().unwrap();
+                assert_eq!(rows.len(), 2, "{request} {platform}");
+                assert_eq!(rows[0]["repo"], "SceneWorks/krea-2-turbo-w4a8");
+                assert_eq!(rows[0]["variant"], "w4a8");
+                // `files: []` downloads the whole published repo (the transformer + its card).
+                assert_eq!(rows[0]["files"], json!([]));
+                assert!(!is_co_requisite_download(&rows[0]));
+                assert_eq!(rows[1]["repo"], "SceneWorks/krea-2-turbo-mlx");
+                assert_eq!(rows[1]["variant"], "bf16");
+                assert_eq!(rows[1]["componentId"], "krea_w4a8_base");
+                assert!(is_co_requisite_download(&rows[1]));
+            }
+        }
+        // macOS / MLX never selects the CUDA-only tier, so it never freezes its base either.
+        let request = json!({"model":"krea_2_turbo","variant":"w4a8"});
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "mlx",
+            "macos",
+            Some("w4a8"),
+            request.as_object().unwrap(),
+        )
+        .unwrap();
+        assert!(!selected["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["componentId"] == "krea_w4a8_base"
+                || row["repo"] == "SceneWorks/krea-2-turbo-w4a8"));
     }
 
     #[test]

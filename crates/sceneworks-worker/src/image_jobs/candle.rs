@@ -9,11 +9,13 @@ use super::artifact_resolution::ensure_boogu_tier_present;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::ensure_ideogram_tier_present;
 #[cfg(not(target_os = "macos"))]
-use super::artifact_resolution::ensure_krea_convrot_base_present;
+use super::artifact_resolution::ensure_krea_dense_base_present;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::is_anima_model;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::model_repo;
+#[cfg(not(target_os = "macos"))]
+use super::artifact_resolution::require_krea_w4a8;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::resolve_candle_flux1_packed_weights_dir;
 #[cfg(not(target_os = "macos"))]
@@ -88,6 +90,8 @@ use super::load_spec::attach_required_components;
 use super::load_spec::candle_certified_load_spec;
 #[cfg(not(target_os = "macos"))]
 use super::load_spec::candle_shared_memory_tier;
+#[cfg(not(target_os = "macos"))]
+use super::load_spec::krea_w4a8_load_spec;
 #[cfg(not(target_os = "macos"))]
 use super::load_spec::load_spec;
 #[cfg(not(target_os = "macos"))]
@@ -645,11 +649,17 @@ async fn generate_candle_registry_stream_using(
     // inputs. `None` = not a ConvRot job (or an artifact still absent) → the normal dense/packed path
     // below. When it resolves, the LoadSpec `weights` becomes the bf16 base DIR and `text_encoder` the
     // ConvRot DiT `File` — the exact shape the candle-gen krea engine's `convrot_selector` expects.
-    ensure_krea_convrot_base_present(api, settings, job, request).await?;
+    ensure_krea_dense_base_present(api, settings, job, request).await?;
     let convrot = resolve_krea_convrot(request, settings);
+    // Krea 2 W4A8 tier (SW-6135): the same transformer-only shape over the same dense bf16 base, but
+    // loaded through the inference native-file route — the W4A8 `.safetensors` is the primary
+    // `weights` FILE and the base rides the `base_snapshot` component (see the spec substitution
+    // below). Unlike ConvRot, a W4A8 pick that cannot resolve is refused, never rendered at another
+    // tier: the tier is a deliberate numeric choice.
+    let w4a8 = require_krea_w4a8(request, settings)?;
     // `mut` for the sc-10733 capability downtier below: a DEFAULT job whose resolved tier won't fit the
     // live VRAM budget is re-pointed at the highest installed tier that does, before the spec is built.
-    let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref() {
+    let mut weights_dir = if let Some((base_dir, _)) = convrot.as_ref().or(w4a8.as_ref()) {
         base_dir.clone()
     } else if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
         resolve_candle_flux1_packed_weights_dir(request, settings)?.ok_or_else(|| {
@@ -689,7 +699,7 @@ async fn generate_candle_registry_stream_using(
     // does not honour it or CFG-off would make it inert. Inert for every model that sends none.
     // Per-generation PiD decode (epic 7840): resolved before `resolve_lane_request_controls_with_pid`
     // so `lowResStart` dimension validation shares the effective PiD activation decision (`SW-7221`).
-    let pid_weights = if convrot.is_some() {
+    let pid_weights = if convrot.is_some() || w4a8.is_some() {
         None
     } else {
         resolve_pid_weights(request, &settings.data_dir, &request.model)?
@@ -954,6 +964,7 @@ async fn generate_candle_registry_stream_using(
     // to be handed to the bits-derived `requested_tier_key`, which aliased it to q8 and under-gated it.
     // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
     // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
+    // SW-6135: a W4A8 request is named by its tier identity too (`gate_tier_key_resolved`).
     let mut tier = candle_resolved_tier_key(request, &weights_dir, convrot.is_some());
     if matches!(engine_id, "sana_1600m" | "sana_sprint_1600m") {
         tier = "bf16";
@@ -980,7 +991,7 @@ async fn generate_candle_registry_stream_using(
     // text-to-image never transfers to them.
     let krea_turbo_ladder = krea_turbo_memory_route(
         engine_id,
-        convrot.is_some(),
+        convrot.is_some() || w4a8.is_some(),
         edit_reference.is_some(),
         img2img_reference.is_some(),
         !edit_refs.is_empty(),
@@ -1143,7 +1154,7 @@ async fn generate_candle_registry_stream_using(
     let explicit_pick = candle_resolved_tier_pick_is_exact(request);
     // FLUX 3's package is request-named and is gated as named: rejected before load if it does
     // not fit, never downtiered to a package the request did not choose.
-    if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {
+    if convrot.is_none() && w4a8.is_none() && !explicit_pick && flux3_plan.is_none() {
         let floor = capability_downtier_floor(krea_turbo_ladder, tier, min_quality_floor(request));
         let candidates: Vec<(&'static str, TierFit)> =
             downtier_candidate_tiers(request, settings, tier, floor)
@@ -1437,7 +1448,7 @@ async fn generate_candle_registry_stream_using(
             tier,
             &weights_dir,
             model.supports_quant(),
-            convrot.is_some() || is_anima_model(&request.model),
+            convrot.is_some() || w4a8.is_some() || is_anima_model(&request.model),
         ),
     };
     let mut raw_settings = mlx_raw_settings_for_bundle(
@@ -1567,6 +1578,9 @@ async fn generate_candle_registry_stream_using(
             gen_core::KREA_CONVROT_DIT_COMPONENT,
             WeightsSource::File(convrot_dit.clone()),
         );
+    }
+    if let Some((base_dir, w4a8_dit)) = w4a8.as_ref() {
+        shared_contract_spec = krea_w4a8_load_spec(shared_contract_spec, base_dir, w4a8_dit);
     }
     // Export the selected encoder receipt only after the entire load shape is complete; this exact
     // prepared spec is reused by the selector and eventual provider/cache load.
@@ -2370,6 +2384,9 @@ async fn generate_candle_registry_stream_using(
     // Reuse the exact selector spec, including Mage's split text-encoder/VAE component paths. Only
     // the post-selection residency policy and optional ConvRot substitution may differ below.
     let mut spec = shared_contract_spec;
+    if w4a8.is_some() {
+        refuse_w4a8_block_streaming(generation_memory.as_ref())?;
+    }
     spec = apply_declared_candle_image_load_shape(
         engine_id,
         Some(tier),
@@ -3072,6 +3089,25 @@ async fn generate_candle_registry_stream_using(
 /// whose verified binding froze a tier. The latter is served in place from the hub snapshot, so a
 /// downtier would load a sibling tier the guard never verified; such a job is gated as bound
 /// (fits, or is refused before load).
+/// A W4A8 transformer loads resident — whole, or in the sequential heavy phase of a staged load.
+/// Its packed projections have no transformer block-streaming form, so a memory selection that
+/// would stream blocks is refused here, typed and before any load, instead of reaching the
+/// loader's own refusal after conditioning has run (SW-6135).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn refuse_w4a8_block_streaming(
+    memory: Option<&gen_core::GenerationMemory>,
+) -> WorkerResult<()> {
+    if memory.is_some_and(|memory| memory.stream_transformer_blocks) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "krea_2_turbo: a W4A8 transformer loads resident (whole or staged); its packed \
+             projections have no transformer block-streaming form \
+             ({} is unsupported for this tier)",
+            sceneworks_core::image_request::BLOCK_STREAMING_RUNG
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_resolved_tier_pick_is_exact(request: &ImageRequest) -> bool {
     (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")

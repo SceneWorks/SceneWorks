@@ -357,7 +357,8 @@ export function catalogAxes(model, backend, poseFamilies, baseProvider) {
     // `tiersFor` falls back to the pseudo-tier `["default"]` when a catalog entry advertises none.
     // Left as-is rather than widened: a model with no advertised tier has no cell at `bf16`/`q4`/`q8`
     // for a declaration to describe, so every engine tier is correctly reported as unreachable.
-    tiers: new Set(advertised.filter((tier) => tier !== "int8-convrot")),
+    // Mirrors generate-memory-matrix.mjs's PREBUILT_DIT_TIERS (INT8-ConvRot, SW-6135's W4A8).
+    tiers: new Set(advertised.filter((tier) => tier !== "int8-convrot" && tier !== "w4a8")),
   };
 }
 

@@ -1420,6 +1420,8 @@ fn portable_owner_module(file: &str) -> bool {
             | "crates/sceneworks-options/src/image_sampling_controls.rs"
             | "crates/sceneworks-options/src/limits.rs"
             | "crates/sceneworks-options/src/low_res_start.rs"
+            // SW-6132: the shared `advanced.lossyAttention` shape/model rule and its routing probe.
+            | "crates/sceneworks-options/src/lossy_attention.rs"
             | "crates/sceneworks-options/src/moss_advanced.rs"
             | "crates/sceneworks-options/src/moss_validation.rs"
             | "crates/sceneworks-options/src/pag.rs"

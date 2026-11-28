@@ -74,6 +74,8 @@ export function useVideoSubmission({
   supportsPromptEnhancement,
   enhancePrompt,
   flashAttn,
+  // SW-6132: the resolved `advanced.lossyAttention` block (null when off / unsupported).
+  lossyAttention,
   supportsTextEncoderSelection,
   selectedTextEncoderModel,
   defaultTextEncoderId,
@@ -235,6 +237,8 @@ export function useVideoSubmission({
         // SW-7276: the worker defaults the shared candle FlashAttention-2 toggle on when absent, so only
         // an explicit opt-out is sent (same shape as the image request).
         ...(flashAttn === false ? { flashAttn: false } : {}),
+        // SW-6132: only an explicit lossy attention opt-in is sent; absent is the exact path.
+        ...(lossyAttention ? { lossyAttention } : {}),
         ...(supportsPromptEnhancement && enhancePrompt
           ? { enhancePrompt: true }
           : {}),

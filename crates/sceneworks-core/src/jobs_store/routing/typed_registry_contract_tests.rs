@@ -351,6 +351,15 @@ fn former_audit_regressions_follow_typed_image_and_video_owners() {
         .find(|row| row["variant"] == "int8-convrot")
         .unwrap();
     assert_eq!(convrot["platforms"], json!(["windows", "linux"]));
+    let w4a8 = krea["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["variant"] == "w4a8")
+        .unwrap();
+    assert_eq!(w4a8["platforms"], json!(["windows", "linux"]));
+    assert_eq!(w4a8["repo"], "SceneWorks/krea-2-turbo-w4a8");
+    assert_eq!(w4a8["files"], json!([]));
     assert!(
         !crate::registry::route_bindings::platform_worker_capabilities("mlx")
             .contains(&"int8_convrot")
@@ -929,6 +938,9 @@ mod residual {
                 Some(json!({ "quantTier": crate::image_request::FP8R_QUANT_TIER }))
             }
             "int8-convrot" => Some(json!({ "convRot": true })),
+            crate::image_request::W4A8_QUANT_TIER => {
+                Some(json!({ "quantTier": crate::image_request::W4A8_QUANT_TIER }))
+            }
             _ => return None,
         })
     }
@@ -1728,6 +1740,14 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
         "models/krea_2_turbo/precisionTier/int8-convrot".into(),
         CANDLE_ONLY,
     );
+    // SW-6135: the prebuilt W4A8 transformer is a CUDA format with no MLX form, and a job on it
+    // requires the `w4a8` device marker (sm_80+), which the shipping Candle worker advertises on
+    // an eligible GPU (`route_bindings::platform_worker_capabilities`). The MLX answer is false.
+    assert!(
+        crate::registry::route_bindings::platform_worker_capabilities("candle")
+            .contains(&crate::image_request::W4A8_QUANT_TIER)
+    );
+    add("models/krea_2_turbo/precisionTier/w4a8".into(), CANDLE_ONLY);
     for tier in ["q4", "q8"] {
         add(format!("models/mage_flow_edit/precisionTier/{tier}"), BOTH);
     }

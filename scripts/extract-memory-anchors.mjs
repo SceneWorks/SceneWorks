@@ -116,11 +116,30 @@ export const PACKAGED_SOURCES_PATH =
   "crates/sceneworks-core/src/memory_anchor.rs";
 
 /**
- * The per-model loader closures (sc-22511). Not read by this generator — an anchor's currency key
- * is carried forward from the store's own previous content (see `loaderClosureDigestFor`) — but
- * named here because it is the other half of the pair and the file the key is compared against.
+ * The per-model loader closures (sc-22511). An anchor's currency KEY is still carried forward from
+ * the store's own previous content (see `loaderClosureDigestFor`), never derived here. SW-6138:
+ * the declaration is read for one decision only, which retained render REPRESENTS a cell
+ * (`selectRepresentative`): a render measured under the loader the pin actually ships outranks one
+ * measured under a loader that has since moved.
  */
 export const ANCHOR_LOADER_CLOSURES_PATH = "config/anchor-loader-closures.json";
+
+/**
+ * SW-6138: whether a candidate render was measured under the loader closure the pin ships. True
+ * when it was captured AT the declaration's own inference revision (its key is the declaration's
+ * digest by construction; a freshly ingested record has no stamped key yet), or when the key the
+ * store already carries for its anchor id equals the declared digest for its (model, backend) lane
+ * (stamped current, including by a reviewed attestation). Host-independent: no clone is read.
+ */
+export function isCurrentAtPin(candidate, { closures, previousStore }) {
+  const declared = closures?.models?.[`${candidate.modelId}:${candidate.backend}`]?.digest;
+  if (typeof declared !== "string") return false;
+  if (candidate.inferenceRevision && candidate.inferenceRevision === closures.inferenceRevision) return true;
+  const id = anchorId(candidate);
+  const carried = [...(previousStore?.anchors ?? []), ...(previousStore?.regimeAnchors ?? [])]
+    .find((entry) => entry.id === id)?.source?.loaderClosureDigest;
+  return carried === declared;
+}
 
 /**
  * The three phase peaks an anchor is made of, keyed by BACKEND LANE. Absent any one of them, the
@@ -394,6 +413,11 @@ export function anchorCandidate(record, corpus) {
     // the same cell. `null` where the record states none; a record with no timestamp supersedes
     // nothing.
     capturedAt: typeof record.capturedAt === "string" ? record.capturedAt : null,
+    // SW-6138: the inference revision the render ran at, for `isCurrentAtPin`.
+    inferenceRevision:
+      typeof record.repositories?.inference?.revision === "string"
+        ? record.repositories.inference.revision
+        : null,
     hostMemoryBytes: Number.isInteger(record.hardware?.memoryBytes)
       ? record.hardware.memoryBytes
       : null,
@@ -524,9 +548,18 @@ export function stagedResidencyExemptLanes(manifest) {
  * record whose composition the lane's law can actually price outranks one it cannot, however much
  * larger the latter's envelope is — see [`isDerivable`]), then an MLX window opened above its
  * materialized resident set over one opened on a cold first request (`residentSetSeen`, sc-22667
- * D3), then the LARGEST measured allocator envelope, tie-broken by (source path, record id). The largest envelope is the most binding
- * retained observation of that cell, and every tie-break term is a stable string, so the choice
- * cannot move with corpus iteration order.
+ * D3), then a render measured under the loader the pin SHIPS over one measured under a loader that
+ * has since moved (`current`, SW-6138), then the LARGEST measured allocator envelope, tie-broken by
+ * (source path, record id). The largest envelope is the most binding retained observation of that
+ * cell, and every tie-break term is a stable string, so the choice cannot move with corpus
+ * iteration order.
+ *
+ * SW-6138: CURRENCY BEFORE SIZE. A re-capture at the pin measures the code that ships; an older,
+ * larger render measured code that no longer does. Ranking size first meant a fresh capture that
+ * came out LOWER (the fused kernels lowered krea, z_image and flux2_klein) could never replace the
+ * stale anchor, so the cell kept pricing the superseded loader. With no current render the rule is
+ * unchanged — the largest stale one still represents the cell, and staleness alone still changes
+ * nothing at runtime (sc-22738): only a re-measurement at the pin retires an older anchor.
  *
  * Ordering the two terms the other way would let a cell be anchored by a render the law rejects,
  * which reads as coverage and admits nothing: krea's resident-only capture is the largest envelope
@@ -547,6 +580,9 @@ export function selectRepresentative(
     const candidateSeen = candidate.residentSetSeen === true;
     if (candidateSeen !== (best.residentSetSeen === true))
       return candidateSeen ? candidate : best;
+    const candidateCurrent = candidate.current === true;
+    if (candidateCurrent !== (best.current === true))
+      return candidateCurrent ? candidate : best;
     if (
       candidate.overallAllocatorEnvelopeBytes !==
       best.overallAllocatorEnvelopeBytes
@@ -1843,6 +1879,8 @@ export async function buildAnchorStore({
   // The store's own previous content supplies frozen provenance only. See
   // `loaderClosureDigestFor` and `carryManifestTierEvidence` for the two narrow carry-forward rules.
   const previousStore = JSON.parse(await readFile(path.join(root, STORE_PATH), "utf8"));
+  // SW-6138: the declared loader closures, read only to rank a current render over a stale one.
+  const closures = JSON.parse(await readFile(path.join(root, ANCHOR_LOADER_CLOSURES_PATH), "utf8"));
 
   // The fitted video curves name the corpora the video lane's identities were measured from. They
   // are not a separate reader: the assertion is that corpus discovery already reached them, so a
@@ -1920,6 +1958,7 @@ export async function buildAnchorStore({
     for (const record of corpus.records) {
       const candidate = anchorCandidate(record, corpus);
       if (candidate === null) continue;
+      candidate.current = isCurrentAtPin(candidate, { closures, previousStore });
       completedRenders.push(candidate);
       // SW-F363: a REGIME render is filed under its own identity, never under the cell's
       // derivation anchor — it is a deliberately different composition (or overlay) of the cell.

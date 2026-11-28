@@ -350,6 +350,7 @@ pub use effective_values::{legacy_image_flag, legacy_integer, legacy_number};
 
 pub mod supra2;
 
+pub mod lossy_attention;
 pub mod low_res_start;
 pub mod moss_advanced;
 pub mod moss_validation;

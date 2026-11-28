@@ -629,6 +629,9 @@ pub(crate) async fn run_image_upscale_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // SW-6132: the job's lossy attention opt-in (SeedVR2 / Iris), refused by name for an engine
+    // without candle attention, before either engine path loads.
+    crate::inference_runtime::apply_standalone_lossy_attention(job)?;
     // Iris restoration (sc-25683) is its own sized-by-scale engine with its own job body; every
     // other engine keeps the path below unchanged.
     let requested_engine = job
@@ -932,7 +935,9 @@ pub(crate) async fn run_image_upscale_job(
                 "stylePreset": "",
                 "sourceAssetId": source_asset_id,
                 "workerExecutionReport": execution_report,
-                "rawAdapterSettings": { "upscale": upscale_settings },
+                "rawAdapterSettings": crate::inference_runtime::with_attention_execution(
+                    json!({ "upscale": upscale_settings }),
+                ),
                 "parents": [source_asset_id],
                 "extra": {
                     "isUpscaled": true,
@@ -1292,7 +1297,9 @@ pub(crate) async fn run_iris_restore_job_using(
                 "stylePreset": "",
                 "sourceAssetId": source_asset_id,
                 "workerExecutionReport": execution_report,
-                "rawAdapterSettings": { "upscale": record },
+                "rawAdapterSettings": crate::inference_runtime::with_attention_execution(
+                    json!({ "upscale": record }),
+                ),
                 "parents": [source_asset_id],
                 "extra": {
                     "isUpscaled": true,
@@ -1379,6 +1386,8 @@ pub(crate) async fn run_dataset_upscale_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // SW-6132: dataset upscaling is Real-ESRGAN (no candle attention): an opt-in is refused.
+    crate::inference_runtime::apply_standalone_lossy_attention(job)?;
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     let payload = &job.payload;
     // Reject an unsupported factor early rather than silently coercing it to 2x (F-118 / sc-8920,

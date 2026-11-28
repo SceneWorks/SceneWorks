@@ -109,6 +109,14 @@ pub(crate) const NVFP4_TIER: &str = "nvfp4";
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) const INT8_CONVROT_TIER: &str = "int8-convrot";
 
+/// The `candle.vramGbByTier` key and tier IDENTITY of the Krea 2 Turbo W4A8 tier (SW-6135): a
+/// prebuilt int4-weight / int8-activation transformer the worker loads over the dense bf16 base
+/// surface. Like [`INT8_CONVROT_TIER`] it has no honest `mlxQuantize` integer (`4` names the
+/// int4-affine q4 tier), so the request names it by `advanced.quantTier` and the VRAM gate sizes
+/// it by this identity, never by a bits-derived key. Candle-lane only.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const W4A8_TIER: &str = sceneworks_core::image_request::W4A8_QUANT_TIER;
+
 /// Whether the request EXPLICITLY asked for the NVFP4 tier, via the `advanced.quantTier: "nvfp4"`
 /// label (sc-12006 established the label as asset telemetry; sc-11042 makes it a selection input).
 ///

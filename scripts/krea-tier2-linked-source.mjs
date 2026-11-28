@@ -76,6 +76,15 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
   ]],
+  // SW-6135: artifact selection gains the Krea W4A8 tier's checkpoint + dense-base co-requisite
+  // branch (the ConvRot branch moved, unchanged, into a shared helper). No existing tier selects
+  // differently, so this records source review, not a new physical proof.
+  ["7ce2d2864b4b3c03a3d7a55da9166f1f6b41b424", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    REPAIR_SHA256[1],
+    "5473ca1414e2e886c562fff6e9085853d3d52ac50c52c8c2e8a42750d4656d6b",
+    "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
+  ]],
   // The runtime guard serves verified local sources (imported checkpoints, trained adapters,
   // claimed components, plan layers) from their originals instead of a per-route copy, keys any
   // remaining bundle by its copy layout, and binds saved quantizations to the admitted local
@@ -84,6 +93,16 @@ const REVIEWED_CANDIDATES = [
   ["6ffb4ef8404571ca511f4d8681c239aa56a3456e", [
     "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
     REPAIR_SHA256[1], REPAIR_SHA256[2],
+    "a5ce0fc14c82e819d6f7394e7567b2f764e835854cbc9e7af69c1835af7df047",
+  ]],
+  // SW-6138 feature/main integration: the SW-6135 W4A8 artifact-selection bytes (7ce2d2864) beside
+  // main's in-place local-source guard (6ffb4ef84). Each file is exactly one reviewed side; the W4A8
+  // tier selects the same checkpoint + co-requisite dense-base row shape as ConvRot, which the
+  // in-place guard already verifies and serves from the original. Source review, not a new proof.
+  ["350c6f884601407c000a07188a9443b27f8dad11", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    REPAIR_SHA256[1],
+    "5473ca1414e2e886c562fff6e9085853d3d52ac50c52c8c2e8a42750d4656d6b",
     "a5ce0fc14c82e819d6f7394e7567b2f764e835854cbc9e7af69c1835af7df047",
   ]],
 ];

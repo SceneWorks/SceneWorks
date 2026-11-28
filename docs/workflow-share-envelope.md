@@ -470,6 +470,7 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 | `mossOrdinarySettings` | Inactive ordinary studio choices retained locally for switching acceleration OFF; these did not generate the accelerated image. |
 | `keypointCollectionId` | A local Key Point Library collection id. Resolves to nothing on another install. |
 | `flashAttn` | A backend kernel toggle — what this install's attention path can do. |
+| `lossyAttention` | The lossy CUDA attention opt-in (INT8 QK / Sol-Attn, SW-6132) — a kernel choice for this install's GPU; a non-CUDA install refuses it. |
 | `mlxQuantize` | Quant tier: a memory accommodation for this machine. |
 | `mlxQuantizeExplicit` | Marks a deliberate tier pick on this install. |
 | `convRot` | The INT8-ConvRot tier selector. |

@@ -943,6 +943,12 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
          not what to make.",
     ),
     deny(
+        "lossyAttention",
+        "The lossy CUDA attention opt-in (SW-6132, INT8 QK / Sol-Attn): a backend kernel choice \
+         for THIS install's GPU, the same class as `flashAttn`. A receiving install without CUDA \
+         would refuse the shared recipe outright.",
+    ),
+    deny(
         "mlxQuantize",
         "Quant tier: a memory accommodation for THIS machine. The receiving install picks \
          its own.",

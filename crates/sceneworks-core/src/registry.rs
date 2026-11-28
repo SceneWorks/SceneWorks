@@ -49,6 +49,23 @@ static LEGACY_PREVIEW: LazyLock<BTreeMap<String, BTreeMap<String, bool>>> = Lazy
     .expect("validated legacy preview feature export")
 });
 
+/// The checked-in projection of inference's `SHARED_ATTENTION_ROUTING` (SW-6132): which lossy
+/// attention kernels each candle provider's attention can take. Serialized from the linked table by
+/// the candle worker, whose test fails on drift, so this is the same facts rather than a copy.
+static SHARED_ATTENTION: LazyLock<sceneworks_options::lossy_attention::SharedAttentionFacts> =
+    LazyLock::new(|| {
+        serde_json::from_str(include_str!(
+            "../../../config/engine-capabilities/attention/shared-attention-routing.candle.json"
+        ))
+        .expect("checked-in shared attention routing facts")
+    });
+
+/// Every candle provider's shared-attention routing (see [`SHARED_ATTENTION`]).
+pub fn shared_attention_facts() -> &'static sceneworks_options::lossy_attention::SharedAttentionFacts
+{
+    &SHARED_ATTENTION
+}
+
 pub fn builtin_model_spec(id: &str) -> Option<&'static ModelSpec> {
     BUILTINS.get(id)
 }
@@ -106,6 +123,59 @@ impl ModelSpec {
             .as_ref()
             .map(|pag| serde_json::to_value(pag).expect("serializable PAG spec"))
     }
+    /// The candle engines a request for this model can select: the image route's generator, the
+    /// direct-dispatch identity engine a bespoke image product loads (`pulid_flux_dev` ->
+    /// `pulid_flux`, `instantid_realvisxl` -> `instantid`, when the candle export registers it), or
+    /// every video mode's engines (which lane serves them, generic or bespoke, is routing's
+    /// concern). Empty when the model has no candle engine.
+    pub fn candle_attention_provider_ids(&self) -> Vec<&str> {
+        let bespoke = (self.product.model_type == "image")
+            .then(|| route_bindings::bespoke_image_route_id(&self.product.id))
+            .flatten()
+            .filter(|id| {
+                crate::sga_capabilities::for_backend("candle")
+                    .is_some_and(|export| export.routes.contains_key(*id))
+            });
+        let mut ids: Vec<&str> = self
+            .routes
+            .get("candle")
+            .map(|route| route.id.as_str())
+            .into_iter()
+            .chain(bespoke)
+            .chain(
+                self.video_routes
+                    .get("candle")
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|route| &route.engines)
+                    .map(|engine| engine.id.as_str()),
+            )
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Which lossy attention kernels (`advanced.lossyAttention`, SW-6132) this model's candle
+    /// attention can take, from [`shared_attention_facts`]. `None` for a model with no candle
+    /// route or with an engine whose attention is bespoke: the option is refused there.
+    pub fn lossy_attention_capability(
+        &self,
+    ) -> Option<sceneworks_options::lossy_attention::LossyAttentionCapability> {
+        let ids = self.candle_attention_provider_ids();
+        if ids.is_empty() {
+            return None;
+        }
+        shared_attention_facts().capability_for(ids)
+    }
+
+    /// [`Self::lossy_attention_capability`] as the catalog's `lossyAttention` JSON.
+    pub fn lossy_attention_value(&self) -> Option<Value> {
+        self.lossy_attention_capability().map(|capability| {
+            serde_json::to_value(capability).expect("serializable lossy attention capability")
+        })
+    }
+
     /// Computed Feature availability flags (`features.low_res_start`), when the native route supports them.
     pub fn features_value(&self) -> Option<Value> {
         (!self.features.is_empty())
@@ -157,6 +227,12 @@ impl ModelSpec {
             model["pag"] = pag;
         } else if let Some(object) = model.as_object_mut() {
             object.remove("pag");
+        }
+        let lossy_key = sceneworks_options::lossy_attention::CAPABILITY_KEY;
+        if let Some(capability) = self.lossy_attention_value() {
+            model[lossy_key] = capability;
+        } else if let Some(object) = model.as_object_mut() {
+            object.remove(lossy_key);
         }
         if let Some(features) = self.features_value() {
             model["features"] = features;

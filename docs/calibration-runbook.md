@@ -1906,9 +1906,32 @@ reaps a step's direct children.
 2. terminates anything matching `*memory-candle-adapter*` / `*memory-mlx-adapter*` — **ours, by
    name**. Never an arbitrary pid: this box also serves `windows-candle.yml` and
    `desktop-windows.yml`;
-3. censuses again, and **fails the job** with `::error title=Profiled GPU is not idle` naming the
-   pid, the process and its memory if a **pure-compute (`C`)** row is left. Find out whose it is
-   before killing it.
+3. censuses again and **reports** every pure-compute (`C`) co-tenant left: an idle one (pmon
+   sm/mem `-` or 0, such as the open desktop app) as `::notice title=Idle GPU co-tenant`, an active
+   one as `::warning title=Active GPU co-tenant`. It fails the job only when one of OUR adapters
+   survived the reap. It never kills a co-tenant.
+
+**Admission is by FIT, per anchor (SW-6138).** Owner rule (2026-11-28): *"You don't need a
+completely pristine GPU, you just need it to fit."* Before each Candle capture the walker
+(`scripts/measure-memory-catalog.mjs` `admitCard`) censuses the card (`cardCensus`: memory
+total/used/free, utilization, every `C` co-tenant's pid, full name, memory and pmon activity) and
+admits the cell when:
+
+- the card's **free** memory covers the cell's requirement plus the Candle lane's dedicated-VRAM
+  reserve (`CO_TENANT_RESERVE_MIB`, bound to `DEDICATED_VRAM_ALLOCATOR_SLACK_GB`). The requirement
+  is the largest packaged anchor envelope for that exact cell, else the manifest's
+  `vramGbByTier`, else its `minMemoryGb` (`captureRequirement`). A cell with none of these is
+  admitted only on a near-empty card;
+- no co-tenant is computing (pmon sm/mem above zero) and the card is below the CI lease's busy
+  ceiling (30 % utilization).
+
+An idle co-tenant never blocks. A busy or non-fitting card is waited on for up to 15 minutes and
+then the cell ends `capture_failed`, with the reason and its arithmetic. Every committed record
+carries the admission census as `coTenantCensus`, so a peak measured beside an idle app is
+auditable from the evidence alone. The during-capture bracket is unchanged in purpose. It
+discards and retries an attempt in which a co-tenant computed, appeared, moved its own memory
+(pmon `fb`), or moved the card baseline (`coTenantShift`). This is the same rule the CI lease applies
+(`scripts/ci/windows_cuda_execution.py` `shared_decision`).
 
 **Type, not presence (the run-34297841666 false positive).** The first spelling of this step
 censused with `--query-compute-apps` alone, which on Windows WDDM returns every process holding a
@@ -1948,6 +1971,16 @@ gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
   -f download_missing=true
 ```
 
+- **A zero exit is not a landed fetch, and a rate limit is retried (SW-6138).** For a commit-hash
+  revision, huggingface_hub's `snapshot_download` answers a failed Hub API call (a 429 rate
+  limit, a 5xx, a dropped connection) by returning the existing local snapshot folder unchanged
+  and exiting 0. Run 46124090866 landed only `q4/transformer/*` of krea_2_turbo's six globs, and
+  nothing of z_image_turbo's `q4/*`, while the host was uploading models. Every glob is therefore
+  checked for a landed file right after its invocation. A silent no-op, or a non-zero exit whose
+  output names a 429/5xx/connection fault (`HF_TRANSIENT_PATTERN`), is retried with bounded
+  exponential backoff (`HF_FETCH_BACKOFF_MS`: 30 s doubling to 8 min, six attempts, about
+  15.5 min). Any other refusal (401, 404) fails at once. The fetch child alone runs with
+  `HF_DEBUG=1`, and the anchor's `download failed:` reason quotes the hub's last lines.
 - **Only `weights_missing` anchors.** A `runnable` cell is never re-fetched, and a cell refused for
   any other reason (`no_adapter_arm`, `lane_undeclared`, `exceeded_current`, `harness_unsupported`)
   is not a weights problem and gets no download. After the fetch the cell is classified **again**,

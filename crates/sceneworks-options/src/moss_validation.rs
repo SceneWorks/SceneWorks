@@ -270,6 +270,14 @@ pub fn native_request(
     if advanced.contains_key("flashAttn") {
         return Err("MOSS-Image does not support advanced.flashAttn".into());
     }
+    // SW-6132: MOSS-Image's DiT attention is its own explicit-f32 path (bespoke), so the lossy
+    // CUDA attention kernels can never reach it.
+    if advanced
+        .get(crate::lossy_attention::LOSSY_ATTENTION_KEY)
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("MOSS-Image does not support advanced.lossyAttention".into());
+    }
     for key in [
         "poses",
         "controlImage",

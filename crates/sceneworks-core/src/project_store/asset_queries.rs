@@ -149,11 +149,17 @@ pub const ASSET_LIST_VIEW_SUMMARY: &str = "summary";
 
 /// `recipe.rawAdapterSettings` keys a summary keeps because catalog surfaces
 /// render them on every card (face-likeness badge, VEDA attention outcome,
-/// depth-map details). Each is a small object; the rest of the block (prompt
-/// batches, MOSS execution reports, structured-caption trees, ...) is replay
-/// data and is only on the full envelope.
-const SUMMARY_RAW_ADAPTER_SETTINGS_KEYS: [&str; 4] =
-    ["faceLikeness", "veda", "vedaExecution", "depth"];
+/// depth-map details, the lossy attention receipt). Each is a small object; the
+/// rest of the block (prompt batches, MOSS execution reports, structured-caption
+/// trees, ...) is replay data and is only on the full envelope.
+const SUMMARY_RAW_ADAPTER_SETTINGS_KEYS: [&str; 5] = [
+    "faceLikeness",
+    "veda",
+    "vedaExecution",
+    "depth",
+    // SW-6132: whether a lossy attention opt-in actually ran (INT8 / Sol-Attn call counts).
+    sceneworks_options::lossy_attention::ATTENTION_EXECUTION_KEY,
+];
 
 /// Drop the replay-only bulk from a listed envelope, in place.
 ///

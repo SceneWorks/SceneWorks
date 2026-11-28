@@ -19,6 +19,7 @@ import {
   PACKAGED_SOURCES_PATH,
   STORE_PATH,
   anchorCandidate,
+  isCurrentAtPin,
   observedOperatingEnvelope,
   assertEveryDerivableCorpusIsPackaged,
   assertPackagedSources,
@@ -720,6 +721,50 @@ test("the representative is the largest envelope, tie-broken by path then record
     selectRepresentative([...candidates].reverse()).recordId,
     selectRepresentative(candidates).recordId,
   );
+});
+
+// SW-6138: a render measured under the loader the pin ships outranks a larger one measured under a
+// loader that has since moved. The fused kernels LOWERED krea_2_turbo, z_image_turbo and
+// flux2_klein_9b, and envelope-first kept the stale, larger record forever.
+test("a LOWER render current at the pin outranks a HIGHER stale one; with none current, size decides as before", () => {
+  const make = (id, envelope, current) => ({
+    overallAllocatorEnvelopeBytes: envelope,
+    recordId: id,
+    sourcePath: `${id}.json`,
+    current,
+  });
+  const stale = make("stale", 53_280_000_000, false);
+  const fresh = make("fresh", 48_070_000_000, true);
+  assert.equal(selectRepresentative([stale, fresh]).recordId, "fresh");
+  assert.equal(selectRepresentative([fresh, stale]).recordId, "fresh");
+  // Among current renders the largest still wins.
+  assert.equal(selectRepresentative([fresh, make("fresh-big", 49e9, true)]).recordId, "fresh-big");
+  // No current render: the unchanged rule, the largest stale one represents the cell.
+  assert.equal(selectRepresentative([stale, make("older", 40e9, false)]).recordId, "stale");
+  assert.equal(selectRepresentative([make("legacy", 60e9, undefined), make("older", 40e9, false)]).recordId, "legacy");
+  // Derivability still comes first: a current render the law cannot price never wins.
+  const still = (staged) => ({ backend: "candle", modelId: "krea_2_turbo", transformerVariant: null, decoder: null, geometry: { frames: 1 },
+    measuredRegime: { staged, decodeTiled: false, attentionChunked: false, transformerWindowed: false } });
+  const underivable = { ...make("fresh-raw", 30e9, true), ...still(false) };
+  const derivable = { ...make("stale-staged", 50e9, false), ...still(true) };
+  assert.equal(selectRepresentative([underivable, derivable]).recordId, "stale-staged");
+});
+
+test("currency at the pin: captured AT the declared revision, or carrying the declared digest", () => {
+  const closures = { inferenceRevision: "a".repeat(40), models: { "krea_2_turbo:candle": { digest: "d".repeat(64) } } };
+  const candidate = (overrides) => ({
+    modelId: "krea_2_turbo", backend: "candle", tier: "bf16", transformerVariant: null, decoder: null,
+    regime: null, calibrationFingerprint: "fp", recordId: "imc-1", inferenceRevision: "b".repeat(40), ...overrides,
+  });
+  const store = (digest) => ({ anchors: [{ id: "krea_2_turbo:candle:bf16:base:base:fp:imc-1", source: { loaderClosureDigest: digest } }] });
+  // A freshly ingested record at the pin has no stamped key yet and is current by construction.
+  assert.equal(isCurrentAtPin(candidate({ inferenceRevision: "a".repeat(40) }), { closures, previousStore: { anchors: [] } }), true);
+  // An older record is current exactly when its carried key equals the declaration.
+  assert.equal(isCurrentAtPin(candidate({}), { closures, previousStore: store("d".repeat(64)) }), true);
+  assert.equal(isCurrentAtPin(candidate({}), { closures, previousStore: store("e".repeat(64)) }), false);
+  assert.equal(isCurrentAtPin(candidate({}), { closures, previousStore: { anchors: [] } }), false);
+  // A lane with no declaration is never current.
+  assert.equal(isCurrentAtPin(candidate({ modelId: "unknown", inferenceRevision: "a".repeat(40) }), { closures, previousStore: null }), false);
 });
 
 test("an MLX window opened above its resident set outranks a cold-request render of the same cell", () => {

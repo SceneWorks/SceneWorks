@@ -51,6 +51,7 @@ pub mod image_decode;
 pub mod image_limits;
 pub mod image_request;
 pub mod image_restoration;
+// SW-6132: `advanced.lossyAttention` on the standalone (engine-named) job types.
 pub mod image_sampling_controls;
 pub mod inference_provenance;
 pub mod jobs_store;
@@ -61,6 +62,7 @@ pub mod log_rotation;
 pub mod loop_utility;
 pub mod lora_family;
 pub mod lora_url;
+pub mod lossy_attention;
 pub mod managed_checkpoint_variants;
 pub mod managed_file;
 pub mod media_convert;

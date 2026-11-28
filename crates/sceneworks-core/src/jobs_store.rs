@@ -118,10 +118,11 @@ pub use routing::catalog::{
     imported_entry_honors_legacy_quant, imported_entry_installed_path,
     imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
-    imported_pose_control_mode_is_supported_resolved, imported_provider_routes,
-    imported_video_adapter_surface_claimable, imported_video_lane_claims_with_lora,
-    imported_video_model_candle_support, imported_video_model_mac_support, is_builtin_image_model,
-    mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
+    imported_lossy_attention_capability, imported_pose_control_mode_is_supported_resolved,
+    imported_provider_routes, imported_video_adapter_surface_claimable,
+    imported_video_lane_claims_with_lora, imported_video_model_candle_support,
+    imported_video_model_mac_support, is_builtin_image_model, mac_capabilities,
+    model_candle_support, model_mac_support, training_kernel_is_candle_routed,
     video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
@@ -1206,6 +1207,13 @@ impl JobsStore {
             "veda_execution_json",
             "text",
         )?;
+        // SW-6132: the candle worker's per-job attention path receipt (`attentionExecution`).
+        ensure_column(
+            &transaction,
+            "generation_metrics",
+            "attention_execution_json",
+            "text",
+        )?;
         // Retention may remove the owning queue row, but Generation Stats is
         // historical product data rather than queue history. Materialize the
         // joined row before purging so aggregate charts remain complete.
@@ -1263,6 +1271,12 @@ impl JobsStore {
             &transaction,
             "generation_metrics_history",
             "veda_execution_json",
+            "text",
+        )?;
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "attention_execution_json",
             "text",
         )?;
         // Per-item job results (SW-7082), kept out of the replaced-per-POST `result_json`.
@@ -1332,14 +1346,14 @@ impl JobsStore {
                 // the columns makes the mapping independent of physical order in both tables.
                 "insert or replace into generation_metrics_history (
                      job_id, model, quant_label, quant_bits, source_codec,
-                     execution_representation, veda_execution_json, sampler, scheduler, scheduler_shift, steps,
+                     execution_representation, veda_execution_json, attention_execution_json, sampler, scheduler, scheduler_shift, steps,
                      image_count, guidance_scale, true_cfg_scale, guidance_method, use_pid,
                      pid_target, width, height, seed, loras_json, load_ms, sample_ms, decode_ms,
                      total_ms, peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
                      updated_at, j_type, j_status, j_project_id, j_created_at
                  )
                  select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
-                        m.execution_representation, m.veda_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
+                        m.execution_representation, m.veda_execution_json, m.attention_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
                         m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
                         m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
                         m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
@@ -2377,11 +2391,12 @@ impl JobsStore {
                 guidance_method, use_pid, pid_target, width, height, seed,
                 loras_json, load_ms, sample_ms, decode_ms, total_ms,
                 peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
-                image_count, source_codec, execution_representation, updated_at, veda_execution_json
+                image_count, source_codec, execution_representation, updated_at, veda_execution_json,
+                attention_execution_json
             ) values (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                ?28, ?29, ?30
+                ?28, ?29, ?30, ?31
             )
             on conflict(job_id) do update set
                 model = coalesce(excluded.model, generation_metrics.model),
@@ -2415,6 +2430,10 @@ impl JobsStore {
                     generation_metrics.execution_representation
                 ),
                 veda_execution_json = coalesce(excluded.veda_execution_json, generation_metrics.veda_execution_json),
+                attention_execution_json = coalesce(
+                    excluded.attention_execution_json,
+                    generation_metrics.attention_execution_json
+                ),
                 updated_at = excluded.updated_at
             ",
             params![
@@ -2448,6 +2467,7 @@ impl JobsStore {
                 metrics.execution_representation,
                 now,
                 optional_dumps(metrics.veda_execution.as_ref())?,
+                optional_dumps(metrics.attention_execution.as_ref())?,
             ],
         )?;
         Ok(())
@@ -2510,7 +2530,7 @@ impl JobsStore {
             // value shifted, breaking Generation Stats on every existing install.
             "select stats.* from (
                select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
-                      m.execution_representation, m.veda_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
+                      m.execution_representation, m.veda_execution_json, m.attention_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
                       m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
                       m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
                       m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
@@ -2520,7 +2540,7 @@ impl JobsStore {
                  from generation_metrics m join jobs j on j.id = m.job_id
                union all
                select job_id, model, quant_label, quant_bits, source_codec,
-                      execution_representation, veda_execution_json, sampler, scheduler, scheduler_shift,
+                      execution_representation, veda_execution_json, attention_execution_json, sampler, scheduler, scheduler_shift,
                       steps, image_count, guidance_scale, true_cfg_scale,
                       guidance_method, use_pid, pid_target, width, height, seed,
                       loras_json, load_ms, sample_ms, decode_ms, total_ms,
@@ -5872,6 +5892,18 @@ fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetric
                 })
             })
             .transpose()?,
+        attention_execution: row
+            .get::<_, Option<String>>("attention_execution_json")?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
         sampler: row.get("sampler")?,
         scheduler: row.get("scheduler")?,
         scheduler_shift: scheduler_shift.map(number_from_f64),
@@ -7338,11 +7370,12 @@ fn required_capability(job: &JobSnapshot) -> &str {
         JobType::ModelDownload if job.payload.contains_key("localDerivation") => {
             WorkerCapability::AudioGenerate.as_str()
         }
-        // sc-26241: a FLUX 3 publisher package (FP8R, NVFP4) runs only past its CUDA device floor.
-        // The worker advertises the floor's marker exactly when its GPU clears it, so the job
-        // stays queued for a capable worker instead of being claimed and refused at load.
+        // A tier with a CUDA device floor (sc-26241: the FLUX 3 FP8R / NVFP4 publisher packages;
+        // SW-6135: Krea 2 Turbo W4A8) runs only past it. The worker advertises the floor's marker
+        // exactly when its GPU clears it, so the job stays queued for a capable worker instead of
+        // being claimed and refused at load.
         JobType::ImageGenerate | JobType::ImageEdit => {
-            flux3_required_worker_capability(job).unwrap_or_else(|| job.job_type.as_str())
+            tier_required_worker_capability(job).unwrap_or_else(|| job.job_type.as_str())
         }
         _ => job.job_type.as_str(),
     }
@@ -7364,15 +7397,33 @@ pub(crate) fn prompt_expansion_needs_nvfp4(job: &JobSnapshot) -> bool {
 /// The `localDerivation.conversion` prefix of every FLUX 3 native conversion (sc-26241).
 pub const FLUX3_CONVERSION_PREFIX: &str = "flux3-";
 
-/// The device-floor marker a FLUX 3 image job's package requires, if any.
-fn flux3_required_worker_capability(job: &JobSnapshot) -> Option<&'static str> {
+/// The device-floor marker an image job's admitted tier requires, if any: one entry per tier
+/// whose loader refuses a device below its floor rather than falling back.
+///
+/// * FLUX 3 FP8R / NVFP4 publisher packages (sc-26241): `fp8r` / `flux3_nvfp4`.
+/// * Krea 2 Turbo W4A8 (SW-6135): `w4a8` (sm_80), read off the admitted tier, so a top-level
+///   `variant` and `advanced.quantTier` select it alike.
+///
+/// The legacy standard-tier `nvfp4` label needs no entry: a host below sm_120 deliberately resolves
+/// another installed tier and records that tier (sc-11042), and the MiniMax-H3-Image prompt
+/// expander's NVFP4 package is gated by [`prompt_expansion_needs_nvfp4`].
+fn tier_required_worker_capability(job: &JobSnapshot) -> Option<&'static str> {
     let model = job.payload.get("model").and_then(Value::as_str)?;
-    if !crate::image_request::FLUX3_TIERED_MODEL_IDS.contains(&model) {
-        return None;
+    if crate::image_request::FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return routing::mlx::flux3_payload_tier(&job.payload)
+            .ok()?
+            .required_worker_capability();
     }
-    routing::mlx::flux3_payload_tier(&job.payload)
-        .ok()?
-        .required_worker_capability()
+    let admitted =
+        crate::model_artifacts::artifact_selection::requested_runtime_variant(&job.payload);
+    if model == crate::image_request::W4A8_TIER_MODEL_ID
+        && admitted
+            .as_deref()
+            .is_some_and(crate::image_request::is_w4a8_tier)
+    {
+        return Some(crate::image_request::W4A8_QUANT_TIER);
+    }
+    None
 }
 
 /// True when a person detection/tracking job explicitly opts into the procedural

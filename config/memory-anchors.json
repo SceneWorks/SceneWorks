@@ -1138,7 +1138,7 @@
       "overallAllocatorEnvelopeBytes": 113150645436
     },
     {
-      "id": "flux2_klein_9b:candle:bf16:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-11684b48bf42c7321ae1",
+      "id": "flux2_klein_9b:candle:bf16:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-d92b8eddadc55c62c1f6",
       "modelId": "flux2_klein_9b",
       "modelFamily": "flux2-klein",
       "route": "flux2_klein_9b",
@@ -1158,11 +1158,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/calibration/sc-22738/flux2-klein-9b-bf16-candle-evidence.json",
-        "sha256": "472624a06e2a884c58ea9843a7be074d0baffeec2e4e1391e731d3de8d511e67",
-        "recordId": "imc-11684b48bf42c7321ae1",
+        "path": "docs/calibration/sw-f287/flux2-klein-9b-bf16-candle-evidence.json",
+        "sha256": "09c017fcc22c23cd1db39dd6abbe123a49533e1ebcc537639682f33cc087939d",
+        "recordId": "imc-d92b8eddadc55c62c1f6",
         "calibrationFingerprint": "flux2-klein-cuda-shared-ladder-provider-abi-v2",
-        "loaderClosureDigest": "7e06e22ef9ea7ba32ffb717cc5128872177ac6105b64f8a8f0eee197efbde55d"
+        "loaderClosureDigest": "92fa8b0dee0a24a85efb06db34deb3ee9d81cf6d4162b3e9ffa80ed487a4d3c9"
       },
       "geometry": {
         "width": 1024,
@@ -1171,16 +1171,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 24726470656,
-        "denoise": 48013246464,
-        "decode": 57207160832
+        "conditioning": 24732762112,
+        "denoise": 47851765760,
+        "decode": 51609862144
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 24726470656,
-        "denoise": 48013246464,
-        "decode": 57207160832
+        "conditioning": 24732762112,
+        "denoise": 47851765760,
+        "decode": 51609862144
       },
-      "overallAllocatorEnvelopeBytes": 57207160832
+      "overallAllocatorEnvelopeBytes": 51609862144
     },
     {
       "id": "flux2_klein_9b:candle:q4:base:base:flux2-klein-cuda-shared-ladder-provider-abi-v2:imc-68e0955b91a86829e91c",
@@ -1859,7 +1859,7 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
-      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
       "modelId": "flux_dev",
       "modelFamily": "flux",
       "route": "flux1_dev",
@@ -1879,11 +1879,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
-        "sha256": "48857f0cdfe6734692bbb78448583b8823d198c633bd2ae9cdceebf8c05c43af",
-        "recordId": "imc-4cd8238201e0179ab82d",
+        "path": "docs/calibration/sw-f287/flux-dev-q4-mlx-evidence.json",
+        "sha256": "890683403a940a316586be20a99ffabe2f5818c51b8fd7ec8d27dd9e56d20bd5",
+        "recordId": "imc-46107e77f4f356743da0",
         "calibrationFingerprint": "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1",
-        "loaderClosureDigest": "d7c4be259300301df9135f56ca83a70d5e31de752718418914de607ff00be6ae"
+        "loaderClosureDigest": "90028ff3933a87c6729591c82d23a6623ef831cfdf0335b90da8d0213a685408"
       },
       "geometry": {
         "width": 1024,
@@ -1892,16 +1892,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 1051956,
-        "denoise": 11460184788,
-        "decode": 24904956136
+        "conditioning": 10935953824,
+        "denoise": 11510359354,
+        "decode": 24972213846
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 1054052,
-        "denoise": 16655857464,
-        "decode": 67111725924
+        "conditioning": 12260033602,
+        "denoise": 16450760516,
+        "decode": 67355896740
       },
-      "overallAllocatorEnvelopeBytes": 67111725924,
+      "overallAllocatorEnvelopeBytes": 67355896740,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
@@ -3529,7 +3529,7 @@
       "overallAllocatorEnvelopeBytes": 27566097584
     },
     {
-      "id": "krea_2_turbo:candle:bf16:base:base:krea-2-turbo-bf16-cuda-phase-curves-v1:imc-c9323d73137e799fdfc7",
+      "id": "krea_2_turbo:candle:bf16:base:base:krea-2-turbo-bf16-cuda-phase-curves-v1:imc-1d57a434e94dafce6c29",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
       "route": "krea_2_turbo",
@@ -3549,11 +3549,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/calibration/sc-22738/krea-2-turbo-bf16-candle-evidence.json",
-        "sha256": "b53216e1b2ffd9f6219a0e79fce435c470abf662e3ff1de400e26560cdfb0d7e",
-        "recordId": "imc-c9323d73137e799fdfc7",
+        "path": "docs/calibration/sw-f287/krea-2-turbo-bf16-candle-evidence.json",
+        "sha256": "a7c7712101a1f4351c9ccb7ebbc85ea47d829988d05c3ddabeb5b186fb334816",
+        "recordId": "imc-1d57a434e94dafce6c29",
         "calibrationFingerprint": "krea-2-turbo-bf16-cuda-phase-curves-v1",
-        "loaderClosureDigest": "3e5eb1737f71c79e529451971c972d44232bc385782508d1ebcd4200f72c358b"
+        "loaderClosureDigest": "c9819426494761277f085c9eb9f41189af754642cb5bbe2cdae238580884b84f"
       },
       "geometry": {
         "width": 768,
@@ -3562,16 +3562,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 8693743616,
-        "denoise": 28524412928,
-        "decode": 34633416704
+        "conditioning": 8525971456,
+        "denoise": 27083669504,
+        "decode": 33593229312
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 8693743616,
-        "denoise": 28524412928,
-        "decode": 34633416704
+        "conditioning": 8525971456,
+        "denoise": 27083669504,
+        "decode": 33593229312
       },
-      "overallAllocatorEnvelopeBytes": 34633416704
+      "overallAllocatorEnvelopeBytes": 33593229312
     },
     {
       "id": "krea_2_turbo:candle:q4:base:base:krea-turbo-cuda-phase-curves-v1:imc-7f1a63e5459300aed47c",
@@ -3719,7 +3719,7 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
-      "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+      "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
       "modelId": "krea_2_turbo",
       "modelFamily": "krea_2",
       "route": "krea_2_turbo",
@@ -3739,11 +3739,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json",
-        "sha256": "6c5eda994fd714bb8b5a2f495d6584d032ad7850d39961507a85435c1bc4b46b",
-        "recordId": "imc-8bcf5e9fcda82036aec7",
+        "path": "docs/calibration/sw-f287/krea-2-turbo-q4-mlx-evidence.json",
+        "sha256": "edb60b1620bf4c3d603c23c9875aa66d4f5d877c2b07e07061ad27b88f4979bd",
+        "recordId": "imc-9184d2790e209fb8abf5",
         "calibrationFingerprint": "krea-2-turbo-q4-mlx-shared-ladder-v1",
-        "loaderClosureDigest": "858b28715ccc2d45a9446b4caf49e19901f50e16c00fc97aaaf4630bc10387f0"
+        "loaderClosureDigest": "d4ca54f07bd7fd882ed890ba4ff70ab12e3341127ee135cc5bb30e834bdad327"
       },
       "geometry": {
         "width": 768,
@@ -3752,16 +3752,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 2768597780,
-        "denoise": 12722391448,
-        "decode": 16225150040
+        "conditioning": 11988757800,
+        "denoise": 13220283668,
+        "decode": 16441934564
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 2768597984,
-        "denoise": 15117484244,
-        "decode": 16225150040
+        "conditioning": 12535270040,
+        "denoise": 15739219740,
+        "decode": 16441934564
       },
-      "overallAllocatorEnvelopeBytes": 18620242836,
+      "overallAllocatorEnvelopeBytes": 18960870636,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
@@ -11444,6 +11444,52 @@
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "provider": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json",
+        "sha256": "5f5246c2e66cd3acebd2f20c8dbd4dde8cf5b3f2af06b180e9b2700114c7d835",
+        "recordId": "imc-5d7b09000cf98eca0b0b",
+        "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q4-v1",
+        "loaderClosureDigest": "7de3116697d1889d921455e545b984f89810ebb764e2638f10e3c96552c23686"
+      },
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12015632384,
+        "denoise": 27417116672,
+        "decode": 27383562240
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12015632384,
+        "denoise": 27417116672,
+        "decode": 27383562240
+      },
+      "overallAllocatorEnvelopeBytes": 27417116672,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "z_image:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-0b154783eee307ac1ad8",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -11984,7 +12030,7 @@
       "overallAllocatorEnvelopeBytes": 37717014808
     },
     {
-      "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-3cd69f2fee9e91e83b58",
+      "id": "z_image_turbo:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-07f3ce44a00a58753a73",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
       "route": "z_image_turbo",
@@ -12004,20 +12050,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
-        "sha256": "124f7d4f9988c1626d3e914edfa3faa620115f8775781e2456dc130f6c482e5b",
-        "recordId": "imc-3cd69f2fee9e91e83b58",
+        "path": "docs/calibration/sw-f287/z-image-turbo-bf16-candle-evidence.json",
+        "sha256": "3ffd267994ff966dbf7c3c5e4ab47ed3c5cf42aea81a98c3cb533e0c34d0f22f",
+        "recordId": "imc-07f3ce44a00a58753a73",
         "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
-        "loaderClosureDigest": "227d039408c425313ed8c7ce8289e2dad3868a9d0a9e118a53c02e3d666aa677",
-        "currencyAttestation": {
-          "measuredRevision": "670dc1f4418859cf241471987a0a050fedc108c5",
-          "attestedRevision": "8e2d9671fd28ab1b34aa22c8fc49de221d43b000",
-          "attestedAt": "2026-09-16",
-          "story": "sc-22723, sc-22738, sc-23026, sc-23053, sc-23108, sc-23187, sc-23026 final capture repairs, sc-23207, sc-23234, sc-23402, sc-23584, sc-23648",
-          "class": "accounting-only",
-          "why": "Every file the z_image_turbo:candle loader closure changed in 670dc1f4..c6d6a4db carries contract ACCOUNTING, not load or device behaviour: candle-gen-z-image/src/memory_strategy.rs grew the per-component asset facts, architecture facts and loaded-path pricing the sc-22657 law reads; candle-gen/src/architecture_facts.rs is a new snapshot-config reader for those facts; gen-core's memory_strategy.rs / weightsmeta.rs / wan_i2v_memory.rs carry the contract types and the tensor-free byte walkers (materialized_* readers; the .candle-device-format-v1 hidden-cache skip) that price the checkpoint without touching the loader; gen-core lib.rs and candle-gen lib.rs are re-export / `pub mod` lines for those; gen-core registry.rs and runtime.rs move a #[cfg(test)] helper and fix a Windows-only test fixture; candle-gen-pid/src/engine.rs names the f32 load dtype and merged-file constants it already used (same values, and PiD is not on the Z-Image path); candle-gen/src/quant/sidecar.rs re-homes the `.candle-device-format-v1` CACHE_DIR literal to gen-core's constant with the same value. No loader, pipeline, weights, kernel, quant or device-format code path changed. Extended to 8a65db2a (sc-22723 feature pin, inference PRs #946-#958): c6d6a4db..8a65db2a touches four files of this closure and none is a load or device path - gen-core encoder_contract.rs (packed-marker struct kept whole with same-value accessors, a stale-marker allowance only mlx-gen-flux2 calls, the hf_cache_discovery_roots authorization helper, tests), gen-core lib.rs (its re-export), gen-core wan_i2v_memory.rs (Wan-only identity tokens) and candle-gen-z-image memory_strategy.rs, whose selected_encoder_discovery_roots now authorizes the HF-cache repository dir as a symlink target for the text-encoder planning-facts readers - a validation gate, not a load: the same bytes reach the same device the same way. pipeline.rs, model.rs, the loader and every device-format path are untouched. Extended to 563c44e1 (sc-22738, the epic final pin = inference main, merge of feature PR #960 over main 1cd0e393): 8a65db2a..563c44e1 changes nine inference files and exactly two are in this closure, gen-core encoder_contract.rs and lib.rs. Both are a REMOVAL, not a change of behaviour: inference PR #961 (sync of main into the feature branch) drops the sc-22727 stale-packed-marker tolerance that sc-22760 made unnecessary - the two entry points `source_for_load_with_stale_packed_marker` / `validate_source_for_discovery_with_stale_packed_marker`, the `RequiredWithStalePackedMarker` policy arm and its `stale_packed_marker()` reader, the `declared_quant` rewrite in `validate_source_with_policy` that was the identity for every other policy, `PackedQuantization` back to crate-private, and the allowance test; lib.rs drops the matching re-export. The only production caller of the removed surface was mlx-gen-flux2 (the FLUX.2 Klein turnkey inventory), which this closure does not reach; `source_for_load`, `validate_source_for_discovery`, `requires_config` for `Required` and every shard/header/quantization-evidence check this model executes are byte-for-byte the same code path before and after. The remaining seven files (mlx-gen-flux2 artifact_inventory.rs / loader.rs / memory_strategy.rs / model.rs, its two test files, release/real-weight-models.toml) are outside this closure. No load or device path this anchor reaches changed. Extended to 3b922bac (sc-22738, inference main = the merge of PR #962 over 563c44e1, its first parent): 563c44e1..3b922bac changes fourteen inference files, all under crates/media/mlx-gen/mlx-gen-krea and crates/media/mlx-gen/mlx-gen-krea-realtime (the harness-authorized calibration_fault hooks at every phase exit of the MLX krea base and realtime generators, their memory_strategy.rs helpers and tests), and the intersection with this closure's closureFiles is EMPTY - the Z-Image candle closure (candle-gen-z-image) never links either krea crate. The closure digest is byte-identical across the range (config/anchor-loader-closures.json records the same digest for this model at 563c44e1 and 3b922bac; only krea_2_raw:mlx and krea_2_turbo:mlx moved), so this is the trivial extension the bump script's remediation names: nothing this anchor loads or executes changed, and no file is added to filesChangedSinceMeasurement. Extended to e16c6a55 (sc-22738 fourth terminal pin, 2026-09-07; inference main = the merge of PR #965 fix/sc-22738-wan-rehost-tolerance over #964 fix/sc-22738-wan-t2v-memory-contract over #963 fix/sc-22738-mlx-progress-boundaries over 3b922bac): 3b922bac..e16c6a55 changes eleven inference files (gen-core residency.rs and wan_i2v_memory.rs; mlx-gen-bernini bernini.rs and its conformance test; mlx-gen-mage model.rs and pipeline.rs; mlx-gen-wan config.rs, i2v_memory_strategy.rs, memory_strategy.rs and model.rs; one mlx-gen-flux real-weight test) and the intersection with this closure's closureFiles is exactly ONE file, crates/contracts/gen-core/src/residency.rs. That diff is instrumentation-only (+195/-8, of which 147 lines are new unit tests): ensure_warm_locked drops its on_progress parameter and no longer emits Loading(TextEncoder)/Loading(Renderer) itself; the two warm (!stage_residency) arms of run_request_scoped and run_staged_request_scoped emit Loading(TextEncoder) before the warm load and Loading(Renderer) AFTER the prompt encode, both gated on the new warm_needs_load; the staged arms, run_two_phase, the components loaded, their order, their devices and the offload policy are byte-identical. candle-gen-z-image links gen-core but never drives gen_core::residency::Residency (the crate has no run_request_scoped, run_staged_request_scoped or run_two_phase call); residency.rs is in this closure only as a gen-core module and is unreached by the Z-Image Candle load and render path. No file is added to filesChangedSinceMeasurement. EXTENDED to e34d7b46 (sc-22738, fifth terminal pin; inference main = PR #966 fix/sc-22738-sensenova-measurable over e16c6a55): the e16c6a55..e34d7b46 range changes five inference files, all under crates/media/mlx-gen/mlx-gen-sensenova (src/memory_strategy.rs, src/model.rs, src/t2i.rs and the two parity tests), and the intersection with this closure's closureFiles (109 files) is EMPTY - the closure is byte-identical across the range and derives the same currency key at e34d7b46 as at e16c6a55. The trivial extension the doctrine names; no file is added to filesChangedSinceMeasurement and no re-measure was taken. EXTENDED to e11fd9f0 (sc-22738, sixth terminal pin; inference main = PR #967 fix/sc-22738-candle-kolors-ideogram-predicates over e34d7b46, its first parent): the e34d7b46..e11fd9f0 range changes exactly three inference files, all a candle-gen memory_strategy.rs - candle-gen-kolors (dense/non-packed tensors may be F16 as well as BF16, since the shipped rehost's shards are F16 and every dense tensor is read at F32), candle-gen-ideogram (the VAE's rank-0 I32/I64 BatchNorm counter is priced at zero, and the turbo id stops refusing the co-located unconditional_transformer/ its loader never opens) and candle-gen-bernini (contract_for_loaded and validate_loaded_contract publish the calibration identity memory_strategy_contract already computed). The intersection with this closure's closureFiles (109 files) is EMPTY, and stronger than empty: this closure reaches no file of ANY of the three crates (grep over closureFiles for candle-gen-kolors / candle-gen-ideogram / candle-gen-bernini: 0 hits), so the closure is byte-identical across the range and derives the same currency key at e11fd9f0 as at e34d7b46 (config/anchor-loader-closures.json records the same digest for this model at both pins; only bernini:candle, bernini_image:candle, ideogram_4:candle, ideogram_4_turbo:candle and kolors:candle moved). The trivial extension the doctrine names; no file is added to filesChangedSinceMeasurement and no re-measure was taken. sc-23026 pin extension (e11fd9f0fd26..81fda3bd5a9d): reviewed the changed inference files (crates/media/candle-gen/candle-gen-flux2/src/lib.rs, crates/media/candle-gen/candle-gen-ltx/src/lib.rs, crates/media/candle-gen/candle-gen-ltx/src/memory_strategy.rs, crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs). None intersects this model/backend's old or new closureFiles, and its derived loader digest is unchanged. The existing witness and accounting classification therefore extend without another measurement. sc-23053 pin extension (81fda3bd5a9d..8fb95eb05cee): the changed inference files have an EMPTY intersection with this Candle model loader closure. The shared MLX native read-completion repair is not linked into this Candle path. Its first-party loader digest is unchanged; the existing classification extends without a new measurement. sc-23108 pin extension (8fb95eb05cee..e3de348f4dde): reviewed all five changed files, exclusively MiniMax-H3 MLX AdaLN evaluation and its tests. Their intersection with this model/backend loader closure is EMPTY; its closureFiles and derived digest are byte-identical across the range. The existing classification extends without a new measurement. Extended to 8b43c354 (inference PR #972, sc-23187): e3de348f..8b43c354 changes only the MLX SDXL tokenizer, three MLX Flux2 files, and a diagnostic document. The intersection with this Candle loader closure is empty and its derived digest is byte-identical; no load or device path reachable by this anchor changed. Extended to 290fa1f3 (inference PRs #973 and #974): The changed-file intersection with this Candle loader closure is empty. All changes belong to Qwen Edit admission/accounting, MLX Flux2 deferred residency, their tests, and a diagnostic document. The loader closure is byte-identical; the existing classification extends without another measurement. Extended from 290fa1f3 to fff98b05 (merged inference PRs #974/#975, sc-23207/sc-23234): the additional files are the two SenseNova calibration-identity implementations and their diagnostic document. Their intersection with the old and new inventories of this Candle loader closure is EMPTY and the derived digest is unchanged. The Qwen classification above is preserved; no new measurement is claimed. fff98b05..e497db468 (this pin, sc-23402 / epic 23401) intersects this closure in exactly two files - crates/contracts/gen-core/src/generator.rs and crates/contracts/gen-core/src/lib.rs - and in nothing else: the rest of the range is the StarVector contracts/llm crates and the MiniMax-H3 media crates, none of which this closure reaches. Both intersecting files are accounting-only, classified individually in filesChangedSinceMeasurement: one new `Option<u32>` request field defaulting to None with a range validator and a resolver, plus the re-exports and tests. Nothing on this closure reads the field, so no load, device, allocation or residency behaviour can have moved. e497db468..8e2d9671f (this pin, the epic-23401 main sync) leaves the release lineage: the app's previous main pin ebc97be15 sits on inference release/next and does not contain the epic's inference work, while 8e2d9671f is inference main and contains BOTH e497db468 and the forward-ports of the sc-23584 and sc-23648 fixes ebc97be15 carried. The range changes 66 files and intersects this closure in only the files classified individually in filesChangedSinceMeasurement; the rest is the StarVector contracts/llm crates (sc-22261), the other providers' memory_strategy.rs files, mlx-gen asset_facts.rs and CI/release scripts, none of which this closure reaches. Every intersecting file is accounting-only: a new fact-TYPE module, its re-exports, a `phase_facts: None` initializer per provider, and an optional `stage_residency: Option<bool>` selection parameter that is None on every existing construction and whose every new branch is guarded on Some. No load, device, allocation or residency behaviour can have moved.",
-          "witness": "No hardware re-measure of the bf16 tier itself; the classification stands on the diff alone, which is the same file set as the q4 anchor's (the closure is per model, not per tier) and carries no load or device path change. The q4 tier's cold-staged re-measure at a5f643ae (docs/calibration/sc-22657/candle-five-rung-falsification-sc-22667.json) witnesses that the shared loader's memory behaviour did not move across the larger half of this range. No re-measure for c6d6a4db..8a65db2a: that segment carries no load or device path change (files listed), so the classification stands on the diff, as the doctrine allows. The fff98b05..e497db468 leg needs no re-measure either: its ONLY intersection with this closure is gen-core generator.rs + lib.rs, both request-contract surface (a new inert Option<u32> field, its range validator, its resolver, re-exports and tests) with no load or device path change, so the classification stands on the diff, as the doctrine allows. The e497db468..8e2d9671f leg needs no re-measure either: its whole intersection with this closure is gen-core contract surface (a new fact-type module, its re-exports, an Option<bool> selection parameter inert at its Default None, an Option<MemoryPhaseFacts> field this provider passes None for) plus one-line `phase_facts: None` initializers in the provider crates, with no load or device path change, so the classification stands on the diff, as the doctrine allows."
-        }
+        "loaderClosureDigest": "23b86b94c970305116ab33f0c32a21db1bd972a6b13b384228dcf50c7a7dfa65"
       },
       "geometry": {
         "width": 1024,
@@ -12027,15 +12064,15 @@
       },
       "phaseActivePeakBytes": {
         "conditioning": 8727298048,
-        "denoise": 16545480704,
+        "denoise": 13559136256,
         "decode": 12988710912
       },
       "phaseAllocatorEnvelopeBytes": {
         "conditioning": 8727298048,
-        "denoise": 16545480704,
+        "denoise": 13559136256,
         "decode": 12988710912
       },
-      "overallAllocatorEnvelopeBytes": 16545480704
+      "overallAllocatorEnvelopeBytes": 13559136256
     },
     {
       "id": "z_image_turbo:candle:q4:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-b8064416c974b5008509",
@@ -12191,7 +12228,7 @@
       "overallAllocatorEnvelopeBytes": 33954027466
     },
     {
-      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
       "modelId": "z_image_turbo",
       "modelFamily": "z-image",
       "route": "z_image_turbo",
@@ -12211,11 +12248,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/generated/memory-calibration-evidence.json",
-        "sha256": "e8b3474d0c05c3d91f309ac75c1bc38eeaad99baa20c36bedca4233a5be49359",
-        "recordId": "imc-2284d75c08c2a13f1b7e",
+        "path": "docs/calibration/sw-f287/z-image-turbo-q4-mlx-evidence.json",
+        "sha256": "372e55642e691db9a998959d86ece807544fbce8ace4e0dcafa90ba3bcc17300",
+        "recordId": "imc-bc730ba3201b870a4ad9",
         "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
-        "loaderClosureDigest": "dccbde61a8d9765bf91120923842d6a0ee1b6982fb5619bb325db09d7689533f"
+        "loaderClosureDigest": "c4c67f551bd6b8979cd09b4847ec841e0df4f42b683fc8dd5ceff076b477e086"
       },
       "geometry": {
         "width": 768,
@@ -12224,16 +12261,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 5834701816,
-        "denoise": 7589844352,
-        "decode": 14462448216
+        "conditioning": 5901322806,
+        "denoise": 7656465346,
+        "decode": 14529069206
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 5834737016,
-        "denoise": 12510771316,
-        "decode": 14462448216
+        "conditioning": 5901358006,
+        "denoise": 12579784394,
+        "decode": 14529069206
       },
-      "overallAllocatorEnvelopeBytes": 19383375180
+      "overallAllocatorEnvelopeBytes": 19452388254
     },
     {
       "id": "z_image_turbo:mlx:q8:base:base:z-image-mlx-independent-materialization-v4:imc-39155e037db1a566f017",
@@ -13834,27 +13871,6 @@
         "envelopeBytes": null,
         "values": {
           "vramGbByTier": "38.56"
-        }
-      }
-    },
-    {
-      "id": "analytic:wan_2_2_t2v_14b:candle:q4",
-      "modelId": "wan_2_2_t2v_14b",
-      "modelFamily": "wan-video",
-      "route": "wan2_2_t2v_14b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/registry/evidence.json#wan_2_2_t2v_14b/candle",
-        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.13"
         }
       }
     },

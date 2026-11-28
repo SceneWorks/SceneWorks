@@ -969,6 +969,16 @@ async fn run_image_generate_job_unexplained(
 
     let mut asset_writes: Vec<Value> = Vec::with_capacity(plan.image_count as usize);
 
+    // SW-6132: the lossy attention kernels (INT8 / Sol-Attn) exist only in the candle runtime. A
+    // build without it (the MLX worker) refuses the opt-in with a typed error rather than
+    // rendering the exact path in its place. The API refuses it earlier on an MLX host.
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    if request.lossy_attention().is_some_and(|wire| wire.any()) {
+        return Err(WorkerError::InvalidPayload(
+            sceneworks_core::options::lossy_attention::mlx_refusal(&request.model).detail,
+        ));
+    }
+
     // Real in-process MLX inference on macOS for engine-backed models; otherwise the
     // procedural stub (keeps non-macOS + not-yet-ported models working).
     #[cfg(target_os = "macos")]
@@ -1080,6 +1090,12 @@ async fn run_image_generate_job_unexplained(
         )
         .await?;
     }
+
+    // SW-6132: a job that opted in to a lossy attention kernel records, on each asset's recipe,
+    // what the engine actually ran (INT8 / Sol-Attn calls, refusals, adaptations) beside the
+    // request (`rawAdapterSettings.attentionExecution`).
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    crate::attention_path::record_attention_execution_on_assets(&mut asset_writes);
 
     // Explicitly, and BEFORE the terminal post. A pump tick that lands after the job completes is
     // a no-op on the job row (the heartbeat's job update is scoped to the owning worker), but it
@@ -3869,6 +3885,8 @@ use tier_resolver::standard_tier_subdir_gated;
 pub(crate) use tier_resolver::INT8_CONVROT_TIER;
 #[cfg(native_lane)]
 pub(crate) use tier_resolver::NVFP4_TIER;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use tier_resolver::W4A8_TIER;
 #[cfg(native_lane)]
 use tier_resolver::{
     is_dense_te_tier, min_quality_floor, nvfp4_host_eligible, nvfp4_requested, nvfp4_selected,

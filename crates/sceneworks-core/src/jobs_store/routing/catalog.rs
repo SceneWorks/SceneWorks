@@ -1031,6 +1031,25 @@ pub fn imported_provider_routes(
         .into_iter()
 }
 
+/// SW-6132: the lossy attention capability of an imported image entry: the candle providers that
+/// load its exact (family, source) shape, judged by the same checked-in projection of inference's
+/// `SHARED_ATTENTION_ROUTING` the builtin catalog uses. `None` for a builtin row (projected by
+/// `ModelSpec::project`) or a shape no candle provider loads.
+pub fn imported_lossy_attention_capability(
+    entry: &Map<String, Value>,
+) -> Option<sceneworks_options::lossy_attention::LossyAttentionCapability> {
+    let family = entry.get("family").and_then(Value::as_str)?;
+    let source = imported_source_shape(entry)?;
+    let providers: Vec<&str> = imported_provider_routes("candle", family)
+        .filter(|route| route.source == source)
+        .map(|route| route.provider_id.as_str())
+        .collect();
+    if providers.is_empty() {
+        return None;
+    }
+    crate::registry::shared_attention_facts().capability_for(providers)
+}
+
 fn imported_provider_route(
     backend: &str,
     family: &str,

@@ -670,6 +670,24 @@ pub(super) fn apply_imported_provider_surface(object: &mut JsonObject) {
     // `generation::enqueue_backend`. See that function's "Scope" note.
     let mlx_lane = cfg!(target_os = "macos");
     apply_imported_provider_surface_for_lanes(object, mlx_lane, !mlx_lane);
+    apply_imported_lossy_attention_capability(object);
+}
+
+/// SW-6132: an imported image checkpoint runs on the same candle provider as its family, so it takes
+/// the same lossy attention kernels (`lossyAttention`, the capability `advanced.lossyAttention` is
+/// validated against). Builtin rows carry it from their spec; nothing is written for a shape no
+/// candle provider loads, which leaves the option refused.
+pub(super) fn apply_imported_lossy_attention_capability(object: &mut JsonObject) {
+    let key = sceneworks_core::options::lossy_attention::CAPABILITY_KEY;
+    if object.get("catalogScope").and_then(Value::as_str) == Some("builtin") {
+        return;
+    }
+    if let Some(capability) =
+        sceneworks_core::jobs_store::imported_lossy_attention_capability(object)
+            .and_then(|capability| serde_json::to_value(capability).ok())
+    {
+        object.insert(key.to_owned(), capability);
+    }
 }
 
 /// The Mac and off-Mac support blocks for an imported, plan-backed video entry (sc-26680).
