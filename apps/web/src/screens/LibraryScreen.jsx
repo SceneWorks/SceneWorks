@@ -97,10 +97,12 @@ export function LibraryScreen() {
   // falls back to the most-recent asset across ALL studios, so without scoping the panel
   // can show a freshly generated Character Studio image instead of a library asset. Keep
   // the global selection only when it is itself a library asset (even if the current
-  // tag/type filter hides it); otherwise fall back to the most-recent visible asset —
+  // tag/type filter hides it) within the current Assets/Trashcan collection;
+  // otherwise fall back to the most-recent visible asset —
   // never a non-library (e.g. character) asset.
   const librarySelectedAsset =
-    libraryAssets.find((asset) => asset.id === selectedAsset?.id) ?? visibleAssets[0] ?? null;
+    libraryAssets.find((asset) => asset.id === selectedAsset?.id &&
+      Boolean(asset.status?.trashed) === (assetMode === "trashcan")) ?? visibleAssets[0] ?? null;
   const assetVqaJobs = librarySelectedAsset
     ? jobs.filter((job) => job.type === "image_vqa" && job.payload?.sourceAssetId === librarySelectedAsset.id)
     : [];

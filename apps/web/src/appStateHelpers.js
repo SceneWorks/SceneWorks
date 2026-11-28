@@ -52,5 +52,5 @@ const EDITOR_MEDIA_TYPES = new Set([
 ]);
 
 export function selectEditorMediaAssets(assets) {
-  return assets.filter((asset) => EDITOR_MEDIA_TYPES.has(asset.type));
+  return assets.filter((asset) => !asset.status?.trashed && EDITOR_MEDIA_TYPES.has(asset.type));
 }

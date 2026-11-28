@@ -1006,6 +1006,8 @@ describe("SceneWorks app shell", () => {
 
     expect([...document.body.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).toContain("Active Frame");
     expect([...document.body.querySelectorAll(".asset-tile")].map((tile) => tile.textContent).join(" ")).not.toContain("Discarded Frame");
+    expect([...document.body.querySelectorAll("button")].some((button) => button.textContent === "Purge")).toBe(false);
+    expect(document.body.querySelector(".asset-detail").textContent).toContain("Active Frame");
 
     await act(async () => {
       [...document.body.querySelectorAll('button')].find((button) => button.textContent === "Trashcan").click();

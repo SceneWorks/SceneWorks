@@ -119,7 +119,10 @@ export function VideoStudio() {
   // Recent Assets (sc-2089) — 20 most recent video assets in the active
   // project. Falls back to the legacy single-generation list for test
   // contexts that haven't migrated.
-  const latestAssets = recentVideoAssets ?? latestVideoAssets;
+  const latestAssets = useMemo(
+    () => (recentVideoAssets ?? latestVideoAssets).filter((asset) => !asset.status?.trashed),
+    [recentVideoAssets, latestVideoAssets],
+  );
   const launchRequest = studioLaunch;
   const trackedLocalJobs = videoLocalJobs;
   const onCancelJob = (job) => jobAction(job, "cancel");
