@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:2830ace2e4af3c44b9514a631f8f5e209141f382574dd3624c4cf55ccf816ef0",
+    "sceneWorksRevision": "source-tree:44c78b5a92b61e2efde0c18c7de1fa8afcfee5df8db204c90991ab1a97ae0ab4",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,7 +85,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "3097950cc1aa7e1e36d9fcc663fd3bc8f210927fdab4e4a487f5cab69fbdb7d6"
+        "sha256": "82ef12256d0009532f05eb5a8fb0448e2c0d8fef64f0915e7b344714b714640b"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -93,7 +93,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "b1278d29a59646d5d2381ed3234dbd425164f8fe661fd3017ce2754468689a9a"
+        "sha256": "15098a8f05e10bb3cd7ef9947ac18c8583a32b7cc8b264f991eb4d29c71f72d2"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -193,7 +193,7 @@
     "anchors": 266,
     "analyticOnlyCells": 123,
     "anchoredCells": 4038,
-    "staleAnchors": 260,
+    "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -10007,7 +10007,7 @@
       "cells": 15
     },
     {
-      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+      "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
       "modelId": "z_image_turbo",
       "backend": "mlx",
       "tier": "q4",
@@ -10019,8 +10019,8 @@
         "frames": 1,
         "fps": null
       },
-      "source": "docs/generated/memory-calibration-evidence.json",
-      "current": false,
+      "source": "docs/calibration/sw-f287/z-image-turbo-q4-mlx-evidence.json",
+      "current": true,
       "currencyAttestation": null,
       "cells": 15
     },
@@ -244147,10 +244147,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -244167,7 +244167,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -244213,10 +244213,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -244233,7 +244233,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -244293,10 +244293,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -244313,7 +244313,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -244340,10 +244340,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -244360,7 +244360,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -244393,10 +244393,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -244413,7 +244413,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247311,10 +247311,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247331,7 +247331,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247377,10 +247377,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247397,7 +247397,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247457,10 +247457,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247477,7 +247477,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247504,10 +247504,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247524,7 +247524,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247557,10 +247557,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247577,7 +247577,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247627,10 +247627,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247647,7 +247647,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247693,10 +247693,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247713,7 +247713,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247773,10 +247773,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247793,7 +247793,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247820,10 +247820,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247840,7 +247840,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
@@ -247867,10 +247867,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
+        "id": "z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
         "tier": "q4",
-        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e",
-        "current": false,
+        "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9",
+        "current": true,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -247887,7 +247887,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-2284d75c08c2a13f1b7e"
+            "source": "config/memory-anchors.json#z_image_turbo:mlx:q4:base:base:z-image-mlx-independent-materialization-v4:imc-bc730ba3201b870a4ad9"
           }
         ]
       }
