@@ -1109,6 +1109,9 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       expect(picker.value).toBe(retiredModel);
       expect(container.textContent).toContain("This saved model is no longer available");
       expect(buttonByText("Generate").disabled).toBe(true);
+      await act(async () => container.querySelector("form").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      ));
       expect(createImageJob).not.toHaveBeenCalled();
       await act(async () => {
         picker.value = FLUX3.id;
