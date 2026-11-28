@@ -63,7 +63,10 @@ export function VideoSourcePanel({
   return (
 <>
 {mode !== "text_to_video" ? (
-          <div className="studio-source-band">
+          // The current mode's inputs on the shared studio grid (studio layout simplification).
+          // Which pickers show, and what each one writes, is unchanged.
+          <div className="studio-grid video-inputs">
+            <span className="eyebrow span-full video-inputs-eyebrow">Inputs</span>
             {mode === "image_to_video" || mode === "first_last_frame" ? (
               <ImageEditSourcePickerField
                 assets={imageAssets}

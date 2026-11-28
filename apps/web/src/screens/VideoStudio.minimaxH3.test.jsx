@@ -145,11 +145,15 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     [...container.querySelectorAll(".asset-picker-field")].find((field) =>
       field.querySelector(".asset-picker-label")?.textContent.trim() === text,
     );
+  // Every mode these tests use is in the Create group, which is the one showing by default.
   const modeTab = (label) =>
-    [...container.querySelectorAll(".mode-tabs button")].find((b) => b.textContent.trim() === label);
-  const openAdvanced = async () => {
-    const toggle = container.querySelector(".advanced-section-toggle");
-    if (toggle && container.querySelector(".advanced-panel") === null) await click(toggle);
+    [...container.querySelectorAll('.studio-mode-tabs [role="tab"]')].find((b) => b.textContent.trim() === label);
+  // Settings live in a tab strip (studio layout simplification); Model & output is open by default.
+  const openSettingsTab = async (label) => {
+    const tab = [...container.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+      node.textContent.includes(label),
+    );
+    if (tab && tab.getAttribute("aria-selected") !== "true") await click(tab);
   };
 
   // ---------------------------------------------------------------- geometry
@@ -237,15 +241,16 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
   it("takes the Steps floor from the model rather than a hardcoded 1", async () => {
     const context = baseContext({ videoModels: [MINIMAX, BERNINI] });
     await render(context);
-    await openAdvanced();
+    await openSettingsTab("Sampling");
     expect(labelStartingWith("Steps").querySelector("input").getAttribute("min")).toBe(
       String(MINIMAX.limits.hardMinSteps),
     );
 
     // The other leg: a model that declares no floor keeps the historical 1, so this is a per-model
     // fact and not a new blanket.
+    await openSettingsTab("Model");
     await act(async () => setSelect(selectLabelled("Model"), "bernini"));
-    await openAdvanced();
+    await openSettingsTab("Sampling");
     expect(BERNINI.limits.hardMinSteps).toBeUndefined();
     expect(labelStartingWith("Steps").querySelector("input").getAttribute("min")).toBe("1");
   });
@@ -556,7 +561,7 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
 
     // There is no guidance scale and no negative prompt on the pipeline, so neither control is
     // offered — hidden rather than present-and-discarded.
-    await openAdvanced();
+    await openSettingsTab("Sampling");
     expect(labelStartingWith("Guidance")).toBeFalsy();
     expect(labelStartingWith("Negative prompt")).toBeFalsy();
   });

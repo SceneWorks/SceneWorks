@@ -29,6 +29,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
@@ -80,7 +81,7 @@ const labelled = (container, text) =>
   );
 const field = (container, text) => labelled(container, text)?.querySelector("input, select, textarea");
 const generateButton = () =>
-  [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+  [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
 
 function setTextarea(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -112,8 +113,6 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
       );
     });
     await act(async () => {});
-    await click(document.body.querySelector(".advanced-section-toggle"));
-    await act(async () => {});
   }
 
   it("sizes up to its largest published preset and hides steps, guidance and negative prompt", async () => {
@@ -126,17 +125,18 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
     expect(field(container, "Aspect").value).toBe("1:1");
     expect(imageSize(container)).toBe("2048x2048");
     expect(container.querySelector(".aspect-picker-limit").textContent).toBe("up to 24.00 MP on this model");
+    // Typing past the ceiling clamps to 24 MP: 21:9 at its widest on H3's 32 px grid.
+    await setImageSize(container, { ratio: "21:9", megapixels: 40 });
+    expect(imageSize(container)).toBe("7648x3264");
+    expect(container.querySelector(".studio-model-attribution")?.textContent).toBe(
+      "Powered by MiniMax-H3-Image",
+    );
+    await openSettingsTab("Sampling");
     for (const absent of ["Steps", "Guidance", "Negative prompt", "Guidance interval"]) {
       expect(field(container, absent), absent).toBeUndefined();
     }
     expect(field(container, "Seed")).toBeTruthy();
-    // Typing past the ceiling clamps to 24 MP: 21:9 at its widest on H3's 32 px grid.
-    await setImageSize(container, { ratio: "21:9", megapixels: 40 });
-    expect(imageSize(container)).toBe("7648x3264");
     expect(field(container, "Width override").getAttribute("max")).toBe("9408");
-    expect(container.querySelector(".studio-model-attribution")?.textContent).toBe(
-      "Powered by MiniMax-H3-Image",
-    );
   });
 
   it("sends a 6272x2688 text-to-image job with no steps, guidance or negative prompt", async () => {
@@ -146,6 +146,7 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
     // 6272x2688 is 21:9 at 16.078125 MP (the model card's native 21:9 preset).
     await setImageSize(container, { ratio: "21:9", megapixels: 16.078125 });
     expect(imageSize(container)).toBe("6272x2688");
+    await openSettingsTab("Sampling");
     await act(async () => setInput(field(container, "Seed"), "11"));
     await click(generateButton());
     const request = createImageJob.mock.calls[0][0];
@@ -187,16 +188,17 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
       );
     });
     await act(async () => {});
-    if (open) await click(document.body.querySelector(".advanced-section-toggle"));
+    if (open) await openSettingsTab("Sampling");
     await act(async () => {});
   }
 
   const samplerSelect = () => container.querySelector('select[aria-label="MiniMax-H3-Image sampler"]');
 
-  it("sits in the collapsed Advanced section, defaulting to LCM at 1.1 / 0.9 / 0", async () => {
+  it("sits in the Sampling tab's model-specific group, defaulting to LCM at 1.1 / 0.9 / 0", async () => {
     await render(baseContext(), { open: false });
     expect(samplerSelect()).toBeNull();
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Sampling");
+    expect(samplerSelect().closest(".studio-settings-group")?.textContent).toContain("For this model");
     expect(samplerSelect().value).toBe("lcm");
     expect([...samplerSelect().options].map((option) => option.textContent)).toEqual([
       "Euler (official)",
@@ -266,7 +268,8 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
   it("saves LCM 1.1 / 0.9 / 0 in a recipe preset and restores it intact", async () => {
     const buttonWithText = (text) => [...container.querySelectorAll("button")].find((b) => b.textContent.includes(text));
     const context = baseContext({ createImageJob: vi.fn(async () => ({ id: "job-h3-preset" })) });
-    await render(context);
+    await render(context, { open: false });
+    await openSettingsTab("Style");
     await act(async () => setInput(container.querySelector('input[aria-label="Preset name"]'), "H3 LCM"));
     await click(buttonWithText("Save as preset"));
     await click([...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) => b.textContent.includes("This project")));
@@ -278,9 +281,12 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
     // field comes back exactly.
     await render({ ...context, presets: [preset] }, { open: false });
     await click([...container.querySelectorAll(".preset-chips button")].find((b) => b.textContent === "None"));
+    await openSettingsTab("Sampling");
     await act(async () => setSelect(samplerSelect(), "euler"));
     expect(field(container, "Noise scale start")).toBeUndefined();
+    await openSettingsTab("Style");
     await click(buttonWithText("H3 LCM"));
+    await openSettingsTab("Sampling");
     expect(samplerSelect().value).toBe("lcm");
     expect(field(container, "Noise scale start").value).toBe("1.1");
     expect(field(container, "Noise scale end").value).toBe("0.9");
@@ -425,7 +431,7 @@ describe("ImageStudio — MiniMax-H3-Image edit and LoRAs (SW-7101)", () => {
     expect(insert("<Picture 15>")).toBeNull();
 
     // Edit inherits the t2i sampler surface: LCM 1.1 / 0.9 by default, no steps / guidance / negative.
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Sampling");
     expect(container.querySelector('select[aria-label="MiniMax-H3-Image sampler"]').value).toBe("lcm");
     for (const absent of ["Steps", "Guidance", "Negative prompt"]) {
       expect(field(container, absent), absent).toBeUndefined();
@@ -445,6 +451,7 @@ describe("ImageStudio — MiniMax-H3-Image edit and LoRAs (SW-7101)", () => {
     );
     const createImageJob = vi.fn(async () => ({ id: "job-h3-loras" }));
     await render(baseContext({ createImageJob, loras: [...imageLoras, lora("MiniMax-H3 Turbo", "minimax-h3")] }));
+    await openSettingsTab("LoRAs");
     const openPicker = () => click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Add LoRA"));
     const row = (name) => [...document.body.querySelectorAll(".lora-pick-row")].find((b) => b.textContent.includes(name));
     await openPicker();

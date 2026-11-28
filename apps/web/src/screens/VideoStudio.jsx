@@ -6,9 +6,17 @@ import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
 import { StudioPromptGuide } from "../components/StudioFields.jsx";
 import { VideoSourcePanel } from "./videoStudio/VideoSourcePanel.jsx";
 import { VideoPromptComposer } from "./videoStudio/VideoPromptComposer.jsx";
+import { VideoModePicker } from "./videoStudio/VideoModePicker.jsx";
 import { VideoReviewPanel } from "./videoStudio/VideoReviewPanel.jsx";
-import { VideoGenerationSettings } from "./videoStudio/VideoGenerationSettings.jsx";
-import { VideoAdvancedPanel } from "./videoStudio/VideoAdvancedPanel.jsx";
+import { VideoResultsArea } from "./videoStudio/VideoResultsArea.jsx";
+import { VideoModelOutputSettings } from "./videoStudio/VideoModelOutputSettings.jsx";
+import { VideoCharacterLoraSettings } from "./videoStudio/VideoCharacterLoraSettings.jsx";
+import { VideoStyleSettings } from "./videoStudio/VideoStyleSettings.jsx";
+import { VideoSamplingSettings } from "./videoStudio/VideoSamplingSettings.jsx";
+import { initialVideoSettingsTab } from "./videoStudio/videoModeGroups.js";
+import { VideoUpscalePanel } from "./VideoUpscalePanel.jsx";
+import { StudioSettingsTabs } from "../components/StudioSettingsTabs.jsx";
+import "./videoStudio/VideoStudioLayout.css";
 import { useVideoSubmission } from "./videoStudio/useVideoSubmission.js";
 import { useVideoPresetState } from "./videoStudio/useVideoPresetState.js";
 import { useVideoTurboControls } from "./videoStudio/useVideoTurboControls.js";
@@ -22,18 +30,16 @@ import { DEFAULT_MOTION, ltxVideoModelId, ltx25VideoModelId, MAX_SCAIL2_REFERENC
 
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { VedaOutcome } from "../components/VedaOutcome.jsx";
-import React, { useEffect, useMemo, useState } from "react";
-
-import { AdvancedSection } from "../components/AdvancedSection.jsx";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { WorkPanel } from "../components/WorkPanel.jsx";
 
-import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
-import { styleTextForId } from "../data/styleCatalog.js";
+import { findStyleById, styleTextForId } from "../data/styleCatalog.js";
 import { composeStyledPrompt } from "../styleComposer.js";
+import { sourcePrecisionLabel, tierLabel } from "../quantTier.js";
 
 import { finiteNumberOrUndefined, composePreset } from "../presetUtils.js";
-import { PresetStackPreview, useGenerationStudio } from "../components/generationStudio.jsx";
+import { useGenerationStudio } from "../components/generationStudio.jsx";
 
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -155,9 +161,21 @@ export function VideoStudio() {
   // installed tier the current model would normally seed.
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [veda, setVeda] = useState(() => restoreVedaSettings(saved));
+  // The open settings tab (Model & output / Character & LoRAs / Style & look / Sampling, or null
+  // for all closed) replaces the old Advanced disclosure as persisted UI state. A snapshot from
+  // before the tab strip carries `advancedOpen`; an open Advanced restores as the Sampling tab.
+  const [settingsTab, setSettingsTab] = useState(() => initialVideoSettingsTab(saved));
+  // The LoRA auto-open (generationStudio: an incompatible selected LoRA opens the panel that shows
+  // the blocking warning) now opens the Character & LoRAs tab — once per incompatibility, so the
+  // user can still move to another tab while it stands.
+  const [loraWarningSurfaced, setLoraWarningSurfaced] = useState(false);
+  const surfaceLoraWarning = useCallback((open) => {
+    if (open) {
+      setSettingsTab("loras");
+      setLoraWarningSurfaced(true);
+    }
+  }, []);
   const {
-    advancedOpen,
-    setAdvancedOpen,
     seed,
     setSeed,
     negativePrompt,
@@ -173,7 +191,6 @@ export function VideoStudio() {
     setStepsOverride,
     guidanceOverride,
     setGuidanceOverride,
-    toggleAdvanced
   } = useStudioAdvancedSettings(saved);
   const {
     model,
@@ -513,12 +530,16 @@ export function VideoStudio() {
     latestAssets,
     trackedLocalJobs,
     initialPresetId: saved.selectedPresetId ?? null,
-    advancedOpen,
-    setAdvancedOpen,
+    advancedOpen: settingsTab === "loras" || loraWarningSurfaced,
+    setAdvancedOpen: surfaceLoraWarning,
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
+  const loraIncompatibleCount = selectedLoraValidationResult.incompatible.length;
+  useEffect(() => {
+    if (!loraIncompatibleCount) setLoraWarningSurfaced(false);
+  }, [loraIncompatibleCount]);
   const {
     turboSeededModels,
     turboVariants,
@@ -565,7 +586,7 @@ export function VideoStudio() {
   supportsQuantization
   });
 
-  const { samplerOptions, schedulerOptions, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler });
+  const { samplerOptions, schedulerOptions } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler });
 
 
   const {
@@ -760,7 +781,7 @@ export function VideoStudio() {
   styleId,
   appearance: appearance.selection,
   textEncoderModel,
-  advancedOpen,
+  settingsTab,
   selectedLoraIds,
   loraWeights,
   seed,
@@ -1157,6 +1178,55 @@ export function VideoStudio() {
   const generateDisabled = submitting || !videoValidity.ready || portableFeedbackBlocks(portableFeedback);
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
 
+  // One-line value summaries on the settings tabs, so the closed panels still say what will run.
+  const quantSummary =
+    sourcePrecisionLabel(selectedModel) ??
+    (showTierPicker
+      ? tierLabel(quantTier)
+      : showTorchQuantization && quantization !== "auto"
+        ? quantization === "none"
+          ? "full precision"
+          : quantVariants.find(([id]) => id === quantization)?.[1]?.label ?? quantization
+        : null);
+  const resolutionSummary =
+    Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+      ? `${Math.min(width, height)}p`
+      : resolution;
+  const modelTabSummary = [
+    selectedModel?.ui?.label ?? selectedModel?.name,
+    resolutionSummary,
+    ltx25AutoDurationEnabled ? "auto length" : `${duration} s`,
+    quantSummary,
+  ].filter(Boolean).join(" · ");
+  const selectedCharacter = characters.find((character) => character.id === characterId);
+  const loraCount = selectedLoras.length;
+  const lorasTabSummary = [
+    selectedCharacter?.name ?? "No character",
+    loraCount === 0 ? "No LoRAs" : loraCount === 1 ? "1 LoRA" : `${loraCount} LoRAs`,
+  ].join(" · ");
+  const styleName = styleAxisAvailable ? findStyleById(styleId)?.name : null;
+  const styleTabParts = [
+    styleName,
+    selectedPreset ? selectedPreset.name ?? selectedPreset.id : null,
+    generalStack.length ? `+${generalStack.length} general` : null,
+  ].filter(Boolean);
+  const samplingOverrides = [
+    seed !== "" && seed != null ? `seed ${seed}` : null,
+    stepsOverride !== "" && stepsOverride != null && !lightningActive && !stepsPinned ? `${stepsOverride} steps` : null,
+    supportsGuidance && guidanceOverride !== "" && guidanceOverride != null ? `cfg ${guidanceOverride}` : null,
+    sampler && sampler !== "default" ? sampler : null,
+    scheduler && scheduler !== "default" ? scheduler : null,
+  ].filter(Boolean);
+  const samplingTabSummary = [
+    samplingOverrides.length ? samplingOverrides.join(" · ") : "Model defaults",
+    showLightning ? (lightning ? "Lightning on" : "Lightning off") : null,
+    showTurbo && activeTurboVariant ? "Turbo" : null,
+  ].filter(Boolean).join(" · ");
+  const samplingChanged =
+    samplingOverrides.length > 0 ||
+    schedulerShiftExplicit ||
+    (supportsNegativePrompt && Boolean(negativePrompt?.trim()));
+
   return (
     <ModelAvailabilityGate
       ready={modelReady}
@@ -1172,8 +1242,8 @@ export function VideoStudio() {
     >
     <section className="page-frame video-studio">
       <form className="studio-shell" onSubmit={submit}>
-        <WorkPanel className="studio-work-panel">
-          <VideoPromptComposer
+        <WorkPanel className="studio-work-panel video-compose-panel">
+          <VideoModePicker
             modeOptions={modeOptions}
             mode={mode}
             setMode={setMode}
@@ -1181,6 +1251,9 @@ export function VideoStudio() {
             modeTabBlockedText={modeTabBlockedText}
             openGuide={openGuide}
             onOpenPresets={onOpenPresets}
+          />
+
+          <VideoPromptComposer
             setPrompt={setPrompt}
             promptless={promptless}
             prompt={prompt}
@@ -1195,6 +1268,30 @@ export function VideoStudio() {
             createModelDownloadJob={createModelDownloadJob}
             motion={motion}
             setMotion={setMotion}
+            status={(
+              <>
+                {/* Every reason Generate is dead — mode/preset/LoRA/worker problems — in one chip
+                    row, from the same summary that gates the button (sc-10650). Project, prompt
+                    and inputs are silent requirements: their empty fields show it. */}
+                <ValidationSummary issues={portableRefusal
+                  ? [...videoValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+                  : videoValidity.surfaced} label="Generate errors" />
+                {portableFeedbackStatus(portableFeedback) ? <p className="video-status-line" role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+                <VedaOutcome
+                  label="Recorded recipe attention"
+                  raw={launchRequest?.recipe?.rawAdapterSettings}
+                />
+                {canStartNewGenerationFromReplay ? (
+                  <button
+                    className="secondary-action video-start-new"
+                    onClick={handleStartNewGenerationFromReplay}
+                    type="button"
+                  >
+                    {startNewGenerationLabel}
+                  </button>
+                ) : null}
+              </>
+            )}
           />
 
           <VideoSourcePanel
@@ -1254,242 +1351,262 @@ export function VideoStudio() {
             setUserModel={setUserModel}
           />
 
-          <VideoGenerationSettings
-            selectedModel={selectedModel}
-            setUserModel={setUserModel}
-            model={model}
-            modelsForMode={modelsForMode}
-            mode={mode}
-            macVideoModels={macVideoModels}
-            createModelDownloadJob={createModelDownloadJob}
-            recipeModelNotice={recipeModelNotice}
-            setResolution={setResolution}
-            resolution={resolution}
-            resolutionOptions={resolutionOptions}
-            setDuration={setDuration}
-            setAutoDuration={setAutoDuration}
-            duration={duration}
-            durationOptions={durationOptions}
-            fps={fps}
-            showTierPicker={showTierPicker}
-            quantTier={quantTier}
-            handleExecutionTierChange={handleExecutionTierChange}
-            tierPickerItems={tierPickerItems}
-            tierSwitching={tierSwitching}
-            tierHasMemoryRisk={tierHasMemoryRisk}
-            selectedLoras={selectedLoras}
-            selectedLoraIds={selectedLoraIds}
-            compatibleLoras={compatibleLoras}
-            userSelectedLoraCount={userSelectedLoraCount}
-            toggleLora={toggleLora}
-            effectiveLoraWeight={effectiveLoraWeight}
-            setLoraWeight={setLoraWeight}
-            loraEmptyMessage={loraEmptyMessage}
-            createLoraDownloadJob={createLoraDownloadJob}
-            activeProject={activeProject}
-            createLoraImportJob={createLoraImportJob}
-            models={models}
-            appearance={appearance}
-            styleAxisAvailable={styleAxisAvailable}
-            styleId={styleId}
-            setStyleId={setStyleId}
-            selectedPreset={selectedPreset}
-            availablePresets={availablePresets}
-            setSelectedPresetId={setSelectedPresetId}
-            availableGeneralPresets={availableGeneralPresets}
-            generalStackIds={generalStackIds}
-            toggleGeneralPreset={toggleGeneralPreset}
-            presetPromptParts={presetPromptParts}
-            presetLoraDetails={presetLoraDetails}
-            presetName={presetName}
-            setPresetName={setPresetName}
-            savingPreset={savingPreset}
-            presetSaveMessage={presetSaveMessage}
-            setPresetSaveMessage={setPresetSaveMessage}
-            handleSaveAsPreset={handleSaveAsPreset}
-            presetScope={presetScope}
-            setPresetScope={setPresetScope}
+          {/* The settings strip MUST stay the work panel's last child: it bleeds to the panel's
+              edges and rounds its bottom corners. Only the open tab's panel is mounted. */}
+          <StudioSettingsTabs
+            active={settingsTab}
+            onChange={setSettingsTab}
+            tabs={[
+              {
+                id: "model",
+                label: "Model & output",
+                summary: modelTabSummary,
+                attention: Boolean(selectedModel?.updateAvailable || recipeModelNotice),
+                attentionLabel: selectedModel?.updateAvailable ? "Model update available" : "Recipe model not installed",
+                content: (
+                  <VideoModelOutputSettings
+                    selectedModel={selectedModel}
+                    setUserModel={setUserModel}
+                    model={model}
+                    modelsForMode={modelsForMode}
+                    mode={mode}
+                    macVideoModels={macVideoModels}
+                    createModelDownloadJob={createModelDownloadJob}
+                    recipeModelNotice={recipeModelNotice}
+                    setResolution={setResolution}
+                    resolution={resolution}
+                    resolutionOptions={resolutionOptions}
+                    setDuration={setDuration}
+                    setAutoDuration={setAutoDuration}
+                    duration={duration}
+                    durationOptions={durationOptions}
+                    durationHint={durationHint}
+                    fps={fps}
+                    setFps={setFps}
+                    fpsOptions={fpsOptions}
+                    showTierPicker={showTierPicker}
+                    quantTier={quantTier}
+                    handleExecutionTierChange={handleExecutionTierChange}
+                    tierPickerItems={tierPickerItems}
+                    tierSwitching={tierSwitching}
+                    tierHasMemoryRisk={tierHasMemoryRisk}
+                    showTorchQuantization={showTorchQuantization}
+                    setQuantization={setQuantization}
+                    quantization={quantization}
+                    quantVariants={quantVariants}
+                    setRequestedGpu={setRequestedGpu}
+                    requestedGpu={requestedGpu}
+                    gpuOptions={gpuOptions}
+                    activeBackend={activeBackend}
+                    flashAttn={flashAttn}
+                    setFlashAttn={setFlashAttn}
+                    supportsPromptEnhancement={supportsPromptEnhancement}
+                    enhancePrompt={enhancePrompt}
+                    setEnhancePrompt={setEnhancePrompt}
+                    supportsStockPromptEnhancement={supportsStockPromptEnhancement}
+                    supportsTextEncoderSelection={supportsTextEncoderSelection}
+                    setTextEncoderModel={setTextEncoderModel}
+                    selectedTextEncoderModel={selectedTextEncoderModel}
+                    textEncoderOptions={textEncoderOptions}
+                    selectedTextEncoderAvailable={selectedTextEncoderAvailable}
+                    defaultTextEncoderId={defaultTextEncoderId}
+                  />
+                ),
+              },
+              {
+                id: "loras",
+                label: "Character & LoRAs",
+                summary: lorasTabSummary,
+                changed: Boolean(characterId) || userSelectedLoraCount > 0,
+                attention: loraIncompatibleCount > 0,
+                attentionLabel: "Incompatible LoRA selected",
+                content: (
+                  <VideoCharacterLoraSettings
+                    setCharacterId={setCharacterId}
+                    characterId={characterId}
+                    characters={characters}
+                    setCharacterLookId={setCharacterLookId}
+                    characterLookId={characterLookId}
+                    selectedModel={selectedModel}
+                    selectedLoras={selectedLoras}
+                    selectedLoraIds={selectedLoraIds}
+                    compatibleLoras={compatibleLoras}
+                    userSelectedLoraCount={userSelectedLoraCount}
+                    toggleLora={toggleLora}
+                    effectiveLoraWeight={effectiveLoraWeight}
+                    setLoraWeight={setLoraWeight}
+                    loraEmptyMessage={loraEmptyMessage}
+                    createLoraDownloadJob={createLoraDownloadJob}
+                    activeProject={activeProject}
+                    createLoraImportJob={createLoraImportJob}
+                    models={models}
+                  />
+                ),
+              },
+              {
+                id: "style",
+                label: "Style & look",
+                summary: styleTabParts.length ? styleTabParts.join(" · ") : "None",
+                changed: styleTabParts.length > 0 || Boolean(appearance.active),
+                content: (
+                  <VideoStyleSettings
+                    mode={mode}
+                    activeProject={activeProject}
+                    appearance={appearance}
+                    styleAxisAvailable={styleAxisAvailable}
+                    styleId={styleId}
+                    setStyleId={setStyleId}
+                    selectedPreset={selectedPreset}
+                    availablePresets={availablePresets}
+                    setSelectedPresetId={setSelectedPresetId}
+                    availableGeneralPresets={availableGeneralPresets}
+                    generalStackIds={generalStackIds}
+                    toggleGeneralPreset={toggleGeneralPreset}
+                    presetPromptParts={presetPromptParts}
+                    presetLoraDetails={presetLoraDetails}
+                    presetName={presetName}
+                    setPresetName={setPresetName}
+                    savingPreset={savingPreset}
+                    presetSaveMessage={presetSaveMessage}
+                    setPresetSaveMessage={setPresetSaveMessage}
+                    handleSaveAsPreset={handleSaveAsPreset}
+                    presetScope={presetScope}
+                    setPresetScope={setPresetScope}
+                    styleApplied={styleApplied}
+                    composedStylePrompt={composedStylePrompt}
+                    styledNegativePrompt={appearance.active ? supportsNegativePrompt ? composeNegativePrompt(stackActive ? composedStack.negativePrompt : negativePrompt, appearance.resolved.negative) : "" : undefined}
+                    generalStack={generalStack}
+                    composedStack={composedStack}
+                    stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
+                    stackAddsCount={stackAddsCount}
+                  />
+                ),
+              },
+              {
+                id: "sampling",
+                label: "Sampling",
+                summary: samplingTabSummary,
+                changed: samplingChanged,
+                content: (
+                  <VideoSamplingSettings
+                    showTurbo={showTurbo}
+                    veda={veda}
+                    setVeda={setVeda}
+                    vedaSteps={vedaSteps}
+                    showLightning={showLightning}
+                    lightning={lightning}
+                    setLightning={setLightning}
+                    turboVariants={turboVariants}
+                    selectTurboVariant={selectTurboVariant}
+                    activeTurboVariant={activeTurboVariant}
+                    selectedModel={selectedModel}
+                    model={model}
+                    setLtxPipeline={setLtxPipeline}
+                    ltxPipeline={ltxPipeline}
+                    setDistilledVariant={setDistilledVariant}
+                    distilledVariant={distilledVariant}
+                    setPrecision={setPrecision}
+                    precision={precision}
+                    setTransformerVariant={setTransformerVariant}
+                    transformerVariant={transformerVariant}
+                    ltx25Dev={ltx25Dev}
+                    setVaeDecoder={setVaeDecoder}
+                    vaeDecoder={vaeDecoder}
+                    autoDuration={autoDuration}
+                    setAutoDuration={setAutoDuration}
+                    setAutoDurationMinSeconds={setAutoDurationMinSeconds}
+                    setAutoDurationMaxSeconds={setAutoDurationMaxSeconds}
+                    autoDurationMinSeconds={autoDurationMinSeconds}
+                    autoDurationMaxSeconds={autoDurationMaxSeconds}
+                    setTemporalUpsampleRounds={setTemporalUpsampleRounds}
+                    temporalUpsampleRounds={temporalUpsampleRounds}
+                    showsLegacyLtxGuidanceControls={showsLegacyLtxGuidanceControls}
+                    setLtxVideoCfg={setLtxVideoCfg}
+                    ltxVideoCfg={ltxVideoCfg}
+                    setLtxVideoStg={setLtxVideoStg}
+                    ltxVideoStg={ltxVideoStg}
+                    setLtxVideoRescale={setLtxVideoRescale}
+                    ltxVideoRescale={ltxVideoRescale}
+                    showClipStrength={showClipStrength}
+                    mode={mode}
+                    setVideoConditioningStrength={setVideoConditioningStrength}
+                    videoConditioningStrength={videoConditioningStrength}
+                    setBridgeRightVideoConditioningStrength={setBridgeRightVideoConditioningStrength}
+                    bridgeRightVideoConditioningStrength={bridgeRightVideoConditioningStrength}
+                    showQualitySegment={showQualitySegment}
+                    quality={quality}
+                    setQuality={setQuality}
+                    seed={seed}
+                    setSeed={setSeed}
+                    sampler={sampler}
+                    scheduler={scheduler}
+                    samplerOptions={samplerOptions}
+                    schedulerOptions={schedulerOptions}
+                    setSampler={setSampler}
+                    setScheduler={setScheduler}
+                    setSchedulerShift={setSchedulerShift}
+                    schedulerShift={schedulerShift}
+                    stepsChoice={stepsChoice}
+                    lightningActive={lightningActive}
+                    stepsOffMenu={stepsOffMenu}
+                    stepsOverride={stepsOverride}
+                    stepsPinned={stepsPinned}
+                    setStepsOverride={setStepsOverride}
+                    minSteps={minSteps}
+                    stepsPinnedValue={stepsPinnedValue}
+                    supportsGuidance={supportsGuidance}
+                    setGuidanceOverride={setGuidanceOverride}
+                    guidanceOverride={guidanceOverride}
+                    supportsNegativePrompt={supportsNegativePrompt}
+                    setNegativePrompt={setNegativePrompt}
+                    negativePrompt={negativePrompt}
+                  />
+                ),
+              },
+            ]}
           />
-
-          {/* sc-13136: the EXACT composed prompt the run will send once a style is active — recomputed
-              from the same base the submit uses so it can never drift. Sits under the Style axis row.
-              Hidden when no style applies. */}
-          <StyledPromptPreview active={styleApplied} composedPrompt={composedStylePrompt} appearanceActive={appearance.active} negativePrompt={appearance.active ? supportsNegativePrompt ? composeNegativePrompt(stackActive ? composedStack.negativePrompt : negativePrompt, appearance.resolved.negative) : "" : undefined} />
-
-          {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-8445). This
-              panel is captioned "Prompt sent" and exists so the user sees exactly what will be
-              generated; general presets are filtered on `kind === "general"` alone, so a preset
-              carrying `defaults.negativePrompt` reaches a CFG-free model too. Since submit now sends
-              `negativePrompt: ""` for such a model, showing the stack's `Negative:` line here would
-              assert something that is NOT sent — the same false-copy class this story exists to
-              remove. (Only the negative needs the guard: the preview's other extras are aspect and
-              count, which every video engine honors.) */}
-          <PresetStackPreview
-            generalStack={generalStack}
-            composed={composedStack}
-            stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
-            stackAddsCount={stackAddsCount}
-          />
-
-          {durationHint ? <p className="helper-copy">{durationHint}</p> : null}
-
-          <AdvancedSection
-            hint="cleared values → model default"
-            onToggle={toggleAdvanced}
-            open={advancedOpen}
-          >
-            <VideoAdvancedPanel
-            activeBackend={activeBackend}
-            flashAttn={flashAttn}
-            setFlashAttn={setFlashAttn}
-            showTurbo={showTurbo}
-            veda={veda}
-            setVeda={setVeda}
-            vedaSteps={vedaSteps}
-            setFps={setFps}
-            fps={fps}
-            fpsOptions={fpsOptions}
-            showLightning={showLightning}
-            lightning={lightning}
-            setLightning={setLightning}
-            turboVariants={turboVariants}
-            selectTurboVariant={selectTurboVariant}
-            activeTurboVariant={activeTurboVariant}
-            selectedModel={selectedModel}
-            model={model}
-            setLtxPipeline={setLtxPipeline}
-            ltxPipeline={ltxPipeline}
-            setDistilledVariant={setDistilledVariant}
-            distilledVariant={distilledVariant}
-            setPrecision={setPrecision}
-            precision={precision}
-            setTransformerVariant={setTransformerVariant}
-            transformerVariant={transformerVariant}
-            ltx25Dev={ltx25Dev}
-            setVaeDecoder={setVaeDecoder}
-            vaeDecoder={vaeDecoder}
-            autoDuration={autoDuration}
-            setAutoDuration={setAutoDuration}
-            setAutoDurationMinSeconds={setAutoDurationMinSeconds}
-            setAutoDurationMaxSeconds={setAutoDurationMaxSeconds}
-            autoDurationMinSeconds={autoDurationMinSeconds}
-            autoDurationMaxSeconds={autoDurationMaxSeconds}
-            setTemporalUpsampleRounds={setTemporalUpsampleRounds}
-            temporalUpsampleRounds={temporalUpsampleRounds}
-            supportsPromptEnhancement={supportsPromptEnhancement}
-            enhancePrompt={enhancePrompt}
-            setEnhancePrompt={setEnhancePrompt}
-            supportsStockPromptEnhancement={supportsStockPromptEnhancement}
-            supportsTextEncoderSelection={supportsTextEncoderSelection}
-            setTextEncoderModel={setTextEncoderModel}
-            selectedTextEncoderModel={selectedTextEncoderModel}
-            textEncoderOptions={textEncoderOptions}
-            selectedTextEncoderAvailable={selectedTextEncoderAvailable}
-            defaultTextEncoderId={defaultTextEncoderId}
-            showsLegacyLtxGuidanceControls={showsLegacyLtxGuidanceControls}
-            setLtxVideoCfg={setLtxVideoCfg}
-            ltxVideoCfg={ltxVideoCfg}
-            setLtxVideoStg={setLtxVideoStg}
-            ltxVideoStg={ltxVideoStg}
-            setLtxVideoRescale={setLtxVideoRescale}
-            ltxVideoRescale={ltxVideoRescale}
-            showClipStrength={showClipStrength}
-            mode={mode}
-            setVideoConditioningStrength={setVideoConditioningStrength}
-            videoConditioningStrength={videoConditioningStrength}
-            setBridgeRightVideoConditioningStrength={setBridgeRightVideoConditioningStrength}
-            bridgeRightVideoConditioningStrength={bridgeRightVideoConditioningStrength}
-            showQualitySegment={showQualitySegment}
-            quality={quality}
-            setQuality={setQuality}
-            showTorchQuantization={showTorchQuantization}
-            setQuantization={setQuantization}
-            quantization={quantization}
-            quantVariants={quantVariants}
-            setRequestedGpu={setRequestedGpu}
-            requestedGpu={requestedGpu}
-            gpuOptions={gpuOptions}
-            seed={seed}
-            setSeed={setSeed}
-            sampler={sampler}
-            scheduler={scheduler}
-            samplerOptions={samplerOptions}
-            schedulerOptions={schedulerOptions}
-            setSampler={setSampler}
-            setScheduler={setScheduler}
-            showSchedulerPicker={showSchedulerPicker}
-            setSchedulerShift={setSchedulerShift}
-            schedulerShift={schedulerShift}
-            stepsChoice={stepsChoice}
-            lightningActive={lightningActive}
-            stepsOffMenu={stepsOffMenu}
-            stepsOverride={stepsOverride}
-            stepsPinned={stepsPinned}
-            setStepsOverride={setStepsOverride}
-            minSteps={minSteps}
-            stepsPinnedValue={stepsPinnedValue}
-            supportsGuidance={supportsGuidance}
-            setGuidanceOverride={setGuidanceOverride}
-            guidanceOverride={guidanceOverride}
-            setCharacterId={setCharacterId}
-            characterId={characterId}
-            characters={characters}
-            setCharacterLookId={setCharacterLookId}
-            characterLookId={characterLookId}
-            supportsNegativePrompt={supportsNegativePrompt}
-            setNegativePrompt={setNegativePrompt}
-            negativePrompt={negativePrompt}
-            createVideoUpscaleJob={createVideoUpscaleJob}
-            importAsset={importAsset}
-            macCapabilities={macCapabilities}
-            onLocalJobCreated={onLocalJobCreated}
-            onOpenQueue={onOpenQueue}
-            selectedAsset={selectedAsset}
-            activeProject={activeProject}
-            videoAssets={videoAssets}
-          />
-          </AdvancedSection>
-
-          {/* Every reason Generate is dead — mode/preset/LoRA/worker problems — in one chip
-              row, from the same summary that gates the button (sc-10650). Project, prompt
-              and inputs are silent requirements: their empty fields show it. */}
-          <ValidationSummary issues={portableRefusal
-            ? [...videoValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
-            : videoValidity.surfaced} label="Generate errors" />
-          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
-          <VedaOutcome
-            label="Recorded recipe attention"
-            raw={launchRequest?.recipe?.rawAdapterSettings}
-          />
-          {canStartNewGenerationFromReplay ? (
-            <button
-              className="secondary-action"
-              onClick={handleStartNewGenerationFromReplay}
-              type="button"
-            >
-              {startNewGenerationLabel}
-            </button>
-          ) : null}
-
         </WorkPanel>
 
-        <VideoReviewPanel
-            localJobs={localJobs}
-            assets={assets}
-            onPreview={onPreview}
-            onCancelJob={onCancelJob}
-            onOpenQueue={onOpenQueue}
-            latestAssets={latestAssets}
-            deleteAsset={deleteAsset}
-            purgeAsset={purgeAsset}
-            updateAssetStatus={updateAssetStatus}
-            comparisonAsset={comparisonAsset}
-            comparisonSource={comparisonSource}
-            comparisonMode={comparisonMode}
-            setComparisonMode={setComparisonMode}
-            abSide={abSide}
-            setAbSide={setAbSide}
-          />
+        <VideoResultsArea
+          summary={`${ltx25AutoDurationEnabled ? "auto length" : `${duration} s`} · ${resolution.replace("x", " × ")} · ${fps} fps`}
+          batch={(
+            <VideoReviewPanel
+              localJobs={localJobs}
+              assets={assets}
+              onPreview={onPreview}
+              onCancelJob={onCancelJob}
+              onOpenQueue={onOpenQueue}
+              latestAssets={latestAssets}
+              deleteAsset={deleteAsset}
+              purgeAsset={purgeAsset}
+              updateAssetStatus={updateAssetStatus}
+              comparisonAsset={comparisonAsset}
+              comparisonSource={comparisonSource}
+              comparisonMode={comparisonMode}
+              setComparisonMode={setComparisonMode}
+              abSide={abSide}
+              setAbSide={setAbSide}
+            />
+          )}
+          upscale={(
+            /* Video upscale (super-resolve an existing clip) — it operates on a selected existing
+               asset, independent of the current generation payload, and every control in it is a
+               type="button" so it never submits the compose form it sits inside. */
+            <VideoUpscalePanel
+              characters={characters}
+              createVideoUpscaleJob={createVideoUpscaleJob}
+              importAsset={importAsset}
+              macCapabilities={macCapabilities}
+              onSubmitted={(job) => {
+                onLocalJobCreated(job);
+                onOpenQueue();
+              }}
+              selectedAsset={selectedAsset}
+              projectId={activeProject?.id}
+              videoAssets={videoAssets}
+            />
+          )}
+        />
       </form>
       <StudioPromptGuide open={guideOpen} guide={promptGuide} modelName={selectedModel?.name} onClose={closeGuide} />
     </section>

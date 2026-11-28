@@ -9,9 +9,16 @@ import { useStudioPromptGuide } from "../hooks/useStudioPromptGuide.js";
 import { StudioPromptGuide, CharacterLookFields } from "../components/StudioFields.jsx";
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { preferredOption, preferredResolution } from "../studioDefaults.js";
-import { ImageAdvancedPanel } from "./imageStudio/ImageAdvancedPanel.jsx";
 import { ImagePromptComposer } from "./imageStudio/ImagePromptComposer.jsx";
-import { ImageGenerationSettings } from "./imageStudio/ImageGenerationSettings.jsx";
+import { ImageModelSettings } from "./imageStudio/ImageModelSettings.jsx";
+import { ImageLoraSettings, ImageStyleSettings } from "./imageStudio/ImageLookSettings.jsx";
+import { ImageSamplingSettings } from "./imageStudio/ImageSamplingSettings.jsx";
+import { ImageFinishSettings } from "./imageStudio/ImageFinishSettings.jsx";
+import { imageSettingsTabFromSnapshot, imageSettingsTabSummaries } from "./imageStudio/imageSettingsTabs.js";
+import { StudioSettingsTabs } from "../components/StudioSettingsTabs.jsx";
+import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
+import { Flux3LayoutEditor } from "../components/Flux3LayoutEditor.jsx";
+import "./imageStudio/ImageStudioLayout.css";
 import { ImageReviewPanel } from "./imageStudio/ImageReviewPanel.jsx";
 import { useStructuredPrompt } from "./imageStudio/useStructuredPrompt.js";
 import { useMossImageTransition } from "./imageStudio/useMossImageTransition.js";
@@ -26,11 +33,8 @@ import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 
-import { AssetMedia } from "../components/assetMedia.jsx";
+import { AssetMedia, assetUrl } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
-import { AdvancedSection } from "../components/AdvancedSection.jsx";
-
-import { MultiPhaseEditor } from "../components/MultiPhaseEditor.jsx";
 import { buildTurboFinishPhases, modelSupportsMultiPhase, multiPhaseIssues as computeMultiPhaseIssues, serializePhases } from "../imageMultiPhase.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 
@@ -52,6 +56,7 @@ import { orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, 
 import { maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
 import { usePromptTokenInsertion } from "../hooks/usePromptTokenInsertion.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
+import { showTransparencyToggle } from "../qwenAlpha.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 
 import {
@@ -121,7 +126,7 @@ function defaultCharacterPrompt(character) {
   }
 }
 import { finiteNumberOrUndefined, findModelEditLora, loraIsInstalled, serializeLora, composePreset } from "../presetUtils.js";
-import { PresetStackPreview, useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
+import { useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
 import {
@@ -183,7 +188,6 @@ import { availableUpscaleEngines as upscaleEnginesForPlatform, upscaleEngineIsRe
 import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders } from "../irisRestore.js";
 
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
-import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
 import { batchClipNotice, fitPromptToLimit, imagePromptCharLimit } from "../imagePromptLimit.js";
 import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
@@ -464,8 +468,6 @@ export function ImageStudio() {
   });
 
   const {
-    advancedOpen,
-    setAdvancedOpen,
     seed,
     setSeed,
     negativePrompt,
@@ -481,7 +483,6 @@ export function ImageStudio() {
     setStepsOverride,
     guidanceOverride,
     setGuidanceOverride,
-    toggleAdvanced
   } = useStudioAdvancedSettings(saved, { schedulerShift: mossEdit ? 5 : null, steps: mossEdit ? 30 : "", guidanceScale: mossEdit ? 4 : "" });
 
   const [resolution, setResolution] = useState(saved.resolution ?? (mossEdit ? "512x512" : "1024x1024"));
@@ -552,13 +553,12 @@ export function ImageStudio() {
   const [textStyleGain, setTextStyleGain] = useState(saved.textStyleGain ?? 1.0);
   // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). `multiPhaseEnabled` opts the job into the
   // multi-phase lane; `multiPhasePhases` is the editor's ordered phase list (LoRA refs stored by
-  // stable id — serializePhases resolves them to indices at emit time). `multiPhaseOpen` is the
-  // experimental disclosure's collapsed/expanded state (default collapsed, busy-page guidance).
+  // stable id — serializePhases resolves them to indices at emit time). The editor sits in the
+  // Sampling settings tab's "For this model" group.
   const [multiPhaseEnabled, setMultiPhaseEnabled] = useState(saved.multiPhaseEnabled ?? false);
   const [multiPhasePhases, setMultiPhasePhases] = useState(
     Array.isArray(saved.multiPhasePhases) ? saved.multiPhasePhases : [],
   );
-  const [multiPhaseOpen, setMultiPhaseOpen] = useState(saved.multiPhaseOpen ?? false);
   const [controlnetScale, setControlnetScale] = useState(saved.controlnetScale ?? 0.8);
   // Variation knob for backbones whose CFG is decoupled from IP-Adapter:
   // FLUX (true_cfg_scale alongside ipAdapterScale) and Qwen-Image-Edit (true_cfg_scale
@@ -695,15 +695,27 @@ export function ImageStudio() {
   const [expanding, setExpanding] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
-  // Prompt tools (epic UI-refinement): which inline prompt-tool panel is open —
-  // null | "describe" (reference-image caption) | "refine" (rewrite my prompt).
-  // Replaces the always-rendered ReferenceCaptionPicker + RefinePromptControl pair
-  // with two toggle tiles; only one panel opens at a time.
+  // Prompt tools (epic UI-refinement): which inline assist panel under the prompt box is open —
+  // null | "imageReference" | "structure" | "describe" | "refine" | "qwenRewrite" | "h3Expand".
+  // Only one panel opens at a time; each tool's button keeps its own availability gate.
   const [promptTool, setPromptTool] = useState(saved.promptTool ?? null);
   const togglePromptTool = useCallback(
     (tool) => setPromptTool((current) => (current === tool ? null : tool)),
     [],
   );
+  // The settings tab strip's open tab (studio layout simplification) — "model" | "loras" |
+  // "style" | "sampling" | "finish", or null when every tab is closed. Replaces the persisted
+  // `advancedOpen`; a snapshot saved before the tab strip existed opens Sampling if it had
+  // Advanced open (see imageSettingsTabFromSnapshot).
+  const [settingsTab, setSettingsTab] = useState(() => imageSettingsTabFromSnapshot(saved));
+  // An incompatible LoRA blocks Generate; reveal the LoRAs tab once when one appears (the
+  // generate-errors summary under the prompt box says why) without pinning the strip there.
+  const [loraIssueRevealed, setLoraIssueRevealed] = useState(false);
+  const revealLoraIssue = useCallback((open) => {
+    if (!open) return;
+    setLoraIssueRevealed(true);
+    setSettingsTab("loras");
+  }, []);
   const depthControlAssets = useMemo(
     () =>
       assets.filter(
@@ -1511,7 +1523,7 @@ export function ImageStudio() {
     setReferenceDimensionIntent(null);
     setWidthOverride(match[1]);
     setHeightOverride(match[2]);
-    setAdvancedOpen(true);
+    setSettingsTab("sampling");
   };
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
@@ -1828,12 +1840,16 @@ export function ImageStudio() {
     latestAssets,
     trackedLocalJobs,
     initialPresetId: saved.selectedPresetId ?? null,
-    advancedOpen,
-    setAdvancedOpen,
+    advancedOpen: loraIssueRevealed,
+    setAdvancedOpen: revealLoraIssue,
     initialSelectedLoraIds: saved.selectedLoraIds ?? [],
     initialLoraWeights: saved.loraWeights ?? {},
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
+  const incompatibleLoraCount = selectedLoraValidationResult.incompatible.length;
+  useEffect(() => {
+    if (!incompatibleLoraCount) setLoraIssueRevealed(false);
+  }, [incompatibleLoraCount]);
 
   // The effective generation inputs once the general-preset stack is folded in (epic 11949).
   // The live preview shows exactly this; a client-authoritative submit sends it (Phase 5).
@@ -1932,7 +1948,6 @@ export function ImageStudio() {
   const applyTurboFinishPreset = useCallback(() => {
     setMultiPhasePhases(buildTurboFinishPhases(selectedLoras));
     setMultiPhaseEnabled(true);
-    setMultiPhaseOpen(true);
   }, [selectedLoras]);
 
   // sc-10516: a preset launch (Presets → "Use in Studio"). `availablePresets` filters on
@@ -2451,7 +2466,7 @@ export function ImageStudio() {
     promptTool,
     magicPromptBackend,
     count,
-    advancedOpen,
+    settingsTab,
     model,
     textEncoderModel,
     seed,
@@ -2503,7 +2518,6 @@ export function ImageStudio() {
     // reload regardless of the selected-LoRA list's async hydration).
     multiPhaseEnabled,
     multiPhasePhases,
-    multiPhaseOpen,
     selectedPresetId,
     generalStackIds,
     batchMode,
@@ -3094,6 +3108,130 @@ export function ImageStudio() {
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
 
+  // The Structure tool's reveal contract (formerly the ControlPanel disclosure's own): a workflow
+  // launch that carries shared poses opens it on that launch, and a reset that clears replayed
+  // poses (a model switch, a fresh non-recipe launch) closes it. A restored `promptTool` is left
+  // alone on mount.
+  const structureRevealToken = showControlPanel && workflowPoses.length ? launchRequest?.id ?? null : null;
+  const structureRevealMounted = useRef(false);
+  useEffect(() => {
+    const mounted = structureRevealMounted.current;
+    structureRevealMounted.current = true;
+    if (structureRevealToken) {
+      setPromptTool("structure");
+    } else if (mounted && poseLibraryReplayOpen === false) {
+      setPromptTool((current) => (current === "structure" ? null : current));
+    }
+  }, [structureRevealToken, poseLibraryReplayOpen]);
+
+  // Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
+  // text-to-image backbones whose `ui.controlModes` advertises it. It is the "Structure" prompt
+  // tool's assist panel (studio layout simplification): one panel at a time under the prompt box,
+  // beside Image reference — both guide the render from an image. Pose reuses the library picker
+  // (one image per pose); canny/depth take an uploaded control image + a preprocess-vs-use-as-is
+  // toggle. The request wiring lives in submit() — controlMode / sourceAssetId|advanced.controlImage
+  // / advanced.controlScale.
+  const structurePanel = showControlPanel ? (
+    <ControlPanel
+      embedded
+      supportedModes={controlModes}
+      controlMode={activeControlMode}
+      onControlModeChange={setControlMode}
+      selectedPoseIds={selectedPoseIds}
+      onTogglePose={(id) =>
+        setSelectedPoseIds((ids) =>
+          ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
+        )
+      }
+      onClearPoses={() => setSelectedPoseIds([])}
+      loadUserPoses={loadUserPoses}
+      extraPoses={workflowPoses}
+      preferredPoseCategory={workflowPoses.length ? WORKFLOW_POSE_CATEGORY : null}
+      poseBlockText={macPoseBlock ? macPoseBlock.text : null}
+      controlImageAssetId={controlImageAssetId}
+      onControlImageChange={setControlImageAssetId}
+      controlImagePassthrough={effectiveControlPassthrough}
+      onControlImagePassthroughChange={setControlImagePassthrough}
+      controlImageAssets={
+        activeControlMode === "depth" ? [...depthControlAssets, ...editImageAssets] : editImageAssets
+      }
+      importAsset={importAsset}
+      projectId={activeProject?.id}
+      characters={characters}
+      controlScaleConfig={controlScaleConfig}
+      controlScale={effectiveControlScale}
+      onControlScaleChange={setControlScale}
+      controlOverlayBaseModel={controlOverlayBaseModel}
+      selectedOverlayId={controlOverlayId}
+      onOverlayChange={setControlOverlayId}
+    />
+  ) : null;
+
+  // Screen-level status lines, shown with the composer's own directly under the prompt box.
+  const composerStatusLines = (
+    <>
+      {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
+
+      {decoderCapabilitiesPending && macCapabilitiesError ? (
+        <div className="inline-warning decoder-capability-recovery" role="alert">
+          <span>{macCapabilitiesError} The restored decoder has not been changed.</span>
+          <div className="decoder-capability-recovery-actions">
+            <button
+              className="secondary-action"
+              disabled={macCapabilitiesLoading || typeof refreshMacCapabilities !== "function"}
+              onClick={() => refreshMacCapabilities?.()}
+              type="button"
+            >
+              {macCapabilitiesLoading ? "Retrying…" : "Retry"}
+            </button>
+            <button
+              className="secondary-action"
+              onClick={() => setDecoder("native")}
+              type="button"
+            >
+              Use Native VAE
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <ValidationSummary issues={portableRefusal
+        ? [...generateValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
+        : generateValidity.surfaced} label="Generate errors" />
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+      {portableFeedbackStatus(portableBatchFeedback?.result) ? <p role="status">{portableFeedbackStatus(portableBatchFeedback.result)}</p> : null}
+    </>
+  );
+
+  const settingsSummaries = imageSettingsTabSummaries({
+    selectedModel,
+    width,
+    height,
+    sizeEnvelope,
+    count,
+    showTierPicker,
+    quantTier,
+    userSelectedLoraCount,
+    styleAxisAvailable,
+    styleId,
+    selectedPreset,
+    generalStackCount: generalStack.length,
+    appearanceActive: appearance.active,
+    mossDmd,
+    mossDmdSteps,
+    stepsOverride,
+    guidanceOverride,
+    seed,
+    upscaleEnabled,
+    upscaleFactor,
+    hiresFixEnabled,
+    hiresFixUpscaleBy,
+    usePid: showPidToggle && usePid,
+    pidTarget,
+    decoder: showDecoderPicker ? decoder : "native",
+    transparentBackground: showTransparencyToggle(selectedModel) && transparentBackground,
+  });
+
   return (
     <ModelAvailabilityGate
       ready={modelReady}
@@ -3109,7 +3247,7 @@ export function ImageStudio() {
     >
     <section className="page-frame image-studio">
       <form className="studio-shell" onSubmit={submit}>
-        <WorkPanel className="studio-work-panel">
+        <WorkPanel className="studio-work-panel image-compose-panel">
           <ImagePromptComposer
             mode={mode}
             handleModeChange={handleModeChange}
@@ -3221,28 +3359,25 @@ export function ImageStudio() {
             h3ExpandPicker={h3Expander.picker}
             resolution={resolution}
             selectedModel={selectedModel}
-            flux3LayoutAvailable={flux3LayoutAvailable}
-            flux3Layout={flux3Layout}
-            setFlux3Layout={setFlux3Layout}
-            width={width}
-            height={height}
-            layoutReferences={layoutReferences}
-            assets={assets}
+            structureAvailable={showControlPanel}
+            structurePanel={structurePanel}
+            statusLines={composerStatusLines}
           />
 
-        {mode === "edit_image" || mode === "character_image" ? (
-          <div className="studio-source-band">
+        {mode === "edit_image" || mode === "character_image" || flux3LayoutAvailable ? (
+          <section aria-label="Inputs" className="studio-grid studio-inputs">
+            <span className="eyebrow span-full studio-inputs-label">Inputs</span>
             {mode === "edit_image" || orderedCharacterActive ? (
               <>
                 {mossEdit ? <>
-                  <MossReferencePicker assets={editImageAssets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} max={maxStudioReferences} />
-                  <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} />
+                  <div className="span-full"><MossReferencePicker assets={editImageAssets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} max={maxStudioReferences} /></div>
+                  <div className="span-full"><MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} /></div>
                   {mossEditError ? <p role="alert">{mossEditError}</p> : null}
                 </> : multiReference ? (
                   // sc-6211: FLUX.2-dev multi-reference edit — pick 1–N reference images that the
                   // model combines/edits (Conditioning::MultiReference). Sends the plural
                   // `referenceAssetIds`; a single pick reduces to the normal single-reference edit.
-                  <ImageEditSourcePickerField
+                  <div className="span-2 studio-input-cell"><ImageEditSourcePickerField
                     assets={editImageAssets}
                     buttonLabel="Select images"
                     changeLabel="Edit references"
@@ -3258,13 +3393,13 @@ export function ImageStudio() {
                     onChange={changeReferenceAssetIds}
                     projectId={activeProject?.id}
                     values={referenceAssetIds}
-                  />
+                  /></div>
                 ) : null}
                 {/* sc-24113: the ORDER of these references is part of the request for a model whose
                     template numbers them, so show it and let the user change it. Instance owners
                     keep removal available through the last reference and the explicit empty state. */}
                 {mossEdit ? null : multiReference ? (
-                  <OrderedReferenceList
+                  <div className="span-2 studio-input-cell"><OrderedReferenceList
                     assetIds={referenceAssetIds}
                     itemKeys={flux3LayoutAvailable ? layoutReferences.map(({ id }) => id) : undefined}
                     onMove={flux3LayoutAvailable ? moveFlux3Reference : undefined}
@@ -3275,10 +3410,10 @@ export function ImageStudio() {
                     // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
                     tokenFor={(index) => referencePromptToken(selectedModel, index)}
                     onInsertToken={promptTokenInsertion.insert}
-                  />
+                  /></div>
                 ) : (
                   <>
-                    <ImageEditSourcePickerField
+                    <div className="studio-input-cell"><ImageEditSourcePickerField
                       assets={editImageAssets}
                       buttonLabel="Select image"
                       characters={characters}
@@ -3288,13 +3423,13 @@ export function ImageStudio() {
                       onChange={changeSourceAssetId}
                       projectId={activeProject?.id}
                       value={sourceAssetId}
-                    />
+                    /></div>
                     {/* Optional second source for a two-reference edit (epic 10871 P1.3). Any two
                         images in a fixed order: the source above is image 1 (required); this is
                         image 2 (optional). Only rendered when the model declares `ui.editReferences`. */}
                     {editReferences ? (
                       <>
-                        <ImageEditSourcePickerField
+                        <div className="studio-input-cell"><ImageEditSourcePickerField
                           assets={editImageAssets}
                           buttonLabel="Select image"
                           characters={characters}
@@ -3305,14 +3440,14 @@ export function ImageStudio() {
                           onChange={changeEditSecondAssetId}
                           projectId={activeProject?.id}
                           value={editSecondAssetId}
-                        />
+                        /></div>
                         {editReferences.secondaryHint ? (
-                          <p className="field-hint">{editReferences.secondaryHint}</p>
+                          <p className="field-hint span-2">{editReferences.secondaryHint}</p>
                         ) : null}
                       </>
                     ) : null}
                     {sourceWithMultiReference ? (
-                      <ImageEditSourcePickerField
+                      <div className="span-2 studio-input-cell"><ImageEditSourcePickerField
                         assets={editImageAssets}
                         buttonLabel="Select references"
                         changeLabel="Edit references"
@@ -3324,29 +3459,29 @@ export function ImageStudio() {
                         onChange={changeReferenceAssetIds}
                         projectId={activeProject?.id}
                         values={referenceAssetIds}
-                      />
+                      /></div>
                     ) : null}
                     {sourceWithMultiReference ? (
-                      <OrderedReferenceList
+                      <div className="span-2 studio-input-cell"><OrderedReferenceList
                         assetIds={referenceAssetIds}
                         labelFor={assetLabelFor}
                         onChange={changeReferenceAssetIds}
                         onRemove={(index) => changeReferenceAssetIds(referenceAssetIds.filter((_, at) => at !== index))}
-                      />
+                      /></div>
                     ) : null}
                   </>
                 )}
-                <FitModeControl
+                <div className="span-2 studio-input-cell"><FitModeControl
                   value={effectiveFitMode(fitMode, editInpaintCapable)}
                   onChange={setFitMode}
                   inpaintCapable={editInpaintCapable}
-                />
+                /></div>
                 {/* Krea-style edit LoRA (epic 10871, P4.1): managed for the user — no manual
                     picking. Applied automatically once installed; a one-click download when not
                     (the base can't edit without it, R5). Inert for edit models that need none. */}
                 {editLora ? (
                   editLoraInstalled ? (
-                    <>
+                    <div className="span-2 studio-input-cell edit-lora-managed">
                       <p className="field-hint" role="status">
                         <Icon.Sparkle size={13} /> {editLora.name} is applied automatically for editing.
                       </p>
@@ -3371,9 +3506,9 @@ export function ImageStudio() {
                           value={effectiveLoraWeight(editLora)}
                         />
                       </div>
-                    </>
+                    </div>
                   ) : (
-                    <div className="inline-warning edit-lora-download">
+                    <div className="inline-warning edit-lora-download span-2">
                       <span>
                         {editLora.name} is required to edit — the base can’t edit without it.
                       </span>
@@ -3393,17 +3528,14 @@ export function ImageStudio() {
 
             {mode === "character_image" ? (
               <>
-                <div className="control-grid compact-controls">
-                  <CharacterLookFields characters={characters} characterId={characterId} lookId={characterLookId}
-                    onCharacterChange={changeCharacterId} onLookChange={setCharacterLookId} characterPlaceholder="Select character" />
-
-                </div>
-                {flux3LayoutAvailable && !orderedCharacterReferences ? <button type="button"
+                <CharacterLookFields characters={characters} characterId={characterId} lookId={characterLookId}
+                  onCharacterChange={changeCharacterId} onLookChange={setCharacterLookId} characterPlaceholder="Select character" />
+                {flux3LayoutAvailable && !orderedCharacterReferences ? <button className="studio-input-action" type="button"
                   onClick={() => changeReferenceAssetIds(referenceAssetId ? [referenceAssetId] : [])}>Edit reference images</button> : null}
                 {characterReferenceError ? <p className="inline-warning" role="alert">{characterReferenceError}</p> : null}
                 {characterId ? (
                   characterReferences.length ? (
-                    <div className="character-reference-picker">
+                    <div className="character-reference-picker span-full">
                       <span className="reference-picker-label">Reference identity</span>
                       <div className="reference-thumb-row">
                         {characterReferences.map((reference) => (
@@ -3520,347 +3652,318 @@ export function ImageStudio() {
                       </div>
                     </div>
                   ) : (
-                    <div className="guidance-strip">
+                    <div className="guidance-strip span-full">
                       <strong>No approved reference</strong>
                       <span>Approve a reference image for this character in Character Studio to generate identity-preserving variations. Generating now uses the prompt only.</span>
                     </div>
                   )
                 ) : (
-                  <div className="guidance-strip">
+                  <div className="guidance-strip span-full">
                     <strong>Select a character</strong>
                     <span>Choose a character with an approved reference image to copy its identity across variations.</span>
                   </div>
                 )}
               </>
             ) : null}
-          </div>
+            {/* Quick edits (Edit mode): the built-in edit instructions. A scene description is not
+                an instruction, so Edit swaps the Try: suggestions for these. Free-text models only. */}
+            {mode === "edit_image" && !structuredPromptModel ? (
+              <div className="span-full studio-quick-edits">
+                <EditPromptTemplates onApply={setPromptFromUser} variant="studio" />
+              </div>
+            ) : null}
+            {flux3LayoutAvailable ? (
+              <div className="span-full studio-flux3-layout">
+                <Flux3LayoutEditor
+                  value={flux3Layout}
+                  onChange={setFlux3Layout}
+                  width={width || 1024}
+                  height={height || 1024}
+                  references={layoutReferences.map((slot) => {
+                    const asset = assets.find(({ id }) => id === slot.assetId);
+                    return { ...slot, label: asset?.displayName ?? asset?.name ?? slot.assetId,
+                      url: asset ? assetUrl(asset) : null, width: asset?.width, height: asset?.height };
+                  })}
+                />
+              </div>
+            ) : null}
+          </section>
         ) : null}
 
-          {/* Generation settings (UI-refinement 2b): the everyday knobs — Model, Aspect,
-              Variations, Style preset — sit in a bar directly under the composer instead of a
-              detached right rail. Power-user knobs fold into Advanced below; the results area
-              reclaims the full width (single-column .studio-results). */}
-          <ImageGenerationSettings
-            selectedModel={selectedModel}
-            setModel={setModel}
-            model={model}
-            pickerModels={pickerModels}
-            modeLabel={modeLabel}
-            setActiveView={setActiveView}
-            createModelDownloadJob={createModelDownloadJob}
-            mossEdit={mossEdit}
-            mossDmd={mossDmd}
-            setMossField={setMossField}
-            mossComponents={mossComponents}
-            mossDownload={mossDownload}
-            mossDownloadProgress={mossDownloadProgress}
-            downloadMossAcceleration={downloadMossAcceleration}
-            handleResolutionChange={handleResolutionChange}
-            resolution={resolution}
-            sizeEnvelope={sizeEnvelope}
-            patchGridNotice={patchGridNotice}
-            nativeResolutionNotice={nativeResolutionNotice}
-            setCount={setCount}
-            count={count}
-            showTierPicker={showTierPicker}
-            quantTier={quantTier}
-            handleTierChange={handleTierChange}
-            tierPickerItems={tierPickerItems}
-            tierSwitching={tierSwitching}
-            tierSuggested={tierSuggested}
-            confirmTier={confirmTier}
-            tierBelowFloor={tierBelowFloor}
-            qualityFloor={qualityFloor}
-            tierExplicit={tierExplicit}
-            pickerSelectedLoras={pickerSelectedLoras}
-            pickerSelectedLoraIds={pickerSelectedLoraIds}
-            pickerCompatibleLoras={pickerCompatibleLoras}
-            userSelectedLoraCount={userSelectedLoraCount}
-            toggleLora={toggleLora}
-            effectiveLoraWeight={effectiveLoraWeight}
-            setLoraWeight={setLoraWeight}
-            loraEmptyMessage={loraEmptyMessage}
-            createLoraDownloadJob={createLoraDownloadJob}
-            activeProject={activeProject}
-            createLoraImportJob={createLoraImportJob}
-            models={models}
-            appearance={appearance}
-            styleAxisAvailable={styleAxisAvailable}
-            styleId={styleId}
-            setStyleId={setStyleId}
-            selectedPreset={selectedPreset}
-            availablePresets={availablePresets}
-            setSelectedPresetId={setSelectedPresetId}
-            availableGeneralPresets={availableGeneralPresets}
-            generalStackIds={generalStackIds}
-            toggleGeneralPreset={toggleGeneralPreset}
-            presetPromptParts={presetPromptParts}
-            presetLoraDetails={presetLoraDetails}
-            presetName={presetName}
-            setPresetName={setPresetName}
-            savingPreset={savingPreset}
-            presetSaveMessage={presetSaveMessage}
-            setPresetSaveMessage={setPresetSaveMessage}
-            handleSaveAsPreset={handleSaveAsPreset}
-            presetScope={presetScope}
-            setPresetScope={setPresetScope}
-
+          {/* Settings (studio layout simplification): one tab strip along the bottom of the compose
+              panel. Each tab names a group and summarises its values; picking a tab opens its panel
+              underneath (only the open one is mounted). Must stay the LAST child of the work panel —
+              it bleeds to the panel's edges and rounds its bottom corners. */}
+          <StudioSettingsTabs
+            active={settingsTab}
+            className="image-settings-tabs"
+            onChange={setSettingsTab}
+            tabs={[
+              {
+                id: "model",
+                label: "Model & output",
+                summary: settingsSummaries.model,
+                attention: Boolean(selectedModel?.updateAvailable),
+                attentionLabel: "Model update available",
+                content: (
+                  <ImageModelSettings
+                    selectedModel={selectedModel}
+                    setModel={setModel}
+                    model={model}
+                    pickerModels={pickerModels}
+                    modeLabel={modeLabel}
+                    setActiveView={setActiveView}
+                    createModelDownloadJob={createModelDownloadJob}
+                    mossEdit={mossEdit}
+                    mossDmd={mossDmd}
+                    setMossField={setMossField}
+                    mossComponents={mossComponents}
+                    mossDownload={mossDownload}
+                    mossDownloadProgress={mossDownloadProgress}
+                    downloadMossAcceleration={downloadMossAcceleration}
+                    handleResolutionChange={handleResolutionChange}
+                    resolution={resolution}
+                    sizeEnvelope={sizeEnvelope}
+                    patchGridNotice={patchGridNotice}
+                    nativeResolutionNotice={nativeResolutionNotice}
+                    setCount={setCount}
+                    count={count}
+                    showTierPicker={showTierPicker}
+                    quantTier={quantTier}
+                    handleTierChange={handleTierChange}
+                    tierPickerItems={tierPickerItems}
+                    tierSwitching={tierSwitching}
+                    tierSuggested={tierSuggested}
+                    confirmTier={confirmTier}
+                    tierBelowFloor={tierBelowFloor}
+                    qualityFloor={qualityFloor}
+                    tierExplicit={tierExplicit}
+                    moss={moss}
+                    setRequestedGpu={setRequestedGpu}
+                    requestedGpu={requestedGpu}
+                    gpuOptions={gpuOptions}
+                    supportsTextEncoderSelection={supportsTextEncoderSelection}
+                    setTextEncoderModel={setTextEncoderModel}
+                    selectedTextEncoderModel={selectedTextEncoderModel}
+                    textEncoderOptions={textEncoderOptions}
+                    selectedTextEncoderAvailable={selectedTextEncoderAvailable}
+                    defaultTextEncoderId={defaultTextEncoderId}
+                    activeBackend={activeBackend}
+                    flashAttn={flashAttn}
+                    setFlashAttn={setFlashAttn}
+                    promptEnhance={promptEnhance}
+                    enhancePrompt={enhancePrompt}
+                    setEnhancePrompt={setEnhancePrompt}
+                    precisionToggle={precisionToggle}
+                    bf16Precision={bf16Precision}
+                    setRecipeTierRequest={setRecipeTierRequest}
+                    setBf16Precision={setBf16Precision}
+                  />
+                ),
+              },
+              {
+                id: "loras",
+                label: "LoRAs",
+                summary: settingsSummaries.loras,
+                changed: settingsSummaries.lorasChanged,
+                content: (
+                  <ImageLoraSettings
+                    selectedModel={selectedModel}
+                    pickerSelectedLoras={pickerSelectedLoras}
+                    pickerSelectedLoraIds={pickerSelectedLoraIds}
+                    pickerCompatibleLoras={pickerCompatibleLoras}
+                    userSelectedLoraCount={userSelectedLoraCount}
+                    toggleLora={toggleLora}
+                    effectiveLoraWeight={effectiveLoraWeight}
+                    setLoraWeight={setLoraWeight}
+                    loraEmptyMessage={loraEmptyMessage}
+                    createLoraDownloadJob={createLoraDownloadJob}
+                    activeProject={activeProject}
+                    createLoraImportJob={createLoraImportJob}
+                    models={models}
+                  />
+                ),
+              },
+              {
+                id: "style",
+                label: "Style & look",
+                summary: settingsSummaries.style,
+                changed: settingsSummaries.styleChanged,
+                content: (
+                  <ImageStyleSettings
+                    appearance={appearance}
+                    styleAxisAvailable={styleAxisAvailable}
+                    styleId={styleId}
+                    setStyleId={setStyleId}
+                    selectedPreset={selectedPreset}
+                    availablePresets={availablePresets}
+                    setSelectedPresetId={setSelectedPresetId}
+                    availableGeneralPresets={availableGeneralPresets}
+                    generalStackIds={generalStackIds}
+                    toggleGeneralPreset={toggleGeneralPreset}
+                    presetPromptParts={presetPromptParts}
+                    presetLoraDetails={presetLoraDetails}
+                    presetName={presetName}
+                    setPresetName={setPresetName}
+                    savingPreset={savingPreset}
+                    presetSaveMessage={presetSaveMessage}
+                    setPresetSaveMessage={setPresetSaveMessage}
+                    handleSaveAsPreset={handleSaveAsPreset}
+                    presetScope={presetScope}
+                    setPresetScope={setPresetScope}
+                    activeProject={activeProject}
+                    stylePreviewActive={stylePreviewActive}
+                    styledPreviewPrompt={styledPreviewPrompt}
+                    promptCharLimit={promptCharLimit}
+                    appearanceNegativePreview={appearanceNegativePreview}
+                    generalStack={generalStack}
+                    composedStack={composedStack}
+                    supportsNegativePrompt={supportsNegativePrompt}
+                    stackAddsNegative={stackAddsNegative}
+                    stackAddsCount={stackAddsCount}
+                  />
+                ),
+              },
+              {
+                id: "sampling",
+                label: "Sampling",
+                summary: settingsSummaries.sampling,
+                changed: settingsSummaries.samplingChanged,
+                content: (
+                  <ImageSamplingSettings
+                    mossEdit={mossEdit}
+                    mossImageAdvanced={mossImageAdvanced}
+                    setSeed={setSeed}
+                    seed={seed}
+                    dimensionConstraints={dimensionConstraints}
+                    setReferenceDimensionIntent={setReferenceDimensionIntent}
+                    setWidthOverride={setWidthOverride}
+                    activeDimensionIntent={activeDimensionIntent}
+                    dropdownWidth={dropdownWidth}
+                    widthOverride={widthOverride}
+                    setHeightOverride={setHeightOverride}
+                    dropdownHeight={dropdownHeight}
+                    heightOverride={heightOverride}
+                    moss={moss}
+                    mossDmd={mossDmd}
+                    mossImage={mossImage}
+                    setMossField={setMossField}
+                    setSampler={setSampler}
+                    sampler={sampler}
+                    samplerOptions={showH3ImageSampler ? [] : samplerOptions}
+                    setScheduler={setScheduler}
+                    scheduler={scheduler}
+                    schedulerOptions={schedulerOptions}
+                    showSchedulerShift={showSchedulerShift}
+                    setSchedulerShift={setSchedulerShift}
+                    effectiveSchedulerShift={effectiveSchedulerShift}
+                    selectedModel={selectedModel}
+                    setMossDmdSteps={setMossDmdSteps}
+                    setStepsOverride={setStepsOverride}
+                    mossDmdSteps={mossDmdSteps}
+                    stepsOverride={stepsOverride}
+                    supportsGuidance={supportsGuidance}
+                    setGuidanceOverride={setGuidanceOverride}
+                    guidanceOverride={guidanceOverride}
+                    supportsCfgInterval={supportsCfgInterval}
+                    cfgIntervalDisabled={cfgIntervalDisabled}
+                    setCfgInterval={setCfgInterval}
+                    cfgInterval={cfgInterval}
+                    cfgIntervalError={cfgIntervalError}
+                    captionOverflowChoices={captionOverflowChoices}
+                    setCaptionOverflow={setCaptionOverflow}
+                    outgoingCaptionOverflow={outgoingCaptionOverflow}
+                    showH3ImageSampler={showH3ImageSampler}
+                    h3ImageSampler={h3ImageSampler}
+                    setH3ImageSampler={setH3ImageSampler}
+                    h3ImageSamplerError={h3ImageSamplerError}
+                    pagCapability={pagCapability}
+                    pag={pag}
+                    setPag={setPag}
+                    pagError={pagError}
+                    showLowResStart={showLowResStart}
+                    lowResStart={lowResStart}
+                    setLowResStart={setLowResStart}
+                    lowResStartResolved={lowResStartResolved}
+                    supportsTextStyle={supportsTextStyle}
+                    textStyleGainConfig={textStyleGainConfig}
+                    setTextStyleGain={setTextStyleGain}
+                    textStyleGain={textStyleGain}
+                    showGuidanceMethodPicker={showGuidanceMethodPicker}
+                    setGuidanceMethod={setGuidanceMethod}
+                    guidanceMethod={guidanceMethod}
+                    guidanceMethodOptions={guidanceMethodOptions}
+                    supportsNegativePrompt={supportsNegativePrompt}
+                    negativePromptCfgOff={negativePromptCfgOff}
+                    setNegativePrompt={setNegativePrompt}
+                    negativePrompt={negativePrompt}
+                    multiPhaseAvailable={multiPhaseAvailable}
+                    multiPhaseEnabled={multiPhaseEnabled}
+                    applyTurboFinishPreset={applyTurboFinishPreset}
+                    setMultiPhasePhases={setMultiPhasePhases}
+                    setMultiPhaseEnabled={setMultiPhaseEnabled}
+                    multiPhasePhases={multiPhasePhases}
+                    selectedLoras={selectedLoras}
+                  />
+                ),
+              },
+              {
+                id: "finish",
+                label: "Upscale & finish",
+                summary: settingsSummaries.finish,
+                changed: settingsSummaries.finishChanged,
+                content: (
+                  <ImageFinishSettings
+                    selectedModel={selectedModel}
+                    supportsGuidance={supportsGuidance}
+                    transparentBackground={transparentBackground}
+                    setTransparentBackground={setTransparentBackground}
+                    prompt={prompt}
+                    setPromptFromUser={setPromptFromUser}
+                    showPidToggle={showPidToggle}
+                    usePid={usePid}
+                    upscaleEnabled={upscaleEnabled}
+                    hiresFixEnabled={hiresFixEnabled}
+                    setUsePid={setUsePid}
+                    setDecoder={setDecoder}
+                    setPidTarget={setPidTarget}
+                    pidTarget={pidTarget}
+                    pidDecodeNotice={pidDecodeNotice}
+                    showDecoderPicker={showDecoderPicker}
+                    decoder={decoder}
+                    decoderOptions={decoderOptions}
+                    setUpscaleEnabled={setUpscaleEnabled}
+                    setHiresFixEnabled={setHiresFixEnabled}
+                    upscaleEngine={upscaleEngine}
+                    setUpscaleFactor={setUpscaleFactor}
+                    upscaleFactor={upscaleFactor}
+                    handleUpscaleEngineChange={handleUpscaleEngineChange}
+                    availableUpscaleEngines={availableUpscaleEngines}
+                    setUpscaleRestore={setUpscaleRestore}
+                    setRestorePlanStatus={setRestorePlanStatus}
+                    restorePlanBody={restorePlanBody}
+                    token={token}
+                    upscaleRestore={upscaleRestore}
+                    setUpscaleSoftness={setUpscaleSoftness}
+                    upscaleSoftness={upscaleSoftness}
+                    hiresFixDisabledReason={hiresFixDisabledReason}
+                    hiresFixDisabled={hiresFixDisabled}
+                    setHiresFixSteps={setHiresFixSteps}
+                    hiresFixSteps={hiresFixSteps}
+                    setHiresFixDenoisingStrength={setHiresFixDenoisingStrength}
+                    hiresFixDenoisingStrength={hiresFixDenoisingStrength}
+                    setHiresFixUpscaleBy={setHiresFixUpscaleBy}
+                    hiresFixUpscaleBy={hiresFixUpscaleBy}
+                    hiresFixTargetInvalid={hiresFixTargetInvalid}
+                    hiresFixTargetWidth={hiresFixTargetWidth}
+                    hiresFixTargetHeight={hiresFixTargetHeight}
+                    setHiresFixCfgScale={setHiresFixCfgScale}
+                    hiresFixCfgScale={hiresFixCfgScale}
+                  />
+                ),
+              },
+            ]}
           />
-
-          {/* sc-13131: the EXACT composed prompt (Subject:/Style:, preserved sibling directives,
-              and the own-`Style:` MERGE) the run will send once a style is active — reuses
-              buildJobRequest so it can never drift from the payload. Sits under the Style axis row.
-              Hidden when no style applies. */}
-          <StyledPromptPreview active={stylePreviewActive} composedPrompt={styledPreviewPrompt} maxChars={promptCharLimit} appearanceActive={appearance.active} negativePrompt={appearance.active ? appearanceNegativePreview : undefined} />
-
-          {macActiveModeBlock ? <p className="mac-gating-note">{macActiveModeBlock.text}</p> : null}
-
-          {decoderCapabilitiesPending && macCapabilitiesError ? (
-            <div className="inline-warning decoder-capability-recovery" role="alert">
-              <span>{macCapabilitiesError} The restored decoder has not been changed.</span>
-              <div className="decoder-capability-recovery-actions">
-                <button
-                  className="secondary-action"
-                  disabled={macCapabilitiesLoading || typeof refreshMacCapabilities !== "function"}
-                  onClick={() => refreshMacCapabilities?.()}
-                  type="button"
-                >
-                  {macCapabilitiesLoading ? "Retrying…" : "Retry"}
-                </button>
-                <button
-                  className="secondary-action"
-                  onClick={() => setDecoder("native")}
-                  type="button"
-                >
-                  Use Native VAE
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {/* `stackAddsNegative` is ANDed with the engine's negative-prompt axis (sc-15299), the
-              same way VideoStudio does it: the submit path blanks the composed negative for a
-              CFG-free engine, so previewing "+ negative prompt" would advertise a contribution
-              this job will not make. */}
-          <PresetStackPreview
-            generalStack={generalStack}
-            composed={composedStack}
-            stackAddsNegative={supportsNegativePrompt && stackAddsNegative}
-            stackAddsCount={stackAddsCount}
-          />
-
-          {/* Strict-control panel (epic 8236, sc-8245): pose / canny / depth structure lock for the
-              text-to-image backbones whose `ui.controlModes` advertises it. Hidden when the backbone
-              supports no strict control. Pose reuses the library picker (one image per pose); canny/depth
-              take an uploaded control image + a preprocess-vs-use-as-is toggle. The request wiring lives in
-              submit() — controlMode / sourceAssetId|advanced.controlImage / advanced.controlScale.
-              Sits directly above Advanced (studio-cleanup sc-15369): it is a disclosure of the same
-              kind, so it belongs beside the other one rather than in a source band above the settings. */}
-          {showControlPanel ? (
-            <ControlPanel
-              supportedModes={controlModes}
-              controlMode={activeControlMode}
-              onControlModeChange={setControlMode}
-              selectedPoseIds={selectedPoseIds}
-              onTogglePose={(id) =>
-                setSelectedPoseIds((ids) =>
-                  ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id],
-                )
-              }
-              onClearPoses={() => setSelectedPoseIds([])}
-              loadUserPoses={loadUserPoses}
-              extraPoses={workflowPoses}
-              preferredPoseCategory={workflowPoses.length ? WORKFLOW_POSE_CATEGORY : null}
-              revealPoseLibraryToken={workflowPoses.length ? launchRequest?.id : null}
-              poseReplayOpen={poseLibraryReplayOpen}
-              poseBlockText={macPoseBlock ? macPoseBlock.text : null}
-              controlImageAssetId={controlImageAssetId}
-              onControlImageChange={setControlImageAssetId}
-              controlImagePassthrough={effectiveControlPassthrough}
-              onControlImagePassthroughChange={setControlImagePassthrough}
-              controlImageAssets={
-                activeControlMode === "depth" ? [...depthControlAssets, ...editImageAssets] : editImageAssets
-              }
-              importAsset={importAsset}
-              projectId={activeProject?.id}
-              characters={characters}
-              controlScaleConfig={controlScaleConfig}
-              controlScale={effectiveControlScale}
-              onControlScaleChange={setControlScale}
-              controlOverlayBaseModel={controlOverlayBaseModel}
-              selectedOverlayId={controlOverlayId}
-              onOverlayChange={setControlOverlayId}
-            />
-          ) : null}
-
-          <ImageAdvancedPanel
-            toggleAdvanced={toggleAdvanced}
-            advancedOpen={advancedOpen}
-            setRequestedGpu={setRequestedGpu}
-            requestedGpu={requestedGpu}
-            gpuOptions={gpuOptions}
-            mossEdit={mossEdit}
-            mossImageAdvanced={mossImageAdvanced}
-            setSeed={setSeed}
-            seed={seed}
-            dimensionConstraints={dimensionConstraints}
-            setReferenceDimensionIntent={setReferenceDimensionIntent}
-            setWidthOverride={setWidthOverride}
-            activeDimensionIntent={activeDimensionIntent}
-            dropdownWidth={dropdownWidth}
-            widthOverride={widthOverride}
-            setHeightOverride={setHeightOverride}
-            dropdownHeight={dropdownHeight}
-            heightOverride={heightOverride}
-            moss={moss}
-            mossDmd={mossDmd}
-            mossImage={mossImage}
-            setMossField={setMossField}
-
-            setSampler={setSampler}
-            sampler={sampler}
-            // SW-7106: MiniMax-H3-Image picks its sampler through its own control, not the menu.
-            samplerOptions={showH3ImageSampler ? [] : samplerOptions}
-
-            setScheduler={setScheduler}
-            scheduler={scheduler}
-            schedulerOptions={schedulerOptions}
-            showSchedulerShift={showSchedulerShift}
-            setSchedulerShift={setSchedulerShift}
-            effectiveSchedulerShift={effectiveSchedulerShift}
-            selectedModel={selectedModel}
-            setMossDmdSteps={setMossDmdSteps}
-            setStepsOverride={setStepsOverride}
-            mossDmdSteps={mossDmdSteps}
-            stepsOverride={stepsOverride}
-            supportsGuidance={supportsGuidance}
-            setGuidanceOverride={setGuidanceOverride}
-            guidanceOverride={guidanceOverride}
-            supportsCfgInterval={supportsCfgInterval}
-            cfgIntervalDisabled={cfgIntervalDisabled}
-            setCfgInterval={setCfgInterval}
-            cfgInterval={cfgInterval}
-            cfgIntervalError={cfgIntervalError}
-            captionOverflowChoices={captionOverflowChoices}
-            setCaptionOverflow={setCaptionOverflow}
-            outgoingCaptionOverflow={outgoingCaptionOverflow}
-            showH3ImageSampler={showH3ImageSampler}
-            h3ImageSampler={h3ImageSampler}
-            setH3ImageSampler={setH3ImageSampler}
-            h3ImageSamplerError={h3ImageSamplerError}
-            pagCapability={pagCapability}
-            pag={pag}
-            setPag={setPag}
-            pagError={pagError}
-            showLowResStart={showLowResStart}
-            lowResStart={lowResStart}
-            setLowResStart={setLowResStart}
-            lowResStartResolved={lowResStartResolved}
-            supportsTextStyle={supportsTextStyle}
-            textStyleGainConfig={textStyleGainConfig}
-            setTextStyleGain={setTextStyleGain}
-            textStyleGain={textStyleGain}
-            supportsTextEncoderSelection={supportsTextEncoderSelection}
-            setTextEncoderModel={setTextEncoderModel}
-            selectedTextEncoderModel={selectedTextEncoderModel}
-            textEncoderOptions={textEncoderOptions}
-            selectedTextEncoderAvailable={selectedTextEncoderAvailable}
-            defaultTextEncoderId={defaultTextEncoderId}
-            showGuidanceMethodPicker={showGuidanceMethodPicker}
-            setGuidanceMethod={setGuidanceMethod}
-            guidanceMethod={guidanceMethod}
-            guidanceMethodOptions={guidanceMethodOptions}
-            activeBackend={activeBackend}
-            flashAttn={flashAttn}
-            setFlashAttn={setFlashAttn}
-            promptEnhance={promptEnhance}
-            enhancePrompt={enhancePrompt}
-            setEnhancePrompt={setEnhancePrompt}
-            precisionToggle={precisionToggle}
-            showTierPicker={showTierPicker}
-            bf16Precision={bf16Precision}
-            setRecipeTierRequest={setRecipeTierRequest}
-            setBf16Precision={setBf16Precision}
-            transparentBackground={transparentBackground}
-            setTransparentBackground={setTransparentBackground}
-            prompt={prompt}
-            setPromptFromUser={setPromptFromUser}
-            showPidToggle={showPidToggle}
-            usePid={usePid}
-            upscaleEnabled={upscaleEnabled}
-            hiresFixEnabled={hiresFixEnabled}
-            setUsePid={setUsePid}
-            setDecoder={setDecoder}
-            setPidTarget={setPidTarget}
-            pidTarget={pidTarget}
-            pidDecodeNotice={pidDecodeNotice}
-            showDecoderPicker={showDecoderPicker}
-            decoder={decoder}
-            decoderOptions={decoderOptions}
-            setUpscaleEnabled={setUpscaleEnabled}
-            setHiresFixEnabled={setHiresFixEnabled}
-            upscaleEngine={upscaleEngine}
-            setUpscaleFactor={setUpscaleFactor}
-            upscaleFactor={upscaleFactor}
-            handleUpscaleEngineChange={handleUpscaleEngineChange}
-            availableUpscaleEngines={availableUpscaleEngines}
-            setUpscaleRestore={setUpscaleRestore}
-            setRestorePlanStatus={setRestorePlanStatus}
-            restorePlanBody={restorePlanBody}
-            token={token}
-            upscaleRestore={upscaleRestore}
-            setUpscaleSoftness={setUpscaleSoftness}
-            upscaleSoftness={upscaleSoftness}
-            hiresFixDisabledReason={hiresFixDisabledReason}
-            hiresFixDisabled={hiresFixDisabled}
-            setHiresFixSteps={setHiresFixSteps}
-            hiresFixSteps={hiresFixSteps}
-            setHiresFixDenoisingStrength={setHiresFixDenoisingStrength}
-            hiresFixDenoisingStrength={hiresFixDenoisingStrength}
-            setHiresFixUpscaleBy={setHiresFixUpscaleBy}
-            hiresFixUpscaleBy={hiresFixUpscaleBy}
-            hiresFixTargetInvalid={hiresFixTargetInvalid}
-            hiresFixTargetWidth={hiresFixTargetWidth}
-            hiresFixTargetHeight={hiresFixTargetHeight}
-            setHiresFixCfgScale={setHiresFixCfgScale}
-            hiresFixCfgScale={hiresFixCfgScale}
-            supportsNegativePrompt={supportsNegativePrompt}
-            negativePromptCfgOff={negativePromptCfgOff}
-            setNegativePrompt={setNegativePrompt}
-            negativePrompt={negativePrompt}
-          />
-
-          {/* Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). Its own EXPERIMENTAL disclosure,
-              default collapsed (busy-page guidance), shown only for the model that advertises the
-              acceleration LoRA compat (krea_2_raw) in text-to-image mode — matching the worker gate.
-              The phase editor references the LoRAs picked in the Advanced section above by index. */}
-          {multiPhaseAvailable ? (
-            <AdvancedSection
-              className="multiphase-section"
-              hint="experimental — split the Raw denoise into phases"
-              label="Multi-phase denoise (experimental)"
-              onToggle={() => setMultiPhaseOpen((value) => !value)}
-              open={multiPhaseOpen}
-            >
-              <MultiPhaseEditor
-                enabled={multiPhaseEnabled}
-                onApplyTurboFinish={applyTurboFinishPreset}
-                onChange={setMultiPhasePhases}
-                onToggleEnabled={setMultiPhaseEnabled}
-                phases={multiPhasePhases}
-                selectedLoras={selectedLoras}
-              />
-            </AdvancedSection>
-          ) : null}
-
-          {/* The preset/LoRA problems that used to be three separate .inline-warning
-              paragraphs (sc-10649). Requirements — no project, empty prompt — stay silent. */}
-          <ValidationSummary issues={portableRefusal
-            ? [...generateValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
-            : generateValidity.surfaced} label="Generate errors" />
-          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
-          {portableFeedbackStatus(portableBatchFeedback?.result) ? <p role="status">{portableFeedbackStatus(portableBatchFeedback.result)}</p> : null}
-
         </WorkPanel>
 
         <div className="studio-results">

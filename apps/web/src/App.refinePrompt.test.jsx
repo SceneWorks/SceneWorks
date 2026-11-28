@@ -56,8 +56,8 @@ describe("refine my prompt (sc-2041)", () => {
     });
 
     // Opening the tool lets the user choose exclusions before starting the rewrite.
-    const refineTile = [...document.body.querySelectorAll(".prompt-tool")].find((button) =>
-      button.textContent.includes("Refine my prompt"),
+    const refineTile = [...document.body.querySelectorAll(".studio-prompt-tool")].find((button) =>
+      button.textContent.trim() === "Refine",
     );
     await act(async () => {
       refineTile.click();

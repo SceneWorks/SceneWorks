@@ -21,6 +21,9 @@
   grid-auto-flow: column;
   grid-auto-columns: minmax(128px, 1fr);
   overflow-x: auto;
+  /* Don't let the tabs' min widths size the page: on a narrow screen the strip scrolls
+     inside the panel instead of widening the studio's grid column. */
+  contain: inline-size;
   border-radius: 0 0 var(--r-lg) var(--r-lg);
 }
 
@@ -142,6 +145,11 @@
   grid-column: 1 / -1;
   padding-top: 4px;
 }
+
+.studio-settings-group > .span-2 { grid-column: span 2; }
+.studio-settings-group > .span-3 { grid-column: span 3; }
+.studio-settings-group > .span-full,
+.studio-settings-group > .studio-note { grid-column: 1 / -1; }
 
 /* ── Shared 4-column field grid ─────────────────────────────────────────── */
 .studio-grid {
@@ -359,6 +367,11 @@
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface-2);
+}
+
+/* A card kept mounted while closed (so an in-flight tool survives) hides via [hidden]. */
+.studio-tool-card[hidden] {
+  display: none;
 }
 
 .studio-tool-card-head {

@@ -80,7 +80,7 @@ export function useVideoPresetState({
   styleId,
   appearance,
   textEncoderModel,
-  advancedOpen,
+  settingsTab,
   selectedLoraIds,
   loraWeights,
   seed,
@@ -236,7 +236,9 @@ export function useVideoPresetState({
     enhancePrompt,
     textEncoderModel,
     quantization,
-    advancedOpen,
+    // The open settings tab (or null when the strip is closed) — replaced `advancedOpen`; a
+    // snapshot that still carries only `advancedOpen` is migrated on read (initialVideoSettingsTab).
+    settingsTab,
     selectedLoraIds,
     loraWeights,
     model,

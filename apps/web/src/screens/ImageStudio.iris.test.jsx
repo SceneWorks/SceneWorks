@@ -23,6 +23,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
 
 // Mirrors the shipped catalog entry's control-bearing keys.
 const IRIS = {
@@ -97,7 +98,7 @@ const labelled = (container, text) =>
   );
 const field = (container, text) => labelled(container, text)?.querySelector("input, select, textarea");
 const generateButton = () =>
-  [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+  [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
 
 function setTextarea(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -129,7 +130,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
       );
     });
     await act(async () => {});
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Sampling");
     await act(async () => {});
   }
 
@@ -227,6 +228,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     await render(baseContext());
     const hint = () =>
       [...container.querySelectorAll('[role="note"]')].find((node) => node.textContent.includes("patch grid"));
+    await openSettingsTab("Model");
     expect(hint()).toBeUndefined();
     await setImageSize(container, { ratio: "1:1", megapixels: 0.25 });
     expect(imageSize(container)).toBe("512x512");
@@ -237,6 +239,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     expect(imageSize(container)).toBe("1024x1024");
     expect(hint()).toBeUndefined();
     // The free size override still admits a sub-1024 size on the 16-px grid.
+    await openSettingsTab("Sampling");
     expect(field(container, "Width override").getAttribute("min")).toBe("16");
   });
 
@@ -312,6 +315,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
   it("packs the prompt batch into native batch jobs of up to 8 / count prompts", async () => {
     const createImageJob = vi.fn(async () => ({ id: `job-${createImageJob.mock.calls.length}` }));
     await render(baseContext({ createImageJob }));
+    await openSettingsTab("Model");
     await act(async () => setInput(field(container, "Variations"), "4"));
     await runBatch("a red fox\na blue whale\na green frog\n[512x512] a gold bird");
     await act(async () => { await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(3)); });

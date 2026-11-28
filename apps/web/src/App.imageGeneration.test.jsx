@@ -6,6 +6,7 @@ import { withAppContext, withImageStudioContext, FakeEventSource, response, sett
 import { MAX_USER_JOB_LORAS } from "./presetUtils.js";
 import { EDIT_PROMPT_TEMPLATES } from "./data/editPromptTemplates.js";
 import { imageSize } from "./testUtils/dom.js";
+import { openSettingsTab } from "./screens/imageStudio/studioTestUtils.js";
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -148,6 +149,8 @@ describe("SceneWorks app shell", () => {
     const modelBefore = field(container, "Model").value;
     expect(userPrompt.length).toBeGreaterThan(0);
 
+    // The general-preset stack and its preview live in the Style & look settings tab.
+    await openSettingsTab("Style", container);
     const clickGeneral = async (name) => {
       await act(async () => {
         [...container.querySelectorAll(".general-preset-chips .preset-chip")]
@@ -160,13 +163,14 @@ describe("SceneWorks app shell", () => {
     await clickGeneral("Portra");
     await settle();
 
-    // Model untouched; the preview shows the flat concatenation in selection order.
-    expect(field(container, "Model").value).toBe(modelBefore);
+    // The preview shows the flat concatenation in selection order; the model is untouched.
     const expected = `${userPrompt}, shot on Arri Alexa, 85mm f/1.4, Kodak Portra 400`;
     expect(container.querySelector(".preset-stack-preview .preset-stack-prompt p").textContent).toBe(expected);
+    await openSettingsTab("Model", container);
+    expect(field(container, "Model").value).toBe(modelBefore);
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
     await settle();
 
@@ -701,9 +705,11 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Qwen Only");
     expect(container.textContent).not.toContain("Missing LoRA");
 
-    const loraPicker = document.body.querySelector(".settings-bar > .lora-picker");
+    // LoRAs are their own settings tab, the only place the picker renders.
+    await openSettingsTab("LoRAs");
+    const loraPicker = document.body.querySelector(".image-lora-settings > .lora-picker");
     expect(loraPicker).toBeTruthy();
-    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    expect(document.body.querySelectorAll(".lora-picker")).toHaveLength(1);
     expect(loraPicker.textContent).not.toContain("Show incompatible");
 
     // Add-on-demand LoRA picker (UI-refinement 3b): open the "Add LoRA" dropdown and click a
@@ -749,7 +755,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Missing LoRA");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -797,9 +803,7 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    await openSettingsTab("LoRAs");
     // Open the Add-LoRA dropdown to inspect which LoRAs the model offers as compatible.
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
@@ -836,7 +840,8 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    const loraPicker = document.body.querySelector(".settings-bar > .lora-picker");
+    await openSettingsTab("LoRAs");
+    const loraPicker = document.body.querySelector(".image-lora-settings > .lora-picker");
     expect(loraPicker).toBeTruthy();
     expect(loraPicker.textContent).not.toContain("Show incompatible");
     expect(loraPicker.textContent).not.toContain("Qwen Only");
@@ -900,6 +905,7 @@ describe("SceneWorks app shell", () => {
     });
 
     // sc-5875: presets are opt-in — select it explicitly before its defaults apply.
+    await openSettingsTab("Style");
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
     });
@@ -910,14 +916,14 @@ describe("SceneWorks app shell", () => {
     // The preset's installed LoRA is now seeded into the visible picker (not hidden), so the
     // guidance strip no longer claims it's "applied at generation" — it's a normal selection.
     expect(container.textContent).not.toContain("Preset LoRA applied at generation");
-    // The model settings container exposes the preset's LoRA as a real selection sitting at
-    // the preset's weight (0.4), ready to retune without opening Advanced.
-    expect(document.body.querySelector(".settings-bar > .lora-picker")).toBeTruthy();
-    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    // The LoRAs tab exposes the preset's LoRA as a real selection sitting at the preset's
+    // weight (0.4), ready to retune; the tab's summary counts it.
+    await openSettingsTab("LoRAs");
+    expect(document.body.querySelector(".image-lora-settings > .lora-picker")).toBeTruthy();
     expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("0.40");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     // The seeded preset LoRA rides in `loras` at its preset weight, and the client tells the
@@ -938,9 +944,12 @@ describe("SceneWorks app shell", () => {
 
     // Deselecting the preset (→ None) removes the LoRA it seeded — the picker restores to the
     // pre-preset selection (empty here), so the seed is a reversible overlay, not a one-way dump.
+    await openSettingsTab("Style");
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "None").click();
     });
+    await openSettingsTab("LoRAs");
+    expect(document.body.querySelector(".image-lora-settings > .lora-picker")).toBeTruthy();
     expect(document.body.querySelector(".lora-slot-weight-value")).toBeNull();
   });
 
@@ -1113,30 +1122,35 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // Primary generation controls sit in the settings bar under the composer (UI-refinement 2b),
-    // no longer in a right-hand rail; power-user knobs stay behind Advanced.
-    const settingsLabels = [...document.body.querySelectorAll(".settings-bar label")].map(
+    // Primary generation controls sit in the Model & output settings tab, open by default
+    // under the composer; the hardware knobs (GPU) moved there from the old Advanced section.
+    const modelPanel = document.body.querySelector('.image-settings-tabs [role="tabpanel"][data-panel="model"]');
+    expect(modelPanel).not.toBeNull();
+    const settingsLabels = [...modelPanel.querySelectorAll("label")].map(
       (label) => label.childNodes[0]?.textContent.trim(),
     );
     expect(settingsLabels).toEqual(expect.arrayContaining(["Model", "Variations", "Aspect"]));
+    expect(field(container, "GPU")).not.toBeUndefined();
     expect(document.body.querySelector(".prompt-input")).not.toBeNull();
-    expect(document.body.querySelector(".preset-chips").textContent).toContain("None");
     // sc-5875: a fresh studio defaults to None, so the preset's count (2) is NOT
     // auto-applied — Variations shows the studio default (4) until a preset is picked.
     expect(field(container, "Variations").value).toBe("4");
 
     // Selecting the preset applies its defaults (count 2).
+    await openSettingsTab("Style");
+    expect(document.body.querySelector(".preset-chips").textContent).toContain("None");
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
     });
     await settle();
+    await openSettingsTab("Model");
     expect(field(container, "Variations").value).toBe("2");
-    expect(field(container, "GPU")).toBeUndefined();
     expect(container.textContent).toContain("LoRAs");
-    expect(document.body.querySelector(".settings-bar > .lora-picker")).toBeTruthy();
-    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    await openSettingsTab("LoRAs");
+    expect(document.body.querySelector(".image-lora-settings > .lora-picker")).toBeTruthy();
     expect(container.textContent).not.toContain("Show incompatible");
 
+    await openSettingsTab("Style");
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")]
         .find((chip) => chip.textContent.trim() === "None")
@@ -1147,17 +1161,12 @@ describe("SceneWorks app shell", () => {
     // With no preset selected the guidance strip renders nothing (the visible controls
     // already describe the run); it only appears once a preset is active.
     expect(document.body.querySelector(".style-axis-guidance")).toBeNull();
+    await openSettingsTab("Model");
     expect(field(container, "Variations").value).toBe("4");
-
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
-
-    expect(field(container, "GPU")).not.toBeUndefined();
     expect(container.textContent).toContain("LoRAs");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -1197,16 +1206,14 @@ describe("SceneWorks app shell", () => {
       );
     });
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    await openSettingsTab("Upscale & finish");
 
     expect(document.body.querySelector('.upscale-toggle input[type="checkbox"]').checked).toBe(false);
     expect(field(container, "Scale").disabled).toBe(true);
     expect(field(container, "Engine").disabled).toBe(true);
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledTimes(1);
@@ -1218,7 +1225,7 @@ describe("SceneWorks app shell", () => {
     await changeField(field(container, "Scale"), "4");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -1299,7 +1306,7 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".reference-thumb.active")).not.toBeNull();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -1378,7 +1385,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Reference strength");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     // Tuned InstantID defaults flow through advanced: ipAdapterScale 0.8 (raised from
@@ -1462,7 +1469,7 @@ describe("SceneWorks app shell", () => {
 
     await changeField(field(container, "View angle"), "left_profile");
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     // The chosen angle rides advanced.viewAngle for the worker's landmark pack.
@@ -1545,7 +1552,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Variation");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     // Both knobs ride advanced: ipAdapterScale falls back to the global 0.6
@@ -1617,10 +1624,9 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    // The toggle lives in the (collapsed-by-default) Advanced disclosure — open it first.
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    // The toggle sits with the model's hardware/precision knobs in the Model & output tab
+    // (open by default).
+    await openSettingsTab("Model");
 
     // The manifest-driven "Enhance prompt" toggle renders for flux2_dev (off by default).
     const enhanceToggle = document.body.querySelector(".prompt-enhance-toggle input");
@@ -1633,7 +1639,7 @@ describe("SceneWorks app shell", () => {
       enhanceToggle.click();
     });
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     // The toggle rides advanced.enhancePrompt; the worker threads it into the dev GenerationRequest.
@@ -1713,7 +1719,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Variation");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     // advanced carries trueCfgScale but explicitly NOT ipAdapterScale.
@@ -1945,7 +1951,7 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".reference-thumb")).toBeNull();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(
@@ -2003,11 +2009,12 @@ describe("SceneWorks app shell", () => {
     });
 
     // sc-5875: presets are opt-in — select it explicitly to exercise the managed-LoRA mismatch block.
+    await openSettingsTab("Style");
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Cinematic").click();
     });
 
-    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
     expect(container.textContent).toContain("Preset cannot run with Z-Image");
     expect(container.textContent).toContain("qwen_detail");
     expect(generate.disabled).toBe(true);
@@ -2018,9 +2025,7 @@ describe("SceneWorks app shell", () => {
 
     expect(createImageJob).not.toHaveBeenCalled();
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    await openSettingsTab("Model");
     await changeField(field(container, "Model"), "qwen_image");
     await settle();
 
@@ -2092,12 +2097,16 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // sc-5875: presets are opt-in — select it explicitly to exercise the managed-LoRA mismatch block.
+    // Video Studio settings live in a tab strip (studio layout simplification).
+    await act(async () => {
+      [...document.body.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((tab) => tab.textContent.includes("Style")).click();
+    });
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
     });
     await settle();
 
-    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Render clip"));
     expect(container.textContent).toContain("Preset cannot run with LTX");
     expect(container.textContent).toContain("wan_motion");
     expect(generate.disabled).toBe(true);
@@ -2167,12 +2176,10 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      [...document.body.querySelectorAll(".mode-control button")].find((button) => button.textContent === "Text → Video").click();
-    });
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
+      [...document.body.querySelectorAll('.studio-mode-tabs [role="tab"]')].find((button) => button.textContent === "Text → Video").click();
     });
 
+    // The quant slot (tier picker or torch Quantization) is in Model & output, open by default.
     const quantSelect = field(container, "Quant tier");
     expect(quantSelect).toBeTruthy();
     const optionLabels = [...quantSelect.querySelectorAll("option")].map((option) => option.textContent);
@@ -2184,7 +2191,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Render clip")).click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -2250,11 +2257,15 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // Add-on-demand LoRA picker (UI-refinement 3b): open the dropdown. Only the ltx-video LoRA is
-    // compatible; the z-image one is filtered out. It is part of the model settings rather than
-    // the Advanced disclosure, and the incompatible escape hatch is intentionally absent.
-    const videoLoraPicker = document.body.querySelector(".settings-bar > .lora-picker");
+    // compatible; the z-image one is filtered out. It lives in the Character & LoRAs settings tab
+    // (not Sampling), and the incompatible escape hatch is intentionally absent.
+    // Video Studio settings live in a tab strip (studio layout simplification).
+    await act(async () => {
+      [...document.body.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((tab) => tab.textContent.includes("LoRAs")).click();
+    });
+    const videoLoraPicker = document.body.querySelector('.studio-settings-panel[data-panel="loras"] .lora-picker');
     expect(videoLoraPicker).toBeTruthy();
-    expect(document.body.querySelector(".advanced-panel .lora-picker")).toBeNull();
+    expect(document.body.querySelectorAll(".lora-picker")).toHaveLength(1);
     expect(videoLoraPicker.textContent).not.toContain("Show incompatible");
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
@@ -2281,7 +2292,7 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("1.00");
     await changeField(weightSlider, "0.5");
 
-    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Render clip"));
     expect(generate.disabled).toBe(false);
 
     await act(async () => {
@@ -2337,6 +2348,10 @@ describe("SceneWorks app shell", () => {
       );
     });
 
+    // Video Studio settings live in a tab strip (studio layout simplification).
+    await act(async () => {
+      [...document.body.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((tab) => tab.textContent.includes("Style")).click();
+    });
     expect(container.textContent).toContain("Style preset");
     const noneChip = [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent === "None");
     expect(noneChip).toBeTruthy();
@@ -2375,6 +2390,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    await openSettingsTab("Style");
     expect(container.textContent).toContain("Qwen Detail");
     expect(container.textContent).not.toContain("Cinematic");
 
@@ -2385,7 +2401,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).click();
     });
 
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ model: "qwen_image", recipePresetId: "qwen_detail" }));
@@ -2492,6 +2508,7 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    await openSettingsTab("Style");
     expect(container.textContent).toContain("Cinematic");
     expect(container.textContent).not.toContain("Portrait Only");
 

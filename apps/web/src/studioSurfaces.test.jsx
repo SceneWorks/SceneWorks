@@ -3,6 +3,7 @@ vi.mock("./api.js", async (original) => ({ ...await original(), apiFetch: vi.fn(
 import { currentCandidate } from "./testUtils/catalogBaseline/candidate.js";
 import { change, click, contextFor, mount, observe, submissionButton } from "./testUtils/catalogBaseline/harness.jsx";
 import { defaultTierSelection, installedTiers } from "./quantTier.js";
+import { openSettingsTab } from "./screens/imageStudio/studioTestUtils.js";
 
 // Real studio screens mounted against the live catalog projection, driving actual handlers. These
 // were the behavioural checks inside the retired SW-7028 frozen-catalog suite; they assert what a
@@ -34,9 +35,9 @@ it("recognizes the Video Replace person action rather than its mode tab", async 
   const mounted = await mount(currentCandidate(), { platform: "macos", studio: "video", model: "ltx_2_3", mode: "replace_person" });
   try {
     const action = submissionButton(mounted.container, "video");
-    expect(action?.textContent.trim()).toBe("Replace person");
+    expect(action?.textContent.replace("⌘ ↵", "").trim()).toBe("Replace person");
     expect(action?.type).toBe("submit");
-    expect(action?.classList.contains("prompt-cta")).toBe(true);
+    expect(action?.classList.contains("studio-generate")).toBe(true);
   } finally { await mounted.close(); }
 });
 
@@ -48,10 +49,12 @@ it("renders every converted Anima tier and submits the q8 default", async () => 
   expect(defaultTierSelection(model, null)).toBe("q8");
   const mounted = await mount(catalog, row);
   try {
+    // The quant tier sits in Image Studio's Model & output settings tab.
+    await openSettingsTab("Model", mounted.container);
     const picker = mounted.container.querySelector(".quant-tier-picker select");
     expect([...picker.options].map(({ value }) => value)).toEqual(["q4", "q8", "bf16"]);
     expect(picker.value).toBe("q8");
-    await click([...mounted.container.querySelectorAll("button")].find((node) => node.textContent.trim() === "Generate"));
+    await click(submissionButton(mounted.container, "image"));
     expect(mounted.calls[0].payload.advanced.mlxQuantize).toBe(8);
   } finally { await mounted.close(); }
 });
@@ -70,6 +73,7 @@ for (const [id, other, label] of [["upscale", "hiresFix", "Upscale"], ["hiresFix
     const mounted = await mount(currentCandidate(), sdxl, { upscaleEnabled: other === "upscale", hiresFixEnabled: other === "hiresFix" });
     try {
       expect(postPasses(mounted)[other]).toBe(true);
+      await openSettingsTab("Upscale & finish", mounted.container);
       const node = checkbox(mounted.container, label);
       expect(node?.disabled).toBe(false);
       await click(node);
@@ -96,6 +100,7 @@ it("choosing a non-native decoder clears a restored PiD", async () => {
   const mounted = await mount(catalog, { platform: "macos", studio: "image", model: "krea_2_raw", mode: "text_to_image" }, { usePid: true });
   try {
     expect(postPasses(mounted).usePid).toBe(true);
+    await openSettingsTab("Upscale & finish", mounted.container);
     const decoder = [...mounted.container.querySelectorAll("select")].find((node) => node.closest("label")?.textContent.startsWith("Decoder"));
     const alternative = [...decoder.options].find((option) => option.value !== "native" && !option.disabled);
     expect(alternative).toBeTruthy();

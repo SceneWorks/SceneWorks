@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
-import { withAppContext, FakeEventSource, response, settle, field, openAdvancedSection } from "./main.testSupport.jsx";
+import { withAppContext, FakeEventSource, response, settle, field } from "./main.testSupport.jsx";
 
 // sc-12324: "Use this recipe" on a video asset. A generated clip records a full recipe, and the
 // user must be able to re-run it — with or without the original seed — exactly as they can an
@@ -94,7 +94,20 @@ function renderStudio(context = {}) {
 }
 
 function activeMode() {
-  return document.body.querySelector(".mode-tab.active")?.textContent.trim();
+  return document.body.querySelector('.studio-mode-tab[aria-selected="true"]')?.textContent.trim();
+}
+
+// Video Studio settings live in a tab strip (studio layout simplification); Model & output is
+// open by default and seed / steps / guidance / negative prompt sit under Sampling.
+async function openSettingsTab(label) {
+  const tab = [...document.body.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+    node.textContent.includes(label),
+  );
+  if (tab && tab.getAttribute("aria-selected") !== "true") {
+    await act(async () => {
+      tab.click();
+    });
+  }
 }
 
 describe("video recipe replay (sc-12324)", () => {
@@ -159,10 +172,10 @@ describe("video recipe replay (sc-12324)", () => {
     expect(field(container, "Resolution").value).toBe("1280x720");
     expect(field(container, "Duration").value).toBe("8");
     expect(field(container, "Prompt").value).toBe("the hero walks through rain");
-
-    await openAdvancedSection();
-    expect(field(container, "Negative prompt").value).toBe("blurry, warped hands");
     expect(field(container, "Frames").value).toBe("30");
+
+    await openSettingsTab("Sampling");
+    expect(field(container, "Negative prompt").value).toBe("blurry, warped hands");
     expect(field(container, "Steps").value).toBe("41");
     expect(field(container, "Guidance").value).toBe("7.5");
   });
@@ -172,7 +185,7 @@ describe("video recipe replay (sc-12324)", () => {
     await launch({
       studioLaunch: { id: "launch-1", view: "Video", assetId: "asset-1", recipe: videoRecipe(), replaySeed: 4242 },
     });
-    await openAdvancedSection();
+    await openSettingsTab("Sampling");
     expect(field(container, "Seed").value).toBe("4242");
   });
 
@@ -183,7 +196,7 @@ describe("video recipe replay (sc-12324)", () => {
     // A blank seed is also the studio's default, so on its own it would pass even if the recipe
     // never applied. Pin a non-default field from the same recipe to keep this honest.
     expect(field(container, "Model").value).toBe("wan_i2v");
-    await openAdvancedSection();
+    await openSettingsTab("Sampling");
     // Blank, NOT the recipe's own 4242 — the default re-run is a variation, matching the image lane.
     expect(field(container, "Seed").value).toBe("");
   });
@@ -199,7 +212,7 @@ describe("video recipe replay (sc-12324)", () => {
         replaySeed: 0,
       },
     });
-    await openAdvancedSection();
+    await openSettingsTab("Sampling");
     expect(field(container, "Seed").value).toBe("0");
   });
 
@@ -253,7 +266,7 @@ describe("video recipe replay (sc-12324)", () => {
     // The reference ids reach the form: the CTA is not blocked on missing inputs, which is the
     // observable proof that ads2v's sources were actually restored — `hasInputs` demands the
     // source clip AND the reference clip AND at least one reference image.
-    expect(container.querySelector(".prompt-cta").disabled).toBe(false);
+    expect(container.querySelector(".studio-generate").disabled).toBe(false);
   });
 
   // The I2V aspect snap re-snaps resolution to the source image's aspect whenever the source id
@@ -320,7 +333,6 @@ describe("video recipe replay (sc-12324)", () => {
     expect(VIDEO_MODELS.some((m) => m.id === field(container, "Model").value)).toBe(true);
     // …and the rest of the recipe still came through.
     expect(field(container, "Duration").value).toBe("8");
-    await openAdvancedSection();
     expect(field(container, "Frames").value).toBe("30");
   });
 
@@ -490,7 +502,7 @@ describe("video recipe replay (sc-12324)", () => {
     expect(activeMode()).toBe("Image → Video");
 
     await act(async () => {
-      [...document.body.querySelectorAll(".mode-tab")]
+      [...document.body.querySelectorAll(".studio-mode-tab")]
         .find((button) => button.textContent.trim() === "Text → Video")
         .click();
     });

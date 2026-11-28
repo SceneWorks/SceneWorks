@@ -21,6 +21,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CATALOG_PATH = resolve(HERE, "../testUtils/catalogBaseline/candidate-catalog.json");
@@ -117,7 +118,7 @@ const labelled = (container, text) =>
   );
 const field = (container, text) => labelled(container, text)?.querySelector("input, select, textarea");
 const generateButton = () =>
-  [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+  [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
 const modeTab = (container, label) =>
   [...container.querySelectorAll('button[role="tab"]')].find((tab) => tab.textContent.trim() === label);
 
@@ -147,7 +148,7 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
     vi.clearAllMocks();
   });
 
-  async function render(context, { openAdvanced = true } = {}) {
+  async function render(context, { tab = "Sampling" } = {}) {
     await act(async () => {
       root.render(
         <AppContext.Provider value={context}>
@@ -156,12 +157,9 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
       );
     });
     await act(async () => {});
-    if (openAdvanced) {
-      const toggle = document.body.querySelector(".advanced-section-toggle");
-      if (toggle && toggle.getAttribute("aria-expanded") !== "true") {
-        await click(toggle);
-        await act(async () => {});
-      }
+    if (tab) {
+      await openSettingsTab(tab);
+      await act(async () => {});
     }
   }
 
@@ -214,9 +212,11 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
     await render(baseContext({ createImageJob, imageModels: [MOSS_SFT], models: [MOSS_SFT] }));
 
     // Enable 8-step acceleration in MOSS T2I: PAG remains visible.
+    await openSettingsTab("Model");
     const dmdCheckbox = labelled(container, "8-step acceleration").querySelector("input");
     await click(dmdCheckbox);
     await act(async () => {});
+    await openSettingsTab("Sampling");
     expect(field(container, "PAG scale")).toBeTruthy();
 
     // Switch to Edit mode (mossEdit === true): PAG stays visible and emits advanced.pag.
@@ -304,8 +304,10 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-switch" }));
     await render(baseContext({ createImageJob }));
     await act(async () => setInput(field(container, "PAG scale"), "1.5"));
+    await openSettingsTab("Model");
     await act(async () => setSelect(field(container, "Model"), REALVISXL.id));
     await act(async () => {});
+    await openSettingsTab("Sampling");
     expect(field(container, "PAG scale")).toBeUndefined();
 
     await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour"));
@@ -335,6 +337,7 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
     expect(field(container, "PAG adaptive scale").value).toBe("0.3");
 
     // 2. Preset save & apply round-trip.
+    await openSettingsTab("Style");
     await act(async () => setInput(container.querySelector('input[aria-label="Preset name"]'), "Krea PAG"));
     await click(buttonWithText("Save as preset"));
     await click(
@@ -353,8 +356,9 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
 
     // Clear PAG manually, then apply the saved preset -> PAG controls restore intact,
     // and clicking "None" restores the prior Off state without manual clearing.
-    await render({ ...context, presets: [savedPreset] }, { openAdvanced: true });
+    await render({ ...context, presets: [savedPreset] }, { tab: "Style & look" });
     await click([...container.querySelectorAll(".preset-chips button")].find((b) => b.textContent === "None"));
+    await openSettingsTab("Sampling");
     await act(async () => {
       setInput(field(container, "PAG scale"), "");
       setInput(field(container, "PAG blocks"), "");
@@ -362,13 +366,17 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
       setInput(field(container, "PAG window stop"), "");
       setInput(field(container, "PAG adaptive scale"), "");
     });
+    await openSettingsTab("Style");
     await click(buttonWithText("Krea PAG"));
+    await openSettingsTab("Sampling");
     expect(field(container, "PAG scale").value).toBe("1.8");
     expect(field(container, "PAG blocks").value).toBe("4, 14");
     expect(field(container, "PAG window start").value).toBe("0.15");
     expect(field(container, "PAG window stop").value).toBe("0.85");
     expect(field(container, "PAG adaptive scale").value).toBe("0.3");
+    await openSettingsTab("Style");
     await click([...container.querySelectorAll(".preset-chips button")].find((b) => b.textContent === "None"));
+    await openSettingsTab("Sampling");
     expect(field(container, "PAG scale").value).toBe("");
     expect(field(container, "PAG blocks").value).toBe("");
     expect(field(container, "PAG window start").value).toBe("");

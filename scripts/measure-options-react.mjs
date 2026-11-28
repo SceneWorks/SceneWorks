@@ -97,8 +97,8 @@ try {
     });
     await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 10000 });
     await page.getByRole("button", { name: "Image", exact: true }).first().click();
-    await page.locator(".advanced-section-toggle").first().click();
-    const steps = page.locator(".advanced-panel label").filter({ hasText: /^Steps/ }).locator("input");
+    await page.getByRole("tab", { name: /^Sampling/ }).first().click();
+    const steps = page.locator(".studio-settings-panel label").filter({ hasText: /^Steps/ }).locator("input");
     await steps.evaluate((field) => { field.dataset.validatorMeasure = "steps"; });
     await steps.fill("1");
 

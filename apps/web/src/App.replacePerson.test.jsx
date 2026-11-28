@@ -63,8 +63,12 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
+    // Replace person sits in the People mode group (studio layout simplification).
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll(".video-mode-group")].find((button) => button.textContent === "People").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll('[role="tab"]')].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -84,8 +88,12 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
+    // Replace person sits in the People mode group (studio layout simplification).
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll(".video-mode-group")].find((button) => button.textContent === "People").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll('[role="tab"]')].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -122,8 +130,12 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
+    // Replace person sits in the People mode group (studio layout simplification).
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll(".video-mode-group")].find((button) => button.textContent === "People").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll('[role="tab"]')].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 
@@ -211,8 +223,12 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Video").click();
     });
     await settle();
+    // Replace person sits in the People mode group (studio layout simplification).
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Replace person").click();
+      [...document.body.querySelectorAll(".video-mode-group")].find((button) => button.textContent === "People").click();
+    });
+    await act(async () => {
+      [...document.body.querySelectorAll('[role="tab"]')].find((button) => button.textContent === "Replace person").click();
     });
     await settle();
 

@@ -1,0 +1,426 @@
+/* Video Studio — studio layout simplification. Builds on the shared pieces in
+   components/StudioSettingsTabs.css (.studio-grid, .studio-prompt-box, .studio-generate,
+   .studio-tool-card, .studio-mode-tabs, .studio-settings-tabs). Everything here is scoped to
+   .video-studio so the older global rules the moved controls still carry (.settings-field-*,
+   .lightning-toggle, .upscale-card, .review-panel …) are overridden only on this screen. */
+
+/* ── Compose panel rhythm ───────────────────────────────────────────────── */
+/* The settings tab strip's tracks have a 128px floor and scroll sideways when they don't fit;
+   without a 0 floor on the shell's column the strip's min-content (4 × 128px) would widen the
+   whole work panel past a phone viewport instead. */
+.video-studio .studio-shell {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.video-studio .video-compose-panel {
+  gap: 16px;
+}
+
+/* ── Mode picker: group switch + underline tabs ─────────────────────────── */
+.video-studio .video-mode-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.video-studio .video-mode-picker-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.video-studio .video-mode-picker-links {
+  margin-left: auto;
+  margin-right: -6px;
+}
+
+.video-studio .video-mode-groups {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.video-studio .video-mode-group {
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.video-studio .video-mode-group:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.video-studio .video-mode-group.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.video-studio .video-mode-group:focus-visible,
+.video-studio .video-results-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow);
+}
+
+/* ── Prompt box footer: Motion select ───────────────────────────────────── */
+.video-studio .video-motion-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.video-studio .video-motion-field select {
+  width: 150px;
+  height: 32px;
+}
+
+/* Under the prompt box: the status lines (Generate errors, portable status, Veda receipt,
+   Start new generation) then the Refine card. */
+.video-studio .video-status-line {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.video-studio .video-start-new {
+  justify-self: start;
+  align-self: flex-start;
+}
+
+/* The Refine card stays mounted while closed; the shared card sets display:grid, which would
+   otherwise beat the UA [hidden] rule. */
+.video-studio .studio-tool-card[hidden] {
+  display: none;
+}
+
+.video-studio .video-tool-card-close {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-right: -8px;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+}
+
+.video-studio .video-tool-card-close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────── */
+.video-studio .video-inputs > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.video-studio .video-inputs > .asset-picker-field {
+  grid-column: span 2;
+}
+
+.video-studio .video-inputs > .fit-mode-field {
+  grid-column: span 1;
+}
+
+.video-studio .video-inputs > .asset-picker-field,
+.video-studio .video-inputs > .fit-mode-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+@media (max-width: 560px) {
+  .video-studio .video-inputs > .asset-picker-field,
+  .video-studio .video-inputs > .fit-mode-field {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── Settings panels ────────────────────────────────────────────────────── */
+/* Span helpers inside the "For this model" sub-group (a subgrid, so the shared
+   `.studio-grid > .span-*` rules don't reach its children). */
+.video-studio .studio-settings-group > .span-2 { grid-column: span 2; }
+.video-studio .studio-settings-group > .span-3 { grid-column: span 3; }
+.video-studio .studio-settings-group > .span-full,
+.video-studio .studio-grid > .studio-update-notice { grid-column: 1 / -1; }
+
+@media (max-width: 900px) {
+  .video-studio .studio-settings-group > .span-3 { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  .video-studio .studio-settings-group > .span-2,
+  .video-studio .studio-settings-group > .span-3 { grid-column: 1 / -1; }
+}
+
+/* Every field in a settings panel, including the ones a group or wrapper sits between: label
+   above, one 38px control, hint below. */
+.video-studio .studio-settings-panel :is(.studio-grid, .studio-settings-group, .studio-field) > label:not(.checkline),
+.video-studio .studio-settings-panel :is(.studio-grid, .studio-settings-group) > .studio-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.video-studio .studio-settings-panel :is(.studio-grid, .studio-settings-group, .studio-field) > label > select,
+.video-studio .studio-settings-panel :is(.studio-grid, .studio-settings-group, .studio-field) > label > input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-h);
+}
+
+.video-studio .studio-settings-panel :is(.studio-grid, .studio-settings-group, .studio-field, label) > :is(.helper-copy, .field-hint) {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  color: var(--text-muted);
+}
+
+/* Checkbox toggles are bordered 38px rows wherever they sit in a panel. */
+.video-studio .studio-settings-panel :is(.studio-grid, .studio-settings-group, .studio-field) > label.checkline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.video-studio .studio-grid > label.checkline {
+  align-self: start;
+  margin-top: 24px;
+}
+
+/* The Model cell: the update badge rides on the label line. */
+.video-studio .video-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.video-studio .settings-field-model,
+.video-studio .settings-field-aspect,
+.video-studio .settings-field-count {
+  min-width: 0;
+  flex: none;
+}
+
+.video-studio .studio-settings-panel .studio-update-notice {
+  margin-top: 0;
+}
+
+/* Fixed source precision takes the quant slot: a read-only value, not a control. */
+.video-studio .video-source-precision strong {
+  display: flex;
+  align-items: center;
+  height: var(--control-h);
+  padding: 0 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  font-weight: 500;
+}
+
+.video-studio .studio-settings-panel .guidance-strip {
+  align-self: start;
+}
+
+/* LoRA picker / style row / previews take the whole width; the picker is a section of the
+   panel rather than a card inside it. */
+.video-studio .video-settings-lora-picker > .lora-picker {
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 14px 0 0;
+}
+
+.video-studio .video-settings-style-axis {
+  display: grid;
+  gap: 14px;
+}
+
+.video-studio .video-settings-style-axis > .settings-bar-styles:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.video-studio .video-settings-previews {
+  display: grid;
+  gap: 12px;
+}
+
+.video-studio .video-settings-previews:empty {
+  display: none;
+}
+
+.video-studio .studio-settings-panel .prompt-field textarea {
+  min-height: 76px;
+}
+
+.video-studio .studio-settings-panel .lightning-toggle {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.video-studio .studio-settings-panel .video-quality-field .quality-segment {
+  height: var(--control-h);
+}
+
+/* ── Results ────────────────────────────────────────────────────────────── */
+.video-studio .video-results {
+  gap: 16px;
+}
+
+.video-studio .video-results-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.video-studio .video-results-switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.video-studio .video-results-tab {
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.video-studio .video-results-tab:hover {
+  color: var(--text);
+}
+
+.video-studio .video-results-tab.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.video-studio .video-results-summary {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.video-studio .video-results-body {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* The upscaler as a results view: one card on the studio grid instead of a folded sub-panel. */
+.video-studio .video-results-body > .upscale-card {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+  padding: 16px 20px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.video-studio .video-results-body > .upscale-card > h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.video-studio .video-results-body > .upscale-card > .upscale-card-sub,
+.video-studio .video-results-body > .upscale-card > .mac-feature-block,
+.video-studio .video-results-body > .upscale-card > [role="alert"],
+.video-studio .video-results-body > .upscale-card > [role="status"] {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.video-studio .video-results-body > .upscale-card > h3 + .upscale-card-sub {
+  margin-top: -12px;
+}
+
+.video-studio .video-results-body > .upscale-card > .asset-picker-field {
+  grid-column: span 2;
+}
+
+.video-studio .video-results-body > .upscale-card > .upscale-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.video-studio .video-results-body > .upscale-card > .prompt-cta {
+  justify-self: start;
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .video-studio .video-results-body > .upscale-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .video-studio .video-results-body > .upscale-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .video-studio .video-results-body > .upscale-card > .asset-picker-field {
+    grid-column: 1 / -1;
+  }
+}
+
+.video-studio .video-results-body > .upscale-card .upscale-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Status lines inside the Refine card read as hints, not body copy. */
+.video-studio .video-refine-card p[role="status"] {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
