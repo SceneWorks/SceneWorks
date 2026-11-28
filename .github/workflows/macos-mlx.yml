@@ -199,38 +199,11 @@ concurrency:
   group: macos-mlx-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'pull_request' && github.ref || github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# BUILD ARTIFACTS OUTSIDE THE DIRECTORY `actions/checkout` CLEANS.
-#
-# This lane had no cache of any kind, and `actions/checkout` defaults to `clean: true` —
-# `git clean -ffdx` in the repo directory, which deletes gitignored `target/`. So every PR
-# rebuilt the whole MLX-from-source graph from nothing on a self-hosted Mac. Measured on
-# `nax-macos` 2026-08-04: `target/debug/deps` carried one job's timestamps end to end
-# (CACHEDIR.TAG 21:58, newest artifact 22:16) across 13 GB, i.e. the entire tree was cold.
-#
-# `github.workspace` is `_work/<repo>/<repo>`; its parent is the runner's per-repo work
-# directory, which checkout does not touch and the runner does not recreate between jobs
-# (only `_temp` is). `../cargo-target` therefore survives the clean, stays scoped per repo
-# and per box, and needs no cache action, no upload, and no network round trip. Workflow-level
-# because the `runner` context is step-level only, while `github` is available here.
-#
-# This is the PR merge gate, so its wall clock is queue pressure for every other job on the
-# same two boxes (sc-14708). Reclaiming the cold build is the cheapest reduction available.
-#
-# It is a cache: if a box runs short of disk, delete the directory and the next job rebuilds
-# it. Nothing here is a test input — the calibration/reference dispatch paths below take their
-# weights from host snapshots, never from `target/`.
-#
-# SCOPED TO `nax-worker`, NOT WORKFLOW-LEVEL. It was workflow-level when first written, which
-# silently broke the hosted job's cache: `Swatinem/rust-cache` derives its target path as
-# `<workspace>/target` from its `workspaces` input and does NOT read `CARGO_TARGET_DIR`, so it
-# cached an empty `<workspace>/target` while the build wrote to `../cargo-target`. Only
-# `~/.cargo` was stored, the artifacts were not, and the job stayed cold at 26m55s while
-# reporting a green cache step. Confirmed from the run-31010484672 log, where "Cache Paths"
-# ends in `/SceneWorks/SceneWorks/target` and the env above ends in `/../cargo-target`.
-#
-# The override only ever helped a PERSISTENT runner, where surviving `clean: true` between jobs
-# is the whole point. A hosted runner is ephemeral — nothing survives it either way — so there
-# the default `<workspace>/target` is correct precisely because it is what rust-cache stores.
+# The persistent NAX lane uses a warm dev-host build slot outside checkout and the
+# runner's system disk. Its legacy ../cargo-target cache exhausted nax-macos-2's
+# system disk in run 46142204052. Select the managed slot after the toolchain/SDK;
+# preserve existing caches and let dev-host own their retention. Keep this scoped
+# to nax-worker: hosted jobs use the default target cached by Swatinem/rust-cache.
 
 jobs:
   # THE PATH FILTER THE `merge_group` TRIGGER CANNOT HAVE. See the note on that trigger: GitHub
@@ -979,10 +952,6 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || ((github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, '[Mac2]')) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, '[Mac2]'))) && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
-      # Survives `actions/checkout`'s `clean: true` between jobs on this persistent box. See
-      # the rationale block above `jobs:`. Job-level rather than workflow-level so it cannot
-      # reach the hosted job, whose cache action stores `<workspace>/target` instead.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). The nax pool is small and hand-registered — GitHub's
     # hosted images cannot run this lane at all, so capacity is exactly the Macs
@@ -1006,6 +975,15 @@ jobs:
         with:
           toolchain: "1.98.0"
           components: clippy
+      - name: Select the active Xcode SDK for native builds
+        run: |
+          sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
+          test -d "$sdkroot"
+          echo "SDKROOT=$sdkroot" >> "$GITHUB_ENV"
+      - name: Select the warm dev-host build slot
+        run: |
+          dev-host env --format github --project sceneworks --worktree "$GITHUB_WORKSPACE" \
+            --session "actions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-nax" --warm >> "$GITHUB_ENV"
       - name: Fetch prebuilt MLX (sc-21382)
         # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs
         # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
@@ -1033,11 +1011,6 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
-      - name: Select the active Xcode SDK for native builds
-        run: |
-          sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
-          test -d "$sdkroot"
-          echo "SDKROOT=$sdkroot" >> "$GITHUB_ENV"
       # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
