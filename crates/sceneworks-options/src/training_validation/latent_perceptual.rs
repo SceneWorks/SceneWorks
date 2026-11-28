@@ -110,7 +110,6 @@ pub const VAE_ANCHOR_TARGETS: [&str; 17] = [
     "wan_i2v_14b_lora",
     "ltx_video_lora",
     "ltx_2_5_video_lora",
-    "mage_flow_base_lora",
     "qwen_image_2_1_lora",
     "qwen_image_2_1_edit_lora",
 ];
