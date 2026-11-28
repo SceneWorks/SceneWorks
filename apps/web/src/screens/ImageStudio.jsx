@@ -362,7 +362,10 @@ export function ImageStudio() {
   // soon as its assets surface here, so the worker card disappearing matches the
   // spec ("when the current worker completes its assets are added to recent
   // assets, the worker disappears").
-  const latestAssets = recentImageAssets ?? latestImageAssets;
+  const latestAssets = useMemo(
+    () => (recentImageAssets ?? latestImageAssets).filter((asset) => !asset.status?.trashed),
+    [recentImageAssets, latestImageAssets],
+  );
   const launchRequest = studioLaunch;
   const nonRecipeLaunchIdRef = useRef(null);
   const trackedLocalJobs = imageLocalJobs;

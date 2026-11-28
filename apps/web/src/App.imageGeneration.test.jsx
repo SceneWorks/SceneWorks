@@ -231,7 +231,7 @@ describe("SceneWorks app shell", () => {
     expect(promptField().value).toBe(defaultPrompt);
   });
 
-  it("keeps completed image progress visible until the generated asset renders", async () => {
+  it("keeps completed image progress visible until its asset renders, then hides discarded output", async () => {
     const completedJob = {
       id: "image-job-1",
       type: "image_generate",
@@ -286,6 +286,20 @@ describe("SceneWorks app shell", () => {
     // (selectStackedJobs + resultVisible). The asset itself is in Recent Assets.
     expect(document.body.querySelector(".worker-progress-card")).toBeNull();
     expect(container.textContent).not.toContain("No fresh image batch");
+
+    const discarded = { ...generatedAsset, status: { trashed: true } };
+    await act(async () => {
+      root.render(withImageStudioContext({ ...imageProps, assets: [discarded], latestAssets: [discarded] }));
+    });
+    expect(container.querySelector(".review-card")).toBeNull();
+    expect(container.querySelector(".worker-progress-card")).toBeNull();
+    expect(container.textContent).not.toContain("Purge");
+    expect(container.textContent).toContain("No fresh image batch");
+
+    await act(async () => {
+      root.render(withImageStudioContext({ ...imageProps, assets: [generatedAsset], latestAssets: [generatedAsset] }));
+    });
+    expect(container.querySelector(".review-card")).not.toBeNull();
   });
 
   it("reconstructs running image batch slots from a generation set without asset ids", async () => {
