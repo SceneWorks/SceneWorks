@@ -25,7 +25,7 @@ pub struct SavedQuantizations {
     source: PathBuf,
     owner: String,
     checkpoint: String,
-    /// The admitted content digest of the job's primary local source, when the route froze one.
+    /// A digest over the admitted bytes of the job's quantizable local sources, when it has any.
     /// Loaders key a checkpoint tensor by its file path; folding the admitted bytes in keeps a
     /// saved quantization from ever serving different bytes later found at that same path.
     source_digest: Option<String>,
@@ -66,7 +66,7 @@ impl SavedQuantizations {
             writes: AtomicU64::new(0),
         }
     }
-    /// Bind every saved weight to `digest`, the admitted SHA-256 of the primary source's bytes.
+    /// Bind every saved weight to `digest`, a digest over the admitted local source bytes.
     pub fn with_source_digest(mut self, digest: Option<String>) -> Self {
         self.source_digest = digest;
         self

@@ -133,10 +133,11 @@ pub(crate) struct RuntimeSourceGuard {
     _portable_snapshot: Option<PortableAttemptSnapshot>,
     plan_layers: Option<std::sync::Arc<VerifiedPlanLayers>>,
     verified_revision_sources: Vec<VerifiedRevisionSource>,
-    /// The admitted closure digest of the primary model's local (Digest) source, when the route
-    /// froze one. Saved quantizations are bound to it, because loaders key checkpoint tensors by
-    /// file path and a local original is served in place at a path that does not name its bytes.
-    primary_source_digest: Option<String>,
+    /// One digest over the admitted bytes of every local source this route may quantize (see
+    /// [`quantized_local_sources_digest`]). Saved quantizations are bound to it, because loaders
+    /// key checkpoint tensors by file path and a local original is served in place at a path that
+    /// does not name its bytes.
+    quantized_sources_digest: Option<String>,
     resolutions: Vec<ModelResolution>,
     sessions: Vec<ExternalSourceSession>,
     /// The ONE process-wide local-tier preference scope for this job, holding exactly the
@@ -633,7 +634,7 @@ impl RuntimeSourceGuard {
         let mut portable_scope = None;
         let mut plan_layers = None;
         let mut verified_revision_sources = Vec::new();
-        let primary_source_digest = binding.and_then(primary_local_source_digest);
+        let quantized_sources_digest = binding.and_then(quantized_local_sources_digest);
         if let Some(binding) = binding {
             verify_portable_route(
                 binding,
@@ -735,7 +736,7 @@ impl RuntimeSourceGuard {
             _portable_snapshot: portable_snapshot,
             plan_layers,
             verified_revision_sources,
-            primary_source_digest,
+            quantized_sources_digest,
             resolutions,
             sessions,
             local_scope,
@@ -769,7 +770,7 @@ impl RuntimeSourceGuard {
             _portable_snapshot: None,
             plan_layers: None,
             verified_revision_sources: Vec::new(),
-            primary_source_digest: None,
+            quantized_sources_digest: None,
             resolutions: Vec::new(),
             sessions: Vec::new(),
             local_scope: None,
@@ -782,9 +783,9 @@ impl RuntimeSourceGuard {
         &self.dispatch_payload
     }
 
-    /// The primary local source's admitted digest that this job's saved quantizations bind to.
-    pub(crate) fn primary_source_digest(&self) -> Option<&str> {
-        self.primary_source_digest.as_deref()
+    /// The admitted local-source digest this job's saved quantizations bind to.
+    pub(crate) fn quantized_sources_digest(&self) -> Option<&str> {
+        self.quantized_sources_digest.as_deref()
     }
 
     pub(crate) fn portable_aux(&self) -> &PortableAuxBindings {
@@ -1320,23 +1321,47 @@ fn verify_source_once(
     Ok(())
 }
 
-/// The admitted digest of the primary model's primary member when it is a local (Digest) source.
-fn primary_local_source_digest(route: &PortableRouteBinding) -> Option<String> {
-    let model = route
+/// One digest over the admitted closure of every local (digest-backed or worker-claimed) member
+/// whose weights a loader may quantize, or `None` when the route has none.
+///
+/// A saved quantization is keyed by its tensor's file path and name, and the key reaching the
+/// cache no longer says which file it came from, so each saved weight is bound to all of them: any
+/// such source replaced at the same path quantizes again, whichever member it is (a primary
+/// checkpoint, a plan layer, a control branch, a claimed component). Low-rank adapters are left
+/// out: they ride as dense forward-time residuals and never reach the quantizer, and binding
+/// them would re-quantize the base for every adapter pairing. Pinned revisions are served from
+/// revision-named hub snapshots, so their paths already name their bytes.
+fn quantized_local_sources_digest(route: &PortableRouteBinding) -> Option<String> {
+    let mut sources = route
         .models
         .iter()
-        .find(|model| matches!(model.slot.as_str(), "modelManifestEntry" | "manifestEntry"))?;
-    model
-        .members
-        .iter()
-        .find_map(|member| match &member.source {
-            PortableSourceIdentity::Digest { sha256 }
-                if member.role == ArtifactMemberRole::Primary =>
-            {
-                Some(sha256.clone())
-            }
-            _ => None,
+        .flat_map(|model| {
+            model.members.iter().filter_map(|member| {
+                let digest = match &member.source {
+                    _ if member.role == ArtifactMemberRole::Lora => return None,
+                    PortableSourceIdentity::Revision { .. } => return None,
+                    PortableSourceIdentity::Digest { sha256 } => sha256,
+                    PortableSourceIdentity::WorkerClaim { closure_sha256, .. } => closure_sha256,
+                };
+                Some(format!(
+                    "{}\n{}\n{digest}",
+                    model.slot,
+                    member.component_id.as_deref().unwrap_or("")
+                ))
+            })
         })
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return None;
+    }
+    sources.sort();
+    let mut digest = Sha256::new();
+    digest.update(b"sceneworks-quantized-local-sources-v1");
+    for source in sources {
+        digest.update((source.len() as u64).to_le_bytes());
+        digest.update(source.as_bytes());
+    }
+    Some(format!("sha256:{:x}", digest.finalize()))
 }
 
 /// Which local members (`locals[model][member]` is the original file or directory a non-revision
@@ -1784,24 +1809,48 @@ fn prepare_portable_snapshot(
     }
     let mut local_in_place_by_member =
         local_members_in_place(route, &plan_layers_by_member, &local_selected_by_member);
-    needs_bundle |= local_in_place_by_member
-        .iter()
-        .flatten()
-        .zip(local_selected_by_member.iter().flatten())
-        .any(|(in_place, local)| local.is_some() && in_place.is_none());
     let copied_revisions = directory_roots
         .iter()
         .filter(|(_, roots)| roots.len() > 1)
         .map(|(key, _)| key.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    needs_bundle |= !copied_revisions.is_empty();
+    // Which members this attempt copies depends on the host's files as well as the route (an
+    // unadmitted file can appear beside an in-place directory, a revision can resolve in a second
+    // root). The bundle is keyed by that layout too, so a published bundle always holds every
+    // member its layout copies and a layout change builds its own bundle instead of serving a
+    // path the old one never held.
+    let mut copied_members = Vec::new();
+    for (model_index, model) in route.models.iter().enumerate() {
+        for (member_index, member) in model.members.iter().enumerate() {
+            let plan_layer = plan_layers_by_member[model_index][member_index].is_some();
+            let copied = match &member.source {
+                PortableSourceIdentity::Revision { identity } => {
+                    let is_selected_aux = member
+                        .component_id
+                        .as_ref()
+                        .is_some_and(|id| selected_aux[model_index].contains(id));
+                    plan_layer
+                        || (!is_selected_aux
+                            && copied_revisions.contains(&(
+                                identity.repository.clone(),
+                                identity.revision.clone(),
+                            )))
+                }
+                _ => local_in_place_by_member[model_index][member_index].is_none(),
+            };
+            if copied {
+                copied_members.push((model_index, member_index));
+            }
+        }
+    }
+    needs_bundle |= !copied_members.is_empty();
     let cache_root = settings.data_dir.join("models/portable-attempts");
     create_private_directory(&settings.data_dir.join("models"))?;
     create_private_directory(&cache_root)?;
     ensure_private_directory(&cache_root)?;
     // A supported route may itself exceed the retention target. It remains leased while active;
     // prune removes other entries, and a later route can evict this one after the lease ends.
-    let route_dir = cache_root.join(portable_cache_route_digest(route)?);
+    let route_dir = cache_root.join(portable_cache_route_digest(route, &copied_members)?);
     create_private_directory(&route_dir)?;
     ensure_private_directory(&route_dir)?;
     // Readers share the route lease for as long as they use the bundle; an evictor needs it
@@ -2441,12 +2490,20 @@ fn selected_revision_aux_directory(
     }
 }
 
-fn portable_cache_route_digest(route: &PortableRouteBinding) -> WorkerResult<String> {
+/// The route entry for `route` served with the `copied` (model, member) indices in its bundle.
+/// With nothing copied this is the route's own digest.
+fn portable_cache_route_digest(
+    route: &PortableRouteBinding,
+    copied: &[(usize, usize)],
+) -> WorkerResult<String> {
     let encoded = serde_json::to_vec(route)
         .map_err(|error| invalid_binding(format!("cannot encode frozen route: {error}")))?;
     let mut digest = Sha256::new();
     digest.update(b"portable-route-cache-v6\0");
     digest.update(encoded);
+    for (model, member) in copied {
+        digest.update(format!("\0copy:{model}/{member}").as_bytes());
+    }
     Ok(format!("{:x}", digest.finalize()))
 }
 
@@ -6332,7 +6389,7 @@ mod tests {
         )
         .unwrap();
         let settings = settings(temp.path().join("second"));
-        let route_digest = portable_cache_route_digest(&binding).unwrap();
+        let route_digest = portable_cache_route_digest(&binding, &[]).unwrap();
         let cache_entry = settings
             .data_dir
             .join("models/portable-attempts")
@@ -6674,6 +6731,11 @@ mod tests {
     /// file the route did not admit sends it back to the copy-then-verify bundle, so the loader
     /// never reaches an unverified byte through a directory it was handed.
     ///
+    /// The route here also carries a component that is copied from the start, so the first
+    /// attempt publishes a bundle holding only that component. When the adapter directory later
+    /// needs a copy too, the attempt must not reuse that bundle (it never held the adapter): the
+    /// bundle is keyed by which members it copies.
+    ///
     /// Before: every checkpoint and adapter pairing copied the whole directory plus the 25 GB
     /// checkpoint into a fresh route bundle.
     #[test]
@@ -6682,37 +6744,46 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let trained = data.join("models/imports/trained");
-        let contents = [
-            ("adapter.safetensors", b"adapter".as_slice()),
-            (
-                "adapter-step000250.resume.safetensors",
-                b"optimizer state".as_slice(),
-            ),
-            ("samples/step-000250/one.png", b"sample".as_slice()),
-        ];
-        for (relative, bytes) in contents {
-            let path = trained.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, bytes).unwrap();
-        }
-        let mut files = contents
-            .iter()
-            .map(|(relative, bytes)| PortableArtifactFile {
-                relative_path: relative.into(),
-                size_bytes: bytes.len() as u64,
-                sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
-            })
-            .collect::<Vec<_>>();
-        files.sort();
-        let member = PortableArtifactMember {
-            role: ArtifactMemberRole::Primary,
-            component_id: None,
-            source: PortableSourceIdentity::Digest {
-                sha256: portable_closure_sha256(&files).unwrap(),
-            },
-            tier: None,
-            files,
+        let decoder = data.join("models/imports/decoder");
+        let write = |root: &Path, contents: &[(&str, &[u8])]| {
+            let mut files = contents
+                .iter()
+                .map(|(relative, bytes)| {
+                    let path = root.join(relative);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, bytes).unwrap();
+                    PortableArtifactFile {
+                        relative_path: relative.into(),
+                        size_bytes: bytes.len() as u64,
+                        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                    }
+                })
+                .collect::<Vec<_>>();
+            files.sort();
+            files
         };
+        let member = |role, component_id: Option<&str>, files: Vec<PortableArtifactFile>| {
+            PortableArtifactMember {
+                role,
+                component_id: component_id.map(str::to_owned),
+                source: PortableSourceIdentity::Digest {
+                    sha256: portable_closure_sha256(&files).unwrap(),
+                },
+                tier: None,
+                files,
+            }
+        };
+        let adapter = write(
+            &trained,
+            &[
+                ("adapter.safetensors", b"adapter"),
+                ("adapter-step000250.resume.safetensors", b"optimizer state"),
+                ("samples/step-000250/one.png", b"sample"),
+            ],
+        );
+        let vae = write(&decoder, &[("vae.safetensors", b"decoder")]);
+        // Not admitted: the decoder directory is copied on every attempt.
+        std::fs::write(decoder.join("notes.txt"), b"not admitted").unwrap();
         let model = PortableModelBinding::new(
             "modelManifestEntry",
             "trained",
@@ -6720,13 +6791,20 @@ mod tests {
             "local",
             None,
             canonical_authored_options_sha256(&json!({})).unwrap(),
-            vec![member],
+            vec![
+                member(ArtifactMemberRole::Primary, None, adapter),
+                member(
+                    ArtifactMemberRole::RequiredComponent,
+                    Some("modelManifestEntry/paths/vae"),
+                    vae,
+                ),
+            ],
         )
         .unwrap();
         let binding = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
         let settings = settings(data);
         let payload = json!({"modelManifestEntry":{"id":"trained", "downloads":[],
-            "paths":{"model":trained}}})
+            "paths":{"model":trained, "vae":decoder}}})
         .as_object()
         .unwrap()
         .clone();
@@ -6739,35 +6817,97 @@ mod tests {
             )
             .unwrap()
         };
-        let served = |guard: &RuntimeSourceGuard| {
+        let served = |guard: &RuntimeSourceGuard, key: &str| {
             std::fs::canonicalize(
-                guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                guard.dispatch_payload()["modelManifestEntry"]["paths"][key]
                     .as_str()
                     .unwrap(),
             )
             .unwrap()
         };
-        let route = settings
-            .data_dir
-            .join("models/portable-attempts")
-            .join(portable_cache_route_digest(&binding).unwrap());
+        let route = |copied: &[(usize, usize)]| {
+            settings
+                .data_dir
+                .join("models/portable-attempts")
+                .join(portable_cache_route_digest(&binding, copied).unwrap())
+        };
 
         let guard = attempt();
-        assert_eq!(served(&guard), std::fs::canonicalize(&trained).unwrap());
-        assert!(!route.join("bundle").exists(), "nothing is copied");
+        assert_eq!(
+            served(&guard, "model"),
+            std::fs::canonicalize(&trained).unwrap()
+        );
+        let decoder_only = std::fs::canonicalize(route(&[(0, 1)]).join("bundle")).unwrap();
+        assert!(served(&guard, "vae").starts_with(&decoder_only));
+        assert!(!decoder_only.join("model0/member0").exists());
         drop(guard);
 
         std::fs::write(trained.join("samples/step-000250/two.png"), b"new sample").unwrap();
         let guard = attempt();
-        let copy = served(&guard);
+        let copy = served(&guard, "model");
+        let both = std::fs::canonicalize(route(&[(0, 0), (0, 1)]).join("bundle")).unwrap();
         assert!(
-            copy.starts_with(std::fs::canonicalize(route.join("bundle")).unwrap()),
-            "an unadmitted file beside the frozen ones keeps the verified copy: {copy:?}"
+            copy.starts_with(&both),
+            "an unadmitted file keeps the verified copy, in a bundle that holds it: {copy:?}"
         );
         assert!(!copy.join("samples/step-000250/two.png").exists());
         assert_eq!(
             std::fs::read(copy.join("adapter.safetensors")).unwrap(),
             b"adapter"
+        );
+        assert!(served(&guard, "vae").starts_with(&both));
+    }
+
+    /// Saved quantizations bind to every local source the loader may quantize, not only the
+    /// primary checkpoint: a control branch replaced at the same path while the checkpoint is
+    /// unchanged binds differently, and a different adapter alone does not (the base keeps its
+    /// saved weights across adapter pairings).
+    #[test]
+    fn saved_quantizations_bind_to_every_quantized_local_source_but_no_adapter() {
+        use sceneworks_core::model_artifacts::portable_binding::portable_closure_sha256;
+        let digest_member = |role, component_id: Option<&str>, bytes: &[u8]| {
+            let files = vec![PortableArtifactFile {
+                relative_path: "weights.safetensors".into(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+            }];
+            PortableArtifactMember {
+                role,
+                component_id: component_id.map(str::to_owned),
+                source: PortableSourceIdentity::Digest {
+                    sha256: portable_closure_sha256(&files).unwrap(),
+                },
+                tier: None,
+                files,
+            }
+        };
+        let route = |control: &[u8], adapter: &[u8]| {
+            let model = PortableModelBinding::new(
+                "modelManifestEntry",
+                "m",
+                "cpu",
+                "local",
+                None,
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![
+                    digest_member(ArtifactMemberRole::Primary, None, b"checkpoint"),
+                    digest_member(ArtifactMemberRole::Control, Some("controls/0"), control),
+                    digest_member(ArtifactMemberRole::Lora, Some("loras/0"), adapter),
+                ],
+            )
+            .unwrap();
+            PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap()
+        };
+        let base = quantized_local_sources_digest(&route(b"control a", b"adapter a")).unwrap();
+        assert_ne!(
+            quantized_local_sources_digest(&route(b"control b", b"adapter a")).unwrap(),
+            base,
+            "a replaced control branch must not reuse saved weights"
+        );
+        assert_eq!(
+            quantized_local_sources_digest(&route(b"control a", b"adapter b")).unwrap(),
+            base,
+            "an adapter never reaches the quantizer and must not re-quantize the base"
         );
     }
 
@@ -7066,13 +7206,8 @@ mod tests {
             vec![&original],
             "the plan layer is the original"
         );
-        assert_eq!(
-            first.primary_source_digest(),
-            Some(
-                portable_closure_sha256(&[file("imported.safetensors")])
-                    .unwrap()
-                    .as_str()
-            ),
+        assert!(
+            first.quantized_sources_digest().is_some(),
             "saved quantizations bind to the admitted bytes"
         );
         let attempts = settings.data_dir.join("models/portable-attempts");
