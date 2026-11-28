@@ -64,7 +64,9 @@ exists for fixture tests and read-only inspection; tests use temporary folders.
 
 The migrated campaign/proof jobs require the installed `dev-host` CLI (Windows
 0.1.1 or newer) and the runner's `DEV_HOST_ROOT`. The CLI chooses a fresh `t/`
-directory for each invocation. This action records its exact repository, run,
+directory for each invocation: `DEV_HOST_ROOT\t\<id>` before dev-host 0.2.0 and
+`DEV_HOST_ROOT\hosts\<host>\t\<id>` from 0.2.0 on. The action accepts both layouts,
+and with `cargo-slot` it requires the Cargo target under the matching `build` folder. This action records its exact repository, run,
 attempt, job, runner and a nonce before exporting `DEV_HOST_JOB_ROOT` and the
 process temp variables. It keeps model downloads in `E:\huggingface` and does
 not change `CARGO_TARGET_DIR` implicitly. Migrated consumers explicitly put

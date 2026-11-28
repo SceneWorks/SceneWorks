@@ -242,6 +242,12 @@ test("Windows Actions Krea uses the registered job child and canonical HF cache"
   assert.deepEqual(config().hubs, [`${jobs}\\tier2-ab\\scratch\\krea-hf\\hub`]);
   assert.throws(() => config({ TIER2_AB_WORK: `${env.RUNNER_TEMP}\\tier2-ab` }), /DEV_HOST_JOB_ROOT/);
   assert.throws(() => config({ DEV_HOST_JOB_ROOT: "D:\\dev-host\\foreign\\abcd1234" }), /registered D:/);
+  // dev-host 0.2.0 and later put job folders in hosts\<host>\t.
+  const hosted = "D:\\dev-host\\hosts\\MICHAEL-TRX50\\t\\abcd1234";
+  assert.equal(config({ DEV_HOST_JOB_ROOT: hosted, TIER2_AB_WORK: `${hosted}\\tier2-ab` }).managedJobRoot, hosted);
+  for (const stray of ["D:\\dev-host\\hosts\\t\\abcd1234", "D:\\dev-host\\other\\h\\t\\abcd1234", "D:\\dev-host\\hosts\\h\\x\\abcd1234"]) {
+    assert.throws(() => config({ DEV_HOST_JOB_ROOT: stray, TIER2_AB_WORK: `${stray}\\tier2-ab` }), /registered D:/);
+  }
   assert.throws(() => config({ HF_HUB_CACHE: "E:\\huggingface\\other" }), /canonical E:/);
   assert.doesNotThrow(() => config({ TIER2_AB_SUITE: "", TIER2_AB_WORK: `${env.RUNNER_TEMP}\\tier2-ab`, DEV_HOST_JOB_ROOT: "" }));
 });
