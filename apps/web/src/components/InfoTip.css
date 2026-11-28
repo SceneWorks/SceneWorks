@@ -1,0 +1,110 @@
+/* InfoTip — (i) beside a field label; its explanation opens in a tooltip bubble. */
+.info-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-left: 4px;
+  font-weight: 400;
+}
+
+.info-tip-button {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: help;
+}
+
+.info-tip-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.info-tip-button:hover,
+.info-tip.pinned .info-tip-button {
+  color: var(--text);
+}
+
+.info-tip-button:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-glow);
+}
+
+.info-tip.warn .info-tip-button {
+  color: var(--warn);
+}
+
+.info-tip-bubble {
+  position: absolute;
+  z-index: 40;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  width: max-content;
+  max-width: 300px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, 4px);
+  transition: opacity var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out), visibility var(--t-fast);
+}
+
+.info-tip-bubble > * + * {
+  display: block;
+  margin-top: 6px;
+}
+
+/* A field label that carries an InfoTip: the text and the (i) stay on one line. */
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+
+/* Undo the field-hint styling of any node handed in as the tip's content. */
+.info-tip-bubble .field-hint,
+.info-tip-bubble .helper-copy {
+  display: inline;
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.info-tip.warn .info-tip-bubble {
+  border-color: color-mix(in oklch, var(--warn) 45%, var(--border));
+}
+
+.info-tip:hover .info-tip-bubble,
+.info-tip-button:focus-visible + .info-tip-bubble,
+.info-tip.pinned .info-tip-bubble {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .info-tip-bubble { transition: none; }
+}

@@ -7,6 +7,7 @@ import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx"
 import { tierLabel } from "../../quantTier.js";
 import { mossAccelerationAvailable, mossAccelerationMode } from "../../mossImage.js";
 import { AspectResolutionPicker } from "./AspectResolutionPicker.jsx";
+import { InfoTip } from "../../components/InfoTip.jsx";
 
 // Settings tab › Model & output: the model, its size and count, which build loads (source
 // precision / quant tier), and the hardware/precision knobs that used to sit in Advanced (GPU,
@@ -95,19 +96,18 @@ export function ImageModelSettings({
             surface, from the manifest field, as Video Studio does. */}
         <ModelAttribution model={selectedModel} className="studio-model-attribution" />
       </label>
-      <AspectResolutionPicker envelope={sizeEnvelope} onChange={handleResolutionChange} resolution={resolution}>
-        {/* sc-25681: informational only — the size is never restricted. */}
-        {patchGridNotice ? (
-          <span className="field-hint" role="note">
-            {patchGridNotice}
-          </span>
+      <AspectResolutionPicker
+        envelope={sizeEnvelope}
+        onChange={handleResolutionChange}
+        resolution={resolution}
+        // sc-25681: informational only — the size is never restricted.
+        info={patchGridNotice || nativeResolutionNotice ? (
+          <>
+            {patchGridNotice ? <span role="note">{patchGridNotice}</span> : null}
+            {nativeResolutionNotice ? <span role="note">{nativeResolutionNotice}</span> : null}
+          </>
         ) : null}
-        {nativeResolutionNotice ? (
-          <span className="field-hint" role="note">
-            {nativeResolutionNotice}
-          </span>
-        ) : null}
-      </AspectResolutionPicker>
+      />
       <label className="settings-field settings-field-count">
         Variations
         <input min="1" max="8" onChange={(event) => setCount(Number(event.target.value))} type="number" value={count} />
@@ -149,7 +149,20 @@ export function ImageModelSettings({
       {supportsTextEncoderSelection ? (
         <>
           <label className="span-2">
-            Text encoder model
+            <span className="field-label">
+              Text encoder model
+              <InfoTip
+                label="About Text encoder model"
+                tone={!selectedTextEncoderAvailable && selectedTextEncoderModel !== defaultTextEncoderId ? "warn" : undefined}
+              >
+                {!selectedTextEncoderAvailable &&
+                selectedTextEncoderModel !== defaultTextEncoderId
+                  ? "The recorded encoder is no longer staged. Choose the model default or restore that encoder before generating."
+                  : textEncoderOptions.length > 1
+                    ? "Only compatible installed encoders verified by this model's engine contract are listed."
+                    : "The model encoder is the default. Compatible built-in, imported, and external choices appear after Models is refreshed."}
+              </InfoTip>
+            </span>
             <select
               aria-label="Text encoder model"
               onChange={(event) => setTextEncoderModel(event.target.value)}
@@ -168,43 +181,35 @@ export function ImageModelSettings({
               ) : null}
             </select>
           </label>
-          <p className="helper-copy field-hint span-2">
-            {!selectedTextEncoderAvailable &&
-            selectedTextEncoderModel !== defaultTextEncoderId
-              ? "The recorded encoder is no longer staged. Choose the model default or restore that encoder before generating."
-              : textEncoderOptions.length > 1
-                ? "Only compatible installed encoders verified by this model's engine contract are listed."
-                : "The model encoder is the default. Compatible built-in, imported, and external choices appear after Models is refreshed."}
-          </p>
         </>
       ) : null}
       {!moss ? (
         <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
       ) : null}
       {promptEnhance ? (
-        <label
-          className="checkline prompt-enhance-toggle"
-          title="Have the model's native prompt enhancer rewrite your prompt before generating. FLUX 3 uses its separately installed optional upsampler. The saved recipe records the original and effective prompts, including any safe fallback. Distinct from Refine; off by default."
-        >
+        <label className="checkline prompt-enhance-toggle">
           <input
             checked={enhancePrompt}
             onChange={(event) => setEnhancePrompt(event.target.checked)}
             type="checkbox"
           />
           Enhance prompt
+          <InfoTip label="About Enhance prompt">
+            Have the model's native prompt enhancer rewrite your prompt before generating. FLUX 3 uses its separately installed optional upsampler. The saved recipe records the original and effective prompts, including any safe fallback. Distinct from Refine; off by default.
+          </InfoTip>
         </label>
       ) : null}
       {precisionToggle && !showTierPicker ? (
-        <label
-          className="checkline boogu-precision-toggle"
-          title="Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac)."
-        >
+        <label className="checkline boogu-precision-toggle">
           <input
             checked={bf16Precision}
             onChange={(event) => { setRecipeTierRequest(null); setBf16Precision(event.target.checked); }}
             type="checkbox"
           />
           Full precision (bf16)
+          <InfoTip label="About Full precision">
+            Use the full-precision bf16 build instead of the default Q8. Higher fidelity, but a much larger download (~38 GB per variant, fetched on demand) that needs a larger Mac (≈96 GB unified memory). Off = the Q8 default (~23 GB, 64 GB-class Mac).
+          </InfoTip>
         </label>
       ) : null}
     </div>

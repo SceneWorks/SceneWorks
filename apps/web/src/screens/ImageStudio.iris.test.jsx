@@ -24,6 +24,7 @@ vi.mock("../api.js", async (importOriginal) => {
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
+import { withoutInfoTips } from "../components/InfoTip.jsx";
 
 // Mirrors the shipped catalog entry's control-bearing keys.
 const IRIS = {
@@ -94,7 +95,7 @@ function baseContext(overrides = {}) {
 
 const labelled = (container, text) =>
   [...container.querySelectorAll("label")].find(
-    (node) => node.querySelector("input, select, textarea") && node.firstChild?.textContent?.trim() === text,
+    (node) => node.querySelector("input, select, textarea") && withoutInfoTips(node.firstChild).trim() === text,
   );
 const field = (container, text) => labelled(container, text)?.querySelector("input, select, textarea");
 const generateButton = () =>

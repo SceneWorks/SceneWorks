@@ -3,6 +3,7 @@ import { showTransparencyToggle, transparencyPromptSuggestion, TRANSPARENCY_PROM
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration, upscaleFactorsForEngine } from "../../upscaleEngines.js";
 import { irisRestoreControls } from "../../irisRestore.js";
 import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
+import { InfoTip } from "../../components/InfoTip.jsx";
 
 // Settings tab › Upscale & finish: what happens after the denoise — upscale / restoration,
 // hires.fix, the decoder (alternate decoders, PiD), and RGBA output. Same controls and
@@ -219,7 +220,13 @@ export function ImageFinishSettings({
       ) : null}
       {showDecoderPicker ? (
         <label className="alternate-decoder-select span-2">
-          <span className="studio-field-label">Decoder <span className="badge">Experimental</span></span>
+          <span className="studio-field-label">
+            Decoder <span className="badge">Experimental</span>
+            <InfoTip label="About Decoder">
+              Alternate decode only; the model, text encoder, and native VAE remain installed. Output licensing
+              appends the selected decoder component.
+            </InfoTip>
+          </span>
           <select
             onChange={(event) => {
               const next = event.target.value;
@@ -240,10 +247,6 @@ export function ImageFinishSettings({
               );
             })}
           </select>
-          <span className="field-hint">
-            Alternate decode only; the model, text encoder, and native VAE remain installed.
-            Output licensing appends the selected decoder component.
-          </span>
         </label>
       ) : null}
       {showPidToggle ? (

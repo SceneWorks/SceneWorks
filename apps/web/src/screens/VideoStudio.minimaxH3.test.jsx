@@ -42,6 +42,7 @@ import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 import { servedCatalogFacts } from "../testUtils/servedCatalogFacts.js";
 
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
 const manifestModels = (() => {
@@ -188,7 +189,8 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     for (const model of manifestModels.filter((entry) => entry.family === "minimax-h3")) {
       const fixture = { ...shipped(model.id), installState: "installed", usable: true };
       await render(baseContext({ videoModels: [fixture] }));
-      const helper = [...container.querySelectorAll(".helper-copy")].map((node) => node.textContent);
+      // The duration guidance opens from the (i) beside the Duration label.
+      const helper = [...container.querySelectorAll(".helper-copy, .info-tip-bubble")].map((node) => node.textContent);
       expect(
         helper.some((text) => /481 frames for at least 20 seconds/.test(text)),
         `${model.id} must render its durationHint's twenty-second option`,

@@ -7,6 +7,7 @@ import { qualityChoices } from "../../jobTypes.js";
 import { guidanceDefaultFromModel, stepsDefaultFromModel } from "../../samplerOptions.js";
 import { VedaControls } from "../../components/VedaControls.jsx";
 import { StudioSettingsGroup } from "../../components/StudioSettingsTabs.jsx";
+import { InfoTip } from "../../components/InfoTip.jsx";
 
 // Whether the "For this model" group under Sampling has anything to show — the model-specific
 // blocks (Wan Lightning, MiniMax-H3 Turbo + Veda, LTX-2.3, LTX-2.5). The group is omitted when
@@ -287,12 +288,12 @@ export function VideoSamplingSettings({
                   type="checkbox"
                 />
                 Lightning (fast 4-step)
+                <InfoTip label="About Lightning">
+                  {lightning
+                    ? "On: ~10× faster, 4 steps, CFG off, small quality trade-off. Steps and guidance are governed by the recipe."
+                    : "Off: full multi-step quality with CFG (slower). Use the Steps and Guidance controls above."}
+                </InfoTip>
               </label>
-              <p className="helper-copy">
-                {lightning
-                  ? "On: ~10× faster, 4 steps, CFG off, small quality trade-off. Steps and guidance are governed by the recipe."
-                  : "Off: full multi-step quality with CFG (slower). Use the Steps and Guidance controls above."}
-              </p>
             </div>
           ) : null}
           {/* MiniMax-H3 turbo (sc-18727). A VARIANT selector, not a toggle: the three published
@@ -304,7 +305,16 @@ export function VideoSamplingSettings({
           {showTurbo ? (
             <div className="lightning-toggle studio-field span-2">
               <label>
-                Turbo (step-distilled)
+                <span className="field-label">
+                  Turbo (step-distilled)
+                  <InfoTip label="About Turbo">
+                    {!turboVariants.length
+                      ? "No turbo adapter installed for this model. Install one from the LoRA library to render in 4–8 steps instead of the full schedule."
+                      : activeTurboVariant
+                        ? `On: ${turboRecipeSummary(activeTurboVariant)}. Roughly 7–12× faster (measured 12.6 min against 2.42 h at 1344×768). The distilled checkpoints are trained at 544p/768p and upstream is still improving their detail, so this is a different sample rather than the same one faster — turn it off for the reference schedule.`
+                        : "Off: the full schedule at the model's own sigma shift. Slow — a default-canvas clip measured 2.42 h."}
+                  </InfoTip>
+                </span>
                 <select
                   aria-label="Turbo (step-distilled)"
                   disabled={!turboVariants.length}
@@ -319,13 +329,6 @@ export function VideoSamplingSettings({
                   ))}
                 </select>
               </label>
-              <p className="helper-copy">
-                {!turboVariants.length
-                  ? "No turbo adapter installed for this model. Install one from the LoRA library to render in 4–8 steps instead of the full schedule."
-                  : activeTurboVariant
-                    ? `On: ${turboRecipeSummary(activeTurboVariant)}. Roughly 7–12× faster (measured 12.6 min against 2.42 h at 1344×768). The distilled checkpoints are trained at 544p/768p and upstream is still improving their detail, so this is a different sample rather than the same one faster — turn it off for the reference schedule.`
-                    : "Off: the full schedule at the model's own sigma shift. Slow — a default-canvas clip measured 2.42 h."}
-              </p>
             </div>
           ) : null}
           {showTurbo || veda.enabled ? (
@@ -364,7 +367,14 @@ export function VideoSamplingSettings({
           {model === ltx25VideoModelId ? (
             <>
               <label>
-                Transformer
+                <span className="field-label">
+                  Transformer
+                  <InfoTip label="About Transformer">
+                    {ltx25Dev
+                      ? "Dev uses the guided 30-step transformer and the bundled stage-two distilled refinement."
+                      : "Distilled is the default packed transformer and does not apply the refinement adapter twice."}
+                  </InfoTip>
+                </span>
                 <select
                   aria-label="LTX-2.5 transformer"
                   onChange={(event) => setTransformerVariant(event.target.value)}
@@ -373,14 +383,15 @@ export function VideoSamplingSettings({
                   <option value="distilled">Distilled (default, 8 steps)</option>
                   <option value="dev">Dev (guided, 30 steps)</option>
                 </select>
-                <p className="helper-copy">
-                  {ltx25Dev
-                    ? "Dev uses the guided 30-step transformer and the bundled stage-two distilled refinement."
-                    : "Distilled is the default packed transformer and does not apply the refinement adapter twice."}
-                </p>
               </label>
               <label>
-                VAE decoder
+                <span className="field-label">
+                  VAE decoder
+                  <InfoTip label="About VAE decoder">
+                    Conv is the fast default. DiffVAE performs a separate diffusion decode for finer faces,
+                    textures, and on-screen detail.
+                  </InfoTip>
+                </span>
                 <select
                   aria-label="LTX-2.5 VAE decoder"
                   onChange={(event) => setVaeDecoder(event.target.value)}
@@ -389,10 +400,6 @@ export function VideoSamplingSettings({
                   <option value="conv">Conv VAE (default, faster)</option>
                   <option value="diffusion">DiffVAE (higher fidelity, slower)</option>
                 </select>
-                <p className="helper-copy">
-                  Conv is the fast default. DiffVAE performs a separate diffusion decode for
-                  finer faces, textures, and on-screen detail.
-                </p>
               </label>
               <div className="lightning-toggle studio-field span-2">
                 <label className="checkline">
@@ -403,11 +410,11 @@ export function VideoSamplingSettings({
                     type="checkbox"
                   />
                   Choose duration from the prompt
+                  <InfoTip label="About duration from the prompt">
+                    Uses LTX-2.5&apos;s optional duration head. Choose a manual duration under Model &amp;
+                    output to turn this off and send that explicit duration instead.
+                  </InfoTip>
                 </label>
-                <p className="helper-copy">
-                  Uses LTX-2.5's optional duration head. Choose a manual duration under Model &amp;
-                  output to turn this off and send that explicit duration instead.
-                </p>
               </div>
               <label>
                 Auto duration minimum (seconds)

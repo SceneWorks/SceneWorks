@@ -7,6 +7,7 @@ import { SourcePrecisionField, TierPickerField } from "../../components/generati
 import { tierLabel } from "../../quantTier.js";
 import { formatDurationOption } from "../../videoModelLimits.js";
 import { ModelAttribution } from "../../components/ModelAttribution.jsx";
+import { InfoTip } from "../../components/InfoTip.jsx";
 
 // Settings tab › Model & output: what loads and what comes out — the model, the output shape
 // (resolution, duration, frame rate), the one quantization slot, and the hardware knobs that used
@@ -101,9 +102,11 @@ export function VideoModelOutputSettings({
           ))}
         </select>
       </label>
-      <div className="studio-field">
       <label className="settings-field-count">
-        Duration
+        <span className="field-label">
+          Duration
+          {durationHint ? <InfoTip label="About Duration">{durationHint}</InfoTip> : null}
+        </span>
         {/* A MENU, never a range: `limits.durations` is the model's exact renderable set,
             and MiniMax-H3 is the case that makes the distinction visible — its supported
             `17n + 5` lattice rungs are the ONLY lengths the checkpoint renders, so a
@@ -125,8 +128,6 @@ export function VideoModelOutputSettings({
           ))}
         </select>
       </label>
-      {durationHint ? <p className="helper-copy field-hint">{durationHint}</p> : null}
-      </div>
       <label>
         Frames
         <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
@@ -174,9 +175,22 @@ export function VideoModelOutputSettings({
       ) : null}
       <GpuSelect options={gpuOptions} value={requestedGpu} onChange={setRequestedGpu} />
       {supportsPromptEnhancement && supportsTextEncoderSelection ? (
-        <div className="studio-field">
         <label>
-          Text encoder model
+          <span className="field-label">
+            Text encoder model
+            {!selectedTextEncoderAvailable && selectedTextEncoderModel !== defaultTextEncoderId ? (
+              <InfoTip label="About Text encoder model" tone="warn">
+                The recorded encoder is not staged on this worker. Choose the shipped default or stage the
+                alternate before rendering.
+              </InfoTip>
+            ) : (
+              <InfoTip label="About Text encoder model">
+                {textEncoderOptions.length > 1
+                  ? "Only complete encoders already staged for this worker are listed."
+                  : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
+              </InfoTip>
+            )}
+          </span>
           <select
             aria-label="Text encoder model"
             disabled={!enhancePrompt}
@@ -196,15 +210,6 @@ export function VideoModelOutputSettings({
             ) : null}
           </select>
         </label>
-          <p className="helper-copy field-hint">
-            {!selectedTextEncoderAvailable &&
-            selectedTextEncoderModel !== defaultTextEncoderId
-              ? "The recorded encoder is not staged on this worker. Choose the shipped default or stage the alternate before rendering."
-              : textEncoderOptions.length > 1
-                ? "Only complete encoders already staged for this worker are listed."
-                : "The shipped encoder is the default. Complete operator-staged alternates appear here after Models is refreshed."}
-          </p>
-        </div>
       ) : null}
       <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
       {supportsPromptEnhancement ? (
@@ -216,12 +221,12 @@ export function VideoModelOutputSettings({
               type="checkbox"
             />
             Enhance prompt before generation
+            <InfoTip label="About Enhance prompt">
+              {supportsStockPromptEnhancement
+                ? "Rewrites the prompt with LTX-2.5's separately downloaded stock Gemma-4 enhancer."
+                : "Rewrites the prompt with the selected text encoder before the model encodes it."}
+            </InfoTip>
           </label>
-          <p className="helper-copy field-hint">
-            {supportsStockPromptEnhancement
-              ? "Rewrites the prompt with LTX-2.5's separately downloaded stock Gemma-4 enhancer."
-              : "Rewrites the prompt with the selected text encoder before the model encodes it."}
-          </p>
         </div>
       ) : null}
     </div>

@@ -2,6 +2,7 @@ import { AppearanceSelectors, AppearanceNotes } from "./AppearanceSelectors.jsx"
 import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
+import { InfoTip } from "./InfoTip.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
   modelLibraryContextForModel,
@@ -163,9 +164,24 @@ export function TierPickerField({
   const conversionNoteId = useId();
   const conversionHint = items.find((item) => item.tier === value)?.conversionHint;
   const showSuggested = suggested && !tierSwitching;
+  // The explanation (`title`), the selected tier's conversion note and any memory/quality
+  // `warning` open from an (i) beside the label instead of stacking under the select.
+  const tipContent = [title, conversionHint].filter(Boolean);
   return (
-    <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
-      Quant tier
+    <label className={`quant-tier-picker${className ? ` ${className}` : ""}`}>
+      <span className="field-label">
+        Quant tier
+        {tipContent.length || warning ? (
+          <InfoTip label="About Quant tier" tone={warning ? "warn" : undefined}>
+            {warning}
+            {tipContent.map((text, index) => (
+              <span className="info-tip-para" id={text === conversionHint ? conversionNoteId : undefined} key={index}>
+                {text}
+              </span>
+            ))}
+          </InfoTip>
+        ) : null}
+      </span>
       <select
         aria-label="Quant tier"
         aria-describedby={[showSuggested && suggestedNoteId, conversionHint && conversionNoteId].filter(Boolean).join(" ") || undefined}
@@ -178,7 +194,6 @@ export function TierPickerField({
           </option>
         ))}
       </select>
-      {conversionHint ? <span className="field-hint" id={conversionNoteId}>{conversionHint}</span> : null}
       {tierSwitching ? (
         <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
       ) : null}
@@ -204,7 +219,6 @@ export function TierPickerField({
           ) : null}
         </span>
       ) : null}
-      {warning}
     </label>
   );
 }

@@ -12,6 +12,7 @@ import {
   LOW_RES_START_MIN_SCALE,
 } from "./samplingControls.js";
 import { GUIDANCE_METHOD_LABELS, fixedStepsForModel, guidanceDefaultFromModel, maxStepsForModel, stepsDefaultFromModel } from "../../samplerOptions.js";
+import { InfoTip } from "../../components/InfoTip.jsx";
 
 // Settings tab › Sampling: the denoise knobs every model shares (cleared values → model
 // default), then "For this model" — the blocks only one model family declares (MOSS-Image, PAG,
@@ -192,23 +193,35 @@ export function ImageSamplingSettings({
           1.0: the engine refuses an interval there because it would do nothing. */}
       {supportsCfgInterval ? (
         <label>
-          Guidance interval
+          <span className="field-label">
+            Guidance interval
+            {cfgIntervalError ? null : (
+              <InfoTip label="About Guidance interval">
+                {cfgIntervalDisabled ? "Needs guidance above 1." : "start, end: guidance runs only between (1 = noise)."}
+              </InfoTip>
+            )}
+          </span>
           <input
             disabled={cfgIntervalDisabled}
             onChange={(event) => setCfgInterval(event.target.value)}
             placeholder="0, 1"
             value={cfgInterval}
           />
-          <span className="field-hint" role={cfgIntervalError ? "alert" : undefined}>
-            {cfgIntervalDisabled
-              ? "Needs guidance above 1."
-              : cfgIntervalError || "start, end: guidance runs only between (1 = noise)."}
-          </span>
+          {cfgIntervalError && !cfgIntervalDisabled ? (
+            <span className="field-hint" role="alert">{cfgIntervalError}</span>
+          ) : null}
         </label>
       ) : null}
       {showGuidanceMethodPicker ? (
         <label>
-          Guidance method
+          <span className="field-label">
+            Guidance method
+            {guidanceMethod === "cfg_pp" ? (
+              <InfoTip label="About CFG++" tone="warn">
+                CFG++ reparameterizes guidance — use a low CFG (~1.5–2.5); high values over-saturate.
+              </InfoTip>
+            ) : null}
+          </span>
           <select
             onChange={(event) => setGuidanceMethod(event.target.value)}
             value={guidanceMethod}
@@ -219,12 +232,6 @@ export function ImageSamplingSettings({
               </option>
             ))}
           </select>
-          {guidanceMethod === "cfg_pp" ? (
-            <span className="field-hint">
-              CFG++ reparameterizes guidance — use a low CFG (~1.5–2.5); high
-              values over-saturate.
-            </span>
-          ) : null}
         </label>
       ) : null}
       {captionOverflowChoices.length ? (
@@ -349,17 +356,19 @@ export function ImageSamplingSettings({
       ) : null}
       {supportsNegativePrompt ? (
         <label className="prompt-field span-full">
-          Negative prompt
+          <span className="field-label">
+            Negative prompt
+            {negativePromptCfgOff ? (
+              <InfoTip label="About Negative prompt">
+                The negative prompt applies when CFG is enabled for this model.
+              </InfoTip>
+            ) : null}
+          </span>
           <textarea
             disabled={negativePromptCfgOff || mossDmd}
             onChange={(event) => setNegativePrompt(event.target.value)}
             value={negativePrompt}
           />
-          {negativePromptCfgOff ? (
-            <span className="field-hint">
-              The negative prompt applies when CFG is enabled for this model.
-            </span>
-          ) : null}
         </label>
       ) : null}
       {modelSpecific ? (
@@ -419,7 +428,12 @@ export function ImageSamplingSettings({
           {pagCapability ? (
             <div className="pag-controls span-full">
               <label>
-                PAG scale
+                <span className="field-label">
+                  PAG scale
+                  <InfoTip label="About PAG scale">
+                    {`Recommended: ${pagCapability.recommendedScale} · default blocks [${pagCapability.defaultLayers.join(", ")}] · window [${pagCapability.defaultStart}, ${pagCapability.defaultStop})`}
+                  </InfoTip>
+                </span>
                 <input
                   aria-label="PAG scale"
                   onChange={(event) => setPag((current) => ({ ...current, scale: event.target.value }))}
@@ -428,10 +442,7 @@ export function ImageSamplingSettings({
                   type="number"
                   value={pag.scale}
                 />
-                <span className="field-hint" role={pagError ? "alert" : undefined}>
-                  {pagError ||
-                    `Recommended: ${pagCapability.recommendedScale} · default blocks [${pagCapability.defaultLayers.join(", ")}] · window [${pagCapability.defaultStart}, ${pagCapability.defaultStop})`}
-                </span>
+                {pagError ? <span className="field-hint" role="alert">{pagError}</span> : null}
               </label>
               <details className="pag-advanced">
                 <summary>Advanced PAG overrides</summary>
@@ -494,8 +505,8 @@ export function ImageSamplingSettings({
             <div className="multiphase-section span-full">
               <span className="studio-field-label">
                 Multi-phase denoise <span className="badge">Experimental</span>
+                <InfoTip label="About Multi-phase denoise">Split the Raw denoise into phases.</InfoTip>
               </span>
-              <span className="field-hint">Split the Raw denoise into phases.</span>
               <MultiPhaseEditor
                 enabled={multiPhaseEnabled}
                 onApplyTurboFinish={applyTurboFinishPreset}

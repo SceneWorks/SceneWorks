@@ -22,6 +22,7 @@ vi.mock("../api.js", async (importOriginal) => {
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
+import { withoutInfoTips } from "../components/InfoTip.jsx";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CATALOG_PATH = resolve(HERE, "../testUtils/catalogBaseline/candidate-catalog.json");
@@ -114,7 +115,7 @@ const labelled = (container, text) =>
   [...container.querySelectorAll("label")].find(
     (node) =>
       node.querySelector("input, select, textarea") &&
-      (node.firstChild?.textContent?.trim() === text || node.textContent.trim().startsWith(text)),
+      (withoutInfoTips(node.firstChild).trim() === text || withoutInfoTips(node).trim().startsWith(text)),
   );
 const field = (container, text) => labelled(container, text)?.querySelector("input, select, textarea");
 const generateButton = () =>
@@ -182,7 +183,8 @@ describe("ImageStudio — Perturbed-Attention Guidance (PAG, SW-7181)", () => {
     expect(scaleInput.getAttribute("placeholder")).toBe("0 (Off)");
     expect(scaleInput.getAttribute("step")).toBe("any");
 
-    const hintText = labelled(container, "PAG scale").querySelector(".field-hint")?.textContent;
+    // The recommendation opens from the (i) beside the PAG scale label.
+    const hintText = labelled(container, "PAG scale").querySelector(".info-tip-bubble")?.textContent;
     expect(hintText).toContain(`Recommended: ${model.pag.recommendedScale}`);
     expect(hintText).toContain(`default blocks [${model.pag.defaultLayers.join(", ")}]`);
     expect(hintText).toContain(`window [${model.pag.defaultStart}, ${model.pag.defaultStop})`);
