@@ -9,6 +9,7 @@ import { useThemeAccent } from "./hooks/useThemeAccent.js";
 import { useWebView2RepaintPump } from "./hooks/useWebView2RepaintPump.js";
 import { useShellHydration } from "./hooks/useShellHydration.js";
 import { useFullAssetHydration } from "./hooks/useFullAssetHydration.js";
+import { useCatalogAssetById } from "./hooks/useCatalogAssetById.js";
 import { useJobCreators } from "./hooks/useJobCreators.js";
 import { useJobActions } from "./hooks/useJobActions.js";
 import { useSendToStudio } from "./hooks/useSendToStudio.js";
@@ -1028,14 +1029,15 @@ export function App() {
   // The source image an edit was derived from (asset.lineage.sourceAssetId), resolved
   // from the live asset set so the Image Viewer can offer an Original↔Edited side-by-side
   // compare (the edit stays its own separate tile — this is a view link, not a fold).
-  // Null when the previewed asset isn't a derived edit or its source is gone (purged).
-  const previewSourceAsset = useMemo(() => {
-    const sourceId = previewedAsset?.lineage?.sourceAssetId;
-    if (!sourceId) {
-      return null;
-    }
-    return assets.find((candidate) => candidate.id === sourceId) ?? null;
-  }, [assets, previewedAsset]);
+  // Null when the previewed asset isn't a derived edit or its source is gone (purged). On the
+  // Library routes the catalog is the Library slice, so a Character Studio source is fetched on
+  // its own rather than silently dropping the compare.
+  const previewSourceAsset = useCatalogAssetById({
+    assets,
+    assetId: previewedAsset?.lineage?.sourceAssetId ?? null,
+    projectId: previewedAsset?.projectId ?? activeProject?.id ?? null,
+    token,
+  });
   const previewNavigation = useMemo(() => {
     if (!previewedAsset || previewScopeAssets.length < 2) {
       return { previous: null, next: null };
@@ -1359,7 +1361,7 @@ export function App() {
 
   useWebView2RepaintPump();
 
-  const { refreshAssets, hydrateLaunchDomains, context: shellHydrationContext } = useShellHydration({
+  const { refreshAssets, hydrateLaunchDomains, assetCatalogComplete, context: shellHydrationContext } = useShellHydration({
     residentDomains, jobsRef, loadedAssets, ready, token, activeProject, setAssets, setLoadedAssetsProjectId, setAssetLoadState, setCharacters, setSavedVoices, setPersonTracks, setTimelines, setTimelinesProjectId, setPresets, setPromptBatches, setLoras, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, setSelectedTimelineId, setActiveTimeline, setMacCapabilitiesAuthoritative, setMacCapabilitiesLoading, setMacCapabilities, setMacCapabilitiesError, setDomainError, setProjects, setActiveProject, setProjectsLoaded, setJobs, setQueueSummary, setWorkers, refreshModels, domainErrors, setTrainingTargets, setTrainingTargetsError, setTrainingPresets, setTrainingPresetsError, activeProjectRef, loadedAssetsProjectId, setSelectedAssetId, refreshLoras, setupCompleted, authenticated, uiMode, simpleActiveScreen, activeView, refreshCharacters, refreshSavedVoices, refreshPresets, refreshPromptBatches, refreshTrainingDatasets, refreshPersonTracks, refreshTimelines, projectsLoaded, activeAssetLoadState, hasLibraryConsumerAsset
   });
   // sc-11231 (F-037): useJobEvents captures whichever callback existed at subscribe time
@@ -1721,6 +1723,8 @@ export function App() {
       activeAssetLoadState.status === "ready"
     ),
     assetsLoading: activeAssetLoadState.status === "loading",
+    // False while a Library-sliced catalog is being widened for this route (see useShellHydration).
+    assetCatalogComplete,
     assetsError: activeAssetLoadState.error,
     selectedAsset,
     selectedAssetId,

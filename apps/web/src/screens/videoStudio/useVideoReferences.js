@@ -17,6 +17,8 @@ export function useVideoReferences({
   setCharacterId,
   setCharacterLookId,
   assets,
+  // False while the shell still holds only the Library slice of the catalog (useShellHydration).
+  assetCatalogComplete = true,
   setLastFrameAssetId,
   setBridgeRightClipAssetId,
   setReferenceClipAssetId,
@@ -138,7 +140,9 @@ export function useVideoReferences({
   const restoredAssetsValidatedRef = useRef(false);
 
   useEffect(() => {
-    if (restoredAssetsValidatedRef.current || assets.length === 0) {
+    // A non-empty Library slice is not the whole catalog: wait until it has been widened, or a
+    // restored Character Studio reference would be dropped as missing.
+    if (restoredAssetsValidatedRef.current || assets.length === 0 || !assetCatalogComplete) {
       return;
     }
     restoredAssetsValidatedRef.current = true;
@@ -151,7 +155,7 @@ export function useVideoReferences({
     dropMissing(setReferenceClipAssetId);
     setReferenceAssetIds((current) => (current.some((id) => !assetExists(id)) ? current.filter(assetExists) : current));
     setSourceClipAssetIds((current) => (current.some((id) => !assetExists(id)) ? current.filter(assetExists) : current));
-  }, [assets, setBridgeRightClipAssetId, setLastFrameAssetId, setReferenceAssetIds, setReferenceClipAssetId, setSourceAssetId, setSourceClipAssetId, setSourceClipAssetIds]);
+  }, [assetCatalogComplete, assets, setBridgeRightClipAssetId, setLastFrameAssetId, setReferenceAssetIds, setReferenceClipAssetId, setSourceAssetId, setSourceClipAssetId, setSourceClipAssetIds]);
 
   // Same restore-time validation for the restored person-track selection (sc-11964): once the
   // person-track catalog first lands, drop personTrackId if it no longer resolves to a real track.

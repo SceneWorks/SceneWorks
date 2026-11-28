@@ -38,7 +38,15 @@ use super::*;
 /// indexed-envelope change, so [`ASSET_INDEX_VERSION`] stays at 8 and the bump
 /// does NOT force a rebuild from sidecars — the migration backfills the journal
 /// from the rows already indexed.
-pub(super) const PROJECT_SCHEMA_VERSION: i64 = 9;
+///
+/// v10: replaces `idx_assets_created_at` with `idx_assets_listing`, which keeps
+/// `created_at` as its leading column (so the listing order still comes from the
+/// index) and also carries every column the listing filters on. A scoped read
+/// (`scope=library`) of a project whose catalog is mostly Character Studio
+/// output then rejects the hidden rows from the index entry alone instead of
+/// loading each row and its multi-kilobyte `asset_json`. Pure index change: the
+/// migration builds it from existing rows, so [`ASSET_INDEX_VERSION`] stays.
+pub(super) const PROJECT_SCHEMA_VERSION: i64 = 10;
 
 /// Version of the derived data the asset index rebuild writes (the indexed
 /// envelopes, posters and lineage keys), stamped under `ASSET_INDEX_VERSION_KEY`.
@@ -170,8 +178,9 @@ fn migrate_project_schema(connection: &Connection) -> ProjectStoreResult<()> {
           on assets(source_asset_id);
         create index if not exists idx_assets_upscaled_from
           on assets(upscaled_from_asset_id);
-        create index if not exists idx_assets_created_at
-          on assets(created_at);
+        drop index if exists idx_assets_created_at;
+        create index if not exists idx_assets_listing
+          on assets(created_at, origin, rejected, trashed, type);
         ",
     )?;
     apply_asset_change_journal(connection)?;

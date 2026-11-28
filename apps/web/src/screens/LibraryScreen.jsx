@@ -67,9 +67,10 @@ export function LibraryScreen() {
   // Asset Library hygiene (sc-2024 / sc-8339): show only studio-generated and uploaded
   // media via a positive origin allow-list (isLibraryAsset). Character Studio outputs,
   // Pose/Key Point library assets, and any future/foreign origin stay out by default —
-  // a single `!== "character_studio"` exclusion let everything else leak in. The backend
-  // also exposes `?scope=library`; we filter on the authoritative `origin` field
-  // client-side to reuse the shared asset feed instead of loading a second scoped copy.
+  // a single `!== "character_studio"` exclusion let everything else leak in. On this route
+  // the shared feed is the server's `scope=library` listing (`assetCatalogScopeForRoute`),
+  // but it is a superset — and stays the full catalog once another route has widened it —
+  // so the authoritative `origin` allow-list is still applied here.
   // Dataset images never reach the Library — they are stored outside the indexed folders.
   const libraryAssets = useMemo(() => assets.filter(isLibraryAsset), [assets]);
   const visibleAssets = useMemo(() => foldUpscaledAssetVariants(libraryAssets.filter((asset) => {

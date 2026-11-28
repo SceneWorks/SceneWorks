@@ -70,6 +70,7 @@ export function VideoStudio() {
   const {
     activeProject,
     assets,
+    assetCatalogComplete,
     characters,
     createPersonDetectionJob,
     createPersonTrackJob,
@@ -614,6 +615,7 @@ export function VideoStudio() {
   setCharacterId,
   setCharacterLookId,
   assets,
+  assetCatalogComplete,
   setLastFrameAssetId,
   setBridgeRightClipAssetId,
   setReferenceClipAssetId,

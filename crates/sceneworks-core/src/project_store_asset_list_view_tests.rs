@@ -448,8 +448,20 @@ fn listing_and_change_scan_use_indexes() {
     };
     let listing = plan("select id from assets order by created_at desc");
     assert!(
-        listing.contains("idx_assets_created_at") && !listing.contains("TEMP B-TREE"),
+        listing.contains("idx_assets_listing") && !listing.contains("TEMP B-TREE"),
         "the listing order must come from the index, not a sort: {listing}"
+    );
+    // The scoped Library read filters on columns the listing index carries, so
+    // hidden (e.g. Character Studio) rows are rejected from the index entry.
+    let scoped = plan(
+        "select id, asset_json from assets \
+         where (0 or rejected = 0) and (0 or trashed = 0) and (null is null or type = null) \
+           and (origin is null or origin not in ('character_studio', 'vector_workflow_intermediate')) \
+         order by created_at desc",
+    );
+    assert!(
+        scoped.contains("idx_assets_listing") && !scoped.contains("TEMP B-TREE"),
+        "the scoped listing must scan the listing index in order: {scoped}"
     );
     let changes = plan("select asset_id from asset_changes where seq > 10");
     assert!(

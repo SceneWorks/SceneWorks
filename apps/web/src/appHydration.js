@@ -82,6 +82,24 @@ export function hydrationDomainsForRoute(route, { simple = false, deferred = fal
   return source[route] ?? [];
 }
 
+// Which slice of the project's asset catalog a route needs. The Asset Library pages render only
+// Library assets (`isLibraryAsset`), so they read the server's `scope=library` listing: in a
+// project dominated by Character Studio output that is a fraction of the rows and bytes of the
+// full catalog. Every other route keeps the full catalog, because its pickers, previews and
+// reference checks can name a Character Studio image (an AssetPicker's Character tab, a restored
+// Image Studio reference, a timeline item, a dataset's character images).
+//
+// The shell never narrows a catalog it already holds in full; see `useShellHydration`.
+// (Two constants rather than one `{ advanced, simple }` map: the workflow-share lint reads any
+// `advanced` key as a job payload's advanced-settings map.)
+const LIBRARY_SCOPED_ADVANCED_ROUTES = Object.freeze(new Set(["Library"]));
+const LIBRARY_SCOPED_SIMPLE_ROUTES = Object.freeze(new Set(["assets"]));
+
+export function assetCatalogScopeForRoute(route, { simple = false } = {}) {
+  const routes = simple ? LIBRARY_SCOPED_SIMPLE_ROUTES : LIBRARY_SCOPED_ADVANCED_ROUTES;
+  return routes.has(route) ? "library" : "all";
+}
+
 export function hydrationLedgerKey(domain, projectId = null) {
   return PROJECT_HYDRATION_DOMAINS.has(domain)
     ? `${domain}:project:${projectId ?? "none"}`

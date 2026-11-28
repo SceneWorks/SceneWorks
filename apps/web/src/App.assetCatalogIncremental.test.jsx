@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { useAppContext } from "./context/AppContext.js";
-import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
+import { FakeEventSource, errorResponse, response, settle } from "./main.testSupport.jsx";
 import { writeWorkflowEmbedNoticeSeen } from "./workflowEmbed.js";
 
 // The Library catalog is a SUMMARY listing refreshed incrementally: one full read, then only
@@ -16,6 +16,7 @@ function Probe() {
   return <div data-page="Assets">Assets</div>;
 }
 vi.mock("./screens/LibraryScreen.jsx", () => ({ LibraryScreen: () => <Probe /> }));
+vi.mock("./screens/CharacterStudio.jsx", () => ({ CharacterStudio: () => <Probe /> }));
 
 let root;
 let container;
@@ -124,4 +125,144 @@ it("reads the summary catalog once, then merges only changes since the cursor", 
   // The untouched asset keeps its upgraded envelope; the new one arrives as a summary.
   expect(captures.current.assets[1]).toBe(upgraded);
   expect(captures.current.assets[0].listView).toBe("summary");
+});
+
+it("loads the Library slice on the Library route and widens it in place for a full-catalog route", async () => {
+  const library = fullAsset("library", "2026-10-24T00:00:02Z");
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  const added = { ...fullAsset("added", "2026-10-24T00:00:03Z"), origin: "character_studio" };
+  stubApi({
+    details: { library, portrait, added },
+    catalog: (params) => {
+      if (params.get("scope") === "library") {
+        return { cursor: "epoch.2", reset: true, assets: [summaryOf(library)], removedIds: [] };
+      }
+      return params.get("since") === "epoch.3"
+        ? { cursor: "epoch.4", reset: false, assets: [summaryOf(added)], removedIds: [] }
+        : { cursor: "epoch.3", reset: true, assets: [summaryOf(library), summaryOf(portrait)], removedIds: [] };
+    },
+  });
+  await act(async () => root.render(<App />));
+  await settle();
+
+  // The Library route reads only the server's Library slice.
+  const [first] = catalogRequests();
+  expect(first.searchParams.get("scope")).toBe("library");
+  expect(first.searchParams.get("since")).toBe("");
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library"]);
+
+  // Character Studio needs Character Studio output: a reset read in the full scope. A Library
+  // cursor cannot continue in another scope, so `since` starts over.
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  await vi.waitFor(() => expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]));
+  const widened = catalogRequests()[1];
+  expect(widened.searchParams.get("scope")).toBe("all");
+  expect(widened.searchParams.get("since")).toBe("");
+
+  // Back on the Library the full catalog is kept (never narrowed), and a job refresh continues
+  // the full-scope cursor instead of re-reading anything.
+  await act(async () => captures.current.setActiveView("Library"));
+  await settle();
+  const job = { id: "job-1", type: "image_generate", projectId: "project-1", status: "completed", revision: 2,
+    createdAt: "2026-10-24T00:00:03Z", updatedAt: "2026-10-24T00:00:03Z", payload: {},
+    result: { assetIds: ["added"], assets: [summaryOf(added)] } };
+  await act(async () => FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(job) }));
+  await settle();
+  await vi.waitFor(() => expect(captures.current.assets.map((asset) => asset.id)).toEqual(["added", "library", "portrait"]));
+  const requests = catalogRequests();
+  expect(requests).toHaveLength(3);
+  expect(requests[2].searchParams.get("scope")).toBe("all");
+  expect(requests[2].searchParams.get("since")).toBe("epoch.3");
+});
+
+it("starts a full-catalog route with the full catalog", async () => {
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  stubApi({
+    details: { portrait },
+    catalog: () => ({ cursor: "epoch.1", reset: true, assets: [summaryOf(portrait)], removedIds: [] }),
+  });
+  const originalFetch = global.fetch;
+  global.fetch = vi.fn(async (url, options) => (new URL(url).pathname.endsWith("/ui-preferences")
+    ? response({ activeView: "Characters", simpleUi: false })
+    : originalFetch(url, options)));
+  await act(async () => root.render(<App />));
+  await settle();
+
+  await vi.waitFor(() => expect(catalogRequests()).toHaveLength(1));
+  expect(catalogRequests()[0].searchParams.get("scope")).toBe("all");
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["portrait"]);
+});
+
+it("reports the catalog incomplete until a widening read lands", async () => {
+  const library = fullAsset("library", "2026-10-24T00:00:02Z");
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  let releaseFull;
+  const fullCatalog = new Promise((resolve) => { releaseFull = resolve; });
+  stubApi({
+    details: { library, portrait },
+    catalog: (params) => (params.get("scope") === "library"
+      ? { cursor: "epoch.2", reset: true, assets: [summaryOf(library)], removedIds: [] }
+      : fullCatalog),
+  });
+  await act(async () => root.render(<App />));
+  await settle();
+  // The Library route needs only the Library slice, so what it holds is complete for it.
+  expect(captures.current.assetCatalogComplete).toBe(true);
+
+  // On a full-catalog route the held slice is non-empty but NOT the whole catalog: restored-id
+  // validations read this flag instead of treating "non-empty" as "loaded".
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library"]);
+  expect(captures.current.assetCatalogComplete).toBe(false);
+
+  await act(async () => releaseFull({ cursor: "epoch.3", reset: true, assets: [summaryOf(library), summaryOf(portrait)], removedIds: [] }));
+  await settle();
+  await vi.waitFor(() => expect(captures.current.assetCatalogComplete).toBe(true));
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]);
+});
+
+it("retries a failed widening on the next route entry, without spinning on its own error", async () => {
+  const library = fullAsset("library", "2026-10-24T00:00:02Z");
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  stubApi({
+    details: { library, portrait },
+    catalog: (params) => (params.get("scope") === "library"
+      ? { cursor: "epoch.2", reset: true, assets: [summaryOf(library)], removedIds: [] }
+      : { cursor: "epoch.3", reset: true, assets: [summaryOf(library), summaryOf(portrait)], removedIds: [] }),
+  });
+  // The FIRST full-catalog read fails; later ones succeed.
+  let failNextFull = true;
+  const stubbed = global.fetch;
+  global.fetch = vi.fn(async (url, options) => {
+    const parsed = new URL(url);
+    if (failNextFull && parsed.pathname.endsWith("/projects/project-1/assets") && parsed.searchParams.get("scope") === "all") {
+      failNextFull = false;
+      return errorResponse(500, "catalog read failed");
+    }
+    return stubbed(url, options);
+  });
+  const fullRequests = () => catalogRequests().filter((url) => url.searchParams.get("scope") === "all");
+
+  await act(async () => root.render(<App />));
+  await settle();
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  // The widen failed once and was NOT re-issued by the error status it produced.
+  await vi.waitFor(() => expect(fullRequests()).toHaveLength(1));
+  await settle();
+  expect(fullRequests()).toHaveLength(1);
+  expect(captures.current.assetCatalogComplete).toBe(false);
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library"]);
+
+  // Leaving and re-entering a full-catalog route tries again (the ledger still says "ready").
+  await act(async () => captures.current.setActiveView("Library"));
+  await settle();
+  expect(fullRequests()).toHaveLength(1);
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  await vi.waitFor(() => expect(fullRequests()).toHaveLength(2));
+  await vi.waitFor(() => expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]));
+  expect(captures.current.assetCatalogComplete).toBe(true);
 });

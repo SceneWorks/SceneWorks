@@ -11,8 +11,10 @@ export const assetsApi = {
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets?includeRejected=true&includeTrashed=true&view=summary`, token, options),
   // Incremental summary catalog: `since` "" returns everything plus a cursor; a cursor returns
   // only `{ assets, removedIds }` changed after it (`reset: true` means "replace, don't merge").
-  summaryChangesIncludingHidden: (projectId, since, token, options = {}) =>
-    apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets?includeRejected=true&includeTrashed=true&view=summary&since=${encodeURIComponent(since ?? "")}`, token, options),
+  // `scope` is "library" (no Character Studio / workflow-intermediate output) or "all". A cursor
+  // is only meaningful for the scope that issued it: changing scope needs a fresh `since` "".
+  summaryChangesIncludingHidden: (projectId, since, token, options = {}, { scope = "all" } = {}) =>
+    apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets?includeRejected=true&includeTrashed=true&view=summary&scope=${encodeURIComponent(scope)}&since=${encodeURIComponent(since ?? "")}`, token, options),
   status: (projectId, assetId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/status`, token, options),
   tags: (projectId, assetId, token, options = {}) =>
