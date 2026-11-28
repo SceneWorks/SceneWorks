@@ -17,19 +17,23 @@ import {
   summarize, verdictFor, uploadReference, wanClaimSource, wanObservations, stageWanSnapshots, readWanClaim, verifyWanRecipe, wanExecutionFacts,
 } from "./tier2-ab.mjs";
 
+// A simulated Mac host needs a simulated home: the default Mac hubs are built from it, and the
+// real os.homedir() is not a POSIX path on a Windows dev box.
+const MAC_HOME = "/Users/runner";
+
 const BASE = "d3f7b05bf22826e44fd43da19cff0985fb17d68b", HEAD = "d2b0c76c9b9b9e00b5174aceec61c11a186dac68";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const env = (changes = {}) => ({ TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: BASE, TIER2_AB_HEAD_SHA: HEAD, TIER2_AB_BASE_DIR: "/w/base", TIER2_AB_HEAD_DIR: "/w/head", TIER2_AB_WORK: "/t/work", ...changes });
 
 test("inputs: exact 40-hex SHAs, distinct sides, absolute paths, known backend-matched routes", () => {
-  const cfg = resolveConfig(env(), { platform: "darwin", home: "/Users/runner" });
+  const cfg = resolveConfig(env(), { platform: "darwin", home: MAC_HOME });
   assert.deepEqual(cfg.routes.map((route) => route.id), DEFAULT_ROUTE_IDS.mlx);
   assert.equal(cfg.hubs[0], "/Volumes/Models/huggingface/hub");
   for (const bad of [{ TIER2_AB_BASE_SHA: "main" }, { TIER2_AB_HEAD_SHA: HEAD.slice(0, 39) }, { TIER2_AB_HEAD_SHA: HEAD.toUpperCase() }, { TIER2_AB_HEAD_SHA: BASE }, { TIER2_AB_BACKEND: "candle" }, { TIER2_AB_BASE_DIR: "relative" }, { TIER2_AB_HEAD_DIR: "/w/base" }, { TIER2_AB_WORK: "/w/base/work" }, { TIER2_AB_INFERENCE_SHA: "abc" }, { TIER2_AB_ROUTES: "cuda-sdxl-q4-t2i" }, { TIER2_AB_ROUTES: "nope" }, { TIER2_AB_ROUTES: "mlx-moss-image-t2i,mlx-moss-image-t2i" }, { TIER2_AB_HUBS: "relative/hub" }]) {
-    assert.throws(() => resolveConfig(env(bad), { platform: "darwin" }), undefined, JSON.stringify(bad));
+    assert.throws(() => resolveConfig(env(bad), { platform: "darwin", home: MAC_HOME }), undefined, JSON.stringify(bad));
   }
-  assert.throws(() => resolveConfig(env({ GITHUB_ACTIONS: "true", RUNNER_TEMP: "/r" }), { platform: "darwin" }), /under RUNNER_TEMP/);
-  assert.equal(resolveConfig(env({ GITHUB_ACTIONS: "true", RUNNER_TEMP: "/t" }), { platform: "darwin" }).work, "/t/work");
+  assert.throws(() => resolveConfig(env({ GITHUB_ACTIONS: "true", RUNNER_TEMP: "/r" }), { platform: "darwin", home: MAC_HOME }), /under RUNNER_TEMP/);
+  assert.equal(resolveConfig(env({ GITHUB_ACTIONS: "true", RUNNER_TEMP: "/t" }), { platform: "darwin", home: MAC_HOME }).work, "/t/work");
   const cuda = resolveConfig(env({ TIER2_AB_BACKEND: "cuda", TIER2_AB_BASE_DIR: "D:\\w\\base", TIER2_AB_HEAD_DIR: "D:\\w\\head", TIER2_AB_WORK: "D:\\t\\work", TIER2_AB_ROUTES: '["cuda-moss-image-t2i"]', TIER2_AB_HUBS: "E:\\hub;F:\\hub2" }), { platform: "win32" });
   assert.deepEqual(cuda.routes.map((route) => route.id), ["cuda-moss-image-t2i"]);
   assert.deepEqual(cuda.hubs, ["E:\\hub", "F:\\hub2"]);
@@ -40,7 +44,7 @@ test("physical GPU0 requires explicit SCAIL or CUDA Wan A14B routes at dispatch 
   const select = (backend, routes, cuda_physical_index) => dispatchOptions({ profile: "tier2-ab", backend, ref: BASE,
     moss_options_json: JSON.stringify({ base_sha: BASE, head_sha: HEAD, routes, cuda_physical_index }) }, BASE);
   const worker = (routes, index) => resolveConfig(env({ TIER2_AB_BACKEND: "cuda", TIER2_AB_HUBS: "/hub",
-    TIER2_AB_ROUTES: JSON.stringify(routes), TIER2_AB_PHYSICAL_GPU: index }), { platform: "darwin" });
+    TIER2_AB_ROUTES: JSON.stringify(routes), TIER2_AB_PHYSICAL_GPU: index }), { platform: "darwin", home: MAC_HOME });
   for (const id of Object.keys(ROUTES).filter((id) => id.startsWith("cuda-"))) {
     if (ROUTES[id].scailCandidate || ROUTES[id].wanA14b) {
       assert.equal(select("candle", [id], "0").cuda_physical_index, "0");
@@ -486,8 +490,8 @@ test("job polling: claim bound before a worker attaches, execution bound after, 
   assert.equal(jobProgressDecision({ ...base, job: { status: "completed" }, nowMs: 99 * 60_000 }).state, "completed");
   assert.equal(jobClaimed({ status: "queued", workerId: null }), false); assert.equal(jobClaimed({ status: "running" }), true);
   for (const id of Object.keys(ROUTES)) { const route = ROUTES[id]; assert.ok(route.claimMinutes > 0 && route.claimMinutes <= 10 && route.timeoutMinutes <= (route.kind === "video" ? 45 : 20), `${id} bounds fit the route`); }
-  assert.equal(resolveConfig(env({ TIER2_AB_CLAIM_MINUTES: "2" }), { platform: "darwin" }).claimMinutesOverride, 2);
-  for (const bad of ["0", "-1", "61", "x"]) assert.throws(() => resolveConfig(env({ TIER2_AB_CLAIM_MINUTES: bad }), { platform: "darwin" }), /TIER2_AB_CLAIM_MINUTES/);
+  assert.equal(resolveConfig(env({ TIER2_AB_CLAIM_MINUTES: "2" }), { platform: "darwin", home: MAC_HOME }).claimMinutesOverride, 2);
+  for (const bad of ["0", "-1", "61", "x"]) assert.throws(() => resolveConfig(env({ TIER2_AB_CLAIM_MINUTES: bad }), { platform: "darwin", home: MAC_HOME }), /TIER2_AB_CLAIM_MINUTES/);
 });
 
 test("diagnostics keep the served job state and refusal fields; progress lines are one greppable line", () => {
@@ -623,7 +627,7 @@ test("video fidelity digest covers stream geometry and timing, not only decoded 
   const noProbe = await decodedContent(file, "video", { decode, probe: async () => ({ ok: false, error: "ffprobe missing" }) });
   assert.equal(noProbe.method, "file_bytes_no_probe"); assert.equal(noProbe.sha256, sha256(Buffer.from("container")));
   assert.equal(streamShape({ streams: [] }).video, null);
-  assert.equal(ffprobePath("ffmpeg"), "ffprobe"); assert.equal(ffprobePath("/opt/bin/ffmpeg"), "/opt/bin/ffprobe"); assert.equal(ffprobePath("/opt/bin/avconv"), "ffprobe");
+  assert.equal(ffprobePath("ffmpeg"), "ffprobe"); assert.equal(ffprobePath("/opt/bin/ffmpeg"), path.join("/opt/bin", "ffprobe")); assert.equal(ffprobePath("/opt/bin/avconv"), "ffprobe");
 });
 
 test("wildcard presence: config-only, dangling or empty sets are not complete; the next hub is chosen", async (t) => {
