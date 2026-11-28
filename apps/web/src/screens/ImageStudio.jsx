@@ -3912,6 +3912,10 @@ export function ImageStudio() {
                 label: "Upscale & finish",
                 summary: settingsSummaries.finish,
                 changed: settingsSummaries.finishChanged,
+                // Iris restoration plans its output in IrisRestoreControls, and that plan gates
+                // Generate. Keep the panel mounted (hidden) while Iris is on, so a restored
+                // setting is planned and a size change replans even with this tab closed.
+                keepMounted: irisUpscale,
                 content: (
                   <ImageFinishSettings
                     selectedModel={selectedModel}

@@ -27,7 +27,7 @@
   border-radius: 0 0 var(--r-lg) var(--r-lg);
 }
 
-.studio-settings-tabs:has(.studio-settings-panel) .studio-settings-tablist {
+.studio-settings-tabs:has(.studio-settings-panel:not([hidden])) .studio-settings-tablist {
   border-radius: 0;
 }
 
@@ -58,7 +58,7 @@
   border-bottom-right-radius: var(--r-lg);
 }
 
-.studio-settings-tabs:has(.studio-settings-panel) .studio-settings-tab {
+.studio-settings-tabs:has(.studio-settings-panel:not([hidden])) .studio-settings-tab {
   border-radius: 0;
 }
 

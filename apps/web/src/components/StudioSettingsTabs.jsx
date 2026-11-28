@@ -8,9 +8,11 @@ import "./StudioSettingsTabs.css";
 // picking the open tab closes it. One panel at a time, and only the open panel is mounted —
 // the same lazy-render contract the Advanced disclosure it replaces had.
 //
-// `tabs`: [{ id, label, summary?, changed?, attention?, attentionLabel?, content }]
+// `tabs`: [{ id, label, summary?, changed?, attention?, attentionLabel?, keepMounted?, content }]
 //   - `changed` draws the accent dot (a value differs from the model default),
-//   - `attention` draws the warn dot (e.g. a model update is available).
+//   - `attention` draws the warn dot (e.g. a model update is available),
+//   - `keepMounted` keeps that panel mounted (hidden) while another tab is open or all are
+//     closed — for content whose effects must keep running (Image Studio's Iris planner).
 // Tabs whose `content` is null/false are dropped, so a screen can declare every group and
 // let availability decide which ones show.
 // `active`: the open tab id, or null for all closed. `onChange(id | null)`.
@@ -49,17 +51,21 @@ export function StudioSettingsTabs({ tabs, active, onChange, label = "Settings",
           );
         })}
       </div>
-      {open ? (
-        <div
-          aria-labelledby={`${baseId}-${open.id}-tab`}
-          className="studio-settings-panel"
-          data-panel={open.id}
-          id={`${baseId}-${open.id}`}
-          role="tabpanel"
-        >
-          {open.content}
-        </div>
-      ) : null}
+      {visible.map((tab) =>
+        tab.id === open?.id || tab.keepMounted ? (
+          <div
+            aria-labelledby={`${baseId}-${tab.id}-tab`}
+            className="studio-settings-panel"
+            data-panel={tab.id}
+            hidden={tab.id !== open?.id}
+            id={`${baseId}-${tab.id}`}
+            key={tab.id}
+            role="tabpanel"
+          >
+            {tab.content}
+          </div>
+        ) : null,
+      )}
     </div>
   );
 }

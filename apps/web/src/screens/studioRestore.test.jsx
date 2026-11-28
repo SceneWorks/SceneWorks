@@ -11,6 +11,7 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+import { apiFetch } from "../api.js";
 import { AppContext } from "../context/AppContext.js";
 import { recipeFromWorkflowShare } from "../workflowShare.js";
 import { ImageStudio } from "./ImageStudio.jsx";
@@ -428,6 +429,56 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     seedSnapshot("video", { ...VIDEO_SNAPSHOT, advancedOpen: false });
     await renderSequence(VideoStudio, [videoContext(VIDEO_FULL)]);
     expect(document.body.querySelector('.studio-settings-tablist [aria-selected="true"]')?.dataset.tab).toBe("model");
+  });
+
+  // Iris restoration plans its output inside the Upscale & finish panel, and that plan gates
+  // Generate. The panel stays mounted (hidden) while Iris is on, so a restored Iris pass is planned
+  // with the tab closed, and a size change made from another tab replans.
+  it("Image: plans a restored Iris pass and replans a size change with Upscale & finish closed", async () => {
+    const IRIS = { id: "iris_3b_restore", name: "Iris 3B Restoration", type: "upscaler", installState: "installed", capabilities: [] };
+    const planBodies = () =>
+      apiFetch.mock.calls
+        .filter(([path]) => path === "/api/v1/image-restoration/plan")
+        .map(([, , options]) => JSON.parse(options.body));
+    apiFetch.mockImplementation(async (path, _token, options) =>
+      path === "/api/v1/image-restoration/plan"
+        ? { items: [{ width: JSON.parse(options.body).width * 2, height: JSON.parse(options.body).height * 2 }] }
+        : {},
+    );
+    const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 260)); });
+    seedSnapshot("image", {
+      ...IMAGE_SNAPSHOT,
+      advancedOpen: true,
+      upscaleEnabled: true,
+      upscaleEngine: "iris",
+      upscaleRestore: { scale: 2, inputSizing: "budgeted", colorFix: true },
+    });
+    await renderSequence(ImageStudio, [
+      imageContext({
+        ...IMAGE_FULL,
+        models: [...IMAGE_FULL.models, IRIS],
+        macCapabilities: { features: { imageUpscaleIris: { supported: true } } },
+      }),
+    ]);
+    await settle();
+
+    // The pre-tab-strip snapshot opens Sampling; the Finish panel is mounted but hidden.
+    expect(document.body.querySelector('.studio-settings-tablist [aria-selected="true"]')?.dataset.tab).toBe("sampling");
+    expect(document.body.querySelector('.studio-settings-panel[data-panel="finish"]')?.hidden).toBe(true);
+    expect(planBodies().at(-1)).toMatchObject({ width: 1536, height: 1536, scale: 2 });
+
+    // A size change from the Sampling tab replans without opening Upscale & finish.
+    const widthOverride = [...document.body.querySelectorAll(".studio-settings-panel label")]
+      .find((label) => label.textContent.trim().startsWith("Width override"))
+      ?.querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(widthOverride, "1024");
+      widthOverride.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+    expect(planBodies().at(-1)).toMatchObject({ width: 1024, height: 1536 });
+    expect(document.body.querySelector('.studio-settings-panel[data-panel="finish"]')?.hidden).toBe(true);
+    apiFetch.mockImplementation(async () => ({}));
   });
 
   it("Video: an explicit settingsTab wins over a stale advancedOpen", async () => {

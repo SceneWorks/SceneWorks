@@ -60,6 +60,36 @@ describe("StudioSettingsTabs", () => {
     expect(tab("LoRAs").getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("keeps a keepMounted panel mounted but hidden while it is not the open tab", () => {
+    let mounts = 0;
+    function Planner() {
+      React.useEffect(() => { mounts += 1; }, []);
+      return <div>planner</div>;
+    }
+    function KeepHarness() {
+      const [active, setActive] = useState("model");
+      return (
+        <StudioSettingsTabs
+          active={active}
+          onChange={setActive}
+          tabs={[
+            { id: "model", label: "Model", content: <div>model knobs</div> },
+            { id: "finish", label: "Finish", keepMounted: true, content: <Planner /> },
+          ]}
+        />
+      );
+    }
+    act(() => root.render(<KeepHarness />));
+    const finish = () => container.querySelector('[data-panel="finish"]');
+    expect(finish().hidden).toBe(true);
+    expect(container.querySelectorAll('[role="tabpanel"]:not([hidden])')).toHaveLength(1);
+    act(() => tab("Finish").click());
+    expect(finish().hidden).toBe(false);
+    act(() => tab("Finish").click());
+    expect(finish().hidden).toBe(true);
+    expect(mounts).toBe(1);
+  });
+
   it("treats an active id that has no content as closed", () => {
     act(() => root.render(<Harness initial="empty" />));
     expect(container.querySelector('[role="tabpanel"]')).toBeNull();
