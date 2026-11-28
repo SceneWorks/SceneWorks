@@ -164,6 +164,19 @@ pub(crate) fn apply_video_request(request: &VideoRequest) -> bool {
     apply(options.flash_attn.as_ref().map(|bound| bound.value))
 }
 
+/// The standalone lanes' entry (image upscale / Iris restoration, video upscale, dataset upscale):
+/// they name an engine and have no typed request, so the shared core rule
+/// (`sceneworks_core::lossy_attention::standalone_lossy_attention`, the API's enqueue check)
+/// parses and admits the option for that engine; the opt-in is then set exactly as the studio
+/// lanes set theirs. An engine without candle attention (Real-ESRGAN) is a typed refusal.
+pub(crate) fn apply_standalone_request(job: &JobSnapshot) -> crate::WorkerResult<()> {
+    let wire =
+        sceneworks_core::lossy_attention::standalone_lossy_attention(&job.job_type, &job.payload)
+            .map_err(|refusal| crate::WorkerError::InvalidPayload(refusal.detail))?;
+    apply_lossy(wire.as_ref());
+    Ok(())
+}
+
 fn log_attention_path(job_id: &str, flash_requested: bool, counts: &AttentionPathCounts) {
     tracing::info!(
         event = "attention_path",
@@ -870,5 +883,102 @@ mod tests {
             json!({ "f32Cast": 4, "headPad": 0 })
         );
         assert_eq!(receipt["total"], 230);
+    }
+
+    fn standalone_job(job_type: &str, payload: Value) -> JobSnapshot {
+        let mut job = job(job_type, "job_standalone");
+        job.payload = payload.as_object().expect("payload").clone();
+        job
+    }
+
+    /// Codex P2 on #3528: a standalone SeedVR2 upscale used to reset the opt-in and never apply
+    /// it. The shared standalone helper now sets the job's switch (what the engine reads per
+    /// attention call) and admits the engine before it loads.
+    #[test]
+    fn a_standalone_seedvr2_upscale_applies_the_requested_switch() {
+        let _guard = TOGGLE.lock().unwrap_or_else(|e| e.into_inner());
+        let job = standalone_job(
+            "image_upscale",
+            json!({ "sourceAssetId": "a", "engine": "seedvr2",
+                    "advanced": { "lossyAttention": { "int8": { "kCentering": "always" } } } }),
+        );
+        let scope = AttentionJobScope::begin(&job).expect("upscale jobs open a scope");
+        crate::inference_runtime::apply_standalone_lossy_attention(&job).unwrap();
+        let switch = attention::lossy_attention();
+        assert_eq!(
+            switch.int8.map(|config| config.k_centering),
+            Some(KCentering::Always)
+        );
+        assert!(requested_lossy_attention().is_some());
+        assert_eq!(
+            admit_engine("seedvr2").is_ok(),
+            attention::INT8_ATTN_COMPILED,
+            "seedvr2 serves INT8"
+        );
+        let receipt = scope.finish().attention_execution.expect("receipt");
+        assert_eq!(receipt["lossyRequested"]["int8"]["kCentering"], "always");
+        assert_eq!(attention::lossy_attention(), LossyAttentionOptIns::OFF);
+    }
+
+    #[test]
+    fn every_standalone_handler_applies_or_refuses_through_the_shared_helper() {
+        let _guard = TOGGLE.lock().unwrap_or_else(|e| e.into_inner());
+        let sol = json!({ "sol": { "topkRatio": 0.5 } });
+        // Served engines: Iris restoration and SeedVR2 video upscaling.
+        for (job_type, payload) in [
+            (
+                "image_upscale",
+                json!({ "engine": "iris", "advanced": { "lossyAttention": sol } }),
+            ),
+            (
+                "video_upscale",
+                json!({ "sourceAssetId": "v", "advanced": { "lossyAttention": sol } }),
+            ),
+        ] {
+            let job = standalone_job(job_type, payload);
+            let _scope = AttentionJobScope::begin(&job).expect("scope");
+            crate::inference_runtime::apply_standalone_lossy_attention(&job).unwrap();
+            assert!(attention::lossy_attention().sol.is_some(), "{job_type}");
+        }
+        assert_eq!(attention::lossy_attention(), LossyAttentionOptIns::OFF);
+        // Real-ESRGAN (image default, dataset upscale) has no candle attention: a typed refusal,
+        // and the switch stays OFF.
+        for (job_type, payload) in [
+            (
+                "image_upscale",
+                json!({ "advanced": { "lossyAttention": sol } }),
+            ),
+            (
+                "dataset_upscale",
+                json!({ "advanced": { "lossyAttention": sol } }),
+            ),
+        ] {
+            let job = standalone_job(job_type, payload);
+            let _scope = AttentionJobScope::begin(&job).expect("scope");
+            let error = crate::inference_runtime::apply_standalone_lossy_attention(&job)
+                .expect_err(job_type);
+            assert!(
+                matches!(error, crate::WorkerError::InvalidPayload(_)),
+                "{job_type}: {error:?}"
+            );
+            assert_eq!(attention::lossy_attention(), LossyAttentionOptIns::OFF);
+        }
+        // Each standalone handler calls the shared helper before its engine loads.
+        for (source, handler, calls) in [
+            (include_str!("upscale_jobs.rs"), "upscale_jobs.rs", 2),
+            (
+                include_str!("video_jobs/seedvr2.rs"),
+                "video_jobs/seedvr2.rs",
+                1,
+            ),
+        ] {
+            assert_eq!(
+                source
+                    .matches("crate::inference_runtime::apply_standalone_lossy_attention(job)?")
+                    .count(),
+                calls,
+                "{handler}"
+            );
+        }
     }
 }

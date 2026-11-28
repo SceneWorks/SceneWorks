@@ -366,6 +366,8 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     context!("mossImageExecutionReport", Object("MossImageExecutionReport"), MOSS, "MOSS provider receipt").aliases(&["moss_image_execution_report"]),
     context!("mossImageEditExecutionReport", Object("MossImageEditExecutionReport"), MOSS, "MOSS edit receipt").aliases(&["moss_image_edit_execution_report"]),
     context!("pagExecutionReport", Object("PagExecutionReport"), IMAGE, "PAG provider execution receipt").aliases(&["pag_execution_report"]),
+    // SW-6132: the worker-owned lossy attention receipt (`rawAdapterSettings.attentionExecution`); a replay drops it.
+    context!("attentionExecution", Object("lossy attention execution receipt"), VISUAL, "worker attention path receipt"),
     context!("mossImageSampleIndex", Integer, MOSS, "native batch output ordinal"),
     context!("characterName", Text, IMAGE, "character job snapshot"),
     context!("characterType", Text, IMAGE, "character job snapshot"),

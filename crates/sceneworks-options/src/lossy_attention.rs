@@ -463,6 +463,23 @@ pub fn requested_lossy_attention(
     Ok(Some(wire))
 }
 
+/// The parsed `advanced.lossyAttention` of a raw payload (`None` when absent, null or requesting no
+/// kernel), for the standalone job types (upscale, restoration) that have no typed request.
+pub fn payload_lossy_attention(
+    payload: &JsonObject,
+) -> Result<Option<LossyAttentionWire>, ValidationRefusal> {
+    let Some(raw) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get(LOSSY_ATTENTION_KEY))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let wire = parse_wire_value(raw)?;
+    Ok(wire.any().then_some(wire))
+}
+
 /// Whether an authored payload carries a non-null `advanced.lossyAttention` that requests a kernel
 /// (routing: such a job is CUDA-only).
 pub fn payload_requests_lossy_attention(payload: &JsonObject) -> bool {

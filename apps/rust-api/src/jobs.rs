@@ -236,6 +236,15 @@ pub(crate) async fn create_job(
         crate::generation::enqueue_backend(&state),
         &payload.payload,
     )?;
+    // SW-6132: an upscale / restoration job names an engine, not a catalog model: the option is
+    // admitted only where that engine's candle attention takes it (never accepted and ignored).
+    if sceneworks_core::lossy_attention::is_standalone_job(&payload.job_type) {
+        sceneworks_core::lossy_attention::standalone_lossy_attention(
+            &payload.job_type,
+            &payload.payload,
+        )
+        .map_err(ApiError::from)?;
+    }
     if matches!(payload.job_type, JobType::ImageDetail) {
         validate_job_lora_compatibility(
             &state,
