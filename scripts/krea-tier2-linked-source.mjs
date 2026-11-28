@@ -95,6 +95,16 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "a5ce0fc14c82e819d6f7394e7567b2f764e835854cbc9e7af69c1835af7df047",
   ]],
+  // SW-6138 feature/main integration: the SW-6135 W4A8 artifact-selection bytes (7ce2d2864) beside
+  // main's in-place local-source guard (6ffb4ef84). Each file is exactly one reviewed side; the W4A8
+  // tier selects the same checkpoint + co-requisite dense-base row shape as ConvRot, which the
+  // in-place guard already verifies and serves from the original. Source review, not a new proof.
+  ["350c6f884601407c000a07188a9443b27f8dad11", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    REPAIR_SHA256[1],
+    "5473ca1414e2e886c562fff6e9085853d3d52ac50c52c8c2e8a42750d4656d6b",
+    "a5ce0fc14c82e819d6f7394e7567b2f764e835854cbc9e7af69c1835af7df047",
+  ]],
 ];
 
 async function readSource(root, file) {
