@@ -672,25 +672,15 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
             ),
         }
 
-        // sc-22729: a BESPOKE provider registers no `ModelDescriptor` and no memory-strategy
-        // registration at all (`mlx_gen_catalog::BESPOKE_UTILITY_CRATES` lists `instantid`), so
-        // there is no weights-free REGISTRY contract for this guard to resolve — the adapter arm
-        // calls the crate's own `InstantId::load_with_memory_context`, which needs resolved paths,
-        // not a fixture `LoadSpec`. Skipping silently would let a genuinely registered provider
-        // take the same exit and lose its coverage, so the absence is ASSERTED here rather than
-        // assumed, and the lane is not counted toward `checked`.
-        //
-        // sc-22738: the Candle catalog registers no descriptor named `instantid`, `pulid` or
-        // `pulid_flux` either (`candle-gen-catalog`: "PuLID is a plain struct the worker drives");
-        // `image_jobs/pulid_candle.rs` builds its contract from resolved paths through
-        // `runtime_cuda::providers::pulid::memory_strategy::provider_contract` and prices it via
-        // `evaluate_shared_bespoke_image`, which is the bespoke seam this walk cannot reach
-        // weights-free.
-        const BESPOKE_PROVIDERS: [(&str, &str); 3] = [
-            ("mlx", "instantid"),
-            ("candle", "instantid"),
-            ("candle", "pulid_flux"),
-        ];
+        // sc-22729: InstantID registers no memory-strategy registration in the shared registry
+        // yet; its adapter drives `InstantId::load_with_memory_context` from resolved paths rather
+        // than a weights-free fixture `LoadSpec`. Skipping silently would let a genuinely
+        // registered provider take the same exit and lose its coverage, so the absence is ASSERTED
+        // here rather than assumed, and the lane is not counted toward `checked`.
+        // (Candle PuLID-FLUX now publishes a registered memory-strategy contract under ENG-7 /
+        // SW-6982 and is verified by the normal weights-free path below.)
+        const BESPOKE_PROVIDERS: [(&str, &str); 2] =
+            [("mlx", "instantid"), ("candle", "instantid")];
         if BESPOKE_PROVIDERS.contains(&(lane, provider)) {
             assert!(
                 registry

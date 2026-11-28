@@ -1275,3 +1275,72 @@ async fn starvector_generator_cache_reuses_resident_instance_and_respects_evicti
     drop(cache);
     join.join().expect("isolated cache worker exits cleanly");
 }
+
+#[test]
+fn starvector_registered_route_preserves_process_poisoned_fault() {
+    struct PoisoningVectorGenerator {
+        descriptor: gen_core::ModelDescriptor,
+    }
+
+    impl gen_core::Generator for PoisoningVectorGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _req: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            Err(gen_core::Error::ProcessPoisoned(
+                "fatal CUDA illegal memory access in StarVector".to_owned(),
+            ))
+        }
+    }
+
+    let identity = *starvector_model_identity("starvector_1b").expect("starvector_1b identity");
+    let generator = PoisoningVectorGenerator {
+        descriptor: gen_core::ModelDescriptor {
+            id: identity.model_id,
+            family: "starvector",
+            backend: "candle",
+            modality: gen_core::Modality::Vector,
+            capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
+            required_components: &[],
+            control_kinds: None,
+        },
+    };
+    let req = vector_request(VectorMode::ImageToSvg, "");
+    let image = gen_core::Image {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    let gen_request =
+        starvector_generation_request(&req, image, gen_core::CancelFlag::default()).unwrap();
+    let (progress_tx, _progress_rx) = tokio::sync::watch::channel(0u32);
+    let kv_cache = Mutex::new(None);
+    let err = generate_via_registered_vector_route(
+        &generator,
+        identity,
+        "candle",
+        identity.candle_provider_id,
+        &gen_request,
+        &progress_tx,
+        Instant::now(),
+        &kv_cache,
+    )
+    .expect_err("ProcessPoisoned generator failure must surface as WorkerError::ProcessPoisoned");
+    match err {
+        WorkerError::ProcessPoisoned(detail) => {
+            assert_eq!(detail, "fatal CUDA illegal memory access in StarVector");
+        }
+        other => panic!("expected WorkerError::ProcessPoisoned, got {other:?}"),
+    }
+}

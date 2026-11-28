@@ -5,10 +5,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertBackendCoverage,
-  BESPOKE_ROUTE_ALIASES,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
   indexSgaExport,
+  parseBespokeRouteAliases,
   parseEngineModelTable,
   PREVIEW_SUPPORT_GENERATOR,
   REQUIRED_AUDIO_BACKENDS,
@@ -24,6 +24,9 @@ function readRepositoryFile(relativePath) {
 }
 
 const enginesSource = readRepositoryFile("crates/sceneworks-worker/src/engines.rs");
+const routeBindingsSource = readRepositoryFile(
+  "crates/sceneworks-core/src/registry/route_bindings.rs",
+);
 const previewSupportManifestRaw = readRepositoryFile(
   "config/manifests/builtin.preview-support.jsonc",
 );
@@ -35,8 +38,9 @@ const sgaEntries = REQUIRED_SGA_EXPORTS.map((spec) => ({
 const sgaDocs = sgaEntries.map((entry) => entry.doc);
 
 const rows = parseEngineModelTable(enginesSource);
-const allMediaRows = [...rows, ...BESPOKE_ROUTE_ALIASES];
-const derived = derivePreviewSupport(rows, sgaDocs);
+const bespokeAliases = parseBespokeRouteAliases(routeBindingsSource);
+const allMediaRows = [...rows, ...bespokeAliases];
+const derived = derivePreviewSupport(allMediaRows, sgaDocs);
 
 const audioRouteIds = new Set(
   sgaDocs.flatMap((doc) => Object.keys(doc.audio_routes ?? {})),
@@ -100,8 +104,18 @@ describe("preview-support catalog: promoted routes read directly from sga.capabi
   });
 
   it("derives PuLID and InstantID preview directly from registered pulid_flux and instantid routes", () => {
+    expect(bespokeAliases).toEqual([
+      { sceneworksId: "pulid_flux_dev", engineId: "pulid_flux" },
+      { sceneworksId: "instantid_realvisxl", engineId: "instantid" },
+    ]);
     expect(previewSupport.models.pulid_flux_dev).toEqual({ candle: true, mlx: true });
     expect(previewSupport.models.instantid_realvisxl).toEqual({ candle: false, mlx: false });
+  });
+
+  it("throws when BESPOKE_IMAGE_ROUTE_ALIASES cannot be parsed from route_bindings.rs", () => {
+    expect(() => parseBespokeRouteAliases("// missing table\n")).toThrow(
+      /BESPOKE_IMAGE_ROUTE_ALIASES/,
+    );
   });
 });
 

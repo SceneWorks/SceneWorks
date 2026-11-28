@@ -13,6 +13,7 @@ import {
   assertBackendCoverage,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
+  parseBespokeRouteAliases,
   parseEngineModelTable,
   REQUIRED_AUDIO_BACKENDS,
   REQUIRED_MEDIA_BACKENDS,
@@ -24,6 +25,9 @@ const sgaDir = fileURLToPath(
 );
 const enginesPath = fileURLToPath(
   new URL("../../../crates/sceneworks-worker/src/engines.rs", import.meta.url),
+);
+const routeBindingsPath = fileURLToPath(
+  new URL("../../../crates/sceneworks-core/src/registry/route_bindings.rs", import.meta.url),
 );
 const manifestPath = fileURLToPath(
   new URL("../../../config/manifests/builtin.preview-support.jsonc", import.meta.url),
@@ -48,7 +52,10 @@ assertBackendCoverage(
 );
 
 const catalog = derivePreviewSupport(
-  parseEngineModelTable(readFileSync(enginesPath, "utf8")),
+  [
+    ...parseEngineModelTable(readFileSync(enginesPath, "utf8")),
+    ...parseBespokeRouteAliases(readFileSync(routeBindingsPath, "utf8")),
+  ],
   sgaExports,
 );
 

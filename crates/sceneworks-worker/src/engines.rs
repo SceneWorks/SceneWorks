@@ -983,10 +983,15 @@ pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
         .find(|r| r.sceneworks_id == sceneworks_id)?;
     let descriptor = crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)())
-        .find(|d| d.id == row.engine_id)?;
+        .find(|d| d.id == sceneworks_id)
+        .or_else(|| {
+            crate::inference_runtime::generators()
+                .map(|reg| (reg.descriptor)())
+                .find(|d| d.id == row.engine_id)
+        })?;
     if let Some(spec) = sceneworks_core::registry::builtin_model_spec(sceneworks_id) {
         let route = spec.routes.get(descriptor.backend)?;
-        if route.id != row.engine_id {
+        if route.id != descriptor.id {
             return None;
         }
     }

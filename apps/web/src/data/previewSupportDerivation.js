@@ -36,13 +36,8 @@ export const REQUIRED_SGA_EXPORTS = [
 export const REQUIRED_MEDIA_BACKENDS = ["candle", "mlx"];
 export const REQUIRED_AUDIO_BACKENDS = ["candle"];
 
-/** Identity-backbone product IDs whose inference routes are registered under canonical route IDs. */
-export const BESPOKE_ROUTE_ALIASES = [
-  { sceneworksId: "instantid_realvisxl", engineId: "instantid" },
-  { sceneworksId: "pulid_flux_dev", engineId: "pulid_flux" },
-];
-
 const MODEL_TABLE_OPEN = "const MODEL_TABLE: &[ModelRow] = &[";
+const BESPOKE_ALIASES_OPEN = "const BESPOKE_IMAGE_ROUTE_ALIASES: &[(&str, &str)] = &[";
 const MIN_EXPECTED_MODEL_ROWS = 50;
 
 function stripRustComments(source, sourceLabel = "engines.rs") {
@@ -99,15 +94,15 @@ function stripRustComments(source, sourceLabel = "engines.rs") {
   return out;
 }
 
-function sliceModelTableBody(source) {
-  const open = source.indexOf(MODEL_TABLE_OPEN);
+function sliceBracketedArrayBody(source, openToken, label, fileName) {
+  const open = source.indexOf(openToken);
   if (open === -1) {
     throw new Error(
-      `parseEngineModelTable: no ${JSON.stringify(MODEL_TABLE_OPEN)} in engines.rs — the model ` +
-        "table was renamed or restructured; update this parser and re-run `npm run gen:preview-support`",
+      `${label}: no ${JSON.stringify(openToken)} in ${fileName} — the table was renamed or ` +
+        "restructured; update this parser and re-run `npm run gen:preview-support`",
     );
   }
-  const bodyStart = open + MODEL_TABLE_OPEN.length;
+  const bodyStart = open + openToken.length;
   let depth = 1;
   let index = bodyStart;
   while (index < source.length) {
@@ -133,8 +128,8 @@ function sliceModelTableBody(source) {
     index += 1;
   }
   throw new Error(
-    "parseEngineModelTable: MODEL_TABLE's opening `&[` is never closed — the table is truncated " +
-      "or the brackets are unbalanced",
+    `${label}: opening \`&[\` in ${fileName} is never closed — the table is truncated or the ` +
+      "brackets are unbalanced",
   );
 }
 
@@ -145,8 +140,11 @@ export function parseEngineModelTable(rustSource) {
   if (typeof rustSource !== "string" || rustSource.length === 0) {
     throw new Error("parseEngineModelTable: expected the engines.rs source text");
   }
-  const body = sliceModelTableBody(
+  const body = sliceBracketedArrayBody(
     stripRustComments(rustSource, "parseEngineModelTable: engines.rs"),
+    MODEL_TABLE_OPEN,
+    "parseEngineModelTable",
+    "engines.rs",
   );
 
   const rows = [];
@@ -189,6 +187,45 @@ export function parseEngineModelTable(rustSource) {
     seen.add(row.sceneworksId);
   }
   return rows;
+}
+
+/**
+ * Parse `BESPOKE_IMAGE_ROUTE_ALIASES` out of `crates/sceneworks-core/src/registry/route_bindings.rs`
+ * so preview-support derivation shares the single canonical bespoke product-to-route binding table.
+ */
+export function parseBespokeRouteAliases(rustSource) {
+  if (typeof rustSource !== "string" || rustSource.length === 0) {
+    throw new Error("parseBespokeRouteAliases: expected the route_bindings.rs source text");
+  }
+  const body = sliceBracketedArrayBody(
+    stripRustComments(rustSource, "parseBespokeRouteAliases: route_bindings.rs"),
+    BESPOKE_ALIASES_OPEN,
+    "parseBespokeRouteAliases",
+    "route_bindings.rs",
+  );
+
+  const aliases = [];
+  for (const match of body.matchAll(/\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,?\s*\)/g)) {
+    aliases.push({ sceneworksId: match[1], engineId: match[2] });
+  }
+
+  const declared = (body.match(/\(/g) ?? []).length;
+  if (aliases.length !== declared || aliases.length === 0) {
+    throw new Error(
+      `parseBespokeRouteAliases: BESPOKE_IMAGE_ROUTE_ALIASES declares ${declared} tuple(s) but ` +
+        `parsed ${aliases.length}. Update this parser if the table shape changed.`,
+    );
+  }
+  const seen = new Set();
+  for (const alias of aliases) {
+    if (seen.has(alias.sceneworksId)) {
+      throw new Error(
+        `parseBespokeRouteAliases: duplicate bespoke product id ${alias.sceneworksId}`,
+      );
+    }
+    seen.add(alias.sceneworksId);
+  }
+  return aliases;
 }
 
 /**
@@ -315,7 +352,7 @@ export function derivePreviewSupport(rows, sgaExports) {
     );
   }
 
-  const allMediaRows = [...rows, ...BESPOKE_ROUTE_ALIASES];
+  const allMediaRows = [...rows];
   const models = {};
   for (const row of allMediaRows) {
     const byBackend = {};

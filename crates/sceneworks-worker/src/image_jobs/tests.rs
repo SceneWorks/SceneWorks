@@ -3992,6 +3992,65 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
     assert_eq!(t2i_hires.overlay, None);
 }
 
+#[test]
+fn imported_krea_hires_preserves_explicit_guidance_in_both_passes() {
+    let req = request(json!({
+        "projectId": "p",
+        "model": "krea_2_imported",
+        "prompt": "editorial portrait",
+        "width": 512,
+        "height": 768,
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "ui": { "img2img": true }
+        },
+        "hiresFix": {
+            "enabled": true,
+            "upscaleBy": 2.0,
+            "denoisingStrength": 0.45,
+            "steps": 4
+        },
+        "advanced": {
+            "guidanceScale": 2.75,
+            "steps": 6
+        }
+    }));
+    let sampling = super::sampling::explicit_sampling_request(&req);
+    assert_eq!(sampling.guidance, Some(2.75));
+    let hires = super::krea_imported::krea_imported_hires_refinement(&req, 6, &sampling)
+        .expect("enabled Hires.fix produces a HiresRefinement");
+    assert_eq!(hires.guidance, Some(2.75));
+
+    let first = super::krea_imported::krea_imported_pass_request(
+        &req.prompt,
+        req.width,
+        req.height,
+        42,
+        6,
+        &sampling,
+        Vec::new(),
+        None,
+    );
+    let prepared = PreparedKreaHires::prepare(
+        crate::inference_runtime::media(),
+        std::sync::Arc::new(LoadSpec::new(WeightsSource::Dir("/krea-base".into()))),
+        first,
+        hires,
+    )
+    .expect("prepare imported Krea Hires.fix passes with explicit guidance");
+    let [base_req, refine_req] = prepared.requests();
+    assert_eq!(
+        base_req.guidance,
+        Some(2.75),
+        "first pass must keep authored guidanceScale"
+    );
+    assert_eq!(
+        refine_req.guidance,
+        Some(2.75),
+        "refinement pass must preserve authored guidanceScale instead of dropping to None"
+    );
+}
+
 /// The generic lane's declared reference count must equal the count gen-core derives from the
 /// conditioning that lane really builds, for every shape it can build.
 ///

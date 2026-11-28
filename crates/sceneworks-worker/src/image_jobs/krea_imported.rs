@@ -1850,7 +1850,7 @@ pub(super) fn krea_imported_memory_inputs(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn krea_imported_pass_request(
+pub(super) fn krea_imported_pass_request(
     prompt: &str,
     width: u32,
     height: u32,
@@ -1987,6 +1987,11 @@ impl PreparedKreaHires {
 
     pub(super) fn passes(&self) -> (&gen_core::RenderPlan, &gen_core::RenderPlan) {
         (&self.plan.passes()[0], &self.plan.passes()[1])
+    }
+
+    #[cfg(test)]
+    pub(super) fn requests(&self) -> &[GenerationRequest; 2] {
+        &self.requests
     }
 
     pub(super) fn memory(
@@ -2647,6 +2652,14 @@ pub(super) fn prepare_krea_imported_candle_floor(
     )
 }
 
+pub(super) fn krea_imported_hires_refinement(
+    request: &ImageRequest,
+    steps: u32,
+    sampling: &GenerationRequest,
+) -> Option<HiresRefinement> {
+    HiresRefinement::from_request(request, steps, sampling.guidance, None)
+}
+
 /// Real in-place imported single-file Krea 2 generation (epic 14015 S0c, sc-14023 + sc-14071 +
 /// sc-14111 + sc-14119): resolve the imported DiT, the resident base tier, any img2img reference, and —
 /// on either adapter-capable native backend — the job LoRA stack + Kontext edit conditioning, then load
@@ -2731,7 +2744,9 @@ pub(super) async fn generate_krea_imported_stream(
         || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
         |specs| specs.iter().map(|phase| phase.steps).sum(),
     );
-    let hires_fix = HiresRefinement::from_request(request, steps, None, None);
+    let mut sampling = super::sampling::explicit_sampling_request(request);
+    sampling.features.pag = resolved_pag;
+    let hires_fix = krea_imported_hires_refinement(request, steps, &sampling);
     let text_style_gain = resolve_text_style_gain(request);
     let mut raw_settings =
         krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit));
@@ -2782,8 +2797,6 @@ pub(super) async fn generate_krea_imported_stream(
     let spec =
         prepare_krea_imported_load_spec(request, settings, engine_id, &base_dir, quant, sources)?;
 
-    let mut sampling = super::sampling::explicit_sampling_request(request);
-    sampling.features.pag = resolved_pag;
     let phase_request = phases.as_ref().map(|phases| {
         let mut req = GenerationRequest {
             negative_prompt,

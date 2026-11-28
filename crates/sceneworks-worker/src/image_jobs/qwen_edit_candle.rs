@@ -225,12 +225,15 @@ impl QwenEditMemoryContextCompat for QwenEdit {
 fn is_qwen_edit_candle_model(model: &str) -> bool {
     sceneworks_core::registry::builtin_model_spec(model).is_some_and(|spec| {
         spec.product.family == "qwen-image"
-            && spec.preview_by_backend.get("candle") == Some(&true)
-            && !spec.routes.contains_key("candle")
-            && spec
-                .routes
-                .get("mlx")
-                .is_some_and(|route| route.id == "qwen_image_edit")
+            && spec.routes.get("candle").is_some_and(|route| {
+                matches!(
+                    route.id.as_str(),
+                    "qwen_image_edit"
+                        | "qwen_image_edit_2509"
+                        | "qwen_image_edit_2511"
+                        | "qwen_image_edit_2511_lightning"
+                )
+            })
     }) || matches!(model, "qwen_image_edit" | "qwen_image_edit_2509")
 }
 

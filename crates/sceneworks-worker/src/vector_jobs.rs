@@ -692,7 +692,7 @@ fn generate_via_registered_vector_route(
     })? = Some(record);
     let completed = generation.map_err(|error| match error {
         gen_core::Error::Canceled => WorkerError::Canceled(CANCEL_MESSAGE.to_owned()),
-        other => WorkerError::Engine(format!("native StarVector generation failed: {other}")),
+        other => crate::classify_engine_error("native StarVector generation failed", other),
     })?;
     let vector_out = match completed.generation.output {
         Some(gen_core::GenerationOutput::Vector(vector_out)) => vector_out,
