@@ -16,6 +16,7 @@ function Probe() {
   return <div data-page="Assets">Assets</div>;
 }
 vi.mock("./screens/LibraryScreen.jsx", () => ({ LibraryScreen: () => <Probe /> }));
+vi.mock("./screens/CharacterStudio.jsx", () => ({ CharacterStudio: () => <Probe /> }));
 
 let root;
 let container;
@@ -124,4 +125,71 @@ it("reads the summary catalog once, then merges only changes since the cursor", 
   // The untouched asset keeps its upgraded envelope; the new one arrives as a summary.
   expect(captures.current.assets[1]).toBe(upgraded);
   expect(captures.current.assets[0].listView).toBe("summary");
+});
+
+it("loads the Library slice on the Library route and widens it in place for a full-catalog route", async () => {
+  const library = fullAsset("library", "2026-10-24T00:00:02Z");
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  const added = { ...fullAsset("added", "2026-10-24T00:00:03Z"), origin: "character_studio" };
+  stubApi({
+    details: { library, portrait, added },
+    catalog: (params) => {
+      if (params.get("scope") === "library") {
+        return { cursor: "epoch.2", reset: true, assets: [summaryOf(library)], removedIds: [] };
+      }
+      return params.get("since") === "epoch.3"
+        ? { cursor: "epoch.4", reset: false, assets: [summaryOf(added)], removedIds: [] }
+        : { cursor: "epoch.3", reset: true, assets: [summaryOf(library), summaryOf(portrait)], removedIds: [] };
+    },
+  });
+  await act(async () => root.render(<App />));
+  await settle();
+
+  // The Library route reads only the server's Library slice.
+  const [first] = catalogRequests();
+  expect(first.searchParams.get("scope")).toBe("library");
+  expect(first.searchParams.get("since")).toBe("");
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library"]);
+
+  // Character Studio needs Character Studio output: a reset read in the full scope. A Library
+  // cursor cannot continue in another scope, so `since` starts over.
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  await vi.waitFor(() => expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]));
+  const widened = catalogRequests()[1];
+  expect(widened.searchParams.get("scope")).toBe("all");
+  expect(widened.searchParams.get("since")).toBe("");
+
+  // Back on the Library the full catalog is kept (never narrowed), and a job refresh continues
+  // the full-scope cursor instead of re-reading anything.
+  await act(async () => captures.current.setActiveView("Library"));
+  await settle();
+  const job = { id: "job-1", type: "image_generate", projectId: "project-1", status: "completed", revision: 2,
+    createdAt: "2026-10-24T00:00:03Z", updatedAt: "2026-10-24T00:00:03Z", payload: {},
+    result: { assetIds: ["added"], assets: [summaryOf(added)] } };
+  await act(async () => FakeEventSource.instances[0].listeners["job.updated"]({ data: JSON.stringify(job) }));
+  await settle();
+  await vi.waitFor(() => expect(captures.current.assets.map((asset) => asset.id)).toEqual(["added", "library", "portrait"]));
+  const requests = catalogRequests();
+  expect(requests).toHaveLength(3);
+  expect(requests[2].searchParams.get("scope")).toBe("all");
+  expect(requests[2].searchParams.get("since")).toBe("epoch.3");
+});
+
+it("starts a full-catalog route with the full catalog", async () => {
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  stubApi({
+    details: { portrait },
+    catalog: () => ({ cursor: "epoch.1", reset: true, assets: [summaryOf(portrait)], removedIds: [] }),
+  });
+  const originalFetch = global.fetch;
+  global.fetch = vi.fn(async (url, options) => (new URL(url).pathname.endsWith("/ui-preferences")
+    ? response({ activeView: "Characters", simpleUi: false })
+    : originalFetch(url, options)));
+  await act(async () => root.render(<App />));
+  await settle();
+
+  await vi.waitFor(() => expect(catalogRequests()).toHaveLength(1));
+  expect(catalogRequests()[0].searchParams.get("scope")).toBe("all");
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["portrait"]);
 });

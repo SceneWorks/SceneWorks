@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sceneworks_core::project_store::{AssetListFilesystemOperations, AssetScope, ProjectStore};
+use sceneworks_core::project_store::{
+    AssetListFilesystemOperations, AssetListFilter, AssetListView, AssetScope, ProjectStore,
+};
 use serde_json::json;
 
 fn jpeg_fixture() -> Vec<u8> {
@@ -189,10 +191,47 @@ fn existing(data_dir: PathBuf, project_id: &str, iterations: usize) {
     );
 }
 
+/// Time the exact request shapes the web shell issues (summary view, empty
+/// `since`, i.e. a full reset read) under each scope, including the JSON
+/// serialization the API does before the bytes leave the process.
+fn existing_views(data_dir: PathBuf, project_id: &str, iterations: usize) {
+    let store = ProjectStore::new(data_dir, "assets-list-benchmark");
+    for (label, scope) in [("all", AssetScope::All), ("library", AssetScope::Library)] {
+        let filter = AssetListFilter {
+            include_rejected: true,
+            include_trashed: true,
+            scope,
+        };
+        let mut list_total = Duration::ZERO;
+        let mut serialize_total = Duration::ZERO;
+        let mut assets = 0;
+        let mut bytes = 0;
+        for _ in 0..iterations {
+            let started = Instant::now();
+            let (changes, _) = store
+                .list_asset_changes(project_id, filter, AssetListView::Summary, Some(""))
+                .expect("asset changes succeed");
+            list_total += started.elapsed();
+            let started = Instant::now();
+            let body = serde_json::to_vec(&changes.assets).expect("assets serialize");
+            serialize_total += started.elapsed();
+            assets = changes.assets.len();
+            bytes = body.len();
+        }
+        let n = iterations as f64;
+        println!(
+            "summary-reset scope={label}: assets={assets} json_bytes={bytes} list_ms={:.1} serialize_ms={:.1}",
+            list_total.as_secs_f64() * 1_000.0 / n,
+            serialize_total.as_secs_f64() * 1_000.0 / n,
+        );
+    }
+}
+
 fn usage() -> ! {
     eprintln!(
         "usage:\n  assets_list_benchmark synthetic [asset_count] [warm_iterations]\n  \
-         assets_list_benchmark existing <data_dir> <project_id> [warm_iterations]"
+         assets_list_benchmark existing <data_dir> <project_id> [warm_iterations]
+           assets_list_benchmark existing-views <data_dir> <project_id> [iterations]"
     );
     std::process::exit(2);
 }
@@ -219,6 +258,14 @@ fn main() {
                 .unwrap_or(10)
                 .max(1);
             existing(PathBuf::from(&args[1]), &args[2], iterations);
+        }
+        Some("existing-views") if args.len() >= 3 => {
+            let iterations = args
+                .get(3)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(5)
+                .max(1);
+            existing_views(PathBuf::from(&args[1]), &args[2], iterations);
         }
         _ => usage(),
     }

@@ -15,7 +15,7 @@ import { isDesktop as isDesktopShell } from "../runtime.js";
 import { SIMPLE_MODE } from "../simple/uiMode.js";
 import { mergeFreshJobs } from "../appHelpers.js";
 import { applySuccessfulProjectRefresh, reconcileSelectedAssetId } from "../appStateHelpers.js";
-import { hydrationDomainsForRoute, hydrationLedgerKey, PROJECT_HYDRATION_DOMAINS, isProjectHydrationDomain } from "../appHydration.js";
+import { assetCatalogScopeForRoute, hydrationDomainsForRoute, hydrationLedgerKey, PROJECT_HYDRATION_DOMAINS, isProjectHydrationDomain } from "../appHydration.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 
 // F-189: extracted from App along its existing concern boundary.
@@ -38,22 +38,41 @@ export function useShellHydration({
   useLayoutEffect(() => { loadedAssetsRef.current = loadedAssets; }, [loadedAssets]);
   const loadedAssetsProjectIdRef = useRef(loadedAssetsProjectId);
   useLayoutEffect(() => { loadedAssetsProjectIdRef.current = loadedAssetsProjectId; }, [loadedAssetsProjectId]);
-  // The change cursor of the committed Library catalog (`{ projectId, cursor }`). It advances only
+  // The visible route decides how much of the catalog it needs (`assetCatalogScopeForRoute`). It
+  // is read at request time, so a job-event refresh fired while on a full-catalog route asks for
+  // the full catalog too.
+  const setupHydrationRoute = isDesktopShell && setupCompleted === false && authenticated;
+  const simpleHydrationRoute = !setupHydrationRoute && uiMode === SIMPLE_MODE;
+  const routeCatalogScope = assetCatalogScopeForRoute(
+    setupHydrationRoute ? "Setup" : simpleHydrationRoute ? simpleActiveScreen : activeView,
+    { simple: simpleHydrationRoute },
+  );
+  const routeCatalogScopeRef = useRef(routeCatalogScope);
+  useLayoutEffect(() => { routeCatalogScopeRef.current = routeCatalogScope; }, [routeCatalogScope]);
+  // The change cursor of the committed catalog (`{ projectId, cursor, scope }`). It advances only
   // when a load's result is actually applied (onSuccess), so an aborted or superseded refresh
   // re-asks from the last cursor the catalog really reflects. Every path that empties the catalog
   // drops it, so the next load is a full read instead of a merge into nothing.
   const catalogCursorRef = useRef(null);
+  const wideningProjectIdRef = useRef(null);
   const loadCursorsRef = useRef(new WeakMap());
   const loadCatalogAssets = useCallback(async (projectId, token, options) => {
     const known = catalogCursorRef.current;
-    const since = known?.projectId === projectId && loadedAssetsProjectIdRef.current === projectId
-      ? known.cursor
-      : "";
+    const held = known?.projectId === projectId && loadedAssetsProjectIdRef.current === projectId
+      ? known
+      : null;
+    // A full catalog already held is never narrowed back to the Library scope: it is a superset
+    // of what a Library route renders, and narrowing would make the next full-catalog route pay
+    // the whole read again. A cursor only continues the scope that issued it — the server's
+    // incremental read filters the journal by the CURRENT scope, so widening from a Library
+    // cursor would silently skip every unchanged Character Studio asset.
+    const scope = routeCatalogScopeRef.current === "all" || held?.scope === "all" ? "all" : "library";
+    const since = held?.scope === scope ? held.cursor : "";
     const changes = normalizeAssetChanges(
-      await assetsApi.summaryChangesIncludingHidden(projectId, since, token, options),
+      await assetsApi.summaryChangesIncludingHidden(projectId, since, token, options, { scope }),
     );
     const items = changes.reset ? changes.assets : mergeAssetChanges(loadedAssetsRef.current, changes);
-    loadCursorsRef.current.set(items, changes.cursor ? { projectId, cursor: changes.cursor } : null);
+    loadCursorsRef.current.set(items, changes.cursor ? { projectId, cursor: changes.cursor, scope } : null);
     return items;
   }, []);
 
@@ -451,6 +470,36 @@ export function useShellHydration({
     token,
     uiMode,
   ]);
+
+  // Entering a full-catalog route while only the Library slice is loaded (e.g. Library → Character
+  // Studio): the ledger already counts "assets" as ready, so widen it here. The read is a reset in
+  // the full scope; the Library slice stays rendered until the wider catalog replaces it, the same
+  // way a route's first load renders an empty catalog until it lands. Once widened, the cursor's
+  // scope is "all" and this stays quiet for the rest of the project session.
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    if (
+      !ready ||
+      !projectsLoaded ||
+      !projectId ||
+      queueAssetsRoute ||
+      routeCatalogScope !== "all" ||
+      !residentDomains.has("assets") ||
+      activeAssetLoadState.status !== "ready"
+    ) {
+      return;
+    }
+    const held = catalogCursorRef.current;
+    if (held?.projectId !== projectId || held.scope !== "library" || wideningProjectIdRef.current === projectId) {
+      return;
+    }
+    // One widen in flight per project: the asset list is latest-result, so re-issuing it on a
+    // re-render would abort the multi-second read it is waiting on.
+    wideningProjectIdRef.current = projectId;
+    void refreshAssets(projectId).finally(() => {
+      if (wideningProjectIdRef.current === projectId) wideningProjectIdRef.current = null;
+    });
+  }, [ready, projectsLoaded, activeProject?.id, queueAssetsRoute, routeCatalogScope, residentDomains, activeAssetLoadState.status, refreshAssets]);
 
   // The default Library route paints from its project asset request first. Only
   // after that catalog settles do we hydrate the secondary detail-panel domains:
