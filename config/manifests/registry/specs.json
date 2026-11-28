@@ -67058,47 +67058,6 @@
     },
     "routes": {}
   },
-  "taef2": {
-    "evidence": {},
-    "product": {
-      "autoDownload": false,
-      "capabilities": [],
-      "componentOnly": true,
-      "downloads": [
-        {
-          "estimatedSizeBytes": 10723524,
-          "files": [
-            "taef2.safetensors"
-          ],
-          "footprint": {
-            "diskSizeBytes": 10723524
-          },
-          "platforms": [
-            "macos",
-            "windows",
-            "linux"
-          ],
-          "provider": "huggingface",
-          "repo": "madebyollin/taef2",
-          "revision": "bd244ebfe4398c84fbf312a2f1c868c676b500e3"
-        }
-      ],
-      "family": "taef2",
-      "id": "taef2",
-      "licenseUrl": "https://huggingface.co/madebyollin/taef2/tree/bd244ebfe4398c84fbf312a2f1c868c676b500e3",
-      "name": "TAEF2 Tiny Decoder",
-      "paths": {
-        "model": "${HF_CACHE}/madebyollin/taef2"
-      },
-      "type": "utility",
-      "ui": {
-        "description": "Tiny differentiable decoder for the FLUX.2 latent family (Lens). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
-        "label": "TAEF2 Tiny Decoder",
-        "recommendedFor": []
-      }
-    },
-    "routes": {}
-  },
   "taeltx2_3": {
     "evidence": {},
     "product": {

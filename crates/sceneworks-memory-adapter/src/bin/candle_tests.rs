@@ -1750,8 +1750,6 @@ const TURNKEY_MEMBERS: [(&str, &str); 7] = [
     (KOLORS_ID, "kolors"),
     (IDEOGRAM_ID, "ideogram-4"),
     (IDEOGRAM_TURBO_ID, "ideogram-4-turbo"),
-    (LENS_ID, "lens"),
-    (LENS_TURBO_ID, "lens-turbo"),
     (QWEN_IMAGE_2_1_ID, "qwen-image-2-1"),
     (QWEN_IMAGE_2_1_TURBO_ID, "qwen-image-2-1-turbo"),
 ];
@@ -1965,7 +1963,6 @@ fn the_candle_turnkey_fixture_binds_member_tier_edge_seed_and_steps() {
     }
     // One member's fixture never satisfies another member's plan.
     assert!(validate_fixture_binds_tier_and_geometry(&turnkey_request(
-        LENS_ID,
         "q4",
         "fresh-five-rung-lens-turbo-q4-1024-seed16402-step2"
     ))
@@ -2069,8 +2066,6 @@ fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
         KOLORS_ID,
         IDEOGRAM_ID,
         IDEOGRAM_TURBO_ID,
-        LENS_ID,
-        LENS_TURBO_ID,
         QWEN_IMAGE_2_1_ID,
         QWEN_IMAGE_2_1_TURBO_ID,
     ] {
@@ -2088,8 +2083,6 @@ fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
             KOLORS_ID,
             IDEOGRAM_ID,
             IDEOGRAM_TURBO_ID,
-            LENS_ID,
-            LENS_TURBO_ID,
             QWEN_IMAGE_2_1_ID,
             QWEN_IMAGE_2_1_TURBO_ID,
         ] {
@@ -2287,7 +2280,6 @@ fn a_turnkey_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
             "kolors-candle-staged-chatglm-unet-f32-vae-v1",
         ),
         (
-            LENS_ID,
             "lens",
             "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
         ),
@@ -2329,8 +2321,6 @@ fn the_turnkey_candle_members_fold_the_tier_quant_per_member() {
             (KOLORS_ID, true),
             (IDEOGRAM_ID, false),
             (IDEOGRAM_TURBO_ID, false),
-            (LENS_ID, true),
-            (LENS_TURBO_ID, true),
             (QWEN_IMAGE_2_1_ID, true),
             (QWEN_IMAGE_2_1_TURBO_ID, true),
         ]
@@ -2420,12 +2410,6 @@ fn the_turnkey_candle_spec_binds_the_tier_quant_per_member() {
             (IDEOGRAM_TURBO_ID, "bf16", None),
             (IDEOGRAM_TURBO_ID, "q4", None),
             (IDEOGRAM_TURBO_ID, "q8", None),
-            (LENS_ID, "bf16", None),
-            (LENS_ID, "q4", Some(Quant::Q4)),
-            (LENS_ID, "q8", Some(Quant::Q8)),
-            (LENS_TURBO_ID, "bf16", None),
-            (LENS_TURBO_ID, "q4", Some(Quant::Q4)),
-            (LENS_TURBO_ID, "q8", Some(Quant::Q8)),
             (QWEN_IMAGE_2_1_ID, "bf16", None),
             (QWEN_IMAGE_2_1_ID, "q4", Some(Quant::Q4)),
             (QWEN_IMAGE_2_1_ID, "q8", Some(Quant::Q8)),

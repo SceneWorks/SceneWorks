@@ -2742,12 +2742,6 @@ test("Linux release scan bounds the measured CUDA sidecar without changing other
   }
 });
 
-test("Lens smoke only terminates processes it started", async () => {
-  const script = await source("scripts/smoke-lens.ps1");
-  assert.doesNotMatch(script, /Get-Process/);
-  assert.match(script, /taskkill \/F \/T \/PID \$\(\$p\.Id\)/);
-});
-
 test("health check defaults to the compose API port", async () => {
   assert.match(
     await source("scripts/check-health.mjs"),
@@ -4651,7 +4645,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
   );
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 7\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 5\] = \[([\s\S]*?)\n\];/.exec(adapter);
   assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
   const consts = new Map(
     [...adapter.matchAll(/\bconst ([A-Z0-9_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
@@ -4660,8 +4654,8 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
   assert.deepEqual(
     members.map((member) => member.providerId),
-    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1", "qwen_image_2_1_turbo"],
-    "the seven turnkey members, in table order",
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "qwen_image_2_1", "qwen_image_2_1_turbo"],
+    "the five turnkey members, in table order",
   );
   for (const member of members) {
     const entry = manifest.models.find((model) => model.id === member.providerId);
@@ -4679,7 +4673,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     );
   }
   // Stated as data too, so the loop cannot pass by every member answering the same way.
-  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true", "true"]);
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true"]);
 
   // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
   // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
@@ -4689,7 +4683,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
   // where it runs on the host that writes the arm and the mutation is killable before a push.
   const foldArm =
-    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*LENS_ID\s*\|\s*LENS_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
+    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
       .exec(adapter);
   assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
   assert.match(
@@ -4700,7 +4694,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
   assert.match(
     adapter,
-    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*LENS_ID\s*\|\s*LENS_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*None,\s*\) => spec,/,
+    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*None,\s*\) => spec,/,
     "the dense turnkey tier must bind no quant",
   );
   // The spec builder must be the pure function the Rust test can call — if the fold moves back

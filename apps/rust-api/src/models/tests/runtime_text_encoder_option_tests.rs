@@ -56,32 +56,6 @@ fn embedded_builtin_lookup_preserves_entries_and_isolates_returned_clones() {
     assert!(embedded_builtin_catalog_entry(|_| false).unwrap().is_none());
 }
 
-#[test]
-fn install_health_uses_full_core_safetensors_validation() {
-    let temp = tempfile::tempdir().unwrap();
-    let component = temp.path().join("transformer");
-    std::fs::create_dir(&component).unwrap();
-    let path = component.join("model.safetensors");
-    write_tiny_safetensors(&path);
-    assert!(diffusers_component_safetensors_are_valid(
-        temp.path(),
-        "transformer"
-    ));
-    for raw in [
-        br#"{}"#.as_slice(),
-        br#"{"weight":{"dtype":"F32","shape":[2],"data_offsets":[0,1]}}"#,
-    ] {
-        let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
-        bytes.extend_from_slice(raw);
-        bytes.push(0);
-        std::fs::write(&path, bytes).unwrap();
-        assert!(!diffusers_component_safetensors_are_valid(
-            temp.path(),
-            "transformer"
-        ));
-    }
-}
-
 fn write_tiny_safetensors(path: &FsPath) {
     let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
     let mut bytes = (header.len() as u64).to_le_bytes().to_vec();

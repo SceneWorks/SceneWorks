@@ -46,10 +46,11 @@ pub fn retired_image_family(identity: &str) -> Option<&'static str> {
         .replace('-', "_")
         .as_str()
     {
-        "boogu" | "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" | "mlx_boogu" => {
-            Some("Boogu-Image")
+        "boogu" | "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" | "mlx_boogu"
+        | "candle_boogu" => Some("Boogu-Image"),
+        "lens" | "lens_turbo" | "lens_lora" | "lens_turbo_lora" | "candle_lens" | "mlx_lens" => {
+            Some("Lens")
         }
-        "lens" | "lens_turbo" | "lens_lora" | "lens_turbo_lora" => Some("Lens"),
         "mageflow"
         | "mage_flow"
         | "mage_flow_base"

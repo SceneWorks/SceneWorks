@@ -103,7 +103,7 @@ test("an existing model cannot add an unmeasured row", async () => {
   const inputs = await realInputs();
   const ledger = clone(inputs.ledger);
   ledger.exceptions.push({
-    model: "boogu_image",
+    model: "anima_base",
     component: "textEncoder",
     residentTier: "bf16",
     appliesToTiers: ["q4", "q8"],
@@ -251,24 +251,16 @@ test("every VAE row uses its structured, numeric-receipt-bound residency scope",
 test("decoder-only VAE costs cannot drift back to whole-file numbers", async () => {
   const inputs = await realInputs();
 
-  const lensMlx = inputs.ledger.exceptions.find(
-    (row) => row.model === "lens" && row.component === "vae" && row.backends.join() === "mlx",
+  const ledger = clone(inputs.ledger);
+  const decoder = ledger.exceptions.find(
+    (row) => row.component === "vae" && row.evidence.vaeScope === VAE_SCOPES.DECODER,
   );
-  const lensCandle = inputs.ledger.exceptions.find(
-    (row) => row.model === "lens" && row.component === "vae" && row.backends.join() === "candle",
-  );
-  assert.equal(lensMlx.evidence.costBytesByTier.q4, 84046371 * 4);
-  assert.equal(lensCandle.evidence.costBytesByTier.q4, 49620515 * 4);
-
-  const mageLedger = clone(inputs.ledger);
-  const mage = mageLedger.exceptions.find(
-    (row) => row.model === "mage_flow" && row.component === "vae",
-  );
-  mage.evidence.costBytesByTier.q4 = 172478148 * 2;
-  const { errors } = validate({ ...inputs, ledger: mageLedger });
+  const tier = Object.keys(decoder.evidence.costBytesByTier)[0];
+  decoder.evidence.costBytesByTier[tier] *= 2;
+  const { errors } = validate({ ...inputs, ledger });
   assert.ok(
     errors.some((error) => error.includes("does not reproduce the independent safetensors-header receipt")),
-    `expected Mage's old whole-file count to fail, got: ${errors.join(" | ")}`,
+    `expected the changed decoder byte count to fail, got: ${errors.join(" | ")}`,
   );
 });
 
@@ -282,23 +274,6 @@ test("branchTierByBaseTier must cover every hosted tier variant", async () => {
     errors.some((error) => error.includes('does not cover the hosted tier variant "q8"')),
     `expected the coverage check to fire, got: ${errors.join(" | ")}`,
   );
-});
-
-test("the mage norm_out.linear floor is declared for every mage entry that has the DiT", async () => {
-  const { ledger, manifest } = await realInputs();
-  const mageIds = manifest.models.filter((entry) => entry.id.startsWith("mage_flow")).map((e) => e.id);
-  const declared = new Set(
-    ledger.exceptions
-      .filter((row) => row.component === "transformerHead")
-      .map((row) => row.model),
-  );
-  for (const id of mageIds) {
-    assert.ok(
-      declared.has(id),
-      `${id} routes through the same MageTransformer, whose \`floor_bits(FINAL_MOD_BASE, bits)\` takes ` +
-        `no model argument — so its q8 head floor must be declared`,
-    );
-  }
 });
 
 test("krea_2_raw declares the same dense VAE as krea_2_turbo", async () => {

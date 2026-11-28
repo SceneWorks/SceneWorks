@@ -23,7 +23,6 @@ use super::super::NVFP4_TIER;
 #[cfg(not(target_os = "macos"))]
 use super::anima_dense_split_files_dir;
 use super::anima_tier_subdir;
-use super::boogu_model_subdir;
 use super::dense_tier_subdir;
 use super::ideogram_model_subdir;
 use super::is_anima_model;
@@ -1978,7 +1977,7 @@ fn anima_torn_tier_falls_through_to_a_complete_sibling() {
 /// sc-10845 (epic 10721): [`krea_model_subdir`] — the last bespoke tier resolver — routes its DEFAULT
 /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))`, exactly
 /// like [`standard_tier_subdir`] / [`anima_tier_subdir`] / [`ideogram_model_subdir`] /
-/// [`boogu_model_subdir`], so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
+/// so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
 /// (capped by installed) instead of blindly landing on the q8 default. No shipping Krea model declares
 /// a floor today, so every current model is byte-identical to the prior q8 default; this pins the
 /// generality. Mirrors [`standard_tier_subdir_clamps_default_to_the_floor`].
@@ -2053,7 +2052,7 @@ fn krea_default_tier_clamps_to_the_floor() {
 /// per-family subdir resolvers pick the shipped tier of a turnkey snapshot regardless of platform —
 /// the ideogram/boogu sibling of `candle_lens_resolves_packed_turnkey_tier_subdir` above.
 #[test]
-fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
+fn candle_ideogram_resolves_packed_turnkey_tier_subdir() {
     let model_request = |model: &str, bits: serde_json::Value| {
         resolved_request(
             json!({ "model": model, "advanced": { "mlxQuantize": bits } })
@@ -2087,30 +2086,9 @@ fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
             );
         }
     }
-
-    // Boogu turnkey (`SceneWorks/boogu-image-mlx`): Q8 `base/`/`turbo/`/`edit/` is the shipped
-    // (off-Mac) default. `boogu_model_subdir` probes `<variant>/transformer/diffusion_pytorch_model.safetensors`.
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        for variant in ["base", "turbo", "edit"] {
-            seed_tier(root, variant, "diffusion_pytorch_model.safetensors");
-        }
-        for (model, variant) in [
-            ("boogu_image", "base"),
-            ("boogu_image_turbo", "turbo"),
-            ("boogu_image_edit", "edit"),
-        ] {
-            // Default (no mlxQuantize) → the shipped Q8 `<variant>/` subfolder.
-            assert_eq!(
-                boogu_model_subdir(root, &model_request(model, json!(null))),
-                root.join(variant)
-            );
-        }
-    }
 }
 
-/// sc-10777 (epic 10721): [`ideogram_model_subdir`] / [`boogu_model_subdir`] route their DEFAULT tier
+/// sc-10777 (epic 10721): [`ideogram_model_subdir`] route their DEFAULT tier
 /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))` — the
 /// same clamp [`standard_tier_subdir`] / [`anima_tier_subdir`] use — so a floored model's picker-less
 /// default clamps UP to `mlx.minQualityTier` (capped by installed) instead of blindly landing on the
@@ -2119,7 +2097,7 @@ fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
 /// can't silently regress below its floor on the worker default path. Mirrors
 /// [`standard_tier_subdir_clamps_default_to_the_floor`].
 #[test]
-fn ideogram_boogu_default_tier_clamps_to_the_floor() {
+fn ideogram_default_tier_clamps_to_the_floor() {
     // A request for `model` with the given `bits` (null = no explicit pick) and an optional per-model
     // quality floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
     let floored = |model: &str, bits: serde_json::Value, floor: Option<&str>| {
@@ -2136,60 +2114,6 @@ fn ideogram_boogu_default_tier_clamps_to_the_floor() {
         };
         resolved_request(payload.as_object().unwrap())
     };
-
-    // --- Boogu: a bf16 floor RAISES the picker-less default above the packed Q8 (the meaningful case,
-    // since Boogu's turnkey carries a bf16 tier above its Q8 default). ---
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        seed_tier(root, "base", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "base-q4", "diffusion_pytorch_model.safetensors");
-        // bf16 ships as the dense diffusers tree (SHARDED → only the `.index.json`), like the loader.
-        seed_tier(
-            root,
-            "base-bf16",
-            "diffusion_pytorch_model.safetensors.index.json",
-        );
-        // Floor bf16, no explicit pick → the dense `base-bf16` (raised above the Q8 default).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("bf16"))),
-            root.join("base-bf16"),
-            "floored Boogu default → the bf16 floor tier (raised above the packed Q8 default)"
-        );
-        // Floor q8 (at the default) → the packed Q8 `base/`, unchanged (the floor only ever RAISES).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("q8"))),
-            root.join("base")
-        );
-        // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never
-        // overrides a deliberate quant choice — the web surfaces the advisory instead).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(4), Some("bf16"))),
-            root.join("base-q4")
-        );
-        // Non-floored default is unchanged — the packed Q8 default still stands (acceptance #3).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(null), None)),
-            root.join("base")
-        );
-    }
-    // Boogu floor capped by installed: bf16 floor but only the packed Q8 `base/` on disk → Q8.
-    {
-        let only_q8 = tempfile::tempdir().unwrap();
-        seed_tier(
-            only_q8.path(),
-            "base",
-            "diffusion_pytorch_model.safetensors",
-        );
-        assert_eq!(
-                boogu_model_subdir(
-                    only_q8.path(),
-                    &floored("boogu_image", json!(null), Some("bf16"))
-                ),
-                only_q8.path().join("base"),
-                "bf16 floor with only Q8 installed → Q8 (a floor tier not on disk falls to the best installed)"
-            );
-    }
 
     // --- Ideogram: the turnkey carries only `q4/`/`q8/` (bf16 is a separate repo) and the default
     // already prefers q8, so the floor routing is inert for every in-turnkey floor — but it must still

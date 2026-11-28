@@ -128,7 +128,7 @@ pub(super) fn dense_te_requested_tier_bits(request: &ImageRequest) -> Option<i64
 
 /// The generation tier (`bf16`/`q8`/`q4`) a resolved turnkey tier subdir ACTUALLY loads at, parsed
 /// from its basename (sc-8820 / sc-12090). The tier resolvers ([`standard_tier_subdir`],
-/// [`ideogram_model_subdir`], [`boogu_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
+/// [`ideogram_model_subdir`], [`krea_model_subdir`]) fall through q4→q8→bf16
 /// (or the Boogu `<variant>`-shaped names) when the requested tier isn't downloaded, so the resolved
 /// path can be a DIFFERENT precision than the request asked for. This maps the resolved basename back
 /// to its tier:

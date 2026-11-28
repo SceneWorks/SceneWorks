@@ -552,13 +552,6 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
     ),
     (
         "src/image_jobs/checkpoint_plan.rs",
-        "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS",
-        "Catalog data, not family truth: the adapter's `component_topology` says WHICH components \
-         are required; this says where THIS app installed them. Mage-Flow's fine-tunes live at \
-         `<data>/models/finetunes/<loraId>`, outside `CheckpointPlanStore::installs_root()`.",
-    ),
-    (
-        "src/image_jobs/checkpoint_plan.rs",
         "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS",
         "Catalog data, not family truth: the adapter declares the `base-snapshot` dependency and \
          which families satisfy it; this is only where the app installed that tier.",
@@ -576,7 +569,7 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          but no resident base model id or tier either, and no typed `ModelSpec` declares itself the \
          resident base for a family's imports, so there is no typed source to derive this pairing \
          from: it is product data that names which shipped install an import borrows. Pinned in BOTH directions against \
-         CHECKPOINT_PLAN_RESIDENT_BASE_TIERS + CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS, and \
+         CHECKPOINT_PLAN_RESIDENT_BASE_TIERS, and \
          against each family resolver's own repo/tier constants, by \
          `the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables`, so a family \
          added to the plan tables cannot skip this one and this one cannot drift off them.",

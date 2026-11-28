@@ -49,8 +49,6 @@ use super::adapters::resolve_prepared_adapters;
 use super::adapters::PreparedAdapters;
 #[cfg(native_lane)]
 use super::apply_inline_iris_restore;
-#[cfg(target_os = "macos")]
-use super::artifact_resolution::boogu_model_subdir;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::artifact_resolution::candle_weights_gap;
 #[cfg(target_os = "macos")]
@@ -65,8 +63,6 @@ use super::artifact_resolution::resolve_flux_ip_adapter_dir;
 use super::artifact_resolution::resolve_weights_dir;
 #[cfg(native_lane)]
 use super::artifact_resolution::turnkey_tier_revision;
-#[cfg(native_lane)]
-use super::artifact_resolution::BOOGU_MLX_TURNKEY_REVISION;
 #[cfg(native_lane)]
 use super::artifact_resolution::IDEOGRAM_MLX_TURNKEY_REVISION;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -135,16 +131,12 @@ use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 #[cfg(native_lane)]
 use super::checkpoint_plan::PreparedCheckpointPlanSources;
 #[cfg(native_lane)]
-use super::checkpoint_plan::CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS;
-#[cfg(native_lane)]
 use super::checkpoint_plan::CHECKPOINT_PLAN_RESIDENT_BASE_TIERS;
 use super::civitai_lora_key;
 #[cfg(target_os = "macos")]
 use super::conditioning::angle_prompt_augment;
 #[cfg(target_os = "macos")]
 use super::conditioning::augment_prompt_for_angle;
-#[cfg(target_os = "macos")]
-use super::conditioning::boogu_edit_reference_ids;
 #[cfg(native_lane)]
 use super::conditioning::build_qwen_image_2_1_conditioning;
 #[cfg(target_os = "macos")]
@@ -159,10 +151,6 @@ use super::conditioning::edit_reference_ids;
 use super::conditioning::guard_qwen_image_2_1_lane_slots;
 #[cfg(target_os = "macos")]
 use super::conditioning::identity_strength;
-#[cfg(target_os = "macos")]
-use super::conditioning::is_mage_edit_model;
-#[cfg(native_lane)]
-use super::conditioning::is_minimax_h3_image_edit;
 #[cfg(native_lane)]
 use super::conditioning::is_qwen_image_2_1_edit;
 #[cfg(target_os = "macos")]
@@ -171,8 +159,6 @@ use super::conditioning::load_reference_alpha;
 use super::conditioning::load_reference_image;
 #[cfg(target_os = "macos")]
 use super::conditioning::load_reference_image_with;
-#[cfg(target_os = "macos")]
-use super::conditioning::mage_edit_reference_ids;
 #[cfg(native_lane)]
 use super::conditioning::parse_poses;
 #[cfg(native_lane)]
@@ -203,8 +189,6 @@ use super::conditioning::FlattenPolicy;
 use super::conditioning::PoseInput;
 #[cfg(native_lane)]
 use super::conditioning::QwenImage21Reference;
-#[cfg(target_os = "macos")]
-use super::conditioning::BOOGU_MAX_EDIT_REFERENCES;
 #[cfg(target_os = "macos")]
 use super::conditioning::MAX_EDIT_REFERENCES;
 #[cfg(native_lane)]
@@ -532,26 +516,6 @@ use super::load_spec::load_engine;
 #[cfg(native_lane)]
 use super::load_spec::load_spec;
 use super::lora_weight;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::mage_finetuned_available;
-#[cfg(native_lane)]
-use super::mage_finetuned::mage_finetuned_generation_request;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::mage_finetuned_memory_load_shape_with;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::prepare_mage_finetuned_transformer;
-#[cfg(native_lane)]
-use super::mage_finetuned::resolve_mage_finetuned_transformer;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::resolve_plan_backed_mage_finetuned_transformer;
-#[cfg(native_lane)]
-use super::mage_finetuned::MAGE_FINETUNED_BASE_MODEL;
-#[cfg(native_lane)]
-use super::mage_finetuned::MAGE_FINETUNED_COMPONENT_TIER;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::MAGE_FINETUNED_MEMORY_ROUTE;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::MAGE_FLOW_PLAN_FAMILY;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::memory::downtier_candidate_tiers;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -20581,21 +20545,9 @@ fn instantid_revisions_are_pinned_commits_not_main() {
 #[cfg(native_lane)]
 #[test]
 fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
-    assert_pinned_revision("BOOGU_MLX_TURNKEY_REVISION", BOOGU_MLX_TURNKEY_REVISION);
     assert_pinned_revision(
         "IDEOGRAM_MLX_TURNKEY_REVISION",
         IDEOGRAM_MLX_TURNKEY_REVISION,
-    );
-
-    let boogu = mlx_model("boogu_image").expect("Boogu engine");
-    assert_eq!(boogu.default_repo(), "SceneWorks/boogu-image-mlx");
-    assert_eq!(
-        turnkey_tier_revision(
-            boogu.default_repo(),
-            boogu.default_repo(),
-            BOOGU_MLX_TURNKEY_REVISION,
-        ),
-        BOOGU_MLX_TURNKEY_REVISION
     );
 
     let ideogram = mlx_model("ideogram_4").expect("Ideogram engine");
@@ -20609,14 +20561,6 @@ fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
         IDEOGRAM_MLX_TURNKEY_REVISION
     );
 
-    assert_eq!(
-        turnkey_tier_revision(
-            "example/custom-boogu",
-            boogu.default_repo(),
-            BOOGU_MLX_TURNKEY_REVISION,
-        ),
-        "main"
-    );
     assert_eq!(
         turnkey_tier_revision(
             "example/custom-ideogram",
@@ -20637,18 +20581,11 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
     let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
-    for (repo, revision, relative) in [
-        (
-            "SceneWorks/boogu-image-mlx",
-            BOOGU_MLX_TURNKEY_REVISION,
-            "base-q4/transformer/diffusion_pytorch_model.safetensors",
-        ),
-        (
-            "SceneWorks/ideogram-4-mlx",
-            IDEOGRAM_MLX_TURNKEY_REVISION,
-            "q8/transformer/model.safetensors",
-        ),
-    ] {
+    for (repo, revision, relative) in [(
+        "SceneWorks/ideogram-4-mlx",
+        IDEOGRAM_MLX_TURNKEY_REVISION,
+        "q8/transformer/model.safetensors",
+    )] {
         let cache = hub.join(format!("models--{}", repo.replace('/', "--")));
         std::fs::create_dir_all(cache.join("refs")).unwrap();
         std::fs::write(cache.join("refs/main"), "stale-main").unwrap();
@@ -20658,20 +20595,6 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
             std::fs::write(file, contents).unwrap();
         }
     }
-
-    let boogu = request(json!({
-        "projectId": "p", "model": "boogu_image",
-        "advanced": {"mlxQuantize": 4},
-        "modelManifestEntry": {"repo": "SceneWorks/boogu-image-mlx"}
-    }));
-    assert_eq!(
-        resolve_weights_dir(&boogu, &settings).unwrap(),
-        Some(
-            hub.join("models--SceneWorks--boogu-image-mlx/snapshots")
-                .join(BOOGU_MLX_TURNKEY_REVISION)
-                .join("base-q4")
-        )
-    );
 
     let ideogram = request(json!({
         "projectId": "p", "model": "ideogram_4",
@@ -23706,12 +23629,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             include_str!("krea_imported.rs"),
             "prepare_cached_candle_base_floor(",
         ),
-        (
-            "MageFinetuned",
-            "mage_finetuned.rs",
-            include_str!("mage_finetuned.rs"),
-            "admit_candle_load_spec_floor(",
-        ),
         // The plan route pairs a plan-resolved primary File with the family's resident base
         // snapshot, exactly like `KreaImported` — so it must use the SAME prepared-pin floor over
         // explicit companion dirs. `admit_candle_load_spec_floor` prices every `spec.components`
@@ -24831,38 +24748,6 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
         "imported SDXL must decline a plan-backed entry rather than rely on arm ordering"
     );
     assert!(!sdxl_imported_available(&sdxl, &fx.settings));
-
-    // Mage needs a COMPLETE fine-tuned transformer dir to be claimable at all, so build the exact
-    // fixture its own lane test uses and only then add the plan marker: an entry that this lane
-    // would otherwise claim is the only fixture that can prove the guard, rather than proving the
-    // fixture was unclaimable for some unrelated reason.
-    let mage_dir = tempfile::tempdir().unwrap();
-    let (mage_settings, mage_checkpoint) = mage_finetuned_settings_with_checkpoint(mage_dir.path());
-    let mage_path = mage_checkpoint.to_str().unwrap().to_owned();
-    let mage_entry = |plan_backed: bool| {
-        let mut entry = json!({ "family": "mage-flow", "paths": { "model": mage_path } });
-        if plan_backed {
-            entry["importPlan"] = json!({ "checkpointId": checkpoint_id });
-        }
-        request(json!({
-            "projectId": "p",
-            "model": "finetune_9f3c0a11",
-            "mode": "text_to_image",
-            "modelManifestEntry": entry,
-        }))
-    };
-    assert!(
-        mage_finetuned_available(&mage_entry(false), &mage_settings),
-        "fixture check: without the plan marker this entry IS claimed by the Mage lane"
-    );
-    let mage = mage_entry(true);
-    assert!(
-        prepare_mage_finetuned_transformer(&mage, &mage_settings)
-            .unwrap()
-            .is_none(),
-        "the Mage fine-tuned lane must decline a plan-backed entry"
-    );
-    assert!(!mage_finetuned_available(&mage, &mage_settings));
 
     // `zimage_comfyui_available` is candle-only; its guard sits in the shared
     // `prepare_zimage_comfyui_sources`, pinned here as source text so the macOS lane still proves
@@ -29805,11 +29690,6 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
     let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
         .iter()
         .map(|(family, _)| *family)
-        .chain(
-            CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
-                .iter()
-                .map(|(family, _)| *family),
-        )
         .collect();
     let guard_families: BTreeSet<&str> = PLAN_BACKED_RESIDENT_BASE_MODELS
         .iter()
@@ -29935,47 +29815,7 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
          {KREA_IMPORTED_BASE_TIER} — the repository the imported route's resolver reads"
     );
 
-    let mage = PLAN_BACKED_RESIDENT_BASE_MODELS
-        .iter()
-        .find(|row| row.family == "mage-flow")
-        .expect("mage-flow row");
-    assert_eq!(mage.base_model_id, MAGE_FINETUNED_BASE_MODEL);
-    assert_eq!(mage.tier, MAGE_FINETUNED_COMPONENT_TIER);
-
-    // And the SHAPE is not free-form: it says which of the base entry's repositories the family's
-    // route opens, which is exactly what the family's presence in one plan table or the other
-    // already declares. Krea's base directory contains the transformer config and shared
-    // components, while the separately bound import supplies the transformer weights.
-    // Mage resolves named components from a co-requisite repo. An over-wide closure stops
-    // the guard from serving those components because it verifies all pairs together.
-    for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
-        let in_base_tiers = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
-            .iter()
-            .any(|(family, _)| *family == row.family);
-        let in_component_resolvers = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
-            .iter()
-            .any(|(family, _)| *family == row.family);
-        let expected = match (in_base_tiers, in_component_resolvers) {
-            (true, false) if row.family == "krea_2" => ResidentBaseShape::KreaImportedCompanions,
-            (true, false) => ResidentBaseShape::FullTier,
-            (false, true) => ResidentBaseShape::ComponentsOnly,
-            _ => panic!(
-                "family {:?} must have exactly one plan resolver",
-                row.family
-            ),
-        };
-        assert_eq!(
-            row.shape,
-            expected,
-            "family {:?} is registered in {}, so its resident base is {expected:?}",
-            row.family,
-            if in_base_tiers {
-                "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS"
-            } else {
-                "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS"
-            }
-        );
-    }
+    assert_eq!(krea.shape, ResidentBaseShape::KreaImportedCompanions);
 }
 
 /// sc-22667 (epic 22657 feature-end round, E4/E7) wiring of the Krea 2 Turbo lane in

@@ -4,6 +4,10 @@ mod adapter_test_support;
 #[cfg(not(target_os = "macos"))]
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
+#[path = "mlx_z_image_family.rs"]
+mod mlx_z_image_family;
+use mlx_z_image_family::*;
+
 #[path = "mlx_ltx_family.rs"]
 mod mlx_ltx_family;
 use mlx_ltx_family::*;
@@ -3591,6 +3595,7 @@ fn mlx_source_for_tests() -> &'static str {
                 include_str!("mlx_sd3_family.rs"),
                 include_str!("mlx_krea_realtime_family.rs"),
                 include_str!("mlx_tests.rs"),
+                include_str!("mlx_z_image_family.rs"),
                 include_str!("mlx_z_image_reuse_tests.rs"),
                 include_str!("mlx_flux_one_tests.rs"),
                 include_str!("mlx_sd3_tests.rs"),

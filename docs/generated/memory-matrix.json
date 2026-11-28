@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:5e024243ab895b56e9969118d726f6d141b5900b5dbe738a65d948547d392b5e",
+    "sceneWorksRevision": "source-tree:56bfa387ad314c4252407f1cea21f497cd6ebf70fb91aac88a18e0a366204532",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "481c180016fbdcd871ef4395d84d8beca39298859aaef69ebfdd4deec8649048"
+        "sha256": "270f9f0708243edf419d6d71a2b3a21b3ce73dae921e16121492ecdc9888e946"
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
@@ -17,7 +17,7 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "4ea111a5d6272cdf2ea0b8f0cab286a11e32ac123af15a13d4bfce57c0da587e"
+        "sha256": "6440b06654f8959954658eff7480767cc4525488ee28c707f54fe9f97b7c43d5"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -69,7 +69,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "dc0374d8d2f9e20520ed7d7d7aa55afaf94b3508595957ff1268e8aa9812a92f"
+        "sha256": "0a76ebed9ddafaf8c039787c1dd50a840bf1fccaa85b8ee2689944d35dfd3a16"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",

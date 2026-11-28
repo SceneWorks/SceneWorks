@@ -1791,7 +1791,7 @@ impl gen_core::Generator for ReferenceRenderGenerator {
 fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
     RequestGenerator {
         descriptor: gen_core::ModelDescriptor {
-            id: "mage_flow",
+            id: "fit_fixture",
             family: "test",
             backend: "mlx",
             modality: gen_core::Modality::Image,
@@ -1805,10 +1805,29 @@ fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerat
     }
 }
 
+fn fixture_memory_contract() -> MemoryProviderContract {
+    let mut contract = MemoryProviderContract::compatibility_default(
+        "fit_fixture",
+        MemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: true,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: true,
+            cache_eviction: true,
+        },
+    );
+    contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+        "fit-fixture-q4-v1",
+        gen_core::LoadShape::EagerMaterialization,
+    ));
+    contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+    contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
+    contract
+}
+
 fn request_plan() -> MlxRequestPlan {
     MlxRequestPlan {
-        engine_id: "mage_flow",
-        model_id: "mage_flow".to_owned(),
+        engine_id: "fit_fixture",
+        model_id: "fit_fixture".to_owned(),
         tier: MemoryNumericTier {
             precision: gen_core::Precision::Bf16,
             quant: Some(gen_core::Quant::Q4),
@@ -10487,7 +10506,7 @@ fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
     use gen_core::{MemoryParameterRanges, MemoryStrategyCapability, MemoryStrategySupport};
 
     let contract_with = |missing: MemoryStrategy| {
-        let mut contract = mage_request_contract();
+        let mut contract = fixture_memory_contract();
         contract.strategies = MemoryStrategy::ALL
             .into_iter()
             .map(|strategy| MemoryStrategyCapability {
@@ -10534,7 +10553,7 @@ fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
     // full. Without this, a `memory_for_selection` that returned `Default` unconditionally would
     // satisfy both assertions above.
     let all_implemented = {
-        let mut contract = mage_request_contract();
+        let mut contract = fixture_memory_contract();
         contract.strategies = MemoryStrategy::ALL
             .into_iter()
             .map(|strategy| MemoryStrategyCapability {
@@ -10573,7 +10592,7 @@ fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
 
 #[test]
 fn request_scope_reselects_a_b_a_without_fragmenting_request_axes() {
-    let generator = request_generator(Some(mage_request_contract()));
+    let generator = request_generator(Some(fixture_memory_contract()));
     let plan = request_plan();
     let budget = MemoryBudget {
         total_bytes: gib_to_bytes(16.0),
@@ -10833,11 +10852,12 @@ fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
 /// whole measurement in the area term, with the request budget's remaining OS reserve added as
 /// a separate fixed term.
 ///
-/// This is the lens dense path ([`HeadroomAllowance::LENS_DENSE`], sc-11924). Subtracting the
+/// This is the lens dense path ([`HeadroomAllowance { total_gb: 29.88, os_reserve_gb: 0.0 }`], sc-11924). Subtracting the
 /// legacy 2 GiB request-budget reserve from its 29.88 GiB BARE activation measurement would
 /// under-predict above 1024² by `2·MP`. The safe decomposition is fixed 2 + 29.88·MP.
 #[test]
 fn a_bare_transient_allowance_keeps_its_whole_area_term() {
+    const TRANSIENT_GB: f64 = 29.88;
     let asset_gb = 28.43_f64;
     let plan = |headroom: HeadroomAllowance| {
         let fixed_reserve_bytes = gib_to_bytes(
@@ -10863,7 +10883,10 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
             load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     };
-    let dense = plan(HeadroomAllowance::LENS_DENSE);
+    let dense = plan(HeadroomAllowance {
+        total_gb: 29.88,
+        os_reserve_gb: 0.0,
+    });
     let peak_gb = |plan: &MlxRequestPlan, width, height| {
         plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1))) as f64
             / BYTES_PER_GIB
@@ -10874,13 +10897,13 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
         (1152, 2048, 2.25),
         (2048, 2048, 4.0),
     ] {
-        let expected = asset_gb + 2.0 + LENS_DENSE_HEADROOM_GB * megapixels;
+        let expected = asset_gb + 2.0 + TRANSIENT_GB * megapixels;
         assert!(
-                (peak_gb(&dense, width, height) - expected).abs() < 1e-6,
-                "{width}x{height}: a bare-transient allowance must scale WHOLLY with area — \
-                 expected fixed 2 + {LENS_DENSE_HEADROOM_GB}*{megapixels} = {expected:.4}, got {:.4}",
-                peak_gb(&dense, width, height)
-            );
+            (peak_gb(&dense, width, height) - expected).abs() < 1e-6,
+            "{width}x{height}: a bare-transient allowance must scale WHOLLY with area — \
+                 expected fixed 2 + {TRANSIENT_GB}*{megapixels} = {expected:.4}, got {:.4}",
+            peak_gb(&dense, width, height)
+        );
     }
 
     // Control: the generic allowance, which really does contain a reserve, must NOT behave that
@@ -10895,7 +10918,7 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
 
 #[test]
 fn request_scope_charges_external_committed_memory_and_never_accepts_zero_zero() {
-    let generator = request_generator(Some(mage_request_contract()));
+    let generator = request_generator(Some(fixture_memory_contract()));
     let plan = request_plan();
     let inputs = request_inputs(512, 512, 1);
     let external = evaluate_request_with_budget(
@@ -12387,7 +12410,7 @@ fn optimized_fingerprint_mismatch_fails_closed() {
     let plan = request_plan();
     let inputs = request_inputs(1024, 1024, 1);
     let mut contract = MemoryProviderContract::compatibility_default(
-        "mage_flow",
+        "fit_fixture",
         MemoryBackendRealization::MlxMetal {
             bounded_wired_residency: true,
             lazy_or_mmap_materialization: true,
@@ -12396,7 +12419,7 @@ fn optimized_fingerprint_mismatch_fails_closed() {
         },
     );
     contract.calibration = Some(MemoryCalibrationIdentity::new(
-        mage_request_fingerprint(),
+        "fit-fixture-q4-v1",
         gen_core::LoadShape::EagerMaterialization,
     ));
     contract.asset_facts.base_bytes = gib_to_bytes(6.0);

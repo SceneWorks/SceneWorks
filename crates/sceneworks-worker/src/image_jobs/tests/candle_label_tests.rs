@@ -1,5 +1,4 @@
 use super::super::conditioning::character_image_likeness_requested;
-use super::super::conditioning::mage_edit_reference_ids;
 use super::super::load_spec::load_spec;
 use super::super::memory::candle_capability_reject_message;
 use super::super::memory::vram_reject_tail;
@@ -35,7 +34,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
             "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
         }));
         let route = resolve_candle_image_route_with_prepared_availability(
-            &request, None, &settings, false, false, false, false, false, false, false,
+            &request, None, &settings, false, false, false, false, false, false,
         )
         .unwrap();
         assert_eq!(route, CandleImageRoute::MossImageEdit);
@@ -45,7 +44,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
         let ordinary = bound_request(json!({"model":model,"mode":"text_to_image"}));
         assert_eq!(
             resolve_candle_image_route_with_prepared_availability(
-                &ordinary, None, &settings, false, false, false, false, false, false, false
+                &ordinary, None, &settings, false, false, false, false, false, false
             ),
             Some(CandleImageRoute::CandleTxt2Img)
         );
@@ -55,7 +54,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
         bound_request(json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"}));
     assert_eq!(
         resolve_candle_image_route_with_prepared_availability(
-            &request, None, &settings, false, false, false, false, false, false, false
+            &request, None, &settings, false, false, false, false, false, false
         ),
         None
     );
@@ -189,8 +188,7 @@ fn candle_image_adapter_labels_are_per_family() {
     assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
     assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
     assert_eq!(candle_adapter_label("chroma1_flash"), "candle_chroma");
-    assert_eq!(candle_adapter_label("lens"), "candle_lens");
-    assert_eq!(candle_adapter_label("lens_turbo"), "candle_lens");
+
     assert_eq!(candle_adapter_label("kolors"), "candle_kolors");
     assert_eq!(candle_adapter_label("sensenova_u1_8b"), "candle_sensenova");
     assert_eq!(
@@ -200,9 +198,7 @@ fn candle_image_adapter_labels_are_per_family() {
     assert_eq!(candle_adapter_label("ideogram_4"), "candle_ideogram");
     assert_eq!(candle_adapter_label("ideogram_4_turbo"), "candle_ideogram");
     // Boogu (sc-7524): all three variants share the `candle_boogu` asset stamp.
-    assert_eq!(candle_adapter_label("boogu_image"), "candle_boogu");
-    assert_eq!(candle_adapter_label("boogu_image_turbo"), "candle_boogu");
-    assert_eq!(candle_adapter_label("boogu_image_edit"), "candle_boogu");
+
     for model in [
         "mage_flow_base",
         "mage_flow",

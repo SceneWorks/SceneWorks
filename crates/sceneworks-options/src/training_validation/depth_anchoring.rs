@@ -186,13 +186,6 @@ pub const TAESD3_MODEL: AuxTrainingModel = AuxTrainingModel {
 };
 
 /// TAEF2 — the tiny decoder for the FLUX.2 32-channel latent family (Lens).
-pub const TAEF2_MODEL: AuxTrainingModel = AuxTrainingModel {
-    id: "taef2",
-    label: "TAEF2 tiny decoder",
-    repo: "madebyollin/taef2",
-    revision: "bd244ebfe4398c84fbf312a2f1c868c676b500e3",
-    file: "taef2.safetensors",
-};
 
 /// TAEQI2.1 — the tiny decoder for the Qwen-Image 2.1 64-channel latent family (Qwen Image 2.1).
 pub const TAEQI2_1_MODEL: AuxTrainingModel = AuxTrainingModel {
@@ -233,11 +226,10 @@ pub const TAELTX2_3_MODEL: AuxTrainingModel = AuxTrainingModel {
 };
 
 /// Every cataloged tiny x0 decoder (a parity test pins each to its `builtin.models.jsonc` entry).
-pub const X0_DECODER_MODELS: [AuxTrainingModel; 8] = [
+pub const X0_DECODER_MODELS: [AuxTrainingModel; 7] = [
     TAEF1_MODEL,
     TAESDXL_MODEL,
     TAESD3_MODEL,
-    TAEF2_MODEL,
     TAEQI2_1_MODEL,
     TAEW2_1_MODEL,
     TAEW2_2_MODEL,

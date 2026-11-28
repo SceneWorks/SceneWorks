@@ -692,7 +692,7 @@ struct TurnkeyCandleMember {
     tier_quant_reaches_the_loader: bool,
 }
 
-const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 7] = [
+const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 5] = [
     TurnkeyCandleMember {
         provider_id: KOLORS_ID,
         tier_quant_reaches_the_loader: true,

@@ -1351,3 +1351,16 @@ pub(super) fn routes_to_five_rung_reference(request: &Value) -> Result<bool, Str
         // instead of falling into Turbo's `provider != KREA_ID` refusal.
         || provider == KREA_RAW_ID)
 }
+
+pub(super) fn pulid_reference_image() -> Result<Image, String> {
+    // A generated face already exercised by inference's sc-16956 PuLID render.
+    // A synthetic color gradient cannot pass the production face detector.
+    let decoded = image::load_from_memory(include_bytes!("../../fixtures/pulid-reference.png"))
+        .map_err(|error| format!("decode bundled PuLID reference face: {error}"))?
+        .into_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
+}

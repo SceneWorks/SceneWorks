@@ -33,8 +33,6 @@ import {
   hashAnchorInventory,
   SDXL_COMPONENTS,
   SDXL_TIER_MAIN_TENSORS,
-  MAGE_COMPONENTS,
-  MAGE_COMPONENT_IDS,
   providerFamily,
   anchorParts,
   anchorSlug,
@@ -269,8 +267,6 @@ function fakeModels() {
     // SECOND repository at a SECOND revision, which is the case the family's `tiers` override
     // exists for. Both Ideogram members carry both downloads, exactly as the manifest does.
     { id: "kolors", downloads: [{ repo: "SceneWorks/kolors-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
-    { id: "lens", downloads: [{ repo: "SceneWorks/lens-mlx", revision: REVISION, variant: "q4", files: ["q4/*"] }] },
-    { id: "lens_turbo", downloads: [{ repo: "SceneWorks/lens-turbo-mlx", revision: UPSTREAM, variant: "q4", files: ["q4/*"] }] },
     {
       id: "ideogram_4",
       downloads: [
@@ -3747,8 +3743,8 @@ test("the flux.1 family is measurable on every shipped tier of every routed lane
 // sc-22732. Same shape claim, for the turnkey still family: five catalog models over three engine
 // crate pairs (`*-gen-kolors`, `*-gen-ideogram`, `*-gen-lens`), every one a plain reference-free
 // text-to-image route whose engine id equals its catalog model id.
-test("the kolors, ideogram and lens families are measurable on every shipped tier of every routed lane", async () => {
-  const family = ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo"];
+test("the Kolors and Ideogram families are measurable on every shipped tier of every routed lane", async () => {
+  const family = ["kolors", "ideogram_4", "ideogram_4_turbo"];
   const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
   // The expected KEY SET, spelled out for the same reason the sc-22731 case below spells its own
   // out: a frozen `5 * 3 * 2` says only how MANY cells there should be, so a cell silently lost on
@@ -3766,17 +3762,6 @@ test("the kolors, ideogram and lens families are measurable on every shipped tie
 // sc-22733. Same shape claim, for the Mage-Flow family: SIX registered engine providers (three
 // text-to-image checkpoints and three instruction editors), each with its own tiered rehost, all
 // sharing ONE text-encoder/VAE components snapshot. Key sets, never a frozen count.
-test("the mage-flow family is measurable on every shipped tier of every routed lane", async () => {
-  const family = [
-    "mage_flow", "mage_flow_base", "mage_flow_turbo",
-    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
-  ];
-  const cells = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId));
-  assert.equal(cells.length, 6 * 3 * 2, "six models x three shipped tiers x two routed lanes");
-  const gaps = (await measurabilityGaps()).filter((gap) => family.includes(gap.modelId));
-  assert.equal(gaps.length, 0, gapReport(gaps));
-});
-
 // sc-22730. Same shape claim, for the SD3.5 family: three DISTINCT base text-to-image providers of
 // the shared SD3.5 engine crates, each with its OWN tiered rehost, on the registry path of BOTH
 // lanes. `sd3_5_*` is the catalog model id AND the engine provider id, so no alias is involved.
@@ -3851,12 +3836,6 @@ test("the sana and chroma1 families are measurable on every shipped tier of ever
 test("the turnkey still family binds one artifact per member, and Ideogram's bf16 tier binds its own repository", async () => {
   const hub = await fakeHub([
     ["SceneWorks/kolors-mlx", REVISION, "q4"],
-    ["SceneWorks/lens-mlx", REVISION, "q4"],
-    ["SceneWorks/lens-turbo-mlx", UPSTREAM, "q4"],
-    ...["text_encoder", "transformer", "vae"].flatMap((component) => [
-      ["SceneWorks/lens-mlx", REVISION, "q4", component],
-      ["SceneWorks/lens-turbo-mlx", UPSTREAM, "q4", component],
-    ]),
     ["SceneWorks/ideogram-4-mlx", REVISION, "q4"],
     ["SceneWorks/ideogram-4", UPSTREAM, "bf16"],
   ]);
@@ -3869,23 +3848,6 @@ test("the turnkey still family binds one artifact per member, and Ideogram's bf1
       SCENEWORKS_KOLORS_REPOSITORY: "SceneWorks/kolors-mlx",
       SCENEWORKS_KOLORS_REVISION: REVISION,
       SCENEWORKS_KOLORS_ROOT: snapshotPath(hub, "SceneWorks/kolors-mlx", REVISION, "q4"),
-    });
-
-    // Base Lens and Lens-Turbo are separate repositories at separate revisions: a turbo plan bound
-    // to the base family would re-label the base model's peaks as the distilled model's.
-    const lens = await classifyAnchor(`lens:q4:${backend}`, { provider: "lens" }, context);
-    assert.equal(lens.status, "runnable", `${backend}: ${lens.reason}`);
-    assert.deepEqual(lens.env, {
-      SCENEWORKS_LENS_REPOSITORY: "SceneWorks/lens-mlx",
-      SCENEWORKS_LENS_REVISION: REVISION,
-      SCENEWORKS_LENS_ROOT: snapshotPath(hub, "SceneWorks/lens-mlx", REVISION, "q4"),
-    });
-    const turbo = await classifyAnchor(`lens_turbo:q4:${backend}`, { provider: "lens_turbo" }, context);
-    assert.equal(turbo.status, "runnable", `${backend}: ${turbo.reason}`);
-    assert.deepEqual(turbo.env, {
-      SCENEWORKS_LENS_TURBO_REPOSITORY: "SceneWorks/lens-turbo-mlx",
-      SCENEWORKS_LENS_TURBO_REVISION: UPSTREAM,
-      SCENEWORKS_LENS_TURBO_ROOT: snapshotPath(hub, "SceneWorks/lens-turbo-mlx", UPSTREAM, "q4"),
     });
 
     // Both Ideogram members: q4 from the packed turnkey, bf16 from the second repository.
@@ -3912,14 +3874,7 @@ test("the turnkey still family binds one artifact per member, and Ideogram's bf1
     assert.equal(missing.status, "weights_missing");
     assert.match(missing.reason, /ideogram-4-mlx@.*\/q8 on this host/);
   }
-  const transformer = snapshotPath(hub, "SceneWorks/lens-mlx", REVISION, "q4", "transformer");
-  await rm(path.join(transformer, "weights.safetensors"));
-  await writeFile(path.join(transformer, "config.json"), "{}");
-  const partial = await classifyAnchor("lens:q4:candle", { provider: "lens" }, {
-    models: fakeModels(), backend: "candle", hubs: [hub], current: new Map(), captured: new Map(),
-  });
-  assert.equal(partial.status, "weights_missing");
-  assert.match(partial.reason, /transformer\/\*\.safetensors/);
+
 });
 
 // sc-22735. `krea_realtime_14b` declares ONE adapter arm, and the AC that scopes this story to MLX
@@ -4554,51 +4509,8 @@ test("the engine's own declaration parses for every provider the override rule c
 // Each Mage variant binds TWO artifact triples: its OWN tiered rehost (never a sibling's — the six
 // checkpoints are architecturally identical, so a crossed root would be caught by nothing else) and
 // the ONE shared components snapshot. This asserts the derivation produces exactly that.
-test("every mage-flow member binds its own rehost plus the one shared components snapshot", async () => {
-  const models = await readManifestModels();
-  const seenComponents = new Set();
-  for (const [modelId, family] of Object.entries(PROVIDER_FAMILIES)) {
-    if (!modelId.startsWith("mage_flow")) continue;
-    assert.deepEqual(family.arms, ["mlx", "candle"], `${modelId} is routed on both lanes`);
-    assert.equal(family.components, MAGE_COMPONENTS, `${modelId} shares the one components row`);
-    // The variant repo is this member's own, and it is the repo the manifest ships the tiers from.
-    const download = tierDownload(models, modelId, family.repo, "q4");
-    assert.equal(download.variant, "q4", `${modelId} ships a q4 tier from ${family.repo}`);
-    assert.ok(!download.coRequisite, `${modelId}'s tier download is the primary, not a co-requisite`);
-    // The components repo is shared: same repo AND same revision for every member.
-    const components = tierDownload(models, modelId, MAGE_COMPONENTS.repo, "q4");
-    assert.ok(components.coRequisite, "the components rows are declared as co-requisites");
-    seenComponents.add(components.revision);
-    // No two members may claim the same variant rehost.
-    const others = Object.entries(PROVIDER_FAMILIES).filter(
-      ([id, other]) => id !== modelId && id.startsWith("mage_flow") && other.repo === family.repo,
-    );
-    assert.deepEqual(others, [], `${modelId} shares its variant rehost with ${others.map(([id]) => id).join(", ")}`);
-  }
-  assert.equal(seenComponents.size, 1, "every Mage entry co-requires the SAME components revision");
-});
-
 // The component directory names this script probes must be the ones the adapters actually stage, or
 // a cell reports `runnable` while the load cannot open its text encoder.
-test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async () => {
-  const source = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
-  const declared = [
-    ["MAGE_COMPONENT_TEXT_ENCODER", "text_encoder"],
-    ["MAGE_COMPONENT_VAE", "vae"],
-  ];
-  for (const [name, value] of declared) {
-    assert.match(source, new RegExp(`pub const ${name}: &str =\\s*"${value}"`));
-  }
-  assert.deepEqual(MAGE_COMPONENT_IDS, declared.map(([, value]) => value));
-  // And both adapter arms stage exactly those two components rather than composing a path.
-  for (const backend of ["mlx", "candle"]) {
-    const arm = await rustFacadeSource(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`));
-    for (const [name] of declared) {
-      assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
-    }
-  }
-});
-
 // sc-22736. Same shape claim, for the Wan 2.2 family and SCAIL-2 — the first families whose
 // ARTIFACT is per (lane, TIER) rather than per lane. Each Wan route ships a `SceneWorks/…-mlx`
 // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
@@ -5066,113 +4978,13 @@ test("the bare MLX LTX-2.3 and MiniMax-H3 plan rows are the engines' calibrated 
 //   these rows to them.
 //
 // The cell set is derived (family x shipped tiers x routed lanes), never a frozen count.
-test("every mage-flow plan row names its cell's production identity and the worker's load shape", async () => {
-  const plan = await readPlan();
-  const family = [
-    "mage_flow", "mage_flow_base", "mage_flow_turbo",
-    "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo",
-  ];
-  const expectedKeys = (await shippedTieredCells()).filter((cell) => family.includes(cell.modelId)).map((cell) => cell.key).sort();
-  const mage = Object.entries(plan.anchors).filter(([, row]) => family.includes(row.provider));
-  assert.deepEqual(mage.map(([key]) => key).sort(), expectedKeys, "the planned Mage cells are exactly the shipped ones");
-  const route = (provider) => provider.replaceAll("_", "-");
-  const identities = new Set();
-  for (const [key, row] of mage) {
-    const { modelId, tier, backend } = anchorParts(key);
-    assert.equal(row.provider, modelId, `${key}: catalog id and engine provider id are equal on every Mage row`);
-    const expected = backend === "mlx"
-      ? `mage-flow-${route(row.provider)}-${tier}-mlx-shared-ladder-v1`
-      : `mage-flow-cuda-${route(row.provider)}-${tier}-shared-ladder-v3`;
-    assert.equal(row.calibrationFingerprint, expected, `${key} names a fingerprint ${backend} cannot emit`);
-    assert.ok(!row.calibrationFingerprint.startsWith("mage-flow-mlx-registry-behavior-v1"), `${key} names a weights-free conformance string`);
-    assert.notEqual(row.calibrationFingerprint, "mage-flow-mlx-shared-ladder-2026-08-03-v1", `${key} names the retired single string`);
-    assert.ok(!identities.has(row.calibrationFingerprint), `${key} shares its identity with another cell`);
-    identities.add(row.calibrationFingerprint);
-    const shape = backend === "mlx" || tier === "bf16" ? "deferred_materialization" : "eager_materialization";
-    assert.equal(row.loadShape, shape, `${key} must plan the shape the worker loads`);
-    assert.equal(row.overlay, "none", `${key} carries no overlay`);
-  }
-  assert.equal(identities.size, expectedKeys.length, "one identity per cell");
-});
-
 // The manifest's six MLX Mage contract blocks carry the ENGINE'S weights-free conformance identity
 // per row, as every declared MLX family does (FLUX.1: `flux-one-static-registry-behavior-v2-dev`).
 // `mlx-gen-mage` publishes that identity per (route, tier), so the rows are split per tier and no
 // row may carry a production string, the retired single string, or a multi-tier `tiers` list.
-test("every mage-flow MLX manifest row declares its own per-tier registry-conformance identity", async () => {
-  const models = await readManifestModels();
-  for (const modelId of Object.keys(PROVIDER_FAMILIES).filter((id) => id.startsWith("mage_flow"))) {
-    const contract = models.find((model) => model.id === modelId)?.mlx?.memoryStrategyContract;
-    assert.ok(contract, `${modelId} declares an MLX memory contract`);
-    assert.equal(contract.provider, modelId);
-    const cells = new Set();
-    for (const row of contract.implementations) {
-      assert.deepEqual(Object.keys(row).filter((k) => k === "tiers"), ["tiers"], `${modelId}/${row.rung} declares tiers`);
-      assert.equal(row.tiers.length, 1, `${modelId}/${row.rung} rows are split per tier, got ${JSON.stringify(row.tiers)}`);
-      const [tier] = row.tiers;
-      assert.equal(row.fingerprint, `mage-flow-mlx-registry-behavior-v1-${modelId.replaceAll("_", "-")}-${tier}`, `${modelId}/${row.rung}/${tier}`);
-      cells.add(`${row.rung}:${tier}`);
-    }
-    assert.deepEqual(
-      [...cells].sort(),
-      ["bounded_attention", "bounded_decode", "bounded_transformer_residency", "resident", "staged_residency"]
-        .flatMap((rung) => ["bf16", "q4", "q8"].map((tier) => `${rung}:${tier}`)).sort(),
-      `${modelId} declares every rung on every shipped tier exactly once`,
-    );
-  }
-});
-
 // A Mage cell whose components row for THIS tier is not declared (or whose components repo has no
 // rows at all) is `weights_missing` — planned and armed, merely not bindable on this host — and
 // never a thrown error, which would abort the whole `--list` for every other cell (sc-22733 review).
-test("a mage-flow cell with no components row for its tier is weights_missing, not an error", async () => {
-  const family = PROVIDER_FAMILIES.mage_flow;
-  const variant = (tier) => ({ repo: family.repo, revision: REVISION, variant: tier, files: [`${tier}/*`] });
-  const component = (tier, componentId) => ({
-    repo: MAGE_COMPONENTS.repo, revision: UPSTREAM, coRequisite: true, componentId, variant: tier,
-    subdir: `${tier}/${componentId}`, files: [`${tier}/${componentId}/*`],
-  });
-  const models = [
-    { id: "mage_flow", downloads: [variant("q4"), variant("bf16"), ...MAGE_COMPONENT_IDS.map((id) => component("q4", id))] },
-    { id: "mage_flow_base", downloads: [{ ...variant("q4"), repo: PROVIDER_FAMILIES.mage_flow_base.repo }] },
-  ];
-  const hub = await fakeHub([
-    [family.repo, REVISION, "q4"],
-    [family.repo, REVISION, "bf16"],
-    [PROVIDER_FAMILIES.mage_flow_base.repo, REVISION, "q4"],
-    ...MAGE_COMPONENT_IDS.map((id) => [MAGE_COMPONENTS.repo, UPSTREAM, "q4", id]),
-  ]);
-  const context = { models, backend: "mlx", hubs: [hub], current: new Map(), captured: new Map() };
-  const runnable = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
-  assert.equal(runnable.status, "runnable", runnable.reason);
-  assert.equal(runnable.env[`SCENEWORKS_${MAGE_COMPONENTS.env}_ROOT`], snapshotPath(hub, MAGE_COMPONENTS.repo, UPSTREAM));
-  const noTierRow = await classifyAnchor("mage_flow:bf16:mlx", { provider: "mage_flow" }, context);
-  assert.equal(noTierRow.status, "weights_missing");
-  assert.match(noTierRow.reason, /declares no .*Mage-Flow-Components-mlx components row for tier bf16/);
-  assert.ok(noTierRow.roots.some((root) => root.label === "components snapshot"), "the missing root is named");
-  const noRows = await classifyAnchor("mage_flow_base:q4:mlx", { provider: "mage_flow_base" }, context);
-  assert.equal(noRows.status, "weights_missing");
-  assert.match(noRows.reason, /mage_flow_base declares no .* components row for tier q4/);
-  const encoder = snapshotPath(hub, MAGE_COMPONENTS.repo, UPSTREAM, "q4", "text_encoder");
-  await rm(path.join(encoder, "weights.safetensors"));
-  await writeFile(path.join(encoder, "config.json"), "{}");
-  for (const backend of ["mlx", "candle"]) {
-    const partial = await classifyAnchor(`mage_flow:q4:${backend}`, { provider: "mage_flow" }, { ...context, backend });
-    assert.equal(partial.status, "weights_missing");
-    assert.match(partial.reason, /q4\/text_encoder/);
-  }
-  await writeFile(path.join(encoder, "weights.safetensors"), "present shard");
-  await writeFile(path.join(encoder, "model.safetensors.index.json"), JSON.stringify({
-    weight_map: { first: "weights.safetensors", second: "missing.safetensors" },
-  }));
-  const partialShards = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
-  assert.equal(partialShards.status, "weights_missing");
-  assert.match(partialShards.reason, /missing.safetensors/);
-  await writeFile(path.join(encoder, "missing.safetensors"), "second shard");
-  const repaired = await classifyAnchor("mage_flow:q4:mlx", { provider: "mage_flow" }, context);
-  assert.equal(repaired.status, "runnable", repaired.reason);
-});
-
 // sc-22730. The plan's SD3.5 fingerprints are the one claim a capture cannot re-derive on a host
 // with no weights, and they are duplicated across three artifacts: the plan, the engine (through
 // inference PR 950) and — on the candle lane only — the shipped manifest's declared contract.
@@ -5241,8 +5053,6 @@ test("every planned turnkey-still fingerprint is one its lane's declaration can 
     kolors: (tier) => (tier === "q4" ? "kolors-mlx-chatglm3-sdxl-unet-ladder-v1" : `kolors-${tier}-mlx-shared-ladder-v1`),
     ideogram_4: (tier) => `ideogram-4-${tier}-mlx-shared-ladder-v1`,
     ideogram_4_turbo: (tier) => `ideogram-4-turbo-${tier}-mlx-shared-ladder-v1`,
-    lens: (tier) => (tier === "q4" ? "lens-mlx-shared-ladder-2026-08-03-v1" : `lens-${tier}-mlx-shared-ladder-v1`),
-    lens_turbo: (tier) => `lens-turbo-${tier}-mlx-shared-ladder-v1`,
   };
   const withheld = [];
   let seen = 0;
@@ -5282,7 +5092,7 @@ test("every planned turnkey-still fingerprint is one its lane's declaration can 
     );
     withheld.push(key);
   }
-  assert.equal(seen, 5 * 3 * 2, "every turnkey still cell is priced by the plan");
+  assert.equal(seen, 3 * 3 * 2, "every turnkey still cell is priced by the plan");
   // Stated as data: the withheld set is exactly the three Kolors candle cells, so a lane that
   // silently loses its declarations cannot hide behind a broadly-worded withhold.
   assert.deepEqual(withheld.sort(), ["kolors:bf16:candle", "kolors:q4:candle", "kolors:q8:candle"]);
@@ -7897,14 +7707,6 @@ test("--download-missing resolves the FULL inventory each failing CUDA cell need
     return targets.flatMap((target) => target.include);
   };
 
-  for (const tier of ["bf16", "q8"]) {
-    for (const model of ["mage_flow", "mage_flow_base", "mage_flow_turbo", "mage_flow_edit", "mage_flow_edit_base", "mage_flow_edit_turbo"]) {
-      const globs = includesFor(`${model}:${tier}:candle`, model);
-      assert.ok(globs.includes(`${tier}/text_encoder/*`), `${model}:${tier}: the components text encoder is not fetched (${globs.join(" ")})`);
-      assert.ok(globs.includes(`${tier}/vae/*`), `${model}:${tier}: the components VAE is not fetched`);
-    }
-  }
-
   for (const tier of ["q4", "q8"]) {
     for (const model of ["minimax_h3", "minimax_h3_ref"]) {
       const globs = includesFor(`${model}:${tier}:candle`, "minimax_h3");
@@ -7921,7 +7723,7 @@ test("--download-missing resolves the FULL inventory each failing CUDA cell need
   }
 
   // And every one of those is reachable only because no invocation drops a glob.
-  for (const key of ["mage_flow:bf16:candle", "minimax_h3_ref:q4:candle", "ltx_2_3:q4:candle"]) {
+  for (const key of ["minimax_h3_ref:q4:candle", "ltx_2_3:q4:candle"]) {
     const parts = anchorParts(key);
     const { targets } = anchorDownloadTargets(
       { key, ...parts, provider: parts.modelId === "minimax_h3_ref" ? "minimax_h3" : parts.modelId },
@@ -8047,7 +7849,6 @@ test("through the CLI, every glob a failing CUDA cell needed is passed to a fetc
   const models = await readManifestModels();
   const hub = await mkdtemp(path.join(tmpdir(), "catalog-hub-classes-"));
   const cases = [
-    ["mage_flow:bf16:candle", "mage_flow", ["bf16/text_encoder/*", "bf16/vae/*"]],
     ["ltx_2_3:q4:candle", "ltx_2_3", ["gemma/*", "q4/*"]],
     ["minimax_h3_ref:q8:candle", "minimax_h3", ["q8/transformer_ref/*", "q8/transformer/*"]],
     ["minimax_h3:q4:candle", "minimax_h3", ["q4/transformer/*", "q4/transformer_ref/*"]],

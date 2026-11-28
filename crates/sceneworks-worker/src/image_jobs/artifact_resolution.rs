@@ -1212,7 +1212,7 @@ pub(super) fn anima_dense_split_files_dir(root: PathBuf) -> PathBuf {
 /// resolver [`ideogram_model_subdir`] no longer shares this: as of sc-10777 it routes its default through
 /// the floor-aware [`preferred_tier`] (so a floored default clamps up to `mlx.minQualityTier`, capped by
 /// installed), while this fetch helper stays keyed on the explicit pick only — no shipping Ideogram model
-/// declares a floor, so the two still agree for every current model. Mirrors [`boogu_tier_subdir`].
+/// declares a floor, so the two still agree for every current model.
 pub(super) fn ideogram_tier_subdir(bits: Option<i64>) -> Option<&'static str> {
     match bits {
         Some(b) if b > 4 => Some("q8"),

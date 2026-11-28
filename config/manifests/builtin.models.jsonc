@@ -17973,36 +17973,6 @@
       }
     },
     {
-      // TAEF2 (madebyollin/taef2) — the tiny differentiable decoder for the FLUX.2 latent family (Lens) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEF2_MODEL (parity test).
-      "id": "taef2",
-      "autoDownload": false,
-      "name": "TAEF2 Tiny Decoder",
-      "family": "taef2",
-      "type": "utility",
-      "componentOnly": true,
-      "capabilities": [],
-      "downloads": [
-        {
-          "provider": "huggingface",
-          "repo": "madebyollin/taef2",
-          "revision": "bd244ebfe4398c84fbf312a2f1c868c676b500e3",
-          "files": ["taef2.safetensors"],
-          "platforms": ["macos", "windows", "linux"],
-          "estimatedSizeBytes": 10723524,
-          "footprint": { "diskSizeBytes": 10723524 }
-        }
-      ],
-      "paths": {
-        "model": "${HF_CACHE}/madebyollin/taef2"
-      },
-      "licenseUrl": "https://huggingface.co/madebyollin/taef2/tree/bd244ebfe4398c84fbf312a2f1c868c676b500e3",
-      "ui": {
-        "label": "TAEF2 Tiny Decoder",
-        "description": "Tiny differentiable decoder for the FLUX.2 latent family (Lens). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
-        "recommendedFor": []
-      }
-    },
-    {
       // TAEQI2.1 (madebyollin/taeqi2_1) — the tiny differentiable decoder for the Qwen-Image 2.1 64-channel latent family that the native Qwen Image 2.1 trainer's decoded-x0 perceptual losses run through (epic 2123). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEQI2_1_MODEL (parity test).
       "id": "taeqi2_1",
       "autoDownload": false,

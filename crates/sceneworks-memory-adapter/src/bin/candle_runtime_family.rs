@@ -1,6 +1,82 @@
 //! CANDLE runtime capture owner.
 use super::*;
 
+/// Whether this case is the `z_image_edit` route: the Turbo provider in `edit_image` mode. Every
+/// other provider this adapter implements is measured text-to-image regardless of the mode
+/// spelling, exactly as before; only the Turbo arm has a second mode it can actually execute.
+pub(super) fn is_z_image_edit(request: &Value) -> Result<bool, String> {
+    Ok(planned_provider(request)? == Z_IMAGE_TURBO_ID && planned_mode(request)? == "edit_image")
+}
+
+/// The `(env family, expected repository)` binding for Qwen-Image 2.1 at one tier (sc-24112): the
+/// split-repo shape [`ideogram_five_rung_family`] has, with the halves swapped — `q4`/`q8` are the
+/// SceneWorks re-host's tier subdirs and `bf16` is the upstream `Qwen/Qwen-Image-2.1` snapshot root.
+/// A function for the same parser reason Ideogram's is.
+pub(super) fn qwen_image_2_1_five_rung_family(
+    tier: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    if tier == "bf16" {
+        (
+            QWEN_IMAGE_2_1_ID,
+            QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT",
+            protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY,
+        )
+    } else {
+        (
+            QWEN_IMAGE_2_1_ID,
+            QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_ROOT",
+            protocol::QWEN_IMAGE_2_1_REPOSITORY,
+        )
+    }
+}
+
+/// The Qwen-Image 2.1 Turbo twin of [`qwen_image_2_1_five_rung_family`] (sc-25907): the same split
+/// over the distilled checkpoint's OWN repositories and `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` env
+/// families, so a Turbo plan can never be satisfied by base weights.
+pub(super) fn qwen_image_2_1_turbo_five_rung_family(
+    tier: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    if tier == "bf16" {
+        (
+            QWEN_IMAGE_2_1_TURBO_ID,
+            QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT",
+            protocol::QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY,
+        )
+    } else {
+        (
+            QWEN_IMAGE_2_1_TURBO_ID,
+            QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT",
+            protocol::QWEN_IMAGE_2_1_TURBO_REPOSITORY,
+        )
+    }
+}
+
 pub(super) fn certifying_wddm_idle_config() -> StableIdleConfig {
     // Five samples 200 ms apart must agree within 64 MiB before the lowest becomes the delta
     // baseline. The GPU need not be idle (owner rule): the pinned testkit records resident

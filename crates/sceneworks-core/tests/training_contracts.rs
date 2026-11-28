@@ -2732,8 +2732,8 @@ fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
 #[test]
 fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
     use sceneworks_core::training::depth_anchoring::{
-        x0_decoder_for_trainer, X0DecoderSource, TAEF1_MODEL, TAEF2_MODEL, TAELTX2_3_MODEL,
-        TAEQI2_1_MODEL, TAESD3_MODEL, TAESDXL_MODEL, TAEW2_1_MODEL, TAEW2_2_MODEL,
+        x0_decoder_for_trainer, X0DecoderSource, TAEF1_MODEL, TAELTX2_3_MODEL, TAEQI2_1_MODEL,
+        TAESD3_MODEL, TAESDXL_MODEL, TAEW2_1_MODEL, TAEW2_2_MODEL,
     };
     use X0DecoderSource::{BaseModelVae, Catalog};
     for (trainer, expected) in [
@@ -2742,7 +2742,6 @@ fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
         ("kolors", Catalog(&TAESDXL_MODEL)),
         ("sd3_5_large", Catalog(&TAESD3_MODEL)),
         ("sd3_5_medium", Catalog(&TAESD3_MODEL)),
-        ("lens", Catalog(&TAEF2_MODEL)),
         ("qwen_image_2_1", Catalog(&TAEQI2_1_MODEL)),
         ("krea_2_raw", Catalog(&TAEW2_1_MODEL)),
         ("anima_base", Catalog(&TAEW2_1_MODEL)),
