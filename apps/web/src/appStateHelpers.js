@@ -52,5 +52,7 @@ const EDITOR_MEDIA_TYPES = new Set([
 ]);
 
 export function selectEditorMediaAssets(assets) {
-  return assets.filter((asset) => !asset.status?.trashed && EDITOR_MEDIA_TYPES.has(asset.type));
+  // Saved timelines still resolve discarded media at its retained Trash location.
+  // Browsing views filter their own collections without dropping these records.
+  return assets.filter((asset) => EDITOR_MEDIA_TYPES.has(asset.type));
 }

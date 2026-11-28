@@ -160,6 +160,6 @@ describe("selectEditorMediaAssets", () => {
     const unrelated = { id: "model", type: "model" };
 
     const discarded = { id: "discarded", type: "image", status: { trashed: true } };
-    expect(selectEditorMediaAssets([audio, video, vector, unrelated, discarded])).toEqual([audio, video, vector]);
+    expect(selectEditorMediaAssets([audio, video, vector, unrelated, discarded])).toEqual([audio, video, vector, discarded]);
   });
 });

@@ -51,6 +51,7 @@ export function EditorScreen() {
   const liveTimelineRef = useRef(activeTimeline);
   liveTimelineRef.current = activeTimeline;
   const assets = mediaAssets;
+  const binAssets = useMemo(() => assets.filter((asset) => !asset.status?.trashed), [assets]);
   const gen = useEditorGeneration({ context: app });
 
   const [selectedItemId, setSelectedItemId] = useState(null);
@@ -922,7 +923,7 @@ export function EditorScreen() {
       <TimelineAudio key={activeTimeline.id} ref={timelineAudioRef} plan={audioPlan} assetsById={assetsById}
         time={playheadSeconds} playing={isPlaying && screenActive} onError={handleAudioPreviewError} />
       <div className="ve-upper">
-        <MediaBin assets={assets} onAddToTrack={(asset) => addAssetToTrack(asset)} onPreview={(asset) => setPreviewAsset(asset, assets)} />
+        <MediaBin assets={binAssets} onAddToTrack={(asset) => addAssetToTrack(asset)} onPreview={(asset) => setPreviewAsset(asset, binAssets)} />
         <ProgramMonitor
           aspectClass={aspectClass}
           clipLabel={monitorItem ? `${monitorItem.displayName}${isSelectedAi ? " · AI" : ""}` : null}

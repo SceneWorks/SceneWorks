@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppContext } from "../context/AppContext.js";
 import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
+import { selectEditorMediaAssets } from "../appStateHelpers.js";
 
 // sc-12018 (S8 follow-up): the re-select guard now routes through the desktop-safe appConfirm
 // dialog (not the raw window.confirm, which no-ops in the Tauri WebView). Mock it so a test
@@ -447,6 +448,52 @@ describe("incremental film history (sc-23737)", () => {
 });
 
 describe("timeline audio editing (sc-23739)", () => {
+  it("hides discarded media from both bin tabs while retaining saved picture and audio playback", async () => {
+    const contexts = installAudioContext();
+    const play = vi.spyOn(window.HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(window.HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+    const video = { id: "video", type: "video", displayName: "Picture", url: "/picture.mp4", file: { mimeType: "video/mp4", duration: 2 } };
+    const audio = { id: "audio", type: "audio", displayName: "Dialogue", url: "/line.wav", file: { mimeType: "audio/wav", duration: 2 } };
+    const kept = { ...video, id: "kept", displayName: "Available picture" };
+    const timeline = makeTimeline("tl_1", "Saved cut");
+    timeline.tracks[0].items = [{ id: "shot", trackId: "track_main", assetId: video.id, type: "video", displayName: video.displayName, sourceIn: 0, sourceOut: 2, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 1 }];
+    timeline.tracks.push({ id: "track_audio", kind: "audio", items: [{ id: "line", trackId: "track_audio", assetId: audio.id, type: "audio", displayName: audio.displayName, sourceIn: 0, sourceOut: 2, timelineStart: 0, timelineEnd: 2, speed: 1, volume: 1 }] });
+    const setActiveTimeline = vi.fn();
+    const setPreviewAsset = vi.fn();
+    function Harness({ catalog }) {
+      return <AppContext.Provider value={{ activeProject: { id: "proj_1" }, activeTimeline: timeline, mediaAssets: selectEditorMediaAssets(catalog), timelines: [timeline], selectedTimelineId: timeline.id,
+        setActiveTimeline, setSelectedTimelineId: vi.fn(), setPreviewAsset, createTimeline: vi.fn(), extractTimelineFrame: vi.fn(), exportTimeline: vi.fn(), queueTimelineVideoJob: vi.fn(), saveTimeline: vi.fn(), isActiveTimelineDirty: () => false }}>
+        <EditorScreen />
+      </AppContext.Provider>;
+    }
+    root = createRoot(container);
+    act(() => root.render(<Harness catalog={[video, audio, kept]} />));
+    expect(container.querySelectorAll(".ve-bin-item")).toHaveLength(3);
+    act(() => container.querySelector(".ve-clip").click());
+    expect(container.querySelector(".ve-program video")).not.toBeNull();
+
+    const discardedVideo = { ...video, status: { trashed: true }, url: "/trash/video/picture.mp4" };
+    const discardedAudio = { ...audio, status: { trashed: true }, url: "/trash/audio/line.wav" };
+    act(() => root.render(<Harness catalog={[discardedVideo, discardedAudio, kept]} />));
+    expect(container.querySelectorAll(".ve-bin-item")).toHaveLength(1);
+    expect(container.querySelector(".ve-bin-item").textContent).toContain(kept.displayName);
+    expect(container.querySelector(".ve-program video").getAttribute("src")).toContain(discardedVideo.url);
+    const audioLayer = container.querySelector(".ve-timeline-audio audio");
+    expect(audioLayer.getAttribute("src")).toContain(discardedAudio.url);
+    expect(container.textContent).not.toContain("asset unavailable");
+    act(() => container.querySelector(".ve-play").click());
+    await flush();
+    expect(container.querySelector(".ve-play").title).toBe("Pause");
+    expect(contexts[0].createMediaElementSource).toHaveBeenCalledWith(audioLayer);
+    expect(play).toHaveBeenCalled();
+
+    act(() => [...container.querySelectorAll(".ve-bin-tab")].find((button) => button.textContent === "Assets").click());
+    expect(container.querySelectorAll(".ve-bin-item")).toHaveLength(1);
+    act(() => container.querySelector(".ve-bin-item").click());
+    expect(setPreviewAsset).toHaveBeenCalledWith(kept, [kept]);
+    expect(setActiveTimeline).not.toHaveBeenCalled();
+  });
+
   it("places library audio, auditions it, and persists trim, placement, gain, fades, and mute", () => {
     installAudioContext();
     const audio = { id: "asset_audio", type: "audio", displayName: "Recorded line", url: "/line.wav", file: { mimeType: "audio/wav", duration: 3 } };
