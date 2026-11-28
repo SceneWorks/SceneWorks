@@ -42,11 +42,16 @@ function targetRegistry() {
   })) };
 }
 const generationRecord = () => ({ purpose: "generation-only", generator: TARGET_REGISTRY_WRITER, passed: 1, failed: 0, ignored: 0, exit_code: 0 });
-function capability(backend, kind) {
-  const generatedFrom = { inferenceRevision: PIN };
-  return kind === "runtime"
-    ? { generatedFrom, schemaVersion: 2, modelMappings: {}, videoModelMappings: [], trainerMappings: {}, workerCapabilities: [], snapshot: { backend, platform: backend === "mlx" ? "macos" : "cuda", generator_ids: ["fixture"], trainer_ids: ["fixture"], generator_capabilities: [{ id: "fixture", backend }], trainer_capabilities: [{ id: "fixture", backend }] } }
-    : { generatedFrom, backend, ...(kind === "audio" ? { registry: "audio" } : {}), engines: [{ id: "fixture", modality: kind === "audio" ? "audio" : "image", supportsPreview: false }] };
+function capability(backend) {
+  return {
+    schema_version: "sga.capabilities/2",
+    feature_set: backend === "mlx" ? "macos-mlx" : "candle-cuda",
+    backend,
+    platform: backend === "mlx" ? "macos" : "cuda",
+    routes: { fixture: { id: "fixture", modality: "image" } },
+    trainers: {},
+    audio_routes: {},
+  };
 }
 function fixture(profile = "consumer-assertions") {
   const context = { ...request(profile), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), base_sha: BASE, merge_base: BASE, changed_files: ["Cargo.toml", "config/manifests/builtin.models.jsonc"] };
@@ -55,7 +60,7 @@ function fixture(profile = "consumer-assertions") {
     files["assertions.json"] = Buffer.from(JSON.stringify(syntheticAssertionResult()));
     files["assertions.log"] = Buffer.from("synthetic assertion protocol fixture, not remote execution\n");
   } else {
-    OUTPUTS.forEach((file, index) => { files[`payload/${file}`] = Buffer.from(index < 3 ? JSON.stringify(capability(index === 1 ? "candle" : "mlx", ["media", "audio", "runtime"][index])) : file.endsWith(".md") ? "# Static generated fixture\n" : file.endsWith(".jsonc") ? "// generated fixture\n{}\n" : "{}\n"); });
+    OUTPUTS.forEach((file, index) => { files[`payload/${file}`] = Buffer.from(index === 0 ? JSON.stringify(capability("mlx")) : file.endsWith(".md") ? "# Static generated fixture\n" : file.endsWith(".jsonc") ? "// generated fixture\n{}\n" : "{}\n"); });
   }
   if (profile === "facts-and-projections") {
     files["facts.log"] = Buffer.from("actual static producer output\n");
@@ -173,18 +178,13 @@ const faults = {
 };
 for (const [name, mutate] of Object.entries(faults)) test(`fault rejects ${name}`, async () => { const f = fixture(); mutate(f); await assert.rejects(f.verify); });
 
-for (const [name, mutate] of Object.entries({ "wrong produced pin": value => { value.generatedFrom.inferenceRevision = BASE; }, "CPU runtime": value => { value.snapshot.backend = "cpu"; }, "CUDA on Mac": value => { value.snapshot.platform = "cuda"; }, "unknown runtime schema": value => { value.schemaVersion = 0; }, "duplicate identities": value => { value.snapshot.generator_ids.push("fixture"); }, "foreign descriptor": value => { value.snapshot.trainer_capabilities[0].backend = "candle"; }, "missing mapping": value => { delete value.trainerMappings; } })) test(`facts rejects ${name}`, async () => { const f = fixture("facts-and-projections"), value = capability("mlx", "runtime"); mutate(value); replaceMember(f, `payload/${OUTPUTS[2]}`, JSON.stringify(value)); await assert.rejects(f.verify); });
-test("facts rejects malformed generated JSONC", async () => { const f = fixture("facts-and-projections"); replaceMember(f, `payload/${OUTPUTS[4]}`, "invalid JSONC"); await assert.rejects(f.verify); });
-test("provenance-only drift does not invalidate capability semantics", () => {
-  const older = capability("mlx", "media"); older.generatedFrom.inferenceRevision = BASE;
-  assert.doesNotThrow(() => validateCapabilityFile(older, "mlx", "media"));
-  assert.throws(() => validateCapabilityFile(older, "mlx", "media", PIN));
-});
-test("all six input facts must match real native shapes and one pin", () => {
-  const read = file => JSON.stringify(capability(file.includes("runtime/") ? (file.endsWith(".mlx.json") ? "mlx" : "candle") : file.includes("audio/") ? "candle" : file.endsWith(".mlx.json") ? "mlx" : "candle", file.includes("runtime/") ? "runtime" : file.includes("audio/") ? "audio" : "media"));
-  validateFacts(read, PIN);
-  assert.throws(() => validateFacts(read, BASE));
-  assert.throws(() => validateCapabilityFile({ ...capability("mlx", "media"), engines: [] }, "mlx", "media", PIN));
+for (const [name, mutate] of Object.entries({ "pin-stamped export": value => { value.generatedFrom = { inferenceRevision: BASE }; }, "CPU runtime": value => { value.backend = "cpu"; }, "CUDA on Mac": value => { value.platform = "cuda"; }, "unknown schema": value => { value.schema_version = "sga.capabilities/1"; }, "empty routes": value => { value.routes = {}; }, "missing trainers": value => { delete value.trainers; } })) test(`facts rejects ${name}`, async () => { const f = fixture("facts-and-projections"), value = capability("mlx"); mutate(value); replaceMember(f, `payload/${OUTPUTS[0]}`, JSON.stringify(value)); await assert.rejects(f.verify); });
+test("facts rejects malformed generated JSONC", async () => { const f = fixture("facts-and-projections"); replaceMember(f, `payload/${OUTPUTS[1]}`, "invalid JSONC"); await assert.rejects(f.verify); });
+test("sga.capabilities/2 exports are pin-free and validated for both desktop lanes", () => {
+  const read = file => JSON.stringify(capability(file.endsWith("macos-mlx.json") ? "mlx" : "candle"));
+  validateFacts(read);
+  assert.throws(() => validateCapabilityFile({ ...capability("mlx"), routes: {} }, "mlx", "macos-mlx"));
+  assert.throws(() => validateCapabilityFile({ ...capability("mlx"), generatedFrom: { inferenceRevision: PIN } }, "mlx", "macos-mlx"));
 });
 
 function zip(entries) {
@@ -260,7 +260,7 @@ test("facts importer refuses a symlink destination before any output writes", as
   try {
     const outside = path.join(local.root, "outside"); mkdirSync(outside); mkdirSync(path.join(local.root, "config")); symlinkSync(outside, path.join(local.root, "config/engine-capabilities"), process.platform === "win32" ? "junction" : "dir");
     await assert.rejects(() => importReceipt(local.root, request("facts-and-projections"), local.options), /symlink/);
-    assert.equal(existsSync(path.join(outside, "capabilities.mlx.json")), false);
+    assert.equal(existsSync(path.join(outside, "sga", "macos-mlx.json")), false);
   } finally { rmSync(local.root, { recursive: true, force: true }); }
 });
 
@@ -475,8 +475,8 @@ test("incremental compilation is scoped to the declared consumer profile and aut
   await assert.rejects(stale.verify, /cache build flags/);
 });
 test("facts transport binds the exact authoritative target writer as generation only", async () => {
-  assert.equal(OUTPUTS.length, 8); assert.equal(OUTPUTS.at(-1), TARGET_REGISTRY);
-  assert.deepEqual(OUTPUTS.slice(0, 7), ["config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/audio/capabilities.candle.json", "config/engine-capabilities/runtime/capabilities.mlx.json", "config/manifests/builtin.preview-support.jsonc", "apps/web/src/data/previewSupport.json", "docs/generated/memory-matrix.json", "docs/generated/memory-matrix.md"]);
+  assert.equal(OUTPUTS.length, 6); assert.equal(OUTPUTS.at(-1), TARGET_REGISTRY);
+  assert.deepEqual(OUTPUTS.slice(0, 5), ["config/engine-capabilities/sga/macos-mlx.json", "config/manifests/builtin.preview-support.jsonc", "apps/web/src/data/previewSupport.json", "docs/generated/memory-matrix.json", "docs/generated/memory-matrix.md"]);
   assert.doesNotMatch(readFileSync(modulePath, "utf8"), /dump-backend-capability-matrix|config\/backend-capabilities\/matrix\.json/);
   assert.equal(TARGET_REGISTRY, "tests/fixtures/rust_migration_contracts/training/target-registry.json");
   const writer = `running 1 test\ntest ${TARGET_REGISTRY_WRITER} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n`;
@@ -538,7 +538,7 @@ test("failed native build records fixed read-only toolchain diagnostics without 
   assert.ok(dylibProbe.includes('otool -s __DATA .rustc') && dylibProbe.includes("rust_metadata exports"));
   // Exactly the original facts dump is verbose (not -vv, no second cargo execution).
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
-  assert.equal(controller.split('"--verbose"').length - 1, 1); assert.doesNotMatch(controller, /"-vv"|"build", "-v"/);
+  assert.doesNotMatch(controller, /"-vv"|"build", "-v"|dump-engine-capabilities/);
   // A probe failure is evidence, not a new verdict.
   const failing = policy.buildDiagnostics(ROOT, {}, () => ({ status: 1, stdout: "", stderr: "unavailable" }));
   assert.match(failing, /exit 1/);
@@ -577,7 +577,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
     ["RV-cache-flags", "cache context rejects changed compiler flags even with a self-consistent data hash", 'equal(context.build_flags, cacheFlags(profile))', 'true'],
     ["RV-cache-exclusion", "dedicated target cache lease prevents overlap and never steals or releases another owner", 'mkdirSync(lease);', 'mkdirSync(lease, { recursive: true });'],
     ["RV-consumer-proof", "consumer evidence rejects survivor", 'validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);', 'void spec;'],
-    ["RV-no-currency-gate", "provenance-only drift does not invalidate capability semantics", 'pin === undefined || revision === pin', 'revision === pin'],
+    ["RV-no-currency-gate", "sga.capabilities/2 exports are pin-free and validated for both desktop lanes", '!Object.hasOwn(value, "generatedFrom") && !Object.hasOwn(value, "inferenceRevision")', 'true'],
     ["RV-run-authority", "fault rejects run outcome", 'run.conclusion === "success"', 'true'],
     ["RV-scope", "fault rejects receipt scope", 'equal(receipt.changed_files, context.changed_files)', 'true'],
     ["RV-archive-digest", "archive digest rejects substituted bytes", 'digest === `sha256:${sha256(bytes)}`', 'true'],

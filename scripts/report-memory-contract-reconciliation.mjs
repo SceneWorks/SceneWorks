@@ -82,8 +82,8 @@ function projectionPlan() {
         JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
         readBuiltinMemoryEvidenceSync(ROOT),
       ),
-      engineFacts: ["mlx", "candle"].map((backend) =>
-        JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
+      engineFacts: ["macos-mlx", "candle-cuda"].map((profile) =>
+        JSON.parse(read(`config/engine-capabilities/sga/${profile}.json`)),
       ),
       enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
       strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
@@ -120,8 +120,8 @@ async function loadReconciliation() {
   const { cells } = await buildMatrix({ publish: false });
   return reconcileMemoryContracts({
     pin: null,
-    engineFacts: ["mlx", "candle"].map((backend) =>
-      JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
+    engineFacts: ["macos-mlx", "candle-cuda"].map((profile) =>
+      JSON.parse(read(`config/engine-capabilities/sga/${profile}.json`)),
     ),
     manifest: projectBuiltinMemoryEvidence(
       JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),

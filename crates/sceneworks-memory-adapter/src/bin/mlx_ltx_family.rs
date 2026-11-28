@@ -24,7 +24,9 @@ pub(super) fn ltx_calibration_fingerprint(tier: &str) -> Result<String, String> 
         ));
     }
     if tier == LTX_CALIBRATED_TIER {
-        return Ok(mlx_gen_ltx::memory_strategy::CALIBRATION_FINGERPRINT.to_owned());
+        return Ok(
+            runtime_macos::calibration::ltx::memory_strategy::CALIBRATION_FINGERPRINT.to_owned(),
+        );
     }
     Ok(format!("sc-20772-ltx-2-3-{tier}-mlx-memory-ladder-v2"))
 }
@@ -954,7 +956,7 @@ pub(super) fn ltx_canary_generation_request_for(profile: LtxCanaryProfile) -> Ge
         seed: Some(LTX_CANARY_SEED),
         frames: Some(profile.frames()),
         fps: Some(profile.fps()),
-        video_mode: profile.video_mode().map(str::to_owned),
+        video_mode: profile.video_mode().map(VideoMode::from_name),
         memory: Some(GenerationMemory {
             tile_vae_decode: true,
             decode_tile_edge: Some(LTX_CANARY_TILE_EDGE),
@@ -1011,7 +1013,7 @@ pub(super) fn restore_ltx_canary_no_audio_after_configuration(
                 .to_owned(),
         );
     }
-    request.video_mode = Some("no_audio".to_owned());
+    request.video_mode = Some(VideoMode::NoAudio);
     Ok(())
 }
 
@@ -1096,7 +1098,7 @@ pub(super) fn ltx_canary_wired_limit(requested: usize, untouched_memory_limit: u
 pub(super) fn ltx_attested_strategy(
     request: &Value,
     selection: &MemorySelection,
-    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    contract: &runtime_macos::gen_core::MemoryProviderContract,
 ) -> Result<Value, String> {
     attested_strategy(
         request,
@@ -1297,7 +1299,7 @@ pub(super) fn ltx_unified_reserve_bytes() -> u64 {
 /// contract or plan drift this arm has no measured basis to price, and it is refused explicitly
 /// rather than priced by an arm that was never asked to (sc-22738 review).
 pub(super) fn ltx_floor_weights_bytes(
-    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    contract: &runtime_macos::gen_core::MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> Result<u64, String> {
     if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
@@ -1341,9 +1343,9 @@ pub(super) fn ltx_floor_weights_bytes(
 /// `max(weights + generic headroom, decode profile composed onto the weights)`. Pure, so the table
 /// tests can drive it over every shipped frame count without an allocator.
 pub(super) fn ltx_projected_peak_bytes(
-    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    contract: &runtime_macos::gen_core::MemoryProviderContract,
     weights_bytes: u64,
-    profile: mlx_gen::VideoDecodeMemoryProfile,
+    profile: runtime_macos::VideoDecodeMemoryProfile,
 ) -> Result<u64, String> {
     let composed = profile
         .checked_composed_peak(weights_bytes, contract.asset_facts.decoder_bytes)
@@ -1375,7 +1377,7 @@ pub(super) fn ltx_projected_peak_bytes(
 /// as `reserved_headroom_bytes` (which `MemoryBudget::effective_bytes` subtracts). Physical
 /// containment of the run itself is the harness's footprint watchdog, not this predicate.
 pub(super) fn ltx_ordinary_admission(
-    contract: &mlx_gen::gen_core::MemoryProviderContract,
+    contract: &runtime_macos::gen_core::MemoryProviderContract,
     calibration: &MemoryCalibrationIdentity,
     selection: MemorySelection,
     geometry: LtxGeometry,
@@ -1383,7 +1385,7 @@ pub(super) fn ltx_ordinary_admission(
 ) -> Result<(MemoryRunContext, LtxOrdinaryProjection), String> {
     let engaged = contract.engaged_composition(selection.strategy);
     let weights_bytes = ltx_floor_weights_bytes(contract, &engaged)?;
-    let profile = mlx_gen_ltx::conservative_video_decode_memory_profile(
+    let profile = runtime_macos::conservative_video_decode_memory_profile(
         LTX_PROVIDER,
         geometry.width,
         geometry.height,
@@ -1409,7 +1411,7 @@ pub(super) fn ltx_ordinary_admission(
     context.budget.committed_bytes = get_active_memory() as u64;
     context.budget.reclaimable_bytes = get_cache_memory() as u64;
     context.budget.reserved_headroom_bytes = ltx_unified_reserve_bytes();
-    match mlx_gen::gen_core::default_memory_strategy_safety_check(contract, &context) {
+    match runtime_macos::gen_core::default_memory_strategy_safety_check(contract, &context) {
         MemorySafetyDecision::Accept => Ok((
             context,
             LtxOrdinaryProjection {
@@ -2147,8 +2149,9 @@ pub(super) fn run_ltx_canary_for(
             "LTX safety canary artifact revision must be {LTX_CANARY_ARTIFACT_REVISION}, got {revision}"
         ));
     }
-    let registry =
-        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(LTX_PROVIDER, &spec)
         .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
@@ -2431,8 +2434,9 @@ pub(super) fn run_ltx_with_admission(
     let transformer_bytes = component_bytes("transformer.safetensors")?;
     let tier_bytes = safetensors_bytes(&root)?;
 
-    let registry =
-        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(LTX_PROVIDER, &spec)
         .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
@@ -3240,8 +3244,9 @@ pub(super) fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, St
             "SC-20254 artifact revision must be {LTX_CANARY_ARTIFACT_REVISION}, got {revision}"
         ));
     }
-    let registry =
-        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(LTX_PROVIDER, &spec)
         .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?

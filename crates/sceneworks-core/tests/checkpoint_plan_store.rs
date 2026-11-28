@@ -795,11 +795,9 @@ fn a_trusted_layer_seals_for_load_without_reading_and_a_changed_one_attests_noth
         vec![(gen_core::runtime::ArtifactSealAcquisition::Attested, 0)],
         "the seal redeems the import's proof without hashing"
     );
-    let sealed: String = pin
-        .content_sha256()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let sealed = pin
+        .require_content_sha256_hex()
+        .expect("attested pin carries content sha256");
     assert_eq!(sealed, sha256_hex(&fs::read(&file).unwrap()));
 
     // Same size, different bytes: the stamp no longer names this entry, so nothing is attested.

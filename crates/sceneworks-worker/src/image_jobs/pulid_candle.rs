@@ -123,10 +123,10 @@ fn pulid_memory_ladder_eligible(request: &ImageRequest, use_pid: bool) -> bool {
 /// App-managed model paths do not have to be named `q4`/`q8`, so directory basenames are never tier
 /// evidence; the packed transformer config is authoritative.
 fn pulid_memory_tier_key(paths: &PulidFluxPaths) -> WorkerResult<&'static str> {
-    let tier = runtime_cuda::providers::pulid::memory_strategy::resolved_numeric_tier(paths)
+    let tier = runtime_cuda::memory_helpers::pulid::memory_strategy::resolved_numeric_tier(paths)
         .map_err(|error| {
-            crate::generation_error("PuLID-FLUX numeric tier resolution failed", error)
-        })?;
+        crate::generation_error("PuLID-FLUX numeric tier resolution failed", error)
+    })?;
     match (tier.precision, tier.quant) {
         (gen_core::Precision::Bf16, Some(gen_core::Quant::Q4)) => Ok("q4"),
         (gen_core::Precision::Bf16, Some(gen_core::Quant::Q8)) => Ok("q8"),
@@ -373,10 +373,8 @@ fn plan_pulid_outputs(
         .map(|(seed, prompt)| {
             // Preview never shapes the trajectory; the live sink is bound at generation time.
             let req = requests.request(seed, prompt, &gen_core::PreviewSink::default(), cancel);
-            runtime_cuda::providers::pulid::pulid_flux::compile_pulid_plan(
-                paths, spec, &req, reference,
-            )
-            .map_err(|error| super::render::preload_plan_error("PuLID-FLUX", error))
+            runtime_cuda::calibration::pulid::compile_pulid_plan(paths, spec, &req, reference)
+                .map_err(|error| super::render::preload_plan_error("PuLID-FLUX", error))
         })
         .collect()
 }
@@ -518,7 +516,7 @@ pub(super) async fn generate_candle_pulid_stream(
     };
     let tier = pulid_memory_tier_key(&contract_paths)?;
     let pulid_contract =
-        runtime_cuda::providers::pulid::memory_strategy::provider_contract(&contract_paths)
+        runtime_cuda::memory_helpers::pulid::memory_strategy::provider_contract(&contract_paths)
             .map_err(|error| crate::generation_error("PuLID-FLUX memory contract failed", error))?;
     let runtime_overlay_bytes = pulid_contract.asset_facts.overlay_bytes;
     let mut strategy_spec =

@@ -606,7 +606,7 @@ impl GeneratorCacheHandle {
         }
     }
 
-    #[cfg(all(test, native_lane))]
+    #[cfg(test)]
     pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
         let (worker, rx) = mpsc::channel();
         let join = thread::spawn(move || run_generator_cache_worker(rx, None));
@@ -617,6 +617,11 @@ impl GeneratorCacheHandle {
             },
             join,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn evict(&self) -> WorkerResult<bool> {
+        evict_cached_generator_on(&self.worker).await
     }
 }
 
@@ -2001,7 +2006,7 @@ async fn cached_generator_resident_bytes_on(
 /// [`evict_cached_generator`] against a caller-supplied cache-worker sender — the seam a unit test drives
 /// its own seeded [`GeneratorCache`] worker through (the production entry point uses the process-global
 /// [`generator_worker`]).
-#[cfg(native_lane)]
+#[cfg(any(native_lane, test))]
 async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
     let progress_context = crate::load_progress::Context::capture();

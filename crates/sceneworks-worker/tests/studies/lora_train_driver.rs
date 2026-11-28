@@ -37,7 +37,7 @@ mod driver {
         TrainingConfig, TrainingItem, TrainingProgress, TrainingRequest, WeightsSource,
     };
     use runtime_macos::media::weights::Weights;
-    use runtime_macos::providers::face::FaceAnalysis;
+    use runtime_macos::utilities::face::FaceAnalysis;
 
     use crate::image_jobs::{INSTANTID_ARCFACE_FILE, INSTANTID_SCRFD_FILE};
 
@@ -512,12 +512,11 @@ mod driver {
                 }
             };
 
-        // Direct provider constructor, NOT the gen_core registry: the worker's test build also
-        // links a stub `z_image_turbo` registration (engines.rs derivation test), so the registry
-        // `load` panics on the duplicate id. `runtime_macos::providers::z_image::load` is the same T2I generator,
-        // bypassing the registry. (The trainer registry has no such stub — `load_trainer` is fine.)
-        let generator =
-            runtime_macos::providers::z_image::load(&spec).expect("load z_image_turbo generator");
+        let generator = runtime_macos::catalog()
+            .expect("runtime_macos catalog")
+            .media()
+            .load(MODEL_ID, &spec)
+            .expect("load z_image_turbo generator");
 
         let mut prompts_json: BTreeMap<String, String> = BTreeMap::new();
         let mut written = 0usize;
@@ -541,7 +540,9 @@ mod driver {
                     GenerationOutput::ImagesRgba(_)
                     | GenerationOutput::Video { .. }
                     | GenerationOutput::Audio(_)
-                    | GenerationOutput::Interleaved { .. } => {
+                    | GenerationOutput::Interleaved { .. }
+                    | GenerationOutput::Vector(_)
+                    | GenerationOutput::Latents { .. } => {
                         panic!("expected an image")
                     }
                 };

@@ -332,16 +332,12 @@ pub enum BaseWeightDetection {
 pub static IMPORT_SUPPORTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
     std::sync::LazyLock::new(|| {
         let mut families = Vec::new();
-        for source in [
-            include_str!("../../../config/engine-capabilities/capabilities.mlx.json"),
-            include_str!("../../../config/engine-capabilities/capabilities.candle.json"),
+        for export in [
+            crate::sga_capabilities::macos_mlx(),
+            crate::sga_capabilities::candle_cuda(),
         ] {
-            let facts: Value = serde_json::from_str(source).expect("native import provider facts");
-            for route in facts["imports"].as_array().expect("native import routes") {
-                let Some(family) = route["family"]
-                    .as_str()
-                    .and_then(crate::model_family::exact_identity)
-                else {
+            for route in &export.imported_models {
+                let Some(family) = crate::model_family::exact_identity(&route.family) else {
                     continue;
                 };
                 if image_loader_accepts_family(family) {

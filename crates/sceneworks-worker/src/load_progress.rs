@@ -228,6 +228,7 @@ pub(crate) fn current(job_id: &str) -> Option<Arc<Session>> {
     current_session().filter(|session| session.job_id == job_id)
 }
 
+#[cfg(any(native_lane, test))]
 fn note_compute(message: String, stage: ProgressStage) {
     note_compute_phase(message, stage, false);
 }
@@ -340,7 +341,7 @@ pub(crate) fn training_progress(progress: &gen_core::TrainingProgress) {
 
 /// Attach one request-local callback when a universal text request is built. The captured
 /// context also covers decoder threads; it never consults another job's current observer.
-// Backend-neutral request builders (including StarVector) also compile without a native backend.
+#[cfg(any(native_lane, test))]
 pub(crate) fn text_observer() -> gen_core::core_llm::GenerationProgressObserver {
     let context = Context::capture();
     gen_core::core_llm::GenerationProgressObserver::new(move |phase| {
@@ -408,7 +409,11 @@ impl Context {
             }
         }
         let quantization = self.quantization.install();
-        let runtime_weights = candle_gen::quantization_cache::install_runtime_cache_context();
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let runtime_weights =
+            runtime_cuda::media::quantization_cache::install_runtime_cache_context();
+        #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+        let runtime_weights = ();
         Guard {
             previous: THREAD_JOB.with(|slot| slot.replace(self.session.clone())),
             _observer: self.activity.install(),

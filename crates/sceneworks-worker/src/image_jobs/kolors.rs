@@ -327,8 +327,8 @@ fn kolors_control_generate_one(
         // Curated unified-sampler selection (epic 7114, sc-7432): the combined-pose tier honors a
         // curated solver/scheduler via the kolors engine's `denoise_curated` path (#539). `None` ⇒ the
         // native leading-Euler default, byte-exact (N1).
-        sampler: sampler.map(str::to_owned),
-        scheduler: scheduler.map(str::to_owned),
+        sampler: sampler.map(Into::into),
+        scheduler: scheduler.map(Into::into),
         scheduler_shift,
         conditioning,
         preview,

@@ -300,7 +300,7 @@ fn aggregate(
 mod harness {
     use super::*;
     use gen_core::{Image, LoadSpec, WeightsSource};
-    use runtime_macos::providers::face::FaceAnalysis;
+    use runtime_macos::utilities::face::FaceAnalysis;
 
     use crate::image_jobs::{INSTANTID_ARCFACE_FILE, INSTANTID_SCRFD_FILE};
 

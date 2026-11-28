@@ -647,7 +647,12 @@ async fn download_snapshot_verifies_once_and_its_first_load_seal_hashes_nothing(
         |progress| work.push((progress.acquisition, progress.hashed_bytes)),
     )
     .expect("the snapshot entry pins");
-    assert_eq!(pin.content_sha256().as_slice(), digest.as_slice());
+    assert_eq!(
+        pin.require_content_sha256()
+            .expect("download pin carries content sha256")
+            .as_slice(),
+        digest.as_slice()
+    );
     assert!(
         work.iter().all(|(acquisition, hashed)| {
             *hashed == 0 && *acquisition != gen_core::runtime::ArtifactSealAcquisition::ColdContentRead

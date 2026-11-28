@@ -67,39 +67,10 @@ on:
       # manifest-only edit can turn this suite red — gate on it (matches the
       # windows-candle.yml / desktop-windows.yml filters). sc-8617.
       - "config/manifests/**"
-      # The stage-1 MLX facts dump this lane is the sole producer of (sc-17119). Without this entry
-      # the native content-verification step below is unreachable when an edit touches ONLY
-      # config/engine-capabilities/capabilities.mlx.json, so the lane would not run on the PR that
-      # made the file wrong.
-      #
-      # THIS FILE, not `config/engine-capabilities/**` (sc-17665). The directory glob also matched
-      # capabilities.candle.json, so a candle-only facts edit woke this whole macOS job -- including the
-      # bare `cargo test` over every default member -- for a file its verify step never opens.
-      # Self-hosted runners are the fleet's most constrained resource. Nothing here reads the sibling
-      # file: no Rust reads the facts directory at all (`default_facts_dir()` only builds the dumper
-      # bin's default OUTPUT path), and the three consumers that DO glob it sit outside this job --
-      # previewSupportCatalog.test.js runs in check.yml's hosted Linux `web` job, and
-      # generate-preview-support.mjs / bump-inference.mjs are manual scripts no workflow invokes.
-      #
-      # No coverage is lost. A *material* sibling change also regenerates
-      # config/manifests/builtin.preview-support.jsonc, and `config/manifests/**` above still wakes
-      # both lanes. Path filters match DELETES and ADDS too, so a delete or re-add of this
-      # file still triggers the lane.
-      - "config/engine-capabilities/capabilities.mlx.json"
-      - "config/engine-capabilities/runtime/capabilities.mlx.json"
-      # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
-      # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
-      # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
-      #
-      # sc-17665 narrowed the entry above from `config/engine-capabilities/**` to a single filename,
-      # and that landed while sc-17593 was in flight. The two are individually correct and combine
-      # badly: the audio verification was added to a step whose trigger paths had just stopped
-      # matching the audio file. Demonstrated on `97a7655a9`, an audio-only re-dump that woke neither
-      # stage-1 lane -- declared but unreachable, for exactly the edit the step exists to catch.
-      - "config/engine-capabilities/audio/capabilities.candle.json"
-      # The native producer below delegates its content comparison to this script. A script-only
-      # change must exercise the lane it governs.
-      - "scripts/compare-engine-capability-facts.mjs"
+      # Hardware-free `sga.capabilities/2` route-profile exports embedded by `sceneworks-core`
+      # (`sga_capabilities.rs`) and verified by `scripts/check-generation-route-profiles.mjs`.
+      - "config/engine-capabilities/sga/**"
+      - "scripts/check-generation-route-profiles.mjs"
       # Both jobs below run this to fetch the prebuilt libmlx; an edit to it must exercise them.
       - "scripts/fetch-prebuilt-mlx.sh"
       - "Cargo.toml"
@@ -508,52 +479,13 @@ jobs:
       # Model-level H3 forwards, including synthetic weights, stay ignored here. Explicit
       # pruned/W4A8 native proofs live in server-candle-linux.yml's selected manual-only jobs.
 
-      # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
-      # hosted half rather than the scarce M5/NAX pool. `always()` preserves a fresh native artifact
-      # even when an earlier workspace test reports descriptor drift, so the mismatch can be repaired
-      # without hand-authoring Mac data.
-      - name: Verify capabilities.mlx.json content against a fresh dump
-        if: ${{ always() }}
+      # Hardware-free `sga.capabilities/2` route-profile verification (SW-6983 / REG-3).
+      # Replaces the obsolete per-platform `dump-engine-capabilities` step; native runtime-vs-export
+      # parity runs inside `sceneworks-worker` unit tests above.
+      - name: Verify sga.capabilities/2 route-profile exports
         run: |
           set -euo pipefail
-          scratch="$RUNNER_TEMP/engine-capability-facts-verify"
-          rm -rf "$scratch"
-          mkdir -p "$scratch"
-          cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
-          if ! node scripts/compare-engine-capability-facts.mjs \
-                    config/engine-capabilities/capabilities.mlx.json \
-                    "$scratch/capabilities.mlx.json"; then
-            echo "::error::config/engine-capabilities/capabilities.mlx.json differs in capability"\
-                 "content from a fresh dump. Re-dump it on a Mac:"\
-                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
-                 "then (cd apps/web && npm run gen:preview-support)."
-            exit 1
-          fi
-          if ! node scripts/compare-engine-capability-facts.mjs \
-                    config/engine-capabilities/runtime/capabilities.mlx.json \
-                    "$scratch/runtime/capabilities.mlx.json"; then
-            echo "::error::config/engine-capabilities/runtime/capabilities.mlx.json does not"\
-                 " match inference's fresh runtime capability snapshot. Download the"\
-                 " backend-capability-facts-mlx artifact from this run; never hand-author it."
-            exit 1
-          fi
-          if ! node scripts/compare-engine-capability-facts.mjs \
-                    config/engine-capabilities/audio/capabilities.candle.json \
-                    "$scratch/audio/capabilities.candle.json"; then
-            echo "::error::config/engine-capabilities/audio/capabilities.candle.json does not"\
-                 "match the capability content of a fresh dump. Either box re-dumps it --"\
-                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities"\
-                 "[--no-default-features --features backend-candle] --"\
-                 "then (cd apps/web && npm run gen:preview-support)."
-            exit 1
-          fi
-      - name: Upload fresh MLX capability facts
-        if: ${{ always() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: backend-capability-facts-mlx
-          path: ${{ runner.temp }}/engine-capability-facts-verify
-          if-no-files-found: error
+          node scripts/check-generation-route-profiles.mjs
 
   # THE OTHER HALF of the hosted suite, in parallel with `macos-checks` (see SPLIT IN TWO above):
   # every default member's tests except sceneworks-worker / sceneworks-rust-worker. Same trigger

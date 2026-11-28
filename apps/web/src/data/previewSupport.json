@@ -99,6 +99,10 @@
       "candle": true,
       "mlx": true
     },
+    "instantid_realvisxl": {
+      "candle": false,
+      "mlx": false
+    },
     "iris_3b": {
       "candle": true,
       "mlx": true
@@ -178,8 +182,8 @@
       "candle": false
     },
     "pulid_flux_dev": {
-      "mlx": true,
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "qwen_image": {
       "candle": true,
@@ -194,18 +198,20 @@
       "mlx": false
     },
     "qwen_image_edit": {
+      "candle": true,
       "mlx": true
     },
     "qwen_image_edit_2509": {
+      "candle": true,
       "mlx": true
     },
     "qwen_image_edit_2511": {
-      "mlx": true,
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "qwen_image_edit_2511_lightning": {
-      "mlx": true,
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "realvisxl": {
       "candle": true,

@@ -97,14 +97,13 @@ fn krea_singular_reference_candle_gpu_smoke() {
     let edit_lora = env_path("KREA_EDIT_LORA");
     let out_dir = env_path("CONDITIONED_IMAGE_OUT_DIR");
     std::fs::create_dir_all(&out_dir).expect("create output dir");
-    let device = runtime_cuda::media::default_device().expect("CUDA device");
     let adapters = vec![AdapterSpec::new(edit_lora, 1.0, AdapterKind::Lora)];
-    let components =
-        runtime_cuda::providers::krea::pipeline::load_components(&dir, &device, &adapters, None)
-            .expect("load Krea components");
-    let edit = runtime_cuda::providers::krea::pipeline::load_edit_components(&dir, &device)
-        .expect("load Krea edit components");
-    let request = GenerationRequest {
+    let generator = crate::inference_runtime::load(
+        "krea_2_edit",
+        &LoadSpec::new(WeightsSource::Dir(dir)).with_adapters(adapters),
+    )
+    .expect("load registered krea_2_edit generator");
+    let request = |inverted| GenerationRequest {
         prompt: env_or(
             "KREA_EDIT_PROMPT",
             "preserve the person and move them to a snowy forest",
@@ -115,21 +114,19 @@ fn krea_singular_reference_candle_gpu_smoke() {
         seed: Some(42),
         steps: Some(8),
         guidance: Some(3.5),
+        conditioning: vec![Conditioning::Reference {
+            image: reference(512, 512, inverted),
+            strength: None,
+        }],
         ..Default::default()
     };
     let render = |inverted| {
-        runtime_cuda::providers::krea::pipeline::render_edit(
-            &components,
-            &edit,
-            &request,
-            &[reference(512, 512, inverted)],
-            false,
-            &device,
-            &mut |_| {},
+        one_image(
+            generator
+                .generate(&request(inverted), &mut |_| {})
+                .expect("Krea singular-reference edit"),
+            "Krea output",
         )
-        .expect("Krea singular-reference edit")
-        .pop()
-        .expect("Krea output")
     };
     let image_a = render(false);
     let image_b = render(true);

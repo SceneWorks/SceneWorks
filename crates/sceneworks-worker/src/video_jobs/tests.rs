@@ -63,7 +63,11 @@ fn admit_video_fixture(
             width: geometry.width,
             height: geometry.height,
             frames: geometry.frames,
-            decode_chunk_size: request.decode_chunk_size,
+            decode_chunk_size: request
+                .extensions
+                .svd
+                .as_ref()
+                .and_then(|ext| ext.decode_chunk_size),
             fps: input.fps,
             runtime: Some(VideoRuntimeMemoryState {
                 budget: gen_core::MemoryBudget {
@@ -5573,8 +5577,12 @@ impl Generator for H3ContractProbe {
             configure_error: false,
         })))
     }
-    fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
-        self.inner.adapter_apply_reports()
+    fn generate_with_report(
+        &self,
+        request: &GenerationRequest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::GenerationReport> {
+        self.inner.generate_with_report(request, progress)
     }
     fn generate(
         &self,
@@ -5595,8 +5603,14 @@ impl Generator for ProbeGenerator {
         Ok(())
     }
 
-    fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
-        self.adapter_reports.lock().unwrap().clone()
+    fn generate_with_report(
+        &self,
+        req: &GenerationRequest,
+        on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<gen_core::GenerationReport> {
+        let mut report = gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
+        report.adapter_apply_reports = self.adapter_reports.lock().unwrap().clone();
+        Ok(report)
     }
 
     fn generate_video_planned_with_execution_report(
@@ -5672,8 +5686,22 @@ fn shared_video_funnel_reaches_auto_duration_and_temporal_provider_fields() {
         request.frames, None,
         "a frame count would override the opted-in duration head"
     );
-    assert_eq!(request.auto_duration, Some(range));
-    assert_eq!(request.temporal_upsample_rounds, Some(2));
+    assert_eq!(
+        request
+            .extensions
+            .ltx
+            .as_ref()
+            .and_then(|ext| ext.auto_duration),
+        Some(range)
+    );
+    assert_eq!(
+        request
+            .extensions
+            .ltx
+            .as_ref()
+            .and_then(|ext| ext.temporal_upsample_rounds),
+        Some(2)
+    );
 }
 
 /// sc-23402. The reference-image short edge the job asked for reaches the engine's
@@ -5713,7 +5741,11 @@ fn shared_video_funnel_carries_the_reference_image_short_edge_to_the_request() {
         run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
             .expect("probe generation");
         let request = captured.lock().unwrap().clone().expect("captured request");
-        request.reference_image_short_edge
+        request
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.reference_image_short_edge)
     };
     assert_eq!(probe(Some(1536)), Some(1536));
     assert_eq!(probe(Some(1024)), Some(1024));
@@ -5725,10 +5757,7 @@ fn shared_video_funnel_carries_the_reference_image_short_edge_to_the_request() {
     // The recorded default and the engine's resolver are the same number.
     assert_eq!(
         sceneworks_core::video_request::effective_reference_image_short_edge(None),
-        gen_core::effective_reference_image_short_edge(&gen_core::GenerationRequest {
-            reference_image_short_edge: None,
-            ..Default::default()
-        }),
+        gen_core::effective_reference_image_short_edge(&gen_core::GenerationRequest::default()),
     );
 }
 
@@ -5846,7 +5875,11 @@ fn shared_video_funnel_carries_the_reference_resize_mode_to_the_request() {
         run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
             .expect("probe generation");
         let request = captured.lock().unwrap().clone().expect("captured request");
-        request.reference_image_resize_mode
+        request
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.reference_image_resize_mode)
     };
     for mode in [
         gen_core::ReferenceImageResizeMode::Match,
@@ -10608,7 +10641,7 @@ fn candle_scail2_resolves_exact_model_manager_tier_fail_closed() {
     ]);
     assert_eq!(
         sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES,
-        runtime_cuda::providers::scail2::SHARED_TIER_FILES,
+        runtime_cuda::converters::scail2::SHARED_TIER_FILES,
         "API/MLX completeness and the pinned candle provider must require identical package files"
     );
     let data = tempfile::Builder::new()
@@ -10627,7 +10660,7 @@ fn candle_scail2_resolves_exact_model_manager_tier_fail_closed() {
     let write_complete_tier = |tier: Scail2CandleTier, marker: Value| {
         let path = snapshot.join(tier.key());
         std::fs::create_dir_all(&path).unwrap();
-        for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+        for file in runtime_cuda::converters::scail2::SHARED_TIER_FILES {
             std::fs::write(path.join(file), b"").unwrap();
         }
         std::fs::write(
@@ -20352,7 +20385,7 @@ fn minimax_h3_reference_clip_filter_never_pads_or_upscales() {
     // a literal — the same tie `pinned_engine_geometry` makes for the manifest's `maxPixels`.
     assert_eq!(
         MINIMAX_H3_CANVAS_MAX_PIXELS,
-        runtime_macos::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS,
+        runtime_macos::memory_helpers::minimax_h3::pipeline::CANVAS_MAX_PIXELS,
         "the extraction's area bound must be the canvas budget the pinned engine actually enforces"
     );
 
@@ -22124,11 +22157,23 @@ fn a_reference_clip_with_veda_reaches_the_engine_as_reference_video_conditioning
         .expect("the arm reached the engine");
 
     assert_eq!(
-        engine.veda.as_ref().unwrap().reference,
+        engine
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.veda.as_ref())
+            .unwrap()
+            .reference,
         gen_core::VedaBudget::SparsityPercent(0.0)
     );
     assert_eq!(
-        engine.veda.as_ref().unwrap().full_attention_steps,
+        engine
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.veda.as_ref())
+            .unwrap()
+            .full_attention_steps,
         vec![0, 49]
     );
     let clips: Vec<(&Vec<gen_core::Image>, f32, Option<&gen_core::AudioTrack>)> = engine
@@ -22458,7 +22503,15 @@ fn built_in_turbo_and_community_lora_with_veda_reach_the_engine_as_one_stack() {
         (Some(4), Some(6.0)),
         "the built-in id must still drive its non-default recipe"
     );
-    assert!(engine_request.veda.as_ref().unwrap().enabled);
+    assert!(
+        engine_request
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.veda.as_ref())
+            .unwrap()
+            .enabled
+    );
     let load = probe.spec.lock().unwrap().clone().expect("a load ran");
     assert_eq!(
         load.adapters
@@ -22538,11 +22591,23 @@ fn every_turbo_variant_with_veda_drives_its_own_recipe_to_the_engine() {
             .clone()
             .expect("the arm reached the engine");
         assert_eq!(
-            engine.veda.as_ref().unwrap().reference,
+            engine
+                .extensions
+                .h3
+                .as_ref()
+                .and_then(|ext| ext.veda.as_ref())
+                .unwrap()
+                .reference,
             gen_core::VedaBudget::KeyTiles(12)
         );
         assert_eq!(
-            engine.veda.as_ref().unwrap().full_attention_steps,
+            engine
+                .extensions
+                .h3
+                .as_ref()
+                .and_then(|ext| ext.veda.as_ref())
+                .unwrap()
+                .full_attention_steps,
             vec![0, 3]
         );
         assert_eq!(
@@ -22893,7 +22958,14 @@ fn minimax_h3_veda_enabled_and_off_reach_the_real_offline_load_and_request_seams
         let request = minimax_h3_request("minimax_h3", json!({"advanced":advanced}));
         drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
         let req = probe.request.lock().unwrap().clone().unwrap();
-        assert_eq!(req.veda.as_ref().map(|v| v.enabled), enabled.filter(|v| *v));
+        assert_eq!(
+            req.extensions
+                .h3
+                .as_ref()
+                .and_then(|ext| ext.veda.as_ref())
+                .map(|v| v.enabled),
+            enabled.filter(|v| *v)
+        );
         assert!(
             !probe
                 .spec
@@ -22927,7 +22999,12 @@ fn minimax_h3_veda_complete_controls_reach_native_request_without_changing_tiers
         );
         let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
         let captured = probe.request.lock().unwrap().clone().unwrap();
-        let veda = captured.veda.unwrap();
+        let veda = captured
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.veda.clone())
+            .unwrap();
         assert_eq!(veda.generated, gen_core::VedaBudget::KeyTiles(32));
         assert_eq!(veda.reference, gen_core::VedaBudget::SparsityPercent(0.0));
         assert_eq!(veda.full_attention_layers, vec![0, 1, 2, 49]);
@@ -23012,8 +23089,16 @@ fn veda_outcome_survives_post_generation_conversion_and_never_replays_stale_fact
         fn validate(&self, _: &GenerationRequest) -> gen_core::Result<()> {
             Ok(())
         }
-        fn veda_execution_report(&self) -> Option<gen_core::VedaExecutionReport> {
-            self.observed.borrow().clone()
+        fn generate_with_report(
+            &self,
+            request: &GenerationRequest,
+            progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            let mut report = self.inner.generate_with_report(request, progress)?;
+            let next = self.next.borrow_mut().take();
+            *self.observed.borrow_mut() = next.clone();
+            report.family_report = next.map(|r| gen_core::FamilyExecutionReport::Veda(Box::new(r)));
+            Ok(report)
         }
         fn generate(
             &self,
@@ -23154,11 +23239,17 @@ impl Generator for VedaAdmissionProbe {
     ) -> gen_core::Result<GenerationOutput> {
         self.0.generate(r, p)
     }
-    fn veda_workspace_bound(
+    fn request_workspace_bound(
         &self,
-        r: gen_core_h3::veda::workspace::Request<'_>,
-    ) -> gen_core::Result<Option<gen_core_h3::veda::workspace::WorkspaceBound>> {
-        if let Some(veda) = r.veda.filter(|v| v.enabled) {
+        r: &GenerationRequest,
+    ) -> gen_core::Result<Option<gen_core::RequestWorkspaceBound>> {
+        if let Some(veda) = r
+            .extensions
+            .h3
+            .as_ref()
+            .and_then(|ext| ext.veda.as_ref())
+            .filter(|v| v.enabled)
+        {
             assert_eq!(veda.generated, gen_core::VedaBudget::KeyTiles(32));
             assert_eq!(veda.reference, gen_core::VedaBudget::SparsityPercent(0.0));
             assert_eq!(veda.full_attention_layers, vec![0, 1, 49]);
@@ -23545,4 +23636,144 @@ async fn seedvr2_streaming_probe_uses_the_shared_process_lifecycle_for_long_logs
         }
     );
     assert_eq!(timing.frames, Seedvr2Timing::Constant { num: 30, den: 1 });
+}
+
+#[cfg(native_lane)]
+#[test]
+fn video_workspace_pricing_borrows_multi_clip_conditioning_without_cloning_pixels() {
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct ObservedWorkspaceQuery {
+        width: u32,
+        height: u32,
+        frames: Option<u32>,
+        count: u32,
+        ptrs: Vec<usize>,
+    }
+
+    struct InspectingWorkspaceGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        seen: Mutex<Option<ObservedWorkspaceQuery>>,
+    }
+
+    impl gen_core::Generator for InspectingWorkspaceGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn request_workspace_bound(
+            &self,
+            req: &gen_core::GenerationRequest,
+        ) -> gen_core::Result<Option<gen_core::RequestWorkspaceBound>> {
+            let ptrs: Vec<usize> = req
+                .conditioning
+                .iter()
+                .filter_map(|cond| match cond {
+                    gen_core::Conditioning::VideoClip { frames, .. } => {
+                        frames.first().map(|frame| frame.pixels.as_ptr() as usize)
+                    }
+                    _ => None,
+                })
+                .collect();
+            *self.seen.lock().unwrap() = Some(ObservedWorkspaceQuery {
+                width: req.width,
+                height: req.height,
+                frames: req.frames,
+                count: req.count,
+                ptrs,
+            });
+            Ok(None)
+        }
+
+        fn generate(
+            &self,
+            _req: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            unreachable!("workspace query test must not run generation")
+        }
+    }
+
+    let clip_a = gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: vec![1u8; 8 * 8 * 3],
+    };
+    let clip_b = gen_core::Image {
+        width: 8,
+        height: 8,
+        pixels: vec![2u8; 8 * 8 * 3],
+    };
+    let expected_ptrs = vec![
+        clip_a.pixels.as_ptr() as usize,
+        clip_b.pixels.as_ptr() as usize,
+    ];
+    let mut request = gen_core::GenerationRequest {
+        prompt: "multi clip edit".into(),
+        width: 640,
+        height: 360,
+        frames: Some(17),
+        count: 2,
+        conditioning: vec![
+            gen_core::Conditioning::VideoClip {
+                frames: vec![clip_a],
+                frame_idx: 0,
+                strength: 1.0,
+            },
+            gen_core::Conditioning::VideoClip {
+                frames: vec![clip_b],
+                frame_idx: 1,
+                strength: 1.0,
+            },
+        ],
+        ..Default::default()
+    };
+    let generator = InspectingWorkspaceGenerator {
+        descriptor: gen_core::ModelDescriptor {
+            id: "bernini",
+            family: "bernini",
+            backend: "mlx",
+            modality: gen_core::Modality::Video,
+            capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
+            required_components: &[],
+            control_kinds: None,
+        },
+        seen: Mutex::new(None),
+    };
+
+    let bound = wan::query_video_workspace_bound(&generator, &mut request, 832, 480, 49)
+        .expect("workspace pricing succeeds");
+    assert!(bound.is_none());
+
+    let observed = generator
+        .seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("generator observed request");
+    assert_eq!(
+        (
+            observed.width,
+            observed.height,
+            observed.frames,
+            observed.count
+        ),
+        (832, 480, Some(49), 1)
+    );
+    assert_eq!(
+        observed.ptrs, expected_ptrs,
+        "workspace pricing must borrow original VideoClip pixel buffers without cloning"
+    );
+    assert_eq!(
+        (request.width, request.height, request.frames, request.count),
+        (640, 360, Some(17), 2),
+        "scalar geometry fields must be restored after workspace query"
+    );
 }

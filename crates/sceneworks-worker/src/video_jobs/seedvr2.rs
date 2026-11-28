@@ -15,14 +15,14 @@ use super::wan::{generate_video, VideoGenInput};
 // ---------------------------------------------------------------------------
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) use runtime_cuda::providers::seedvr2::video as seedvr2_video;
+pub(super) use runtime_cuda::converters::seedvr2::video as seedvr2_video;
 /// The SeedVR2 provider's pure temporal-chunk planning/blend module (`video::plan_chunks`,
 /// `video::assemble_overlap`, `DEFAULT_OVERLAP`, `Chunk`), reused ONE LEVEL UP for worker-window
 /// streaming (sc-9595). Both provider crates expose an identical `video` module over `gen_core::Image`
 /// (byte-identical seam math), so the worker-window cross-fade is the engine's own — the worker never
 /// reimplements the blend. Aliased per platform: MLX on Mac, candle on the Windows/CUDA lane.
 #[cfg(target_os = "macos")]
-pub(super) use runtime_macos::providers::seedvr2::video as seedvr2_video;
+pub(super) use runtime_macos::converters::seedvr2::video as seedvr2_video;
 
 // SeedVR2 video upscale runs on Mac (native MLX) AND the Windows/CUDA candle lane (sc-5928); these
 // constants/helpers are backend-neutral (gen_core + ffmpeg + the shared streaming driver).

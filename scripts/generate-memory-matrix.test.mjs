@@ -2440,7 +2440,7 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
     "config/inference-provider-closures.json",
     "config/rung4-applicability-survey.json",
     "config/rung4-contract-prerequisites.json",
-    "config/engine-capabilities/capabilities.mlx.json",
+    "config/engine-capabilities/sga/macos-mlx.json",
     "docs/generated/video-memory-curves.json",
   ]) {
     assert.ok(!generator.includes(`"${removed}"`), `${removed} is still named by the generator`);

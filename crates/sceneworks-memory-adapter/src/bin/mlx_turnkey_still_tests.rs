@@ -543,13 +543,13 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
     for (key, planned) in &qwen_image_2_1 {
         assert_eq!(
                 planned,
-                runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+                runtime_macos::calibration::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
                 "{key}: the plan row must name the loaded generator's production identity"
             );
         assert!(!identities.contains_key(planned.as_str()), "{key}");
     }
     assert_eq!(
-        runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "qwen-image-2-1-mlx-derived-2026-09-22-v1"
     );
     // sc-25907: Turbo's cells name Turbo's OWN engine constant — never base's.
@@ -561,7 +561,7 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
     for (key, planned) in &qwen_image_2_1_turbo {
         assert_eq!(
                 planned,
-                runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
+                runtime_macos::calibration::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
                 "{key}: the plan row must name the loaded Turbo generator's production identity"
             );
         assert_eq!(
@@ -575,12 +575,12 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
         assert!(!identities.contains_key(planned.as_str()), "{key}");
     }
     assert_eq!(
-            runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
+            runtime_macos::calibration::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
             "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1"
         );
     assert_ne!(
-            runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
-            runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
+            runtime_macos::calibration::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
         );
     // The preserved measured keys, byte-for-byte, so the table cannot drift off the engine.
     assert_eq!(
@@ -592,16 +592,16 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
         "lens:q4:mlx"
     );
     assert_eq!(
-        runtime_macos::providers::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "kolors-mlx-chatglm3-sdxl-unet-ladder-v1"
     );
     assert_eq!(
-        runtime_macos::providers::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "lens-mlx-shared-ladder-2026-08-03-v1"
     );
     // The legacy dense Lens-Turbo key is a real engine constant and it is NOT a cell here.
     assert_eq!(
-        runtime_macos::providers::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT,
+        runtime_macos::calibration::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT,
         "lens-text-encoder-window-2026-07-31-v1"
     );
     assert!(!identities.contains_key("lens-text-encoder-window-2026-07-31-v1"));
@@ -665,7 +665,7 @@ fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
             (
                 QWEN_IMAGE_2_1_TURBO_PROVIDER,
                 "qwen-image-2-1-turbo",
-                runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+                runtime_macos::calibration::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
             ),
         ] {
             let mut request = turnkey_planned(provider, "text_to_image", "bf16");

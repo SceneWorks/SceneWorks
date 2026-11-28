@@ -104,7 +104,7 @@ const KREA_CONTROL_BASE_REPO: &str = "krea/Krea-2-Turbo";
 const KREA_CONTROL_MLX_REPO: &str = "SceneWorks/krea-2-turbo-mlx";
 /// Pose ControlNet conditioning-scale default (candle-gen `Krea2Control::DEFAULT_CONTROL_SCALE`). The S0
 /// spike found the usable band ~0.5–0.85 for the distilled CFG-free base; ship a comfortable mid.
-const KREA_CONTROL_DEFAULT_SCALE: f32 = runtime_cuda::providers::krea::DEFAULT_CONTROL_SCALE;
+const KREA_CONTROL_DEFAULT_SCALE: f32 = runtime_cuda::converters::krea::DEFAULT_CONTROL_SCALE;
 /// Hard cap on the exposed `control_scale` — above ~0.85 the frozen CFG-free base over-drives to halftone
 /// (S0 finding: graceful soft-haze, never confetti, but not a usable range).
 const KREA_CONTROL_SCALE_CAP: f32 = 0.85;
@@ -591,8 +591,8 @@ pub(super) fn krea_strict_control_test_fixture(path: PathBuf) -> KreaStrictContr
 impl KreaStrictControl {
     /// Exact artifact set handed to the pinned inference provider. Factoring this out keeps the
     /// ConvRot identity and its additive adapter stack inseparable at the final load boundary.
-    fn provider_paths(&self) -> runtime_cuda::providers::krea::Krea2ControlPaths {
-        runtime_cuda::providers::krea::Krea2ControlPaths {
+    fn provider_paths(&self) -> runtime_cuda::calibration::krea::Krea2ControlPaths {
+        runtime_cuda::calibration::krea::Krea2ControlPaths {
             root: self.base.clone(),
             convrot_dit: self.convrot_dit.clone(),
             native_dit: None,
@@ -622,13 +622,13 @@ impl KreaStrictControl {
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
-    ) -> runtime_cuda::providers::krea::Krea2ControlRequest {
-        runtime_cuda::providers::krea::Krea2ControlRequest {
+    ) -> runtime_cuda::calibration::krea::Krea2ControlRequest {
+        runtime_cuda::calibration::krea::Krea2ControlRequest {
             prompt: self.prompt.clone(),
             guidance: self.sampling.guidance,
             negative_prompt: self.sampling.negative_prompt.clone(),
-            sampler: self.sampling.sampler.clone(),
-            scheduler: self.sampling.scheduler.clone(),
+            sampler: self.sampling.sampler.as_deref().map(str::to_owned),
+            scheduler: self.sampling.scheduler.as_deref().map(str::to_owned),
             scheduler_shift: self.sampling.scheduler_shift,
             width: self.width,
             height: self.height,
@@ -645,7 +645,7 @@ impl KreaStrictControl {
 }
 
 impl CandleStrictControl for KreaStrictControl {
-    type Model = runtime_cuda::providers::krea::Krea2Control;
+    type Model = runtime_cuda::calibration::krea::Krea2Control;
 
     fn engine_id(&self) -> &'static str {
         KREA_CONTROL_ENGINE_ID
@@ -691,7 +691,7 @@ impl CandleStrictControl for KreaStrictControl {
 
     fn load(&self) -> WorkerResult<Self::Model> {
         let paths = self.provider_paths();
-        runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
+        runtime_cuda::calibration::krea::Krea2Control::load_with_spec(&paths, &self.load_spec)
             .map_err(|error| {
                 crate::generation_error("Krea 2 strict-pose control load failed", error)
             })

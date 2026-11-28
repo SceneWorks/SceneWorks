@@ -101,7 +101,7 @@ fn sdxl_endpoint_idle_wait_rejects_invalid_telemetry_and_times_out_with_samples(
 
 #[test]
 fn kolors_capture_revision_passes_real_provider_admission() {
-    use runtime_cuda::providers::kolors::memory_strategy as kolors;
+    use runtime_cuda::calibration::kolors::memory_strategy as kolors;
     for quant in [None, Some(Quant::Q4), Some(Quant::Q8)] {
         let mut spec = LoadSpec::new(WeightsSource::Dir("/__unused_kolors_fixture__".into()));
         spec.quantize = quant;
@@ -128,7 +128,7 @@ fn kolors_capture_revision_passes_real_provider_admission() {
 
 #[test]
 fn sd3_capture_revision_passes_real_provider_admission() {
-    use runtime_cuda::providers::sd3::memory_strategy as sd3;
+    use runtime_cuda::calibration::sd3::memory_strategy as sd3;
 
     for provider in [SD3_5_LARGE_ID, SD3_5_LARGE_TURBO_ID, SD3_5_MEDIUM_ID] {
         for quant in [None, Some(Quant::Q4), Some(Quant::Q8)] {
@@ -162,7 +162,7 @@ fn sana_requests_carry_the_providers_evidence_token() {
     for provider in [SANA_ID, SANA_SPRINT_ID] {
         assert_eq!(
             five_rung_evidence_revision(provider),
-            runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION
+            runtime_cuda::calibration::sana::memory_strategy::REQUEST_EVIDENCE_REVISION
         );
     }
     assert_eq!(

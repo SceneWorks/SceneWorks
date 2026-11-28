@@ -798,7 +798,7 @@ fn preflight_checked_seal_preserves_digest_and_reuses_only_unchanged_identity() 
     let deadline = Instant::now() + Duration::from_secs(10);
     let first = pin_preflight_weight(&file, deadline, None, |_| {}).unwrap();
     let expected: [u8; 32] = Sha256::digest(b"frozen bytes").into();
-    assert_eq!(first.content_sha256(), &expected);
+    assert_eq!(first.content_sha256(), Some(&expected));
     assert_eq!(first.target_fingerprint().size, 12);
     let mut acquired = Vec::new();
     let second = pin_preflight_weight(&file, deadline, None, |p| acquired.push(p.clone())).unwrap();

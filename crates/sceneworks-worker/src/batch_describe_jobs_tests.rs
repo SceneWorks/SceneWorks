@@ -3516,9 +3516,9 @@ fn the_exact_counter_needs_an_installed_tier_tokenizer_and_a_known_adapter() {
 #[test]
 fn krea_2_declares_its_engines_prompt_token_cap_and_that_it_refuses_beyond_it() {
     #[cfg(target_os = "macos")]
-    let engine_cap = runtime_macos::providers::krea::text_encoder::tokenizer::MAX_TEXT_TOKENS;
+    let engine_cap = runtime_macos::converters::krea::MAX_TEXT_TOKENS;
     #[cfg(not(target_os = "macos"))]
-    let engine_cap = runtime_cuda::providers::krea::pipeline::MAX_TEXT_TOKENS;
+    let engine_cap = runtime_cuda::converters::krea::MAX_TEXT_TOKENS;
     for id in ["krea_2_turbo", "krea_2_raw"] {
         let entry = Value::Object(crate::test_env::shipped_catalog_entry(id));
         assert_eq!(

@@ -166,7 +166,7 @@ mod tests {
     use super::*;
     #[test]
     fn flux3_candle_fingerprints_bind_the_native_engine() {
-        use runtime_cuda::providers::flux3::memory_strategy as engine;
+        use runtime_cuda::calibration::flux3::memory_strategy as engine;
         for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
             assert_eq!(
                 common::fingerprint("candle", tier).unwrap(),
@@ -181,7 +181,7 @@ mod tests {
     }
     #[test]
     fn flux3_base_fingerprints_come_from_its_distinct_native_contract() {
-        use runtime_cuda::providers::flux3::memory_strategy as engine;
+        use runtime_cuda::calibration::flux3::memory_strategy as engine;
         let spec = common::load_spec(
             "candle",
             "bf16",

@@ -54,11 +54,10 @@ use super::load_spec::selected_decoder_component_pin;
 use super::mlx_model;
 #[cfg(not(target_os = "macos"))]
 use super::prepare_cached_candle_base_floor;
-use super::render::drive_hires_passes;
 #[cfg(target_os = "macos")]
-use super::render::hires_first_pass_context;
-use super::render::resolve_hires_fix_plan;
-use super::render::HiresFixPlan;
+use super::render::derive_base_pass_memory_context;
+use super::render::drive_hires_passes;
+use super::render::HiresRefinement;
 use super::resolve_seed;
 #[cfg(all(native_lane, all(not(target_os = "macos"), feature = "backend-candle")))]
 use super::routing::imported_base_snapshot_companions;
@@ -1390,7 +1389,7 @@ pub(super) async fn generate_krea_imported_control_stream(
             // installs the job adapters, sources the shared TE/VAE/tokenizer from the base tier, and
             // folds the pose control branch onto the file-loaded DiT — the builtin assembly with
             // only the DiT swapped.
-            let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
+            let paths = runtime_cuda::calibration::krea::Krea2ControlPaths {
                 root: base_dir,
                 native_dit: Some(dit),
                 convrot_dit: None,
@@ -1400,7 +1399,7 @@ pub(super) async fn generate_krea_imported_control_stream(
                 chunk_attention: false,
                 offload_policy: gen_core::OffloadPolicy::Resident,
             };
-            runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
+            runtime_cuda::calibration::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
                 |error| {
                     crate::generation_error(
                         "Krea 2 imported checkpoint pose-control load failed",
@@ -1435,12 +1434,12 @@ pub(super) async fn generate_krea_imported_control_stream(
                     stickwidth,
                     None,
                 )?;
-                let control_request = runtime_cuda::providers::krea::Krea2ControlRequest {
+                let control_request = runtime_cuda::calibration::krea::Krea2ControlRequest {
                     prompt: prompt.clone(),
                     guidance: sampling.guidance,
                     negative_prompt: sampling.negative_prompt.clone(),
-                    sampler: sampling.sampler.clone(),
-                    scheduler: sampling.scheduler.clone(),
+                    sampler: sampling.sampler.as_deref().map(str::to_owned),
+                    scheduler: sampling.scheduler.as_deref().map(str::to_owned),
                     scheduler_shift: sampling.scheduler_shift,
                     width,
                     height,
@@ -1851,7 +1850,7 @@ pub(super) fn krea_imported_memory_inputs(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn krea_imported_pass_request(
+pub(super) fn krea_imported_pass_request(
     prompt: &str,
     width: u32,
     height: u32,
@@ -1861,7 +1860,7 @@ fn krea_imported_pass_request(
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
 ) -> GenerationRequest {
-    GenerationRequest {
+    let mut req = GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -1871,16 +1870,19 @@ fn krea_imported_pass_request(
         sampler: sampling
             .sampler
             .clone()
-            .or_else(|| Some(KREA_IMPORTED_SAMPLER.to_owned())),
+            .or_else(|| Some(KREA_IMPORTED_SAMPLER.into())),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
         guidance: sampling.guidance,
         negative_prompt: sampling.negative_prompt.clone(),
-        pag: sampling.pag.clone(),
         conditioning,
-        text_style_gain,
         ..Default::default()
+    };
+    req.features.pag = sampling.features.pag.clone();
+    if let Some(gain) = text_style_gain {
+        req.extensions.krea_mut().text_style_gain = Some(gain);
     }
+    req
 }
 
 type KreaImportedOutput = (u32, u32, Vec<u8>, Option<gen_core::PagExecutionReport>);
@@ -1945,7 +1947,6 @@ pub(super) struct PreparedKreaHires {
     requests: [GenerationRequest; 2],
     plan: gen_core::MultiPassRenderPlan,
     spec: std::sync::Arc<LoadSpec>,
-    hires: HiresFixPlan,
 }
 
 impl PreparedKreaHires {
@@ -1953,17 +1954,24 @@ impl PreparedKreaHires {
         registry: &gen_core::ProviderRegistry,
         spec: std::sync::Arc<LoadSpec>,
         first: GenerationRequest,
-        hires: HiresFixPlan,
+        hires: HiresRefinement,
     ) -> WorkerResult<Self> {
         let engine_id = "krea_2_turbo";
-        let refine = GenerationRequest {
-            width: hires.width,
-            height: hires.height,
-            steps: Some(hires.steps),
-            ..first.clone()
-        };
+        let refine = hires.refinement_request(
+            &first,
+            gen_core::OutputChannels::Rgb,
+            first.memory,
+            &super::PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            None,
+        );
         let plan = super::render::compile_hires_multi_pass_plan(
-            registry, engine_id, &spec, &first, &refine, &hires,
+            registry,
+            engine_id,
+            &spec,
+            &first,
+            &refine,
+            hires.produced_reference,
         )?
         .ok_or_else(|| {
             WorkerError::Engine(format!(
@@ -1974,7 +1982,6 @@ impl PreparedKreaHires {
             requests: [first, refine],
             plan,
             spec,
-            hires,
         })
     }
 
@@ -1982,11 +1989,16 @@ impl PreparedKreaHires {
         (&self.plan.passes()[0], &self.plan.passes()[1])
     }
 
+    #[cfg(test)]
+    pub(super) fn requests(&self) -> &[GenerationRequest; 2] {
+        &self.requests
+    }
+
     pub(super) fn memory(
         &self,
         pag_capability: Option<&gen_core::PagCapability>,
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        config: &runtime_cuda::providers::krea::Krea2Config,
+        config: &runtime_cuda::converters::krea::Krea2Config,
     ) -> WorkerResult<KreaHiresMemory> {
         let (first, refine) = self.passes();
         let base = first.output_size();
@@ -2002,7 +2014,7 @@ impl PreparedKreaHires {
                     1,
                     pass.executed_steps() as u32,
                     pag_capability,
-                    request.pag.as_ref(),
+                    request.features.pag.as_ref(),
                 )
             })
             .max()
@@ -2021,7 +2033,7 @@ impl PreparedKreaHires {
                     config.hidden_size as u64,
                     config.intermediate_size as u64,
                     config.num_attention_heads as u64,
-                    runtime_cuda::providers::krea::KREA_HIRES_ATTENTION_SCORE_BUDGET,
+                    runtime_cuda::converters::krea::KREA_HIRES_ATTENTION_SCORE_BUDGET,
                 )
             };
             let base = workspace(base, first);
@@ -2090,9 +2102,11 @@ impl PreparedKreaHires {
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<KreaImportedOutput> {
         let (base, _) = self.passes();
-        let (width, height) = base.output_size();
-        let base_context =
-            hires_first_pass_context(&evaluation.context, width, height, base.reference_count());
+        let base_context = derive_base_pass_memory_context(
+            &evaluation.context,
+            base.output_size(),
+            base.reference_count(),
+        );
         self.generate(
             generator,
             loaded_policy,
@@ -2119,7 +2133,6 @@ impl PreparedKreaHires {
             requests,
             plan,
             spec,
-            hires,
         } = self;
         let plan = if let Some(loaded_spec) = loaded_krea_spec(&spec, loaded_policy) {
             plan.rebind_load_placement(&loaded_spec).map_err(|error| {
@@ -2139,9 +2152,11 @@ impl PreparedKreaHires {
         let [first, mut refine] = requests;
         let [first_context, refine_context] = contexts;
         let steps = first.steps.unwrap_or(0);
+        let refine_steps = refine.steps.unwrap_or(0);
         let (_, output) = drive_hires_passes(
             steps,
-            &hires,
+            refine_steps,
+            refine_plan.output_size(),
             Some(refine_plan),
             cancel,
             on_progress,
@@ -2187,7 +2202,7 @@ impl PreparedKreaHires {
 fn candle_hires_adapter_device_bytes(spec: &LoadSpec) -> gen_core::Result<u64> {
     // Empty phases price the provider's default ordered stack, including one independently
     // installed copy of each projection per slot and its BF16 compute cache.
-    let installed = runtime_cuda::providers::krea::phase_adapter_memory(spec, &[])?.device_bytes;
+    let installed = runtime_cuda::converters::krea::phase_adapter_memory(spec, &[])?.device_bytes;
     Ok(installed.max(candle_hires_fold_upload_bytes(spec)?))
 }
 
@@ -2637,6 +2652,14 @@ pub(super) fn prepare_krea_imported_candle_floor(
     )
 }
 
+pub(super) fn krea_imported_hires_refinement(
+    request: &ImageRequest,
+    steps: u32,
+    sampling: &GenerationRequest,
+) -> Option<HiresRefinement> {
+    HiresRefinement::from_request(request, steps, sampling.guidance, None)
+}
+
 /// Real in-place imported single-file Krea 2 generation (epic 14015 S0c, sc-14023 + sc-14071 +
 /// sc-14111 + sc-14119): resolve the imported DiT, the resident base tier, any img2img reference, and —
 /// on either adapter-capable native backend — the job LoRA stack + Kontext edit conditioning, then load
@@ -2721,7 +2744,9 @@ pub(super) async fn generate_krea_imported_stream(
         || resolved_option_or_manifest_u32(request, "steps", KREA_IMPORTED_DEFAULT_STEPS, 1..=100),
         |specs| specs.iter().map(|phase| phase.steps).sum(),
     );
-    let hires_fix = resolve_hires_fix_plan(request, steps, None, None);
+    let mut sampling = super::sampling::explicit_sampling_request(request);
+    sampling.features.pag = resolved_pag;
+    let hires_fix = krea_imported_hires_refinement(request, steps, &sampling);
     let text_style_gain = resolve_text_style_gain(request);
     let mut raw_settings =
         krea_imported_raw_settings(request, steps, is_edit, adapter_count, Some(dit));
@@ -2772,20 +2797,23 @@ pub(super) async fn generate_krea_imported_stream(
     let spec =
         prepare_krea_imported_load_spec(request, settings, engine_id, &base_dir, quant, sources)?;
 
-    let mut sampling = super::sampling::explicit_sampling_request(request);
-    sampling.pag = resolved_pag;
-    let phase_request = phases.as_ref().map(|phases| GenerationRequest {
-        negative_prompt,
-        width,
-        height,
-        text_style_gain,
-        phases: Some(phases.clone()),
-        ..sampling.clone()
+    let phase_request = phases.as_ref().map(|phases| {
+        let mut req = GenerationRequest {
+            negative_prompt,
+            width,
+            height,
+            ..sampling.clone()
+        };
+        if let Some(gain) = text_style_gain {
+            req.extensions.krea_mut().text_style_gain = Some(gain);
+        }
+        req.features.phases = Some(phases.clone());
+        req
     });
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let adapter_phase_bound = match phases.as_deref() {
         Some(phases) => candle_phase_adapter_memory(&spec, phases).await?,
-        None => runtime_cuda::providers::krea::PhaseAdapterMemory::default(),
+        None => runtime_cuda::converters::krea::PhaseAdapterMemory::default(),
     };
     #[cfg(target_os = "macos")]
     let phase_adapter_workspace = phase_request
@@ -2844,7 +2872,7 @@ pub(super) async fn generate_krea_imported_stream(
     let hires_memory = first_hires
         .map(|render| {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            let config = runtime_cuda::providers::krea::Krea2Config::from_snapshot(&base_dir)
+            let config = runtime_cuda::converters::krea::Krea2Config::from_snapshot(&base_dir)
                 .map_err(|error| {
                     crate::generation_error("read Krea Hires.fix architecture", error)
                 })?;
@@ -2879,9 +2907,9 @@ pub(super) async fn generate_krea_imported_stream(
             .ok_or_else(|| {
                 WorkerError::Engine("Candle Krea Hires.fix has no pre-load memory contract".into())
             })?;
-        let encoder = runtime_cuda::providers::krea::hires_encoder_weights(&spec)
+        let encoder = runtime_cuda::converters::krea::hires_encoder_weights(&spec)
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
-        let quant = runtime_cuda::providers::krea::actual_quant_tier(&spec, engine_id)
+        let quant = runtime_cuda::converters::krea::actual_quant_tier(&spec, engine_id)
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;
         let adapter_bytes = candle_hires_adapter_device_bytes(&spec)
             .map_err(|error| super::render::preload_plan_error(engine_id, error))?;

@@ -21,8 +21,8 @@
 //! provider's own request scope.
 
 use super::*;
-use candle_gen::gen_core::tiling::VaeTiling;
 use gen_core_memory_wan::WanI2vRoute;
+use runtime_cuda::gen_core::tiling::VaeTiling;
 use runtime_cuda::gen_core::{MemoryCalibrationIdentity, ReplacementMode};
 
 const SEED: u64 = 22_736;
@@ -291,18 +291,21 @@ fn validate_geometry(arm: Arm, geometry: Geometry) -> Result<(), String> {
             }
         }
         None => {
-            if !candle_gen_scail2::memory_strategy::PUBLIC_BUCKETS.contains(&(width, height)) {
+            if !runtime_cuda::calibration::scail2::memory_strategy::PUBLIC_BUCKETS
+                .contains(&(width, height))
+            {
                 return Err(format!(
                     "{} admits only the buckets {:?}, got {width}x{height}",
                     arm.provider,
-                    candle_gen_scail2::memory_strategy::PUBLIC_BUCKETS
+                    runtime_cuda::calibration::scail2::memory_strategy::PUBLIC_BUCKETS
                 ));
             }
-            if !candle_gen_scail2::memory_strategy::PUBLIC_FRAMES.contains(&frames) {
+            if !runtime_cuda::calibration::scail2::memory_strategy::PUBLIC_FRAMES.contains(&frames)
+            {
                 return Err(format!(
                     "{} admits only the frame counts {:?}, got {frames}",
                     arm.provider,
-                    candle_gen_scail2::memory_strategy::PUBLIC_FRAMES
+                    runtime_cuda::calibration::scail2::memory_strategy::PUBLIC_FRAMES
                 ));
             }
         }
@@ -328,8 +331,8 @@ fn rendered_frame_count(arm: Arm, geometry: Geometry) -> Result<u32, String> {
 /// engine's own resolver rather than tabled here — the same way this file asks the engine for its
 /// buckets and rates.
 fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
-    candle_gen_wan::vae_tiling(arm.provider)
-        .or_else(|| candle_gen_scail2::vae_tiling(arm.provider))
+    runtime_cuda::calibration::wan::vae_tiling(arm.provider)
+        .or_else(|| runtime_cuda::calibration::scail2::vae_tiling(arm.provider))
         .ok_or_else(|| {
             format!(
                 "{} publishes no VAE geometry; its decoded frame count cannot be derived",
@@ -494,7 +497,7 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
         fps: Some(arm.fps),
         // TI2V's standard calibrated T2V scope requires the default route selector.
         // A14B and SCAIL2 bind their explicit modes into sealed request receipts.
-        video_mode: (arm.provider != TI2V_5B.provider).then(|| arm.mode.to_owned()),
+        video_mode: (arm.provider != TI2V_5B.provider).then(|| VideoMode::from_name(arm.mode)),
         conditioning,
         ..Default::default()
     }
@@ -519,13 +522,16 @@ fn evidence_revision(
             adapter_identity: None,
         }),
         Some(WanI2vRoute::T2v14b | WanI2vRoute::I2v14b) => {
-            let prepared = candle_gen_wan::i2v_memory_strategy::prepare(spec, arm.provider)
-                .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
+            let prepared =
+                runtime_cuda::calibration::wan::i2v_memory_strategy::prepare(spec, arm.provider)
+                    .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
             let contract =
-                candle_gen_wan::i2v_memory_strategy::request_contract_for_mode(&prepared, arm.mode)
-                    .map_err(|error| {
-                        format!("resolve the {} request contract: {error}", arm.provider)
-                    })?;
+                runtime_cuda::calibration::wan::i2v_memory_strategy::request_contract_for_mode(
+                    &prepared, arm.mode,
+                )
+                .map_err(|error| {
+                    format!("resolve the {} request contract: {error}", arm.provider)
+                })?;
             contract
                 .validate_selection(&selection)
                 .map_err(|error| format!("select the {} request memory: {error}", arm.provider))?;
@@ -533,10 +539,10 @@ fn evidence_revision(
             // from the exact mode contract before minting; generation still requires admission.
             request.memory = contract.generation_memory(&selection);
             let revision =
-                candle_gen_wan::i2v_memory_strategy::request_evidence_revision(&prepared, request)
-                    .map_err(|error| {
-                        format!("mint the {} request receipt: {error}", arm.provider)
-                    })?;
+                runtime_cuda::calibration::wan::i2v_memory_strategy::request_evidence_revision(
+                    &prepared, request,
+                )
+                .map_err(|error| format!("mint the {} request receipt: {error}", arm.provider))?;
             Ok(CaptureEvidence {
                 revision,
                 adapter_identity: Some(prepared.adapter_identity),
@@ -545,9 +551,11 @@ fn evidence_revision(
         Some(_) => Err(format!("{} has no capture receipt arm", arm.provider)),
         None => {
             let evidence =
-                candle_gen_scail2::memory_strategy::structural_resident_evidence(spec)
-                    .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
-            candle_gen_scail2::memory_strategy::request_evidence_revision(
+                runtime_cuda::calibration::scail2::memory_strategy::structural_resident_evidence(
+                    spec,
+                )
+                .map_err(|error| format!("seal the {} receipt: {error}", arm.provider))?;
+            runtime_cuda::calibration::scail2::memory_strategy::request_evidence_revision(
                 &evidence, request, selection,
             )
             .map(|revision| CaptureEvidence {
@@ -661,8 +669,11 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // identity-less contract ahead of it whenever the spec was prepared. Production
     // (`video_jobs/wan.rs::video_load_spec`) prepares nothing.
     if receipt_publishes_the_identity(arm, tier, &expected_fingerprint)? {
-        candle_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut resolved.spec, arm.provider)
-            .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
+        runtime_cuda::calibration::wan::i2v_memory_strategy::prepare_load_spec(
+            &mut resolved.spec,
+            arm.provider,
+        )
+        .map_err(|error| format!("prepare the {} load spec: {error}", arm.provider))?;
     }
 
     let catalog =
@@ -871,6 +882,18 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
                 arm.provider
             ))
         }
+        GenerationOutput::Vector(_) => {
+            return Err(format!(
+                "{} returned vector output, not a video clip",
+                arm.provider
+            ))
+        }
+        GenerationOutput::Latents { .. } => {
+            return Err(format!(
+                "{} returned latent output, not a video clip",
+                arm.provider
+            ))
+        }
     };
     if fps != arm.fps {
         return Err(format!(
@@ -1054,13 +1077,17 @@ mod tests {
             .with_resolved_route(arm.provider)
             .with_offload_policy(arm.offload_policy);
         spec.quantize = numeric_tier(tier).unwrap().quant;
-        candle_gen_wan::i2v_memory_strategy::prepare_load_spec(&mut spec, arm.provider).unwrap();
+        runtime_cuda::calibration::wan::i2v_memory_strategy::prepare_load_spec(
+            &mut spec,
+            arm.provider,
+        )
+        .unwrap();
         (temporary, spec)
     }
 
     #[test]
     fn both_a14b_capture_receipts_enter_the_real_scope_and_reject_crossed_requests() {
-        use candle_gen_wan::i2v_memory_strategy as wan;
+        use runtime_cuda::calibration::wan::i2v_memory_strategy as wan;
         for arm in [T2V_A14B, I2V_A14B] {
             for tier in ["bf16", "q4", "q8"] {
                 let (_temporary, spec) = a14b_fixture(arm, tier);
@@ -1100,10 +1127,13 @@ mod tests {
                     wan::safety_check(&prepared, &crossed),
                     MemorySafetyDecision::Reject { .. }
                 ));
-                let mut scope =
-                    wan::begin_request(&prepared, candle_gen::candle_core::Device::Cpu, &context)
-                        .unwrap()
-                        .unwrap();
+                let mut scope = wan::begin_request(
+                    &prepared,
+                    runtime_cuda::media::candle_core::Device::Cpu,
+                    &context,
+                )
+                .unwrap()
+                .unwrap();
                 scope.configure_request(&mut request).unwrap();
                 wan::validate_active_request(&prepared, &request).unwrap();
                 let mut crossed = request.clone();
@@ -1171,7 +1201,7 @@ mod tests {
                     .unwrap();
                 let mut request = generation_request(TI2V_5B, geometry);
                 scope.configure_request(&mut request).unwrap();
-                request.video_mode = Some(TI2V_5B.mode.to_owned());
+                request.video_mode = Some(VideoMode::from_name(TI2V_5B.mode));
                 assert!(scope
                     .configure_request(&mut request)
                     .unwrap_err()

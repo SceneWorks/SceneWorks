@@ -41,7 +41,7 @@ pub(crate) fn clip_windows_for_spec(
     negative: &str,
 ) -> u32 {
     if engine_id == "sdxl" {
-        use runtime_macos::providers::sdxl::{load_tokenizer, LDM_TOKENIZER_COMPONENT};
+        use runtime_macos::utilities::sdxl::{load_tokenizer, LDM_TOKENIZER_COMPONENT};
         let root = match &spec.weights {
             WeightsSource::Dir(root) => Some(root),
             WeightsSource::File(_) => match spec.components.get(LDM_TOKENIZER_COMPONENT) {
@@ -619,7 +619,7 @@ pub(super) fn mlx_prefix_kv_cache_shed_transient_bytes(
     }
     #[cfg(target_os = "macos")]
     {
-        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
         let tier = match tier_quant {
             None => provider::quant::Tier::Bf16,
             Some(gen_core::Quant::Q8) => provider::quant::Tier::Q8,
@@ -1774,13 +1774,12 @@ pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget>
     let committed_bytes = mlx_rs::memory::get_active_memory() as u64;
     let reclaimable_bytes = mlx_rs::memory::get_cache_memory() as u64;
     let (total_bytes, reserved_headroom_bytes) = if engine_id.starts_with("mage_flow") {
-        let safe_gb = runtime_macos::providers::mage::memory::production_safe_budget_gb().map_err(
-            |error| {
+        let safe_gb = runtime_macos::memory_helpers::mage::memory::production_safe_budget_gb()
+            .map_err(|error| {
                 crate::provider_error(error, |error| {
                     WorkerError::InvalidPayload(error.to_string())
                 })
-            },
-        )?;
+            })?;
         (decimal_gb_to_bytes(safe_gb), 0)
     } else {
         let total_gib = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb())
@@ -1805,12 +1804,14 @@ pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget>
 #[cfg(target_os = "macos")]
 pub(super) fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: MemoryGeometry) -> u64 {
     if plan.engine_id.starts_with("mage_flow") {
-        decimal_gb_to_bytes(runtime_macos::providers::mage::memory::generation_peak_gb(
-            plan.tier.quant,
-            geometry.width,
-            geometry.height,
-            geometry.batch,
-        ))
+        decimal_gb_to_bytes(
+            runtime_macos::memory_helpers::mage::memory::generation_peak_gb(
+                plan.tier.quant,
+                geometry.width,
+                geometry.height,
+                geometry.batch,
+            ),
+        )
     } else {
         plan.generic_total_peak_bytes(geometry)
     }

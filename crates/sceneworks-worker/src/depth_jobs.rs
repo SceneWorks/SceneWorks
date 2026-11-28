@@ -72,11 +72,11 @@ fn typed(code: &str, detail: impl std::fmt::Display) -> WorkerError {
 fn backend_load(spec: &LoadSpec) -> gen_core::Result<Box<dyn IrisDepthEstimator>> {
     #[cfg(target_os = "macos")]
     {
-        runtime_macos::providers::iris::depth::load(spec)
+        runtime_macos::utilities::iris_depth::load(spec)
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        runtime_cuda::providers::iris::depth::load(spec)
+        runtime_cuda::utilities::iris_depth::load(spec)
     }
 }
 

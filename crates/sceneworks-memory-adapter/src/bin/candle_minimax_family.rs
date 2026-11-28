@@ -11,7 +11,7 @@ pub(super) fn validate_minimax_candle_geometry(
     height: u32,
     frames: u32,
 ) -> Result<(), String> {
-    let lattice = runtime_cuda::providers::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS;
+    let lattice = runtime_cuda::calibration::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS;
     let frames_usize =
         usize::try_from(frames).map_err(|_| "MiniMax-H3 frame count must fit usize".to_owned())?;
     if !lattice.contains(&frames_usize) {
@@ -20,14 +20,14 @@ pub(super) fn validate_minimax_candle_geometry(
              {frames}"
         ));
     }
-    let stride = runtime_cuda::providers::minimax_h3::pipeline::SPATIAL_STRIDE;
+    let stride = runtime_cuda::calibration::minimax_h3::pipeline::SPATIAL_STRIDE;
     if !width.is_multiple_of(stride) || !height.is_multiple_of(stride) {
         return Err(format!(
             "Candle MiniMax-H3 requires geometry divisible by the {stride}px stride, got \
              {width}x{height}"
         ));
     }
-    let budget = runtime_cuda::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
+    let budget = runtime_cuda::calibration::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
     let pixels = width.saturating_mul(height);
     if pixels > budget {
         return Err(format!(

@@ -2578,7 +2578,7 @@ pub(super) async fn generate_checkpoint_plan_stream(
         .native_generation_request()
         .map_err(WorkerError::InvalidPayload)?
         .unwrap_or_else(|| checkpoint_plan_generation_request(request));
-    prototype.pag = resolved_pag;
+    prototype.features.pag = resolved_pag;
     let steps = prototype.steps;
     let guidance = prototype.guidance;
     let raw_settings = checkpoint_plan_raw_settings(request, &sources, steps, guidance, quant_bits);

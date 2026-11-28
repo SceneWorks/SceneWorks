@@ -12,11 +12,10 @@ use super::krea_imported::imported_dit_file;
 use super::krea_imported::imported_model_quant;
 use super::mlx_model;
 use super::pid::resolve_pid_weights;
-use super::render::drive_hires_passes;
 #[cfg(target_os = "macos")]
-use super::render::hires_first_pass_context;
-use super::render::resolve_hires_fix_plan;
-use super::render::HiresFixPlan;
+use super::render::derive_base_pass_memory_context;
+use super::render::drive_hires_passes;
+use super::render::HiresRefinement;
 use super::render::WorkerExecutionReport;
 use super::resolve_seed;
 use super::routing::PreparedFileDispatch;
@@ -780,7 +779,7 @@ pub(super) fn resolve_sdxl_imported_component_cache_only(
 
 pub(super) fn validate_sdxl_imported_hires_conditioning(
     conditioning: &[Conditioning],
-    hires_fix: Option<HiresFixPlan>,
+    hires_fix: Option<HiresRefinement>,
 ) -> WorkerResult<()> {
     if !conditioning.is_empty() && hires_fix.is_some() {
         return Err(WorkerError::InvalidPayload(
@@ -793,7 +792,7 @@ pub(super) fn validate_sdxl_imported_hires_conditioning(
 pub(super) fn validate_sdxl_imported_hires_scheduler(
     engine_id: &str,
     scheduler: Option<&str>,
-    hires_fix: Option<HiresFixPlan>,
+    hires_fix: Option<HiresRefinement>,
 ) -> WorkerResult<()> {
     if hires_fix.is_some() && scheduler == Some("discrete") {
         return Err(WorkerError::InvalidPayload(format!(
@@ -906,7 +905,6 @@ pub(super) struct PreparedSdxlHires {
     requests: [GenerationRequest; 2],
     plan: gen_core::MultiPassRenderPlan,
     spec: std::sync::Arc<LoadSpec>,
-    hires: HiresFixPlan,
     enhance: PromptEnhance,
 }
 
@@ -916,7 +914,7 @@ impl PreparedSdxlHires {
         engine_id: &str,
         spec: std::sync::Arc<LoadSpec>,
         first: GenerationRequest,
-        hires: HiresFixPlan,
+        hires: HiresRefinement,
         enhance: PromptEnhance,
     ) -> WorkerResult<Self> {
         let mut first = first;
@@ -928,21 +926,21 @@ impl PreparedSdxlHires {
 
         validate_sdxl_imported_hires_scheduler(engine_id, first.scheduler.as_deref(), Some(hires))?;
 
-        let mut refine = GenerationRequest {
-            width: hires.width,
-            height: hires.height,
-            steps: Some(hires.steps),
-            guidance: hires.guidance,
-            use_pid: false,
-            conditioning: Vec::new(),
-            low_res_start: None,
-            source_image: None,
-            strength: None,
-            ..first.clone()
-        };
-        enhance.apply(&mut refine, gen_core::PromptEnhancementSink::default());
+        let refine = hires.refinement_request(
+            &first,
+            gen_core::OutputChannels::Rgb,
+            first.memory,
+            &enhance,
+            gen_core::PromptEnhancementSink::default(),
+            None,
+        );
         let plan = super::render::compile_hires_multi_pass_plan(
-            registry, engine_id, &spec, &first, &refine, &hires,
+            registry,
+            engine_id,
+            &spec,
+            &first,
+            &refine,
+            hires.produced_reference,
         )?
         .ok_or_else(|| {
             WorkerError::Engine(format!(
@@ -953,7 +951,6 @@ impl PreparedSdxlHires {
             requests: [first, refine],
             plan,
             spec,
-            hires,
             enhance,
         })
     }
@@ -989,7 +986,7 @@ impl PreparedSdxlHires {
             &[],
             None,
             self.enhance.enabled,
-            self.requests[0].use_pid,
+            self.requests[0].use_pid(),
             0,
             0,
             0,
@@ -1028,10 +1025,12 @@ impl PreparedSdxlHires {
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<SdxlImportedOutput> {
         let (base, _) = self.passes();
-        let (width, height) = base.output_size();
-        let mut base_context =
-            hires_first_pass_context(&evaluation.context, width, height, base.reference_count());
-        base_context.use_pid = self.requests[0].use_pid;
+        let mut base_context = derive_base_pass_memory_context(
+            &evaluation.context,
+            base.output_size(),
+            base.reference_count(),
+        );
+        base_context.use_pid = self.requests[0].use_pid();
         self.generate(
             generator,
             loaded_policy,
@@ -1060,7 +1059,6 @@ impl PreparedSdxlHires {
             requests,
             plan,
             spec,
-            hires,
             enhance,
         } = self;
         let plan = if let Some(loaded_spec) = loaded_sdxl_spec(&spec, loaded_policy) {
@@ -1081,9 +1079,11 @@ impl PreparedSdxlHires {
         let [first, mut refine] = requests;
         let [first_context, refine_context] = contexts;
         let steps = first.steps.unwrap_or(0);
+        let refine_steps = refine.steps.unwrap_or(0);
         let (base_execution, (width, height, pixels, refine_execution)) = drive_hires_passes(
             steps,
-            &hires,
+            refine_steps,
+            refine_plan.output_size(),
             Some(refine_plan),
             cancel,
             on_progress,
@@ -1501,7 +1501,7 @@ pub(super) async fn generate_sdxl_imported_stream(
     let (width, height) = (request.width, request.height);
     let (conditioning, mode_tag, strength) =
         resolve_imported_sdxl_conditioning(request, settings, project_path)?;
-    let hires_fix = resolve_hires_fix_plan(request, steps, Some(guidance), None);
+    let hires_fix = HiresRefinement::from_request(request, steps, Some(guidance), None);
     validate_sdxl_imported_hires_conditioning(&conditioning, hires_fix)?;
     validate_sdxl_imported_hires_scheduler(descriptor.id, scheduler.as_deref(), hires_fix)?;
     let (quant, quant_bits) = imported_model_quant(request, &descriptor, "Imported SDXL")?;
@@ -1543,20 +1543,22 @@ pub(super) async fn generate_sdxl_imported_stream(
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = attach_imported_sdxl_components(spec, &descriptor, api, settings, job).await?;
 
-    let prototype = GenerationRequest {
+    let mut prototype = GenerationRequest {
         negative_prompt,
         width,
         height,
         count: 1,
         steps: Some(steps),
         guidance: Some(guidance),
-        sampler,
-        scheduler,
+        sampler: sampler.map(Into::into),
+        scheduler: scheduler.map(Into::into),
         scheduler_shift,
-        guidance_method,
-        use_pid,
+        guidance_method: guidance_method.map(Into::into),
         ..Default::default()
     };
+    if use_pid {
+        prototype.features.pid = Some(gen_core::PidParams::enabled());
+    }
     let work: Vec<(i64, SdxlImportedItem)> = if let Some(hires) = hires_fix {
         let shared_spec = std::sync::Arc::new(spec.clone());
         work.into_iter()

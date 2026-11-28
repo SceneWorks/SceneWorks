@@ -351,24 +351,14 @@ fn former_audit_regressions_follow_typed_image_and_video_owners() {
         .find(|row| row["variant"] == "int8-convrot")
         .unwrap();
     assert_eq!(convrot["platforms"], json!(["windows", "linux"]));
-    let mlx_caps: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../config/engine-capabilities/runtime/capabilities.mlx.json"
-    ))
-    .unwrap();
-    let candle_caps: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../config/engine-capabilities/runtime/capabilities.candle.json"
-    ))
-    .unwrap();
-    assert!(!mlx_caps["workerCapabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|value| value == "int8_convrot"));
-    assert!(candle_caps["workerCapabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|value| value == "int8_convrot"));
+    assert!(
+        !crate::registry::route_bindings::platform_worker_capabilities("mlx")
+            .contains(&"int8_convrot")
+    );
+    assert!(
+        crate::registry::route_bindings::platform_worker_capabilities("candle")
+            .contains(&"int8_convrot")
+    );
 
     let scail = builtin_model_spec("scail2_14b").unwrap();
     for backend in ["mlx", "candle"] {
@@ -605,17 +595,12 @@ fn imported_provider_operations_keep_exact_source_and_conditioning_claims() {
     };
     let mut sources = BTreeSet::new();
     for backend in ["mlx", "candle"] {
-        let raw = if backend == "mlx" {
-            include_str!("../../../../../config/engine-capabilities/capabilities.mlx.json")
-        } else {
-            include_str!("../../../../../config/engine-capabilities/capabilities.candle.json")
-        };
-        let facts: serde_json::Value = serde_json::from_str(raw).unwrap();
-        for route in facts["imports"].as_array().unwrap() {
+        let export = crate::sga_capabilities::for_backend(backend).unwrap();
+        for route in &export.imported_models {
             sources.insert((
                 backend,
-                route["family"].as_str().unwrap().to_owned(),
-                route["source"].as_str().unwrap().to_owned(),
+                route.family.clone(),
+                crate::sga_capabilities::normalize_import_source_shape(&route.source).to_owned(),
             ));
         }
     }
@@ -677,21 +662,10 @@ mod residual {
     pub(super) type Cells = BTreeMap<String, (bool, bool)>;
 
     fn worker(backend: &str) -> WorkerSnapshot {
-        let raw = match backend {
-            "mlx" => include_str!(
-                "../../../../../config/engine-capabilities/runtime/capabilities.mlx.json"
-            ),
-            _ => include_str!(
-                "../../../../../config/engine-capabilities/runtime/capabilities.candle.json"
-            ),
-        };
-        let facts: Value = serde_json::from_str(raw).expect("runtime worker facts");
-        let capabilities = facts["workerCapabilities"]
-            .as_array()
-            .expect("worker capabilities")
+        let capabilities = crate::registry::route_bindings::platform_worker_capabilities(backend)
             .iter()
             .map(|value| {
-                serde_json::from_value::<WorkerCapability>(value.clone())
+                serde_json::from_value::<WorkerCapability>(json!(value))
                     .expect("known worker capability")
             })
             .collect();

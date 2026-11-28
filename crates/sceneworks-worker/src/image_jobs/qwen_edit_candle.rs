@@ -225,12 +225,15 @@ impl QwenEditMemoryContextCompat for QwenEdit {
 fn is_qwen_edit_candle_model(model: &str) -> bool {
     sceneworks_core::registry::builtin_model_spec(model).is_some_and(|spec| {
         spec.product.family == "qwen-image"
-            && spec.preview_by_backend.get("candle") == Some(&true)
-            && !spec.routes.contains_key("candle")
-            && spec
-                .routes
-                .get("mlx")
-                .is_some_and(|route| route.id == "qwen_image_edit")
+            && spec.routes.get("candle").is_some_and(|route| {
+                matches!(
+                    route.id.as_str(),
+                    "qwen_image_edit"
+                        | "qwen_image_edit_2509"
+                        | "qwen_image_edit_2511"
+                        | "qwen_image_edit_2511_lightning"
+                )
+            })
     }) || matches!(model, "qwen_image_edit" | "qwen_image_edit_2509")
 }
 
@@ -1216,15 +1219,15 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                         width,
                         height,
                         steps: steps as usize,
-                        sampler: sampling.sampler.clone(),
-                        scheduler: sampling.scheduler.clone(),
+                        sampler: sampling.sampler.as_deref().map(str::to_owned),
+                        scheduler: sampling.scheduler.as_deref().map(str::to_owned),
                         scheduler_shift: sampling.scheduler_shift,
                         guidance,
                         seed: seed as u64,
                         lightning,
                         stage_residency: use_sequential,
                         memory: generation_memory,
-                        pag: sampling.pag.clone(),
+                        pag: sampling.features.pag.clone(),
                         cancel: cancel.clone(),
                         // The job's LIVE per-image preview sink (epic 16948, sc-16962), built by
                         // `preview_sink_for` and handed in by `drive_gen_items`. Qwen-Image-Edit emits

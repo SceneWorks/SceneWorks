@@ -217,12 +217,12 @@ fn every_planned_sensenova_mlx_cell_names_the_identity_its_loaded_generator_publ
     // The preserved measured keys, bound to the engine's constants so the table cannot drift.
     assert_eq!(
         identities
-            [runtime_macos::providers::sensenova::memory_strategy::QUALITY_CALIBRATION_FINGERPRINT],
+            [runtime_macos::calibration::sensenova::memory_strategy::QUALITY_CALIBRATION_FINGERPRINT],
         "sensenova_u1_8b:q8:mlx"
     );
     assert_eq!(
         identities
-            [runtime_macos::providers::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT],
+            [runtime_macos::calibration::sensenova::memory_strategy::FAST_CALIBRATION_FINGERPRINT],
         "sensenova_u1_8b_fast:q8:mlx"
     );
 }
@@ -706,7 +706,7 @@ fn write_sharded_dense_root(root: &Path, indexed: &[(&str, &str)]) {
 fn an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity() {
     let fixture_owner = crate::adapter_test_support::Fixtures::default();
     let fixtures = &fixture_owner;
-    use runtime_macos::providers::sensenova::memory_strategy as engine;
+    use runtime_macos::calibration::sensenova::memory_strategy as engine;
     let (root, repository, revision) = preflight_root(fixtures, SENSENOVA_BASE_ARM, "bf16");
     write_sharded_dense_root(&root, &SHARD_TENSORS);
     let spec =
@@ -790,7 +790,7 @@ fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_lay
         Ok(())
     );
     assert_eq!(
-        runtime_macos::providers::sensenova::memory_strategy::production_calibration_fingerprint(
+        runtime_macos::calibration::sensenova::memory_strategy::production_calibration_fingerprint(
             SENSENOVA_FAST_ARM.provider,
             &spec
         )
@@ -832,7 +832,7 @@ fn a_root_the_pinned_engine_cannot_pin_is_refused_before_the_load_naming_the_lay
 /// front of it too (`an_indexed_shard_set_passes_the_preflight_and_publishes_the_identity`).
 #[test]
 fn every_sensenova_cell_names_the_identity_the_pinned_engine_tables() {
-    use runtime_macos::providers::sensenova::memory_strategy as engine;
+    use runtime_macos::calibration::sensenova::memory_strategy as engine;
     let revision = "0123456789abcdef0123456789abcdef01234567";
     for arm in SENSENOVA_FAMILY {
         for tier in ["bf16", "q4", "q8"] {

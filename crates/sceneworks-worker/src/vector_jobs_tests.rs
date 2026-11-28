@@ -781,3 +781,566 @@ async fn terminal_seam_delegates_to_sanitizer_and_publishes_only_the_pair() {
         "terminal publication leaves no staging residue"
     );
 }
+
+#[test]
+fn starvector_registered_vector_route_drives_typed_request_and_output() {
+    struct StubVectorGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        output: gen_core::VectorOutput,
+    }
+    impl gen_core::Generator for StubVectorGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            request: &gen_core::GenerationRequest,
+            on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            assert!(request.prompt.is_empty());
+            assert!(matches!(
+                request.conditioning.as_slice(),
+                [gen_core::Conditioning::Reference { .. }]
+            ));
+            let ext = request
+                .extensions
+                .vector
+                .as_ref()
+                .expect("vector extension set");
+            assert!(!ext.render_preview);
+            assert!(ext.allow_non_publishable);
+            on_progress(gen_core::Progress::Step {
+                current: 4,
+                total: ext.max_new_tokens.unwrap_or(128),
+            });
+            Ok(gen_core::GenerationOutput::Vector(self.output.clone()))
+        }
+    }
+
+    let identity = *starvector_model_identity("starvector_1b").unwrap();
+    let provider_request = vector_request(VectorMode::ImageToSvg, "");
+    let image = gen_core::Image {
+        width: 1,
+        height: 1,
+        pixels: vec![10, 20, 30],
+    };
+    let gen_request =
+        starvector_generation_request(&provider_request, image, gen_core::CancelFlag::new())
+            .expect("typed vector GenerationRequest");
+
+    let descriptor = gen_core::ModelDescriptor {
+        id: identity.model_id,
+        family: "starvector",
+        backend: "mlx",
+        modality: gen_core::Modality::Vector,
+        capabilities: gen_core::Capabilities::default(),
+        encoder_contract: None,
+        denoiser_output_latent_space: None,
+        required_components: &[],
+        control_kinds: None,
+    };
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>".to_owned();
+    let publishable = StubVectorGenerator {
+        descriptor: descriptor.clone(),
+        output: gen_core::VectorOutput {
+            svg: svg.clone(),
+            preview: None,
+            finish_reason: gen_core::VectorFinishReason::Stop,
+            generated_tokens: 4,
+            prompt_tokens: Some(16),
+            truncated: false,
+            terminal: gen_core::VectorTerminalMetadata {
+                sanitizer_id: Some(gen_core::vector::VECTOR_SANITIZER_VERSION.to_owned()),
+                viewport: Some([1, 1]),
+                svg_sha256: None,
+                element_count: Some(1),
+                provider_finish_reason: Some("complete_root".to_owned()),
+                generated_bytes: Some(svg.len()),
+                provider_id: Some(identity.mlx_provider_id.to_owned()),
+                kv_cache: Some(gen_core::core_llm::KvCacheReport::without_table_family(
+                    gen_core::core_llm::KvCompressionPolicy::Off,
+                )),
+            },
+        },
+    };
+    let (tx, rx) = tokio::sync::watch::channel(0);
+    let kv_cache = Mutex::new(None);
+    let (source, terminal, _exec) = generate_via_registered_vector_route(
+        &publishable,
+        identity,
+        "mlx",
+        identity.mlx_provider_id,
+        &gen_request,
+        &tx,
+        Instant::now(),
+        &kv_cache,
+    )
+    .expect("publishable registered vector route succeeds");
+    assert_eq!(source.as_deref(), Some(svg.as_str()));
+    assert_eq!(*rx.borrow(), 4);
+    assert_eq!(terminal.finish_reason, "complete_root");
+    assert_eq!(terminal.generated_tokens, 4);
+    assert_eq!(terminal.provider_id, identity.mlx_provider_id);
+    assert_eq!(
+        gen_request
+            .extensions
+            .vector
+            .as_ref()
+            .and_then(|ext| ext.kv_compression),
+        Some(crate::llm_kv_cache::worker_default_policy()),
+    );
+    let record = kv_cache
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("registered vector route must record kv_cache telemetry");
+    assert_eq!(record.outcome(), "completed");
+    assert_eq!(record.block()["reported"], json!(true));
+
+    // Non-publishable bounded limit returns None source + typed terminal outcome.
+    let limited = StubVectorGenerator {
+        descriptor,
+        output: gen_core::VectorOutput {
+            svg: String::new(),
+            preview: None,
+            finish_reason: gen_core::VectorFinishReason::Length,
+            generated_tokens: 128,
+            prompt_tokens: Some(16),
+            truncated: true,
+            terminal: gen_core::VectorTerminalMetadata {
+                provider_finish_reason: Some("token_limit".to_owned()),
+                generated_bytes: Some(512),
+                provider_id: Some(identity.mlx_provider_id.to_owned()),
+                kv_cache: Some(gen_core::core_llm::KvCacheReport::without_table_family(
+                    gen_core::core_llm::KvCompressionPolicy::Off,
+                )),
+                ..Default::default()
+            },
+        },
+    };
+    let (tx2, _) = tokio::sync::watch::channel(0);
+    let kv_cache2 = Mutex::new(None);
+    let (limited_source, limited_terminal, _) = generate_via_registered_vector_route(
+        &limited,
+        identity,
+        "mlx",
+        identity.mlx_provider_id,
+        &gen_request,
+        &tx2,
+        Instant::now(),
+        &kv_cache2,
+    )
+    .expect("bounded limit returns typed terminal outcome");
+    assert!(limited_source.is_none());
+    assert!(!limited_terminal.publishable());
+    assert_eq!(limited_terminal.finish_reason, "token_limit");
+    assert_eq!(
+        kv_cache2
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("bounded limit still records kv_cache telemetry")
+            .block()["reported"],
+        json!(true)
+    );
+}
+
+#[test]
+fn starvector_registered_vector_route_populates_kv_compression_and_kv_cache_record() {
+    use gen_core::core_llm::{KvCacheReport, KvCompressionPolicy};
+
+    struct KvReportingVectorGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        expected_policy: KvCompressionPolicy,
+        refuse: bool,
+    }
+
+    impl gen_core::Generator for KvReportingVectorGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            let policy = request
+                .extensions
+                .vector
+                .as_ref()
+                .and_then(|ext| ext.kv_compression)
+                .expect("kv_compression must be populated on VectorExtension");
+            assert_eq!(policy, self.expected_policy);
+            if self.refuse {
+                return Err(gen_core::Error::backend(
+                    crate::llm_kv_cache::test_support::refusal(),
+                ));
+            }
+            let svg =
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>".to_owned();
+            Ok(gen_core::GenerationOutput::Vector(gen_core::VectorOutput {
+                svg: svg.clone(),
+                preview: None,
+                finish_reason: gen_core::VectorFinishReason::Stop,
+                generated_tokens: 3,
+                prompt_tokens: Some(8),
+                truncated: false,
+                terminal: gen_core::VectorTerminalMetadata {
+                    provider_finish_reason: Some("complete_root".to_owned()),
+                    generated_bytes: Some(svg.len()),
+                    provider_id: Some("mlx-starvector-1b".to_owned()),
+                    kv_cache: Some(KvCacheReport::without_table_family(policy)),
+                    ..Default::default()
+                },
+            }))
+        }
+    }
+
+    struct RegisteredRouteAdapter {
+        identity: StarVectorModelIdentity,
+        generator: KvReportingVectorGenerator,
+        policy: KvCompressionPolicy,
+        kv_cache: Arc<Mutex<Option<crate::llm_kv_cache::KvCacheRecord>>>,
+    }
+
+    impl MultimodalVectorProviderAdapter for RegisteredRouteAdapter {
+        fn provider_id(&self) -> &str {
+            STARVECTOR_ADAPTER_ID
+        }
+        fn supports_mode(&self, mode: VectorMode) -> bool {
+            mode == VectorMode::ImageToSvg
+        }
+        fn generate_svg(
+            &self,
+            request: &VectorProviderRequest,
+            cancel: &gen_core::CancelFlag,
+            progress: tokio::sync::watch::Sender<u32>,
+            on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
+        ) -> WorkerResult<()> {
+            let image = gen_core::Image {
+                width: 1,
+                height: 1,
+                pixels: vec![0, 0, 0],
+            };
+            let gen_request = starvector_generation_request_with_policy(
+                request,
+                image,
+                cancel.clone(),
+                self.policy,
+            )?;
+            let (source, _, _) = generate_via_registered_vector_route(
+                &self.generator,
+                self.identity,
+                "mlx",
+                self.identity.mlx_provider_id,
+                &gen_request,
+                &progress,
+                Instant::now(),
+                &self.kv_cache,
+            )?;
+            if let Some(svg) = source {
+                on_source(&svg, 0)?;
+            }
+            Ok(())
+        }
+        fn kv_cache_record(&self) -> Option<crate::llm_kv_cache::KvCacheRecord> {
+            self.kv_cache.lock().ok()?.clone()
+        }
+    }
+
+    let identity = *starvector_model_identity("starvector_1b").unwrap();
+    let descriptor = gen_core::ModelDescriptor {
+        id: identity.model_id,
+        family: "starvector",
+        backend: "mlx",
+        modality: gen_core::Modality::Vector,
+        capabilities: gen_core::Capabilities::default(),
+        encoder_contract: None,
+        denoiser_output_latent_space: None,
+        required_components: &[],
+        control_kinds: None,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("source.png");
+    std::fs::write(&source_path, b"png").unwrap();
+    let mut provider_request = vector_request(VectorMode::ImageToSvg, "");
+    provider_request.source_path = Some(source_path);
+
+    // 1. Success path: Qualified policy flows into VectorExtension and terminal.kv_cache flows to
+    //    kv_cache_record() and the emitted `llm_kv_cache` telemetry event.
+    let ok_adapter = RegisteredRouteAdapter {
+        identity,
+        generator: KvReportingVectorGenerator {
+            descriptor: descriptor.clone(),
+            expected_policy: KvCompressionPolicy::Qualified,
+            refuse: false,
+        },
+        policy: KvCompressionPolicy::Qualified,
+        kv_cache: Arc::new(Mutex::new(None)),
+    };
+    let ok_job_id = "vector-registered-kv-cache-completed";
+    let (tx, _) = tokio::sync::watch::channel(0);
+    let collected = collect_svg_source(
+        ok_job_id,
+        &ok_adapter,
+        &provider_request,
+        &gen_core::CancelFlag::new(),
+        tx,
+    )
+    .expect("registered route completes cleanly");
+    assert!(collected.source.is_some());
+    let record = ok_adapter
+        .kv_cache_record()
+        .expect("kv_cache_record populated from terminal.kv_cache");
+    assert_eq!(record.outcome(), "completed");
+    assert_eq!(record.block()["policy"], json!("qualified"));
+    assert_eq!(record.block()["reported"], json!(true));
+    assert_eq!(record.block()["fallbackReason"], json!("unqualified_model"));
+    let events = crate::llm_kv_cache::test_support::events_for(ok_job_id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["engine"], json!("mlx"));
+    assert_eq!(events[0]["kvCache"]["policy"], json!("qualified"));
+    assert_eq!(events[0]["kvCache"]["reported"], json!(true));
+
+    // 2. Refusal path: RequestResourceExhausted wrapped in gen_core::Error::Backend still flows
+    //    through to kv_cache_record() and emits the refused telemetry event.
+    let refusing_adapter = RegisteredRouteAdapter {
+        identity,
+        generator: KvReportingVectorGenerator {
+            descriptor,
+            expected_policy: KvCompressionPolicy::Qualified,
+            refuse: true,
+        },
+        policy: KvCompressionPolicy::Qualified,
+        kv_cache: Arc::new(Mutex::new(None)),
+    };
+    let refused_job_id = "vector-registered-kv-cache-refused";
+    let (tx2, _) = tokio::sync::watch::channel(0);
+    let err = collect_svg_source(
+        refused_job_id,
+        &refusing_adapter,
+        &provider_request,
+        &gen_core::CancelFlag::new(),
+        tx2,
+    )
+    .err()
+    .expect("refused registered route returns error");
+    assert!(matches!(err, WorkerError::Engine(_)));
+    let refused_record = refusing_adapter
+        .kv_cache_record()
+        .expect("refused registered route still populates kv_cache_record");
+    assert_eq!(refused_record.outcome(), "refused");
+    assert_eq!(
+        refused_record.block()["reason"],
+        json!("request_resource_exhausted")
+    );
+    let refused_events = crate::llm_kv_cache::test_support::events_for(refused_job_id);
+    assert_eq!(refused_events.len(), 1);
+    assert_eq!(refused_events[0]["kvCache"]["outcome"], json!("refused"));
+}
+
+#[tokio::test]
+async fn starvector_generator_cache_reuses_resident_instance_and_respects_eviction() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingVectorGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        generates: Arc<AtomicUsize>,
+    }
+
+    impl gen_core::Generator for CountingVectorGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            self.generates.fetch_add(1, Ordering::SeqCst);
+            let svg =
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>".to_owned();
+            Ok(gen_core::GenerationOutput::Vector(gen_core::VectorOutput {
+                svg: svg.clone(),
+                preview: None,
+                finish_reason: gen_core::VectorFinishReason::Stop,
+                generated_tokens: 2,
+                prompt_tokens: Some(8),
+                truncated: false,
+                terminal: gen_core::VectorTerminalMetadata {
+                    provider_finish_reason: Some("complete_root".to_owned()),
+                    generated_bytes: Some(svg.len()),
+                    provider_id: Some("mlx-starvector-1b".to_owned()),
+                    ..Default::default()
+                },
+            }))
+        }
+    }
+
+    let (cache, join) = crate::generator_cache::GeneratorCacheHandle::isolated();
+    let dir = tempfile::tempdir().unwrap();
+    let identity = *starvector_model_identity("starvector_1b").unwrap();
+    let loads = Arc::new(AtomicUsize::new(0));
+    let generates = Arc::new(AtomicUsize::new(0));
+    let provider_request = vector_request(VectorMode::ImageToSvg, "");
+
+    let run_once = |cache: crate::generator_cache::GeneratorCacheHandle,
+                    loads: Arc<AtomicUsize>,
+                    generates: Arc<AtomicUsize>| {
+        let weights_dir = dir.path().to_path_buf();
+        let req = provider_request.clone();
+        async move {
+            let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(weights_dir));
+            let gen_request = starvector_generation_request(
+                &req,
+                gen_core::Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0, 0, 0],
+                },
+                gen_core::CancelFlag::new(),
+            )?;
+            let (progress_tx, _) = tokio::sync::watch::channel(0);
+            let kv_cache = Mutex::new(None);
+            crate::generator_cache::with_cached_generator_for_request_using_cache(
+                cache,
+                identity.model_id,
+                spec,
+                "test StarVector load failed",
+                move |engine_id, _spec| {
+                    assert_eq!(engine_id, identity.model_id);
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Box::new(CountingVectorGenerator {
+                        descriptor: gen_core::ModelDescriptor {
+                            id: identity.model_id,
+                            family: "starvector",
+                            backend: "mlx",
+                            modality: gen_core::Modality::Vector,
+                            capabilities: gen_core::Capabilities::default(),
+                            encoder_contract: None,
+                            denoiser_output_latent_space: None,
+                            required_components: &[],
+                            control_kinds: None,
+                        },
+                        generates: generates.clone(),
+                    }))
+                },
+                move |generator, _state, _policy, warm_policy, _, _| {
+                    warm_policy.decline(
+                        crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                    );
+                    generate_via_registered_vector_route(
+                        generator,
+                        identity,
+                        "mlx",
+                        identity.mlx_provider_id,
+                        &gen_request,
+                        &progress_tx,
+                        Instant::now(),
+                        &kv_cache,
+                    )
+                },
+            )
+            .await
+        }
+    };
+
+    // Cold load + warm reuse: loader runs once, generate runs twice.
+    run_once(cache.clone(), loads.clone(), generates.clone())
+        .await
+        .expect("cold StarVector generation succeeds");
+    run_once(cache.clone(), loads.clone(), generates.clone())
+        .await
+        .expect("warm StarVector generation reuses cached generator");
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+    assert_eq!(generates.load(Ordering::SeqCst), 2);
+
+    // Explicit eviction clears the cached StarVector generator so the next call reloads.
+    assert!(cache.evict().await.expect("evict cached generator"));
+    run_once(cache.clone(), loads.clone(), generates.clone())
+        .await
+        .expect("post-eviction StarVector generation reloads cleanly");
+    assert_eq!(loads.load(Ordering::SeqCst), 2);
+    assert_eq!(generates.load(Ordering::SeqCst), 3);
+
+    drop(cache);
+    join.join().expect("isolated cache worker exits cleanly");
+}
+
+#[test]
+fn starvector_registered_route_preserves_process_poisoned_fault() {
+    struct PoisoningVectorGenerator {
+        descriptor: gen_core::ModelDescriptor,
+    }
+
+    impl gen_core::Generator for PoisoningVectorGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _req: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            Err(gen_core::Error::ProcessPoisoned(
+                "fatal CUDA illegal memory access in StarVector".to_owned(),
+            ))
+        }
+    }
+
+    let identity = *starvector_model_identity("starvector_1b").expect("starvector_1b identity");
+    let generator = PoisoningVectorGenerator {
+        descriptor: gen_core::ModelDescriptor {
+            id: identity.model_id,
+            family: "starvector",
+            backend: "candle",
+            modality: gen_core::Modality::Vector,
+            capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
+            required_components: &[],
+            control_kinds: None,
+        },
+    };
+    let req = vector_request(VectorMode::ImageToSvg, "");
+    let image = gen_core::Image {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    let gen_request =
+        starvector_generation_request(&req, image, gen_core::CancelFlag::default()).unwrap();
+    let (progress_tx, _progress_rx) = tokio::sync::watch::channel(0u32);
+    let kv_cache = Mutex::new(None);
+    let err = generate_via_registered_vector_route(
+        &generator,
+        identity,
+        "candle",
+        identity.candle_provider_id,
+        &gen_request,
+        &progress_tx,
+        Instant::now(),
+        &kv_cache,
+    )
+    .expect_err("ProcessPoisoned generator failure must surface as WorkerError::ProcessPoisoned");
+    match err {
+        WorkerError::ProcessPoisoned(detail) => {
+            assert_eq!(detail, "fatal CUDA illegal memory access in StarVector");
+        }
+        other => panic!("expected WorkerError::ProcessPoisoned, got {other:?}"),
+    }
+}

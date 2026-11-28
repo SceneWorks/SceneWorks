@@ -76,26 +76,24 @@ use mlx_sd3_family::*;
 mod mlx_krea_realtime_family;
 use mlx_krea_realtime_family::*;
 
-use mlx_gen::gen_core::{
-    Capabilities, ComponentPrecisionFloor, GenerationMemory, LoadPhase, MemoryBudget,
-    MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode, MemoryNumericTier,
-    MemoryOptimizationAuthority, MemoryPhase, MemoryProviderContract, MemoryRunContext,
-    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
-    MemoryStrategyParameters, TransformerComponent,
-};
-use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
-#[cfg(test)]
-use mlx_gen::AdapterKind;
-use mlx_gen::{
-    Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, IdentityWeights,
-    Image, LoadShape, LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
-};
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
     reset_peak_memory, set_memory_limit, set_wired_limit,
 };
 use mlx_rs::Array;
-use runtime_macos::providers::qwen_image::{load_vae, QwenVae};
+use runtime_macos::calibration::qwen_image::{load_vae, QwenVae};
+use runtime_macos::gen_core::tiling::{SpatialTiling, TilingConfig, VaeTiling};
+#[cfg(test)]
+use runtime_macos::gen_core::AdapterKind;
+use runtime_macos::gen_core::{
+    Capabilities, ComponentPrecisionFloor, Conditioning, ControlKind, GenerationMemory,
+    GenerationOutput, GenerationRequest, Generator, IdentityWeights, Image, LoadPhase, LoadShape,
+    LoadSpec, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
+    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase,
+    MemoryProviderContract, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
+    MemorySelection, MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress,
+    Quant, SolverId, TransformerComponent, VideoMode, WeightsSource,
+};
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -349,7 +347,7 @@ const LTX_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
 /// reds until the plan follows — the plan is bound to the same source, so the two cannot drift
 /// apart silently. `the_ltx_identity_family_is_the_engines_retained_key_with_a_tier_token` binds
 /// every member to the engine's own weights-free minting function, byte for byte.
-const LTX_CALIBRATED_TIER: &str = mlx_gen_ltx::memory_strategy::CALIBRATED_TIER;
+const LTX_CALIBRATED_TIER: &str = runtime_macos::calibration::ltx::memory_strategy::CALIBRATED_TIER;
 
 /// One fixed seed for every `mlx:ltx_2_3` fixture
 /// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18946`). Historical SC-18810
@@ -608,7 +606,8 @@ const MINIMAX_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
 /// [`mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT`] names, read off the
 /// pinned crate: that key carries no tier token, so the engine is the only source of which tier
 /// keeps it.
-const MINIMAX_CALIBRATED_TIER: &str = mlx_gen_minimax_h3::memory_strategy::CALIBRATED_TIER;
+const MINIMAX_CALIBRATED_TIER: &str =
+    runtime_macos::calibration::minimax_h3::memory_strategy::CALIBRATED_TIER;
 
 /// One fixed seed for every `mlx:minimax_h3` fixture
 /// (`minimax-h3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed17137`).
@@ -1955,7 +1954,7 @@ const SDXL_FAMILY: [SdxlArm; 5] = [
 struct InstantIdBinding {
     repository: String,
     revision: String,
-    paths: mlx_gen_instantid::InstantIdPaths,
+    paths: runtime_macos::calibration::instantid::InstantIdPaths,
     bundle: protocol::InstantIdIdentityBundle,
     artifact_fingerprint: String,
 }
@@ -2444,8 +2443,10 @@ impl LtxDecodePlan {
         // Argument order mirrors the production call site (`pipeline.rs:168`), which passes
         // (out_h, out_w, out_f) — NOT the (out_w, out_h, out_f) spelling one of that crate's own
         // sweep tests uses. At a non-square bucket the two disagree, so this is load-bearing.
-        let tiling = mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
-            .map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?;
+        let tiling = runtime_macos::converters::ltx::pipeline::auto_tiling_budgeted_ltx(
+            height, width, frames,
+        )
+        .map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?;
         Ok(Self {
             tiling,
             writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
@@ -2530,7 +2531,9 @@ impl LtxDecodePlan {
             // Installed for this call only, and restored on the unwind path as well as the normal
             // one — `auto_tiling_budgeted_ltx` panicking must not leak the budget to later tests.
             let _budget = LtxInjectedBudget::install(budget_gib);
-            mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+            runtime_macos::converters::ltx::pipeline::auto_tiling_budgeted_ltx(
+                height, width, frames,
+            )
         };
         Ok(Self {
             tiling: planned.map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?,
@@ -3011,7 +3014,7 @@ impl MinimaxArtifact {
 const BERNINI_PROVIDER: &str = "bernini";
 const _: () = {
     let ours = BERNINI_PROVIDER.as_bytes();
-    let engine = runtime_macos::providers::bernini::memory_strategy::FULL_ID.as_bytes();
+    let engine = runtime_macos::calibration::bernini::memory_strategy::FULL_ID.as_bytes();
     assert!(
         ours.len() == engine.len(),
         "BERNINI_PROVIDER no longer spells mlx-gen-bernini's memory_strategy::FULL_ID"
@@ -3091,12 +3094,12 @@ const BERNINI_ARMS: [BerniniArm; 2] = [BERNINI_VIDEO_ARM, BERNINI_IMAGE_ARM];
 const BERNINI_TIERS: [&str; 3] = ["bf16", "q4", "q8"];
 
 /// The tier the engine's retained
-/// [`MEMORY_CALIBRATION_FINGERPRINT`](runtime_macos::providers::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT)
+/// [`MEMORY_CALIBRATION_FINGERPRINT`](runtime_macos::calibration::bernini::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT)
 /// names, read off the pinned crate rather than spelled: a re-tiered retained key moves this
 /// family's bare member with it, and `the_bernini_identity_family_reproduces_the_engines_retained_key`
 /// proves the retained string IS the `(route, CALIBRATED_TIER)` member the format below mints.
 const BERNINI_CALIBRATED_TIER: &str =
-    runtime_macos::providers::bernini::memory_strategy::CALIBRATED_TIER;
+    runtime_macos::calibration::bernini::memory_strategy::CALIBRATED_TIER;
 
 /// The exact target geometry a `mlx:bernini` calibration case renders.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

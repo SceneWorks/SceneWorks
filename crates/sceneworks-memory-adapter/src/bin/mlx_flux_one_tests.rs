@@ -745,11 +745,11 @@ fn every_planned_flux_one_mlx_cell_names_the_identity_its_loaded_generator_publi
         "pulid_flux_dev:q4:mlx"
     );
     assert_eq!(
-        runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1"
     );
     assert_eq!(
-        runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "pulid-flux-dev-q4-mlx-shared-ladder-2026-08-04-v1"
     );
     // The seven new cells, spelled out: the strings inference PR 943 mints.

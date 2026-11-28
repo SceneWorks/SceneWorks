@@ -3483,9 +3483,9 @@ fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
 #[test]
 fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    use runtime_cuda::providers::qwen_image_2_1 as provider;
+    use runtime_cuda::memory_helpers::qwen_image_2_1 as provider;
     #[cfg(target_os = "macos")]
-    use runtime_macos::providers::qwen_image_2_1 as provider;
+    use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
 
     let models = builtin_models_manifest();
     let entry = models
@@ -3495,7 +3495,7 @@ fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
     let engine = provider::memory_strategy::admission_geometry();
     assert_eq!(
         entry["limits"]["maxReferenceAssets"].as_u64(),
-        Some(provider::config::MAX_REFERENCE_IMAGES as u64),
+        Some(u64::from(engine.max_reference_images)),
         "limits.maxReferenceAssets is the engine's MAX_REFERENCE_IMAGES"
     );
     let geometry = &entry["admissionGeometry"];
@@ -3575,7 +3575,7 @@ fn qwen_image_2_1_every_floor_key_the_ui_reads_has_a_worker_source() {
     // resident + bounded-decode activation at the largest-area preset), per tier.
     #[cfg(target_os = "macos")]
     {
-        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
         const GIB: f64 = (1_u64 << 30) as f64;
         let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
         for tier in provider::quant::Tier::ALL {
@@ -3714,7 +3714,7 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
     #[cfg(target_os = "macos")]
     {
         use provider::memory_strategy::derived;
-        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
         const GIB: f64 = (1_u64 << 30) as f64;
         let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
         let base = models
@@ -3759,9 +3759,9 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
 #[test]
 fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider() {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    use runtime_cuda::providers::qwen_image_2_1 as provider;
+    use runtime_cuda::memory_helpers::qwen_image_2_1 as provider;
     #[cfg(target_os = "macos")]
-    use runtime_macos::providers::qwen_image_2_1 as provider;
+    use runtime_macos::memory_helpers::qwen_image_2_1 as provider;
     use std::collections::BTreeSet;
 
     let models = builtin_models_manifest();
@@ -3769,11 +3769,11 @@ fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider
         .iter()
         .find(|model| model["id"] == "qwen_image_2_1_turbo")
         .expect("qwen_image_2_1_turbo is in the shipped catalog");
+    let engine = provider::memory_strategy::admission_geometry();
     assert_eq!(
         entry["limits"]["maxReferenceAssets"].as_u64(),
-        Some(provider::config::MAX_REFERENCE_IMAGES as u64)
+        Some(u64::from(engine.max_reference_images))
     );
-    let engine = provider::memory_strategy::admission_geometry();
     let geometry = &entry["admissionGeometry"];
     for (key, value) in [
         ("maxSide", u64::from(engine.max_side)),

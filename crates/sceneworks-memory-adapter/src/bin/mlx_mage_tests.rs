@@ -803,32 +803,32 @@ fn the_run_context_carries_each_members_own_mode_and_reference_count() {
 /// `provider_id` against the arm row, so a re-ordered table cannot silently drive one member's
 /// context through another member's predicate.
 const MAGE_MEMORY_REGISTRATIONS: [(
-    mlx_gen_mage::MageVariant,
-    &mlx_gen::gen_core::MemoryRegistration,
+    runtime_macos::converters::mage::MageVariant,
+    &runtime_macos::gen_core::MemoryRegistration,
 ); 6] = [
     (
-        mlx_gen_mage::MageVariant::Rl,
-        &mlx_gen_mage::model::MEMORY_REGISTRATION,
+        runtime_macos::converters::mage::MageVariant::Rl,
+        &runtime_macos::converters::mage::model::MEMORY_REGISTRATION,
     ),
     (
-        mlx_gen_mage::MageVariant::Base,
-        &mlx_gen_mage::model::MEMORY_REGISTRATION_BASE,
+        runtime_macos::converters::mage::MageVariant::Base,
+        &runtime_macos::converters::mage::model::MEMORY_REGISTRATION_BASE,
     ),
     (
-        mlx_gen_mage::MageVariant::Turbo,
-        &mlx_gen_mage::model::MEMORY_REGISTRATION_TURBO,
+        runtime_macos::converters::mage::MageVariant::Turbo,
+        &runtime_macos::converters::mage::model::MEMORY_REGISTRATION_TURBO,
     ),
     (
-        mlx_gen_mage::MageVariant::Edit,
-        &mlx_gen_mage::model::MEMORY_REGISTRATION_EDIT,
+        runtime_macos::converters::mage::MageVariant::Edit,
+        &runtime_macos::converters::mage::model::MEMORY_REGISTRATION_EDIT,
     ),
     (
-        mlx_gen_mage::MageVariant::EditBase,
-        &mlx_gen_mage::model::MEMORY_REGISTRATION_EDIT_BASE,
+        runtime_macos::converters::mage::MageVariant::EditBase,
+        &runtime_macos::converters::mage::model::MEMORY_REGISTRATION_EDIT_BASE,
     ),
     (
-        mlx_gen_mage::MageVariant::EditTurbo,
-        &mlx_gen_mage::model::MEMORY_REGISTRATION_EDIT_TURBO,
+        runtime_macos::converters::mage::MageVariant::EditTurbo,
+        &runtime_macos::converters::mage::model::MEMORY_REGISTRATION_EDIT_TURBO,
     ),
 ];
 
@@ -860,14 +860,18 @@ fn mage_registration_spec(
 /// [`run_mage_provider`] builds it, for one member and tier against a weights-free contract.
 fn mage_admitted_context(
     arm: MageArm,
-    variant: mlx_gen_mage::MageVariant,
+    variant: runtime_macos::converters::mage::MageVariant,
     tier: &str,
-) -> (mlx_gen::gen_core::MemoryProviderContract, MemoryRunContext) {
+) -> (
+    runtime_macos::gen_core::MemoryProviderContract,
+    MemoryRunContext,
+) {
     let quant = resident_selection(tier).tier.quant;
-    let contract = mlx_gen_mage::model::memory_strategy_contract(arm.provider, quant);
+    let contract =
+        runtime_macos::converters::mage::model::memory_strategy_contract(arm.provider, quant);
     let mut selection = resident_selection(tier);
     selection.tier.component_precision_floors = active_component_floors(
-        mlx_gen_mage::descriptor_for(variant)
+        runtime_macos::converters::mage::descriptor_for(variant)
             .capabilities
             .component_precision_floors,
         quant,
@@ -947,7 +951,7 @@ fn every_member_and_tier_is_admitted_by_the_pinned_providers_own_safety_predicat
 
             // The tier the campaign got wrong: the selected tier must carry exactly the
             // promotions the loaded provider applies — neither fewer nor more.
-            let declared = mlx_gen_mage::descriptor_for(variant)
+            let declared = runtime_macos::converters::mage::descriptor_for(variant)
                 .capabilities
                 .component_precision_floors;
             let mut crossed_floors = context.clone();

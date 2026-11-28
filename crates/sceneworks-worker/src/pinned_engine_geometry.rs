@@ -43,8 +43,8 @@ use runtime_macos as platform_runtime;
 // `media` feature). candle-gen-bernini / mlx-gen-bernini and the scail2 engines import this same
 // `MAX_AREA_14B` rather than declaring their own, so it is authoritative for the whole 14B family.
 // `SIZE_MULTIPLE_14B` is the same `pub const ... = 16` on both backends.
-use platform_runtime::providers::ltx::SIZE_MULTIPLE as LTX_SIZE_MULTIPLE;
-use platform_runtime::providers::wan::config::{MAX_AREA_14B, MAX_AREA_5B, SIZE_MULTIPLE_14B};
+use platform_runtime::memory_helpers::ltx::SIZE_MULTIPLE as LTX_SIZE_MULTIPLE;
+use platform_runtime::memory_helpers::wan::config::{MAX_AREA_14B, MAX_AREA_5B, SIZE_MULTIPLE_14B};
 use serde_json::Value;
 
 // MiniMax-H3's enforced area budget, read off the pinned provider's own `pipeline.rs` (sc-19721).
@@ -62,7 +62,7 @@ use serde_json::Value;
 // path was a guess that was never compiled against the real provider. Both backends declare the
 // identical `pub const CANVAS_MAX_PIXELS: u32 = 768 * 1344`, so one mapping serves both lanes,
 // exactly like the wan consts above.
-use platform_runtime::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
+use platform_runtime::memory_helpers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
 
 /// What this guard can say about one model's `limits.maxPixels`.
 ///
@@ -278,7 +278,7 @@ fn advertised_minimax_h3_resolutions_fit_the_pinned_engine_edge_cap() {
     let max_edge = u64::from(descriptor.capabilities.max_size);
     assert_eq!(
         max_edge,
-        u64::from(platform_runtime::providers::minimax_h3::pipeline::MAX_CANVAS_EDGE),
+        u64::from(platform_runtime::memory_helpers::minimax_h3::pipeline::MAX_CANVAS_EDGE),
         "the descriptor's enforced max_size and the pipeline const have diverged; this guard must \
          follow the one the request validator reads"
     );
@@ -349,7 +349,7 @@ fn advertised_minimax_h3_resolutions_fit_the_pinned_engine_edge_cap() {
 /// where the pinned bundle is already in scope.
 #[test]
 fn minimax_h3_component_names_are_the_pinned_engines_own() {
-    use platform_runtime::providers::minimax_h3::model as engine;
+    use platform_runtime::memory_helpers::minimax_h3::model as engine;
     use sceneworks_core::mlx_tier_completeness::MINIMAX_H3_PARTITIONS;
     #[cfg(target_os = "macos")]
     use sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR;

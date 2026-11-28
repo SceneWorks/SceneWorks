@@ -413,7 +413,7 @@ fn generate_image(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         steps: Some(cell.request.steps),
         guidance: cell.request.guidance,
         true_cfg: cell.request.true_cfg,
-        sampler: cell.request.sampler.clone(),
+        sampler: cell.request.sampler.as_deref().map(Into::into),
         memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     };
@@ -495,7 +495,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
         seed: Some(cell.request.seed),
         steps: Some(cell.request.steps),
         guidance: cell.request.guidance,
-        sampler: cell.request.sampler.clone(),
+        sampler: cell.request.sampler.as_deref().map(Into::into),
         conditioning: vec![Conditioning::Control {
             image: control_image,
             kind: ControlKind::Pose,
@@ -526,7 +526,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
         seed: Some(cell.request.seed),
         steps: Some(cell.request.steps),
         guidance: cell.request.guidance,
-        sampler: cell.request.sampler.clone(),
+        sampler: cell.request.sampler.as_deref().map(Into::into),
         conditioning: vec![Conditioning::Control {
             image: counterfactual_control,
             kind: ControlKind::Pose,
@@ -668,7 +668,7 @@ fn scail2_request(
         // be attributed to omitting this exact ordered reference/mask pair.
         seed: Some(cell.request.seed),
         conditioning,
-        video_mode: Some("animation".to_owned()),
+        video_mode: Some(gen_core::VideoMode::from("animation")),
         memory: family_generation_memory(&cell.kind, &cell.engine_id),
         ..Default::default()
     }

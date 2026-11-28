@@ -983,10 +983,15 @@ pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
         .find(|r| r.sceneworks_id == sceneworks_id)?;
     let descriptor = crate::inference_runtime::generators()
         .map(|reg| (reg.descriptor)())
-        .find(|d| d.id == row.engine_id)?;
+        .find(|d| d.id == sceneworks_id)
+        .or_else(|| {
+            crate::inference_runtime::generators()
+                .map(|reg| (reg.descriptor)())
+                .find(|d| d.id == row.engine_id)
+        })?;
     if let Some(spec) = sceneworks_core::registry::builtin_model_spec(sceneworks_id) {
         let route = spec.routes.get(descriptor.backend)?;
-        if route.id != row.engine_id {
+        if route.id != descriptor.id {
             return None;
         }
     }
@@ -1920,20 +1925,20 @@ mod tests {
     /// `VAE_SCALE_FACTOR` on both — so the mapping is compiled per backend.
     #[cfg(target_os = "macos")]
     fn pinned_image_stride(engine_id: &str) -> Option<u32> {
-        use runtime_macos::providers as p;
+        use runtime_macos::memory_helpers::image_strides as s;
         Some(match engine_id {
-            "sana_1600m" | "sana_sprint_1600m" => p::sana::RES_MULTIPLE,
-            "sensenova_u1_8b" | "sensenova_u1_8b_fast" => p::sensenova::CELL,
-            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => p::sd3::SIZE_MULTIPLE,
-            "sdxl" => p::sdxl::SIZE_MULTIPLE,
-            "kolors" => p::kolors::SIZE_MULTIPLE,
-            "chroma1_hd" | "chroma1_base" | "chroma1_flash" => p::chroma::SIZE_MULTIPLE,
-            "flux1_schnell" | "flux1_dev" => p::flux::SIZE_MULTIPLE,
-            "flux2_dev" | "flux2_klein_9b" => p::flux2::SIZE_MULTIPLE,
-            "ideogram_4" | "ideogram_4_turbo" => p::ideogram::RES_MULTIPLE,
-            "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
-            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::RES_MULTIPLE,
-            "krea_2_turbo" | "krea_2_raw" => p::krea::RES_MULTIPLE,
+            "sana_1600m" | "sana_sprint_1600m" => s::SANA,
+            "sensenova_u1_8b" | "sensenova_u1_8b_fast" => s::SENSENOVA,
+            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => s::SD3,
+            "sdxl" => s::SDXL,
+            "kolors" => s::KOLORS,
+            "chroma1_hd" | "chroma1_base" | "chroma1_flash" => s::CHROMA,
+            "flux1_schnell" | "flux1_dev" => s::FLUX,
+            "flux2_dev" | "flux2_klein_9b" => s::FLUX2,
+            "ideogram_4" | "ideogram_4_turbo" => s::IDEOGRAM,
+            "anima_base" | "anima_aesthetic" | "anima_turbo" => s::ANIMA,
+            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => s::BOOGU,
+            "krea_2_turbo" | "krea_2_raw" => s::KREA,
             // Mage's provider currently keeps SIZE_MULTIPLE private; the descriptor validates the
             // same VAE-derived ÷16 lattice, pinned here until the const is re-exported.
             "mage_flow_base"
@@ -1942,8 +1947,8 @@ mod tests {
             | "mage_flow_edit_base"
             | "mage_flow_edit"
             | "mage_flow_edit_turbo" => 16,
-            "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
-            "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            "lens" | "lens_turbo" => s::LENS,
+            "qwen_image" | "qwen_image_edit" => s::QWEN_IMAGE,
             // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
             // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
             // the same reason the Mage arm above is — the provider keeps its `SIZE_MULTIPLE`
@@ -1968,40 +1973,41 @@ mod tests {
             // canvas and resizes back (`gen_core::h3_image::generation_canvas`), so the request
             // carries no lattice.
             "minimax_h3_image" => 1,
-            "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
+            "z_image" | "z_image_turbo" => s::Z_IMAGE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
-            "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
+            "bernini" => s::WAN_14B,
             _ => return None,
         })
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     fn pinned_image_stride(engine_id: &str) -> Option<u32> {
-        use runtime_cuda::providers as p;
+        use runtime_cuda::memory_helpers::image_strides as s;
         Some(match engine_id {
-            "sana_1600m" | "sana_sprint_1600m" => p::sana::RES_MULTIPLE,
-            "sensenova_u1_8b" | "sensenova_u1_8b_fast" => p::sensenova::SIZE_MULTIPLE,
-            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => p::sd3::SIZE_MULTIPLE,
-            "sdxl" => p::sdxl::SIZE_MULTIPLE,
-            "kolors" => p::kolors::SIZE_MULTIPLE,
-            "chroma1_hd" | "chroma1_base" | "chroma1_flash" => p::chroma::SIZE_MULTIPLE,
-            "flux1_schnell" | "flux1_dev" => p::flux::SIZE_MULTIPLE,
-            "flux2_dev" | "flux2_klein_9b" => p::flux2::SIZE_MULTIPLE,
-            "ideogram_4" | "ideogram_4_turbo" => p::ideogram::SIZE_MULTIPLE,
-            "anima_base" | "anima_aesthetic" | "anima_turbo" => p::anima::RES_MULTIPLE,
-            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => p::boogu::SIZE_MULTIPLE,
-            "krea_2_turbo" | "krea_2_raw" => p::krea::SIZE_MULTIPLE,
+            "sana_1600m" | "sana_sprint_1600m" => s::SANA,
+            "sensenova_u1_8b" | "sensenova_u1_8b_fast" => s::SENSENOVA,
+            "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => s::SD3,
+            "sdxl" => s::SDXL,
+            "kolors" => s::KOLORS,
+            "chroma1_hd" | "chroma1_base" | "chroma1_flash" => s::CHROMA,
+            "flux1_schnell" | "flux1_dev" => s::FLUX,
+            "flux2_dev" | "flux2_klein_9b" => s::FLUX2,
+            "ideogram_4" | "ideogram_4_turbo" => s::IDEOGRAM,
+            "anima_base" | "anima_aesthetic" | "anima_turbo" => s::ANIMA,
+            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => s::BOOGU,
+            "krea_2_turbo" | "krea_2_raw" => s::KREA,
             // Mage now has native MLX and Candle providers. Its Candle facade does not export a
-            // stride constant through `runtime_cuda::providers`, so keep the shared ÷16 contract
-            // explicit here and checked against the all-target MODEL_TABLE lattice.
+            // stride constant through `runtime_cuda::memory_helpers::image_strides`, so keep the
+            // shared ÷16 contract explicit here and checked against the all-target MODEL_TABLE
+            // lattice.
             "mage_flow_base"
             | "mage_flow"
             | "mage_flow_turbo"
             | "mage_flow_edit_base"
             | "mage_flow_edit"
             | "mage_flow_edit_turbo" => 16,
-            "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
-            "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            "lens" | "lens_turbo" => s::LENS,
+            "qwen_image" | "qwen_image_edit" => s::QWEN_IMAGE,
             // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
             // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
             // the same reason the Mage arm above is — the provider keeps its `SIZE_MULTIPLE`
@@ -2028,9 +2034,9 @@ mod tests {
             // canvas and resizes back (`gen_core::h3_image::generation_canvas`), so the request
             // carries no lattice.
             "minimax_h3_image" => 1,
-            "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
+            "z_image" | "z_image_turbo" => s::Z_IMAGE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
-            "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
+            "bernini" => s::WAN_14B,
             _ => return None,
         })
     }

@@ -4145,10 +4145,16 @@ fn minimax_h3_sparse_cold_admission_does_not_borrow_dense_peak() {
         width: 576,
         height: 320,
         frames: Some(124),
-        veda: Some(gen_core::VedaRequest {
-            enabled: true,
+        extensions: gen_core::FamilyExtensions {
+            h3: Some(gen_core::H3Extension {
+                veda: Some(gen_core::VedaRequest {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     let bound =

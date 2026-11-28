@@ -149,6 +149,14 @@ fn strict_pose_control_shape(context: &crate::jobs_store::routing::RouteContext<
         )
 }
 
+/// Candle Qwen-Image-Edit aliases registered directly in `sga.capabilities/2` (`candle-cuda.json`).
+pub(crate) const CANDLE_QWEN_EDIT_ROUTE_ALIASES: &[&str] = &[
+    "qwen_image_edit",
+    "qwen_image_edit_2509",
+    "qwen_image_edit_2511",
+    "qwen_image_edit_2511_lightning",
+];
+
 const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     CandleImageRoute {
         lane: CandleImageLane::MossImageEdit,
@@ -745,13 +753,8 @@ pub(crate) fn candle_reserves_reference_only_modes(model: &str) -> bool {
     matches!(
         model,
         "flux2_dev" | "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
-    ) || matches!(
-        model,
-        "qwen_image_edit"
-            | "qwen_image_edit_2509"
-            | "qwen_image_edit_2511"
-            | "qwen_image_edit_2511_lightning"
-    ) || model.starts_with("sensenova_u1_8b")
+    ) || CANDLE_QWEN_EDIT_ROUTE_ALIASES.contains(&model)
+        || model.starts_with("sensenova_u1_8b")
 }
 
 fn candle_refuses_reference_only_mode(model: &str, payload: &Map<String, Value>) -> bool {

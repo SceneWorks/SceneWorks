@@ -1,22 +1,43 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { verifyProfileReceipt } from './check-generation-route-profiles.mjs';
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  loadShippingProfiles,
+  verifyGenerationRouteProfiles,
+} from "./check-generation-route-profiles.mjs";
 
-function fixture() {
-  const ios = 'snapshot.generator_ids, ["image"], snapshot.text_llm_ids, ["llm"], snapshot.transform_ids, ["restore"], snapshot.snapshot_preparer_backends, ["mlx"]';
-  const cpu = 'snapshot.text_llm_ids, ["candle-llama"] candle_gen_catalog::provider_registry() candle_audio_catalog::provider_registry()';
-  const files = { 'crates/bundles/runtime-ios/src/lib.rs': ios, 'crates/bundles/runtime-cpu/src/lib.rs': cpu };
-  return { files, receipt: { inferenceRevision: 'old', sources: Object.fromEntries(Object.entries(files).map(([path, source]) => [path, createHash('sha256').update(source).digest('hex')])),
-    ios: { generator_ids: ['image'], text_llm_ids: ['llm'], transform_ids: ['restore'], snapshot_preparer_backends: ['mlx'] }, cpu: { text_llm_ids: ['candle-llama'] }, cpuSharedCatalogs: ['candle_gen_catalog::provider_registry()', 'candle_audio_catalog::provider_registry()'] } };
-}
-test('profile provenance verifies revision bytes and independently extracted assertions', () => {
-  const { files, receipt } = fixture();
-  assert.equal(verifyProfileReceipt(receipt, (revision, path) => { assert.equal(revision, 'old'); return files[path]; }).iosGenerators, 1);
-  receipt.ios.generator_ids = [];
-  assert.throws(() => verifyProfileReceipt(receipt, (_, path) => files[path]), /iOS generator_ids/);
+test("all five checked-in sga.capabilities/2 shipping profiles verify cleanly", () => {
+  const profiles = loadShippingProfiles();
+  const summary = verifyGenerationRouteProfiles(profiles);
+  assert.equal(summary.schemaVersion, "sga.capabilities/2");
+  assert.equal(summary.iosMediaRoutes, 7);
+  assert.equal(summary.iosLlmOnlyRoutes, 0);
+  assert.ok(summary.candleCpuRoutes > 50);
+  assert.ok(summary.candleCudaRoutes > 50);
+  assert.ok(summary.macosMlxRoutes > 50);
 });
-test('changed owning source is rejected even if the expected member survives', () => {
-  const { files, receipt } = fixture();
-  assert.throws(() => verifyProfileReceipt(receipt, (_, path) => files[path] + '\n'), /source receipt changed/);
+
+test("rejects missing StarVector vector route or media leak into ios-llm-only", () => {
+  const missingVector = structuredClone(loadShippingProfiles());
+  delete missingVector["candle-cuda"].routes.starvector_8b;
+  assert.throws(
+    () => verifyGenerationRouteProfiles(missingVector),
+    /candle-cuda missing starvector_8b/,
+  );
+
+  const leakedIos = structuredClone(loadShippingProfiles());
+  leakedIos["ios-llm-only"].routes.sdxl = { modality: "image" };
+  assert.throws(
+    () => verifyGenerationRouteProfiles(leakedIos),
+    /ios-llm-only must expose 0 media routes/,
+  );
+});
+
+test("rejects forbidden pin provenance or wrong schema version", () => {
+  const tainted = structuredClone(loadShippingProfiles());
+  tainted["macos-mlx"].generatedFrom = { inferenceRevision: "a".repeat(40) };
+  assert.throws(() => verifyGenerationRouteProfiles(tainted), /must be pin-free/);
+
+  const wrongSchema = structuredClone(loadShippingProfiles());
+  wrongSchema["candle-cpu"].schema_version = "sga.capabilities/1";
+  assert.throws(() => verifyGenerationRouteProfiles(wrongSchema), /wrong schema_version/);
 });

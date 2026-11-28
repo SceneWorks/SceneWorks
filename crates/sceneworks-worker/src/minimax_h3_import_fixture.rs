@@ -785,9 +785,9 @@ pub fn write_shared_configs(root: &Path, encoder: &Path) {
         &[("weight", "F16")],
         0x2c,
     );
-    let video = platform_runtime::providers::minimax_h3::config::MiniMaxH3VaeConfig::default();
+    let video = platform_runtime::memory_helpers::minimax_h3::config::MiniMaxH3VaeConfig::default();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let video = platform_runtime::providers::minimax_h3::config::MiniMaxH3VaeConfig {
+    let video = platform_runtime::memory_helpers::minimax_h3::config::MiniMaxH3VaeConfig {
         num_layers: 1,
         num_heads: 1,
         head_dim: 8,
@@ -854,14 +854,14 @@ pub fn write_shared_configs(root: &Path, encoder: &Path) {
         );
         // Complete native audio readset at fixture scale. Source memory planning validates the
         // constructor's actual operand names before the recording mock can be invoked.
-        let a = platform_runtime::providers::minimax_h3::audio_config::MiniMaxH3AudioVaeConfig::from_source_files(
+        let a = platform_runtime::memory_helpers::minimax_h3::audio_config::MiniMaxH3AudioVaeConfig::from_source_files(
             &std::fs::read_to_string(root.join("FL2VA/audio_vae/config.json")).unwrap(),
             &std::fs::read_to_string(root.join("FL2VA/audio_vae/config.yaml")).unwrap(),
             &std::fs::read_to_string(root.join("FL2VA/audio_vae/metadata.json")).unwrap(),
         ).unwrap();
-        let mut names = platform_runtime::providers::minimax_h3::audio_vae_encoder::MiniMaxH3AudioVaeEncoder::tensor_names(&a);
+        let mut names = platform_runtime::memory_helpers::minimax_h3::audio_vae_encoder::MiniMaxH3AudioVaeEncoder::tensor_names(&a);
         names.extend(
-            platform_runtime::providers::minimax_h3::audio_vae::MiniMaxH3AudioVae::tensor_names(&a),
+            platform_runtime::memory_helpers::minimax_h3::audio_vae::MiniMaxH3AudioVae::tensor_names(&a),
         );
         names.sort();
         names.dedup();
@@ -880,7 +880,7 @@ pub fn write_shared_configs(root: &Path, encoder: &Path) {
     );
     put(
         root.join("tokenizer/tokenizer_config.json"),
-        json!({"additional_special_tokens":platform_runtime::providers::minimax_h3::text_encoder::MINIMAX_ADDED_SPECIALS}),
+        json!({"additional_special_tokens":platform_runtime::memory_helpers::minimax_h3::text_encoder::MINIMAX_ADDED_SPECIALS}),
     );
 }
 
@@ -945,7 +945,7 @@ fn convrot_managed_import_binds_declared_assembly_and_canonical_native_operands(
 #[test]
 #[ignore = "requires coordinator-reserved local Metal token; tiny synthetic projections only"]
 fn convrot_import_native_mlx_projection_smoke() {
-    use platform_runtime::providers::minimax_h3 as h3;
+    use platform_runtime::memory_helpers::minimax_h3 as h3;
     use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
     use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
     use sceneworks_core::minimax_h3_codec::H3SourceInventory;
@@ -1002,8 +1002,8 @@ fn convrot_import_native_mlx_projection_smoke() {
 #[test]
 #[ignore = "requires coordinator-reserved CUDA runner; tiny synthetic projections only"]
 fn convrot_import_native_cuda_projection_smoke() {
-    use candle_gen::candle_core::{DType, Device, Tensor};
-    use platform_runtime::providers::minimax_h3 as h3;
+    use platform_runtime::memory_helpers::minimax_h3 as h3;
+    use runtime_cuda::media::candle_core::{DType, Device, Tensor};
     use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
     use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
     use sceneworks_core::minimax_h3_codec::H3SourceInventory;
@@ -1029,7 +1029,7 @@ fn convrot_import_native_cuda_projection_smoke() {
     let device = Device::new_cuda(0).expect("CUDA fixture must execute, never skip-as-pass");
     // Match MiniMaxH3Dit::load_from_dir: preserve I8 codes and F32 row scales through
     // the validated native reader, not Candle's generic safetensors dtype loader.
-    let weights = candle_gen::Weights::from_files_native_int8(
+    let weights = runtime_cuda::media::Weights::from_files_native_int8(
         &[output.join("diffusion_pytorch_model-00001-of-00001.safetensors")],
         &device,
     )
@@ -1161,7 +1161,7 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
     let headers = safetensors_path_tensor_headers(&shard).unwrap();
     #[cfg(native_lane)]
     {
-        use platform_runtime::providers::minimax_h3 as h3;
+        use platform_runtime::memory_helpers::minimax_h3 as h3;
         let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(data.path().into()))
             .with_component(
                 "transformer",
@@ -1373,7 +1373,7 @@ fn assert_pruned_period(actual: &[f32], case: &Value, rows: usize, tolerance: f3
 #[ignore = "requires explicit native Metal fixture workflow; never run in ordinary CI"]
 fn w4a8_import_native_mlx_projection_smoke() {
     use mlx_rs::{Array, Dtype};
-    use platform_runtime::providers::minimax_h3 as h3;
+    use platform_runtime::memory_helpers::minimax_h3 as h3;
     let data = tempfile::tempdir().unwrap();
     let artifact = stage_sealed_pruned_artifact(data.path(), "packed-native-mlx", "w4a8");
     assert_eq!(
@@ -1433,8 +1433,8 @@ fn w4a8_import_native_mlx_projection_smoke() {
 #[test]
 #[ignore = "requires explicit native CUDA fixture workflow; never run in ordinary CI"]
 fn w4a8_import_native_cuda_projection_smoke() {
-    use candle_gen::candle_core::{DType, Device, Tensor};
-    use platform_runtime::providers::minimax_h3 as h3;
+    use platform_runtime::memory_helpers::minimax_h3 as h3;
+    use runtime_cuda::media::candle_core::{DType, Device, Tensor};
     let device = Device::new_cuda(0).expect("CUDA fixture must execute, never skip-as-pass");
     let data = tempfile::tempdir().unwrap();
     let artifact = stage_sealed_pruned_artifact(data.path(), "packed-native-cuda", "w4a8");
@@ -1442,7 +1442,7 @@ fn w4a8_import_native_cuda_projection_smoke() {
         artifact.imported.entry["importQuantFormat"],
         "asym_w4a8_int8"
     );
-    let weights = candle_gen::Weights::from_files_native_int8(
+    let weights = runtime_cuda::media::Weights::from_files_native_int8(
         &[artifact
             .output
             .join("diffusion_pytorch_model-00001-of-00001.safetensors")],
@@ -1500,7 +1500,7 @@ fn w4a8_import_native_cuda_projection_smoke() {
 fn pruned_import_native_mlx_projection_smoke() {
     use h3::dit::model::{BlockModulation, PackedForward};
     use mlx_rs::{Array, Dtype};
-    use platform_runtime::providers::minimax_h3 as h3;
+    use platform_runtime::memory_helpers::minimax_h3 as h3;
     let data = tempfile::tempdir().unwrap();
     let artifact = stage_sealed_pruned_artifact(data.path(), "pruned-native-mlx", "pruned");
     let foreign = stage_sealed_pruned_artifact(data.path(), "foreign-pruned-mlx", "pruned-other");
@@ -1659,14 +1659,14 @@ fn pruned_import_native_mlx_projection_smoke() {
 #[test]
 #[ignore = "requires native CUDA; managed synthetic source only, never skip-as-pass"]
 fn pruned_import_native_cuda_projection_smoke() {
-    use candle_gen::candle_core::{DType, Device, Tensor};
     use h3::dit::model::{BlockModulation, PackedForward};
-    use platform_runtime::providers::minimax_h3 as h3;
+    use platform_runtime::memory_helpers::minimax_h3 as h3;
+    use runtime_cuda::media::candle_core::{DType, Device, Tensor};
     let device = Device::new_cuda(0).expect("CUDA fixture must execute, never skip-as-pass");
     let data = tempfile::tempdir().unwrap();
     let artifact = stage_sealed_pruned_artifact(data.path(), "pruned-native-cuda", "pruned");
     let foreign = stage_sealed_pruned_artifact(data.path(), "foreign-pruned-cuda", "pruned-other");
-    let weights = candle_gen::Weights::from_files_native_int8(
+    let weights = runtime_cuda::media::Weights::from_files_native_int8(
         &[artifact
             .output
             .join("diffusion_pytorch_model-00001-of-00001.safetensors")],
@@ -1817,7 +1817,7 @@ fn pruned_import_native_cuda_projection_smoke() {
             "CUDA imported resident/cache full forward",
         );
     }
-    let foreign_weights = candle_gen::Weights::from_files_native_int8(
+    let foreign_weights = runtime_cuda::media::Weights::from_files_native_int8(
         &[foreign
             .output
             .join("diffusion_pytorch_model-00001-of-00001.safetensors")],

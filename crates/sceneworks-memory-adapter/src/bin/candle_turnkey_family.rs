@@ -68,8 +68,8 @@ pub(super) fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> 
 /// test.
 #[cfg(test)]
 pub(super) fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
-    fingerprint.starts_with(runtime_cuda::providers::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
-        || fingerprint.starts_with(runtime_cuda::providers::lens::STATIC_BEHAVIOR_FINGERPRINT)
+    fingerprint.starts_with(runtime_cuda::calibration::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        || fingerprint.starts_with(runtime_cuda::calibration::lens::STATIC_BEHAVIOR_FINGERPRINT)
         // Retired plan namespace: this string is not an engine identity at the pinned source.
         || fingerprint.starts_with("ideogram4-candle-request-scoped-staged-residency-static-v1")
         // Retired pre-sc-22732 all-tier spelling, also absent from the current engine exports.

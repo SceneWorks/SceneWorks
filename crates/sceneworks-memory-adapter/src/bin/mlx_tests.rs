@@ -70,10 +70,12 @@ fn every_scenario_literal_declares_the_overlay_entry_the_protocol_settles() {
 fn scoped_generation_preserves_generator_and_finish_failures() {
     let mut observed = Some(ScopedGenerationFailureKind::Error);
     let error = settle_scoped_generation(
-        Err(mlx_gen::gen_core::Error::Msg(
+        Err(runtime_macos::gen_core::Error::Msg(
             "generator exploded".to_owned(),
         )),
-        Err(mlx_gen::gen_core::Error::Msg("finish exploded".to_owned())),
+        Err(runtime_macos::gen_core::Error::Msg(
+            "finish exploded".to_owned(),
+        )),
         &mut observed,
     )
     .expect_err("neither terminal failure may be discarded");
@@ -85,7 +87,7 @@ fn scoped_generation_preserves_generator_and_finish_failures() {
 
     let mut control = Some(ScopedGenerationFailureKind::Error);
     let error = settle_scoped_generation(
-        Err(mlx_gen::gen_core::Error::Msg(
+        Err(runtime_macos::gen_core::Error::Msg(
             "generator exploded".to_owned(),
         )),
         Ok(()),
@@ -1077,11 +1079,11 @@ fn instantid_binding_names_the_missing_identitynet_weight_and_covers_five_ordere
 fn planned_fingerprints_are_the_pinned_crates_own_strings() {
     assert_eq!(
         SDXL_CALIBRATION_FINGERPRINT,
-        mlx_gen_sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+        runtime_macos::calibration::sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
     );
     assert_eq!(
         INSTANTID_CALIBRATION_FINGERPRINT,
-        mlx_gen_instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
+        runtime_macos::calibration::instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
     );
     let plan: Value = serde_json::from_str(include_str!(
         "../../../../config/memory-calibration-plan.json"

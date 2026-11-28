@@ -175,9 +175,9 @@ pub(super) const INSTANTID_ENGINE: &str = "candle_instantid";
 // so cross-backend evidence is not split); only `provider_contract` differs — the
 // MLX one takes the numeric tier, the candle one is dense-only.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::instantid::memory_strategy as instantid_memory;
+use runtime_cuda::memory_helpers::instantid::memory_strategy as instantid_memory;
 #[cfg(target_os = "macos")]
-use runtime_macos::providers::instantid::memory_strategy as instantid_memory;
+use runtime_macos::memory_helpers::instantid::memory_strategy as instantid_memory;
 
 use instantid_memory::{InstantIdMemoryIdentity, InstantIdRoute};
 

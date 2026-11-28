@@ -755,7 +755,7 @@ fn sweep_bernini_image_bf16() {
         &dir,
         move |width, height| GenerationRequest {
             frames: Some(1),
-            video_mode: Some("t2i".to_owned()),
+            video_mode: Some("t2i".into()),
             ..make_request(width, height)
         },
     );

@@ -1,5 +1,5 @@
 use super::*;
-use mlx_gen::gen_core::MemoryStrategySupport;
+use runtime_macos::gen_core::MemoryStrategySupport;
 
 fn minimal_request(provider: &str, rung: &str) -> Value {
     json!({
@@ -33,7 +33,7 @@ fn planned_row(arm: KreaBaseArm, tier: &str) -> Value {
 }
 
 fn fixture_spec(root: &std::path::Path) -> LoadSpec {
-    let encoder_contract = mlx_gen_krea::provider_registry()
+    let encoder_contract = runtime_macos::memory_contract_surface_registry()
         .unwrap()
         .provider_encoder_contract(KREA_BASE_PROVIDER)
         .expect("the pinned Krea base encoder contract");
@@ -367,7 +367,7 @@ fn pinned_base_contract_exposes_the_exact_declared_full_ladder() {
     let root = fixtures.path("pinned-base-contract-exposes-the-exact-declared-full-ladder");
     std::fs::create_dir_all(&root).unwrap();
     let spec = fixture_spec(&root);
-    let contract = mlx_gen_krea::provider_registry()
+    let contract = runtime_macos::memory_contract_surface_registry()
         .unwrap()
         .memory_strategy_contract(KREA_BASE_PROVIDER, &spec)
         .unwrap()

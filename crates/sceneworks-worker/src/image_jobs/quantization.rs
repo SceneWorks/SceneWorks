@@ -350,7 +350,7 @@ pub(crate) fn mlx_load_quant_for_resolved_artifact(
     if matches!(
         engine_id,
         "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
-    ) || runtime_macos::providers::flux2::product_load::loads_packed_tier_unquantized(engine_id)
+    ) || runtime_macos::converters::flux2::product_load::loads_packed_tier_unquantized(engine_id)
     {
         None
     } else {

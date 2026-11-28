@@ -425,7 +425,7 @@ pub(super) fn run_flux2(request: &Value) -> Result<Value, String> {
     };
     if arm.provider == FLUX2_PROVIDER {
         scenarios(&|fingerprint, total_bytes, predicted| {
-            mlx_gen_flux2::memory_strategy::registered_dev_t2i_safety_check(
+            runtime_macos::calibration::flux2::memory_strategy::registered_dev_t2i_safety_check(
                 &spec,
                 &contract,
                 &admission_context(fingerprint, total_bytes, predicted),

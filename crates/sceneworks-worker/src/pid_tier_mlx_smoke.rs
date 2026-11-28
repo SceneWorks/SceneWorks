@@ -57,16 +57,16 @@ fn resolve_base_dir(root: &Path) -> PathBuf {
 fn render_pid(spec: &LoadSpec, w: u32, h: u32, steps: u32, prompt: &str) -> Image {
     let generator = crate::inference_runtime::load("z_image_turbo", spec)
         .expect("load mlx z_image_turbo generator");
-    let req = GenerationRequest {
+    let mut req = GenerationRequest {
         prompt: prompt.to_owned(),
         width: w,
         height: h,
         count: 1,
         seed: Some(42),
         steps: Some(steps),
-        use_pid: true,
         ..Default::default()
     };
+    req.features.pid = Some(gen_core::PidParams::enabled());
     let mut last = String::new();
     let output = generator
         .generate(&req, &mut |p| {

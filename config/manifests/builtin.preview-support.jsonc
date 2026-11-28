@@ -6,12 +6,10 @@
     "mlx"
   ],
   "generatedFrom": {
-    "candle": {
-      "inferenceRevision": "d4e9ee0b8756e94c18030f712656cde7435c82a0",
-      "audioInferenceRevision": "38dab65f5d9640396cf2946cd4ee866ce46630c6"
-    },
-    "mlx": {
-      "inferenceRevision": "d4e9ee0b8756e94c18030f712656cde7435c82a0"
+    "schemaVersion": "sga.capabilities/2",
+    "featureSets": {
+      "candle": "candle-cuda",
+      "mlx": "macos-mlx"
     }
   },
   "models": {
@@ -109,6 +107,10 @@
       "candle": true,
       "mlx": true
     },
+    "instantid_realvisxl": {
+      "candle": false,
+      "mlx": false
+    },
     "iris_3b": {
       "candle": true,
       "mlx": true
@@ -188,8 +190,8 @@
       "candle": false
     },
     "pulid_flux_dev": {
-      "mlx": true,
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "qwen_image": {
       "candle": true,
@@ -204,18 +206,20 @@
       "mlx": false
     },
     "qwen_image_edit": {
+      "candle": true,
       "mlx": true
     },
     "qwen_image_edit_2509": {
+      "candle": true,
       "mlx": true
     },
     "qwen_image_edit_2511": {
-      "mlx": true,
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "qwen_image_edit_2511_lightning": {
-      "mlx": true,
-      "candle": true
+      "candle": true,
+      "mlx": true
     },
     "realvisxl": {
       "candle": true,

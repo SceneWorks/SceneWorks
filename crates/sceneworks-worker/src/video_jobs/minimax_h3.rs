@@ -1968,7 +1968,7 @@ fn imported_h3_load_identity(dit: &ImportedMiniMaxH3Dit) -> Value {
         "assembly": dit.assembly,
         "sourceFiles": dit._pins.iter().map(|pin| json!({
             "path": pin.loader_path(),
-            "sha256": sceneworks_core::hashing::hex(pin.content_sha256()),
+            "sha256": sceneworks_core::hashing::hex(&pin.content_or_identity_digest()),
         })).collect::<Vec<_>>(),
     })
 }
@@ -2276,10 +2276,12 @@ fn resolve_imported_minimax_h3_dit_with_check(
                 .source
                 .content_digest()
                 .map_err(|e| refuse("source-drift", e.to_string()))?;
+            let pin_sha = pin
+                .require_content_sha256()
+                .map_err(|e| refuse("source-drift", e.to_string()))?;
             if expected.len() != 64
                 || !(0..32).all(|i| {
-                    u8::from_str_radix(&expected[2 * i..2 * i + 2], 16).ok()
-                        == Some(pin.content_sha256()[i])
+                    u8::from_str_radix(&expected[2 * i..2 * i + 2], 16).ok() == Some(pin_sha[i])
                 })
             {
                 return Err(refuse(
@@ -2453,7 +2455,8 @@ fn resolve_imported_minimax_h3_dit_with_check(
                 })?;
                 let actual = format!(
                     "sha256:{}",
-                    sceneworks_core::hashing::hex(pin.content_sha256())
+                    pin.require_content_sha256_hex()
+                        .map_err(|e| refuse("source-drift", e.to_string()))?
                 );
                 if file.sha256.as_deref() != Some(actual.as_str()) {
                     return Err(refuse(
@@ -2628,7 +2631,7 @@ const IMPORTED_MINIMAX_H3_TIER: &str = "imported";
 /// Validate shared components with the pinned provider's parsers before provider loading.
 #[cfg(native_lane)]
 fn validate_imported_minimax_h3_shared(root: &Path, encoder: &Path) -> WorkerResult<()> {
-    use platform_runtime::providers::minimax_h3 as engine;
+    use platform_runtime::memory_helpers::minimax_h3 as engine;
     let refuse = |reason: String| {
         WorkerError::InvalidPayload(format!("[checkpoint-plan:incompatible-component] {reason}"))
     };

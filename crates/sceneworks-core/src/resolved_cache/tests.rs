@@ -2889,10 +2889,8 @@ fn a_produced_derivative_is_hashed_once_as_it_is_written_through_its_first_load(
         );
         let sealed = format!(
             "sha256:{}",
-            seal.content_sha256()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
+            seal.require_content_sha256_hex()
+                .expect("attested seal carries content sha256")
         );
         assert_eq!(file.sha256.as_deref(), Some(sealed.as_str()));
     }

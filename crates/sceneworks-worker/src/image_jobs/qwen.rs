@@ -227,7 +227,7 @@ pub(super) fn qwen_control_generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<BespokeGeneratedOne> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
         width,
@@ -236,16 +236,18 @@ pub(super) fn qwen_control_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
-        use_pid,
         conditioning,
         preview,
         cancel: cancel.clone(),
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
         ..Default::default()
     };
+    if use_pid {
+        request.features.pid = Some(gen_core::PidParams::enabled());
+    }
+    request.features.pag = sampling.features.pag.clone();
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("Qwen strict-pose generation failed", error))?;
@@ -753,7 +755,7 @@ pub(super) fn qwen_edit_generate_one(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<BespokeGeneratedOne> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
         width,
@@ -762,19 +764,18 @@ pub(super) fn qwen_edit_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance: Some(guidance),
-        use_pid,
         conditioning,
         preview,
         cancel: cancel.clone(),
-        sampler: sampling
-            .sampler
-            .clone()
-            .or_else(|| sampler.map(str::to_owned)),
+        sampler: sampling.sampler.clone().or_else(|| sampler.map(Into::into)),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
-        pag: sampling.pag.clone(),
         ..Default::default()
     };
+    if use_pid {
+        request.features.pid = Some(gen_core::PidParams::enabled());
+    }
+    request.features.pag = sampling.features.pag.clone();
     let completed = generator
         .generate_with_execution_report(&request, on_progress)
         .map_err(|error| crate::generation_error("edit generation failed", error))?;
