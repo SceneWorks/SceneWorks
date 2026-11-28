@@ -3992,6 +3992,7 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
     assert_eq!(t2i_hires.overlay, None);
 }
 
+#[cfg(native_lane)]
 #[test]
 fn imported_krea_hires_preserves_explicit_guidance_in_both_passes() {
     let req = request(json!({
@@ -4031,9 +4032,11 @@ fn imported_krea_hires_preserves_explicit_guidance_in_both_passes() {
         Vec::new(),
         None,
     );
-    let prepared = PreparedKreaHires::prepare(
+    let prepared = super::krea_imported::PreparedKreaHires::prepare(
         crate::inference_runtime::media(),
-        std::sync::Arc::new(LoadSpec::new(WeightsSource::Dir("/krea-base".into()))),
+        std::sync::Arc::new(gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+            "/krea-base".into(),
+        ))),
         first,
         hires,
     )
