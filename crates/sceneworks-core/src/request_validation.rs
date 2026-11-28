@@ -36,6 +36,7 @@ pub fn reject_retired_image_job(
         ImageGenerate | ImageEdit | ImageDetail | ImageUpscale | ImageInterleave | PromptRefine => {
             &["model", "checkpointModelId"]
         }
+        VectorGenerate => &["model", "rasterModel"],
         ModelDownload | ModelConvert | ModelImport | LoraImport => {
             &["modelId", "family", "baseModel"]
         }
@@ -55,6 +56,14 @@ pub fn reject_retired_image_job(
     }
     for key in ["modelManifestEntry", "baseModelManifestEntry"] {
         if let Some(entry) = payload.get(key).and_then(Value::as_object) {
+            reject_retired_image_entry(entry)?;
+        }
+    }
+    if let Some(entries) = payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+    {
+        for entry in entries.iter().filter_map(Value::as_object) {
             reject_retired_image_entry(entry)?;
         }
     }
@@ -178,5 +187,33 @@ pub fn facts_for_job(
             .unwrap_or_else(|| serde_json::json!({}));
         crate::registry::project_option_route_facts(&mut entry);
         entry.as_object().cloned().unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use crate::contracts::JobType;
+
+    #[test]
+    fn vector_replay_refuses_a_retired_frozen_raster_checkpoint() {
+        let payload = serde_json::json!({
+            "model": "vtracer",
+            "modelManifestEntries": [{"id": "old-checkpoint", "family": "mage-flow"}],
+        });
+        let refused =
+            reject_retired_image_job(&JobType::VectorGenerate, payload.as_object().unwrap())
+                .unwrap_err();
+        assert_eq!(refused.code, "retired_model");
+        assert_eq!(refused.context["identity"], "mage-flow");
+
+        let retained = serde_json::json!({
+            "model": "vtracer",
+            "modelManifestEntries": [{"id": "flux_dev", "family": "flux"}],
+        });
+        assert!(
+            reject_retired_image_job(&JobType::VectorGenerate, retained.as_object().unwrap())
+                .is_ok()
+        );
     }
 }
