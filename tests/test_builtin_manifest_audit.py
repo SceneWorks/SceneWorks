@@ -200,6 +200,26 @@ def _load_builtin_models_manifest() -> dict:
     return manifest
 
 
+def test_builtin_catalog_excludes_retired_image_models():
+    retired_ids = {
+        "boogu_image",
+        "boogu_image_turbo",
+        "boogu_image_edit",
+        "lens",
+        "lens_turbo",
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+        "taef2",
+    }
+    model_ids = {model["id"] for model in _load_builtin_models_manifest()["models"]}
+    assert not (reintroduced := model_ids & retired_ids), sorted(reintroduced)
+    assert "krea_2_turbo" in model_ids
+
+
 def test_v2_product_manifest_keeps_memory_evidence_out_of_authored_rows() -> None:
     product = _cached_jsonc(MANIFEST_PATH)
     assert product["schemaVersion"] == 2
