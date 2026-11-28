@@ -330,6 +330,7 @@ pub enum JobsStoreError {
     InvalidStatus(String),
     InvalidNumber(String),
     InvalidRequestedGpu(String),
+    RetiredModel(crate::request_validation::ValidationRefusal),
     RetryLimit {
         max_attempts: u32,
     },
@@ -441,6 +442,7 @@ impl std::fmt::Display for JobsStoreError {
             ),
             Self::InvalidResultItem(detail) => write!(formatter, "{detail}"),
             Self::ReplayUnavailable(reason) => write!(formatter, "{}", reason.reason),
+            Self::RetiredModel(reason) => write!(formatter, "{reason}"),
             Self::PortableSourceClaimsRequired { worker_id } => write!(
                 formatter,
                 "Worker {worker_id} must republish its source claims: they were dropped when it went offline."
@@ -1268,6 +1270,18 @@ impl JobsStore {
         // Per-item job results (SW-7082), kept out of the replaced-per-POST `result_json`.
         transaction.execute_batch(result_items::RESULT_ITEMS_SCHEMA)?;
         backfill_claim_routing_facts(&transaction)?;
+        // Previously admitted, bound jobs also predate the live catalog. Fail these once at
+        // startup so a removed route cannot leave old queued rows waiting for a worker forever.
+        let queued = self.list_jobs_by_status_on_connection(&transaction, &["queued"])?;
+        fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now_unix_seconds()),
+            queued.into_iter().filter_map(|job| {
+                crate::request_validation::reject_retired_image_job(&job.job_type, &job.payload)
+                    .err()
+                    .map(|error| (job.id, "This model is no longer supported.", error.detail))
+            }),
+        )?;
         release_dead_worker_rows(&transaction, now_unix_seconds())?;
         transaction.commit()?;
         Ok(())
@@ -4627,6 +4641,8 @@ impl JobsStore {
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let source = self.get_job_on_connection(&transaction, source_job_id)?;
+        crate::request_validation::reject_retired_image_job(&source.job_type, &source.payload)
+            .map_err(JobsStoreError::RetiredModel)?;
         if source.status != JobStatus::Completed
             || self.progress_side_effects_pending_on_connection(&transaction, source_job_id)?
         {

@@ -189,13 +189,6 @@ pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
 /// live in their own upstream repos, but those are the two BESPOKE routes, and no anchor measures
 /// them.
 pub const KOLORS_REPOSITORY: &str = "SceneWorks/kolors-mlx";
-/// The base Lens tiered rehost (sc-22732). The gpt-oss-20b MoE text encoder and the FLUX.2
-/// autoencoder are packed per tier, so a Lens capture opens exactly one root.
-pub const LENS_REPOSITORY: &str = "SceneWorks/lens-mlx";
-/// The distilled Lens-Turbo tiered rehost (sc-22732) — a DIFFERENT repository at a DIFFERENT
-/// revision from [`LENS_REPOSITORY`], bound through its own `SCENEWORKS_LENS_TURBO_*` family the way
-/// `flux1_schnell` is split from `flux1_dev`, so a turbo plan can never be satisfied by base weights.
-pub const LENS_TURBO_REPOSITORY: &str = "SceneWorks/lens-turbo-mlx";
 /// The PACKED Ideogram 4 turnkey (sc-22732). It carries the `q4/` and `q8/` tiers ONLY, and it
 /// serves both catalog models — `ideogram_4` and `ideogram_4_turbo` share this repo AND this
 /// revision, differing by the `turbo_lora.safetensors` the turbo tier ships beside the glob.
@@ -217,7 +210,6 @@ pub const QWEN_IMAGE_2_1_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1";
 /// The distilled Qwen-Image 2.1 Turbo packed re-host (sc-25907, epic 25899): `q8/` and `q4/`
 /// subdirs laid out exactly as [`QWEN_IMAGE_2_1_REPOSITORY`]'s, but a DIFFERENT repository at a
 /// different revision, bound through its own `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` family the way
-/// [`LENS_TURBO_REPOSITORY`] is split from [`LENS_REPOSITORY`] — so a Turbo plan can never be
 /// satisfied by base weights. Published by the epic's terminal story (sc-25909) at
 /// `9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`.
 pub const QWEN_IMAGE_2_1_TURBO_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-turbo-mlx";
@@ -1966,32 +1958,6 @@ mod minimax_h3_image_tests {
     }
 }
 
-/// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
-/// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
-/// and the VAE are bit-identical across all six variants and are hosted ONCE in
-/// [`MAGE_COMPONENTS_REPOSITORY`], which the manifest declares as a per-tier co-requisite of every
-/// Mage entry (`config/manifests/builtin.models.jsonc`). Both engines resolve that split through
-/// `LoadSpec::components` (`mlx-gen-mage` `model::resolve_component_dirs`, `candle-gen-mage`
-/// `resolved_component_dirs`), so a Mage capture binds TWO artifact triples: the variant's own tier
-/// root and the shared components snapshot.
-///
-/// One constant per variant rather than a derived string: the anchor key, the engine provider id and
-/// the artifact are three separate namespaces, and a capture that resolved the repository by
-/// transforming the provider id would silently follow any future rename.
-pub const MAGE_FLOW_REPOSITORY: &str = "SceneWorks/Mage-Flow";
-pub const MAGE_FLOW_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Base";
-pub const MAGE_FLOW_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Turbo";
-pub const MAGE_FLOW_EDIT_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit";
-pub const MAGE_FLOW_EDIT_BASE_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Base";
-pub const MAGE_FLOW_EDIT_TURBO_REPOSITORY: &str = "SceneWorks/Mage-Flow-Edit-Turbo";
-/// The shared Mage text-encoder + VAE rehost. Named `-mlx` upstream but consumed by BOTH lanes: the
-/// manifest ships exactly these co-requisite downloads for every Mage entry regardless of backend,
-/// and `candle-gen-mage` reads the same `text_encoder`/`vae` component ids.
-pub const MAGE_COMPONENTS_REPOSITORY: &str = "SceneWorks/Mage-Flow-Components-mlx";
-/// The two component ids both Mage engines advertise, in descriptor order (`mlx-gen-mage`
-/// `model::REQUIRED_COMPONENTS`, `candle-gen-mage` `REQUIRED_COMPONENTS`).
-pub const MAGE_COMPONENT_TEXT_ENCODER: &str = "text_encoder";
-pub const MAGE_COMPONENT_VAE: &str = "vae";
 /// The Wan 2.2 artifacts (sc-22736). The first family whose artifact is per (lane, TIER) rather
 /// than per lane, so each route names THREE repositories: the MLX rehost the macOS lane opens for
 /// every tier, the Candle rehost the Windows/Linux lane opens for `q4` and `q8`, and the upstream

@@ -1260,9 +1260,7 @@ pub(crate) fn eng2_low_res_architecture_params(
         | "flux2_klein_4b"
         | "flux2_klein_9b"
         | "flux2_klein_9b_kv"
-        | "flux2_klein_9b_true_v2"
-        | "lens"
-        | "lens_turbo" => Some(Eng2LowResArchitectureParams {
+        | "flux2_klein_9b_true_v2" => Some(Eng2LowResArchitectureParams {
             latent_channels: 32,
             vae_spatial_scale: 8,
             patch_size: 2,
@@ -1272,8 +1270,8 @@ pub(crate) fn eng2_low_res_architecture_params(
             head_dim: 128,
         }),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" | "anima" | "anima_base"
-        | "anima_aesthetic" | "anima_turbo" | "boogu_image" | "qwen_image" | "z_image"
-        | "z_image_turbo" | "z_image_edit" => Some(Eng2LowResArchitectureParams {
+        | "anima_aesthetic" | "anima_turbo" | "qwen_image" | "z_image" | "z_image_turbo"
+        | "z_image_edit" => Some(Eng2LowResArchitectureParams {
             latent_channels: 16,
             vae_spatial_scale: 8,
             patch_size: 2,

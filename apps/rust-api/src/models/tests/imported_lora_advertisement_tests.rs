@@ -157,62 +157,6 @@ fn imported_krea_2_advertises_adapters_on_both_registered_backends() {
     assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
 }
 
-/// Generated Mage-Flow full fine-tunes render plain text-to-image on MLX, whose provider seam
-/// rejects adapters — so that projection withdraws the LoRA promise while preserving the
-/// routable model itself. Candle declares no `mage-flow` imported provider at all, so it has no
-/// opinion to project and must leave the entry untouched: withdrawing there would advertise a
-/// lane that exists and merely lacks adapters, which is a different and false claim.
-#[test]
-fn mage_flow_withdraws_adapters_only_on_the_lane_that_serves_it() {
-    let mut on_mlx = entry("finetune_9f3c", "mage-flow");
-    apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
-    assert!(
-        withdrawn(&on_mlx),
-        "MLX renders generated Mage t2i but cannot load adapters: {on_mlx:?}"
-    );
-
-    let untouched = entry("finetune_9f3c", "mage-flow");
-    let mut on_candle = entry("finetune_9f3c", "mage-flow");
-    apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
-    assert_eq!(
-        on_candle, untouched,
-        "candle declares no mage-flow imported provider, so there is no promise to withdraw"
-    );
-}
-
-/// The LANE-SCOPED verdict above is per-lane truth; the PRODUCTION binding must still publish a
-/// withdrawal on a candle-only deployment. sc-15328's hang was exactly this shape — no explicit
-/// empty family list, so `families_from_value_chain` fell back to `family`, the API accepted a
-/// LoRA submission, and no worker could claim it. That regressed on every non-macOS build the
-/// moment the advertisement became facts-derived, because candle registers no `mage-flow`
-/// imported provider and therefore answers "no opinion" rather than "refuses adapters".
-#[test]
-fn a_candle_only_build_still_withdraws_mage_adapters_from_the_other_lane() {
-    let mut object = entry("finetune_9f3c", "mage-flow");
-    // The production binding's own lane (candle) has no opinion here.
-    assert_eq!(
-        imported_lora_advertisement_verdict(&object, false, true),
-        None
-    );
-    // MLX is the lane that serves the family and refuses adapters, and that refusal is what
-    // must reach the entry regardless of which engine this build links.
-    assert_eq!(
-        imported_lora_advertisement_verdict(&object, true, false),
-        Some(false)
-    );
-    write_imported_lora_advertisement(&mut object, false);
-    assert!(withdrawn(&object), "{object:?}");
-    assert_eq!(object["loraCompatibility"]["families"], json!([]));
-
-    // A positive advertisement must NOT cross lanes: offering adapters this build cannot claim
-    // is the same hang pointed the other way.
-    let krea = entry("user_kreamania_variant5", "krea_2");
-    assert_eq!(
-        imported_lora_advertisement_verdict(&krea, true, false),
-        Some(true)
-    );
-}
-
 /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
 /// than family. Neither may be touched — this projection only ever removes a promise nothing
 /// can keep.

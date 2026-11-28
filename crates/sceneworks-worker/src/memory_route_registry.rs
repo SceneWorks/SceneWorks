@@ -467,7 +467,6 @@ const PLAIN_LORA_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::IpAdapter,
 ];
 const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
-const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
 const BF16_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Bf16];
 const BF16_Q4_Q8: &[MemoryRouteTier] = &[
     MemoryRouteTier::Bf16,
@@ -476,24 +475,6 @@ const BF16_Q4_Q8: &[MemoryRouteTier] = &[
 ];
 
 const LEGACY_RULES: &[MemoryRouteRule] = &[
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "lens",
-        tiers: Q4_ONLY,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "lens_turbo",
-        tiers: BF16_ONLY,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "qwen_image",
@@ -727,60 +708,6 @@ const LEGACY_RULES: &[MemoryRouteRule] = &[
         tiers: ALL_TIERS,
         modes: ALL_MODES,
         load_profiles: PLAIN_SINGLE_CONTROL,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "mage_flow_base",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "mage_flow",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "mage_flow_turbo",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "mage_flow_edit_base",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "mage_flow_edit",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "mage_flow_edit_turbo",
-        tiers: ALL_TIERS,
-        modes: ALL_MODES,
-        load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
@@ -2768,7 +2695,6 @@ pub(crate) enum MemoryGateFamily {
     Flux1,
     Flux2Dev,
     Flux2Klein,
-    Mage,
     Chroma,
     Ideogram,
     Kolors,
@@ -2791,12 +2717,6 @@ pub(crate) fn gate_family(engine_id: &str) -> Option<MemoryGateFamily> {
         "flux1_schnell" | "flux1_dev" | "flux1_dev_control" => Flux1,
         "flux2_dev" => Flux2Dev,
         "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit" => Flux2Klein,
-        "mage_flow"
-        | "mage_flow_base"
-        | "mage_flow_turbo"
-        | "mage_flow_edit"
-        | "mage_flow_edit_base"
-        | "mage_flow_edit_turbo" => Mage,
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => Chroma,
         "ideogram_4" | "ideogram_4_turbo" => Ideogram,
         "kolors" => Kolors,
@@ -2843,10 +2763,6 @@ pub(crate) const CHROMA_REQUEST_EVIDENCE_REVISION: &str =
     "sc-20788-candle-chroma-staged-residency-v2";
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(crate) const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str =
-    "sc-15813-candle-mage-flow-request-scope-v1";
-
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str =
     "sc-15831-candle-flux2-klein-request-scope-v1";
 
@@ -2874,7 +2790,6 @@ pub(crate) fn candle_gate_evidence_revision(engine_id: &str) -> Option<&'static 
         Some(Flux1) if engine_id != "flux1_dev_control" => FLUX1_REQUEST_EVIDENCE_REVISION,
         Some(Flux2Dev) => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
         Some(Flux2Klein) if engine_id == "flux2_klein_9b" => FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION,
-        Some(Mage) => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
         Some(Chroma) => CHROMA_REQUEST_EVIDENCE_REVISION,
         Some(Ideogram) => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
         Some(Kolors | KolorsBespoke) => KOLORS_REQUEST_EVIDENCE_REVISION,

@@ -9,8 +9,8 @@ pub(crate) use crate::events::{EventHub, EventMessage};
 
 pub(crate) use crate::training::{
     insufficient_disk_space, resolve_base_model_path, training_base_model_installed,
-    training_base_model_label, training_base_model_status, training_base_unavailable_message,
-    training_is_full_finetune, TrainingBaseStatus, LTX_GEMMA_CO_REQUISITE,
+    training_base_model_status, training_base_unavailable_message, TrainingBaseStatus,
+    LTX_GEMMA_CO_REQUISITE,
 };
 
 pub(crate) use crate::workers::person_readiness_from_workers;
@@ -881,107 +881,6 @@ pub(crate) fn private_training_output_dir(
             .as_str()
             .expect("stored training output directory"),
     )
-}
-
-/// Submit a real **FULL base fine-tune** (sc-15036, epic 14034 F6) against the Mage-Flow Base
-/// target — the only target that offers `networkType: "full"` — and return
-/// `(job_id, output_dir)`.
-///
-/// Distinct from [`submit_real_training_job`] in exactly the way that matters: the SAME target
-/// with `advanced.networkType = "full"` must resolve its output into the model tree
-/// (`<data>/models/finetunes/<id>`) rather than the LoRA tree, so the returned `output_dir` is
-/// itself part of what the caller asserts.
-pub(crate) async fn submit_full_finetune_job(
-    app: axum::Router,
-    project_id: &str,
-    data_dir: &std::path::Path,
-) -> (String, std::path::PathBuf) {
-    seed_pinned_training_base_fixture(data_dir, "mage_flow_base");
-    let (_, asset) = request_multipart_upload(
-        app.clone(),
-        &format!("/api/v1/projects/{project_id}/assets"),
-        "Portrait.PNG",
-        "image/png",
-        b"png-bytes",
-    )
-    .await;
-    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
-    let (_, dataset) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/projects/{project_id}/training/datasets"),
-        json!({
-            "name": "Aurora set",
-            "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
-        }),
-    )
-    .await;
-    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
-
-    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
-    let target = registry["targets"]
-        .as_array()
-        .expect("targets")
-        .iter()
-        .find(|target| target["baseModel"] == "mage_flow_base")
-        .expect("the Mage-Flow Base training target is registered")
-        .clone();
-    let mut config = target["defaults"].clone();
-    config["triggerWord"] = json!("auroraStyle");
-    config["advanced"]["networkType"] = json!("full");
-    if let Some(full_config) = target["defaults"]["advanced"]["fullFinetuneConfig"].as_object() {
-        config["advanced"]["mixedPrecision"] = full_config["mixedPrecision"].clone();
-        config["advanced"]["gradientCheckpointing"] = full_config["gradientCheckpointing"].clone();
-    }
-    // The full-tune memory envelope scales with the training resolution. Use the target's
-    // smallest advertised resolution so this test remains about registration while still
-    // exercising a request the shared target-limit boundary accepts.
-    config["resolution"] = target["limits"]["resolutions"]
-        .as_array()
-        .and_then(|resolutions| resolutions.first())
-        .cloned()
-        .expect("Mage-Flow advertises at least one training resolution");
-
-    // The caller pins a deterministic unified-memory budget via `training_env` — see that
-    // helper for why the fixture's real staged bytes otherwise make admission a property of
-    // the host. No env guard HERE: [`EnvVars::set`] is not reentrant and the caller already
-    // holds the shared env lock.
-    let (status, job) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/projects/{project_id}/training/jobs"),
-        json!({
-            "targetId": target["id"],
-            "datasetId": dataset_id,
-            "config": config,
-            "outputName": "Aurora Base",
-            "dryRun": false
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "submit failed: {job}");
-    let job_id = job["id"].as_str().expect("job id").to_owned();
-    let payload = private_training_payload(data_dir, &job_id);
-    let output_dir = std::path::PathBuf::from(
-        payload["plan"]["output"]["outputDir"]
-            .as_str()
-            .expect("output dir"),
-    );
-    (job_id, output_dir)
-}
-
-/// Write the two files a full base fine-tune emits into its output dir — the diffusers transformer
-/// component pair `mlx_gen_mage::load_finetuned` reads.
-pub(crate) fn stage_trained_base_checkpoint(output_dir: &std::path::Path) {
-    std::fs::create_dir_all(output_dir).expect("output dir creates");
-    std::fs::write(
-        output_dir.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
-        br#"{"_class_name":"MageFlow"}"#,
-    )
-    .expect("config writes");
-    write_test_safetensors(
-        &output_dir.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
-    );
 }
 
 /// Drives a project-scoped training job from submission to a completed result

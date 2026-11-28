@@ -151,10 +151,6 @@ pub(crate) const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
 /// declaration.
 pub(super) const HEADROOM_GB: f64 = sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB;
 
-/// Lens dense/bf16's measured 1024² activation transient. Its gpt-oss encoder is the only current
-/// MLX family whose architecture-bound transient exceeds the generic calibration (sc-11924).
-pub(super) const LENS_DENSE_HEADROOM_GB: f64 = 29.88;
-
 /// The macOS/app share inside [`HEADROOM_GB`] — the part of that flat allowance that covers the OS and
 /// other apps drawing from the same unified pool, as opposed to this request's activation transient.
 ///
@@ -172,11 +168,6 @@ impl HeadroomAllowance {
     pub(super) const GENERIC: Self = Self {
         total_gb: HEADROOM_GB,
         os_reserve_gb: OS_APP_RESERVE_GB,
-    };
-    /// sc-11924's lens-dense measurement: a bare activation transient, no reserve folded in.
-    pub(super) const LENS_DENSE: Self = Self {
-        total_gb: LENS_DENSE_HEADROOM_GB,
-        os_reserve_gb: 0.0,
     };
 }
 
@@ -1020,7 +1011,7 @@ pub(super) fn spec_component_bytes_with_provider_footprint_and_sizes(
         || replaces_component)
         .then_some(footprint)
         .flatten();
-    let mut headroom = HeadroomAllowance::GENERIC;
+    let headroom = HeadroomAllowance::GENERIC;
     let (mut total_bytes, mut te_bytes) = match (&spec.weights, provider_owned_assembly_footprint) {
         (_, Some(components)) => (
             components
@@ -1030,16 +1021,8 @@ pub(super) fn spec_component_bytes_with_provider_footprint_and_sizes(
             components.text_encoder,
         ),
         (WeightsSource::Dir(dir), None) => {
-            let mut total = sum_safetensors_bytes(dir);
+            let total = sum_safetensors_bytes(dir);
             let te = resolve_text_encoder_bytes(footprint_te, dir);
-            if matches!(engine_id, "lens" | "lens_turbo") {
-                let disk_te = sum_safetensors_bytes(&dir.join("text_encoder"));
-                let materialized_expansion = te.saturating_sub(disk_te);
-                total = total.saturating_add(materialized_expansion);
-                if spec.quantize.is_none() && packed_quant_bits(dir, "text_encoder").is_none() {
-                    headroom = HeadroomAllowance::LENS_DENSE;
-                }
-            }
             (total, te)
         }
         (WeightsSource::File(_), None) => (source_bytes(&spec.weights), footprint_te.unwrap_or(0)),

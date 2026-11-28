@@ -80,14 +80,12 @@ pub fn import_adapter_for_family(family: &str) -> Option<&'static str> {
         "z-image"
             | "qwen-image"
             | "qwen-image-2-1"
-            | "lens"
             | "sensenova-u1"
             | "flux"
             | "flux3"
             | "chroma"
             | "kolors"
             | "sdxl"
-            | "mage-flow"
             | "sd3"
             | "ltx-video"
             | "wan-video"
@@ -164,14 +162,12 @@ mod tests {
             ("z-image", "z_image_diffusers"),
             ("qwen-image", "qwen_image"),
             ("qwen-image-2-1", "qwen_image_2_1"),
-            ("lens", "lens_turbo"),
             ("sensenova-u1", "sensenova_u1"),
             ("flux", "flux_diffusers"),
             ("flux3", "mlx_flux3"),
             ("chroma", "chroma_diffusers"),
             ("kolors", "kolors_diffusers"),
             ("sdxl", "sdxl_diffusers"),
-            ("mage-flow", "mlx_mage"),
             ("sd3", "sd3"),
             ("ltx-video", "ltx_video"),
             ("wan-video", "wan_video"),

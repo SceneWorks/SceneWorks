@@ -111,12 +111,10 @@ starter set of models.
 ## Models
 
 SceneWorks ships a built-in catalog of models it can download and run natively;
-weights are pulled on first use, not bundled. The catalog currently spans **53
-image models, 9 video models, 8 audio models, and 15 utility models**, including:
+weights are downloaded on first use. The catalog includes these models and utilities.
 
-- **Image** — Z-Image / Z-Image-Edit, Qwen-Image (+ Edit), Mage-Flow
-  (Base/RL/Turbo, + Edit), FLUX.1 [schnell/dev], FLUX.2 [klein 9B / dev], Krea 2
-  (Raw/Turbo), Ideogram 4, Lens, SenseNova-U1, Boogu, Anima 2B, Chroma1, Kolors,
+- **Image** — Z-Image / Z-Image-Edit, Qwen-Image (+ Edit), FLUX.1 [schnell/dev],
+  FLUX.2 [klein 9B / dev], Krea 2 (Raw/Turbo), Ideogram 4, SenseNova-U1, Anima 2B, Chroma1, Kolors,
   Stable Diffusion 3.5 (Large/Medium), SANA / SANA-Sprint, SDXL / RealVisXL /
   Illustrious-XL, Bernini, plus identity models InstantID and PuLID-FLUX.
 - **Video** — LTX-2.3 (and 10Eros), Wan 2.2 (TI2V-5B, T2V/I2V-14B, VACE-Fun
@@ -217,7 +215,7 @@ video adapters in Video Studio. API clients can validate a plan with `dryRun: tr
 before submitting a real run.
 
 - **Image LoRAs** — Z-Image-Turbo, SDXL (the generic SDXL-UNet kernel that
-  SDXL-family models such as Kolors extend), Lens, Krea 2, and Stable Diffusion
+  SDXL-family models such as Kolors extend), Krea 2, and Stable Diffusion
   3.5 (Large/Medium).
 - **MOSS-Image LoRA / LoKr** — explicit Base and SFT targets on Apple Silicon
   (MLX) and CUDA (candle). Base weights, text encoder and VAE stay frozen.

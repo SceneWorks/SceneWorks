@@ -51,7 +51,6 @@ use super::krea_imported::generate_krea_imported_control_stream;
 use super::krea_imported::generate_krea_imported_stream;
 use super::krea_multiphase::generate_krea_multiphase_stream;
 use super::krea_turbo_raw::generate_krea_turbo_on_raw_stream;
-use super::mage_finetuned::generate_mage_finetuned_stream;
 #[cfg(target_os = "macos")]
 use super::mlx::generate_stream;
 #[cfg(target_os = "macos")]
@@ -330,25 +329,6 @@ pub(super) async fn execute_mlx_image_route(
                     },
                     request,
                     target,
-                    asset_writes,
-                )
-                .await?;
-            }
-            ImageRoute::MageFinetuned => {
-                // A full base fine-tune's own checkpoint (sc-15036): pair the trained transformer
-                // with the installed Mage-Flow base's shared text encoder + VAE and render through
-                // `load_finetuned`. txt2img, `count` renders each its own seed.
-                let PreparedImageRoute::MageFinetuned(transformer) = route else {
-                    unreachable!("Mage fine-tuned route missing its prepared transformer")
-                };
-                generate_mage_finetuned_stream(
-                    api,
-                    settings,
-                    job,
-                    *transformer,
-                    plan,
-                    project_path,
-                    backend,
                     asset_writes,
                 )
                 .await?;
@@ -934,22 +914,6 @@ pub(super) async fn execute_candle_image_route(
                     )
                     .await?;
                 }
-                CandleImageRoute::MageFinetuned => {
-                    let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
-                        unreachable!("Mage fine-tuned route missing its prepared transformer")
-                    };
-                    generate_mage_finetuned_stream(
-                        api,
-                        settings,
-                        job,
-                        *transformer,
-                        plan,
-                        project_path,
-                        backend,
-                        asset_writes,
-                    )
-                    .await?;
-                }
                 CandleImageRoute::SdxlImported => {
                     let PreparedCandleImageRoute::SdxlImported(sources) = route else {
                         unreachable!("SDXL imported route missing its prepared sources")
@@ -1002,11 +966,7 @@ pub(super) async fn execute_candle_image_route(
                         request.model
                     )));
                 }
-                // Registry-driven candle generation. Mage Edit is named separately by the resolver so
-                // an edit without its required source can never fall through as plain T2I; both variants
-                // use the same generic stream once their request shapes are resolved.
-                CandleImageRoute::MageEdit
-                | CandleImageRoute::MossImageEdit
+                CandleImageRoute::MossImageEdit
                 | CandleImageRoute::QwenImage21Edit
                 | CandleImageRoute::MinimaxH3ImageEdit
                 | CandleImageRoute::Flux3Reference

@@ -1690,6 +1690,11 @@ pub(crate) fn validate_lora_specs_for_model_in_mode(
             })?;
         }
         if let Some(detected_family) = header.as_ref().and_then(detect_lora_family) {
+            sceneworks_core::request_validation::reject_retired_image_identity(
+                "loras",
+                &detected_family,
+            )
+            .map_err(crate::jobs::retired_model_error)?;
             // `model_families` are normalized (via `model_lora_families` →
             // `normalize_lora_family`, `_`→`-`), but `detect_lora_family` returns the catalog/
             // trainer-verbatim token (e.g. `krea_2`, underscore — chosen so import-time
@@ -2137,6 +2142,10 @@ pub(crate) fn reconcile_lora_family(
     // Shared policy + canonicalization: spelling variants of one family (Krea 2's
     // `krea2`/`krea-2`/`krea_2`) reconcile instead of being rejected, and the result
     // is the canonical stored token.
+    for family in supplied.iter().chain(detected.iter()) {
+        sceneworks_core::request_validation::reject_retired_image_identity("family", family)
+            .map_err(crate::jobs::retired_model_error)?;
+    }
     reconcile_detected_family(supplied, detected).map_err(|mismatch| {
         ApiError::bad_request(format!(
             "LoRA file appears to be a {} model, but family was declared as {}. Re-import with family {} or pick a different file.",
@@ -4598,56 +4607,6 @@ mod base_model_gating_tests {
             }
         }
         keys
-    }
-
-    /// sc-14057 + sc-10214: a Mage adapter gets its own family-scoped folder, so a Mage and a
-    /// Qwen-Image LoRA sharing one display name can never co-mingle in a single record dir (the
-    /// collision that made the header inspector arbitrate non-deterministically).
-    #[test]
-    fn mage_flow_imports_into_a_family_scoped_folder() {
-        assert_eq!(
-            derive_lora_id(None, "Realism Engine", Some("mage-flow")),
-            "mage_flow_realism_engine"
-        );
-        // The inference trainer's own `mage_flow` spelling canonicalizes to the same folder.
-        assert_eq!(
-            derive_lora_id(None, "Realism Engine", Some("mage_flow")),
-            "mage_flow_realism_engine"
-        );
-        for sibling in ["qwen-image", "z-image", "krea_2"] {
-            assert_ne!(
-                derive_lora_id(None, "Realism Engine", Some("mage-flow")),
-                derive_lora_id(None, "Realism Engine", Some(sibling)),
-                "mage-flow must not share a folder with {sibling}"
-            );
-        }
-    }
-
-    /// The cross-family guard, exercised on the pair that actually looks alike: a Mage folder
-    /// rejects an incoming Qwen-Image import (and vice versa), while a same-family re-import is
-    /// still allowed.
-    #[test]
-    fn a_mage_folder_rejects_a_foreign_family_reimport() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_adapter(
-            &tmp.path().join("mage.safetensors"),
-            r#"{"format":"pt"}"#,
-            &mage_lora_keys(),
-        );
-        assert_eq!(
-            conflicting_folder_family(tmp.path(), "qwen-image")
-                .unwrap()
-                .as_deref(),
-            Some("mage-flow")
-        );
-        assert_eq!(
-            conflicting_folder_family(tmp.path(), "mage-flow").unwrap(),
-            None
-        );
-        assert_eq!(
-            conflicting_folder_family(tmp.path(), "mage_flow").unwrap(),
-            None
-        );
     }
 
     /// The import inspector returns the detected family AND what the file declares about itself,

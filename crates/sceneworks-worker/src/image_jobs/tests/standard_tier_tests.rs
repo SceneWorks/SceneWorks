@@ -988,26 +988,6 @@ fn effective_quant_label_never_aliases_nvfp4_to_bf16_or_q4() {
     }
 }
 
-/// sc-16025: provider-local floors are part of the effective numeric identity. The label stored
-/// on the asset/effective-settings record must not collapse Mage's mixed q4/q8 load to plain q4.
-#[cfg(native_lane)]
-#[test]
-fn mage_q4_label_includes_every_descriptor_declared_component_floor() {
-    let request = resolved_request(
-        json!({ "model": "mage_flow", "advanced": { "mlxQuantize": 4 } })
-            .as_object()
-            .unwrap(),
-    );
-    let q4_dir = PathBuf::from("/models/mage_flow/q4");
-    let (label, bits) = effective_quant_label_gated(&request, false, Some(&q4_dir));
-    assert_eq!(
-        label.as_deref(),
-        Some("q4+[textEncoder:q8,transformerHead:q8]")
-    );
-    assert_ne!(label.as_deref(), Some("q4"));
-    assert_eq!(bits, None, "a mixed-width profile has no single bit count");
-}
-
 /// sc-11042 / epic 11037 SC#5 — **the recorded label must describe the tier that RAN.**
 ///
 /// The regression this pins: `effective_quant_label` was host-aware but DISK-BLIND. It returned
@@ -1898,47 +1878,6 @@ fn non_sana_standard_turnkey_ignores_the_sana_completeness_branch() {
     assert_eq!(standard_tier_subdir(root, &request), root.join("q8"));
 }
 
-/// Seed a Boogu tier folder (`<variant>` / `<variant>-q4` / `<variant>-bf16`): packed transformer +
-/// its config, and (when `complete`) the Qwen3-VL `mllm/` with tokenizer and the VAE. No index.
-fn seed_boogu_tier(root: &Path, folder: &str, complete: bool) {
-    let dir = root.join(folder);
-    std::fs::create_dir_all(dir.join("transformer")).unwrap();
-    std::fs::write(
-        dir.join("transformer/diffusion_pytorch_model.safetensors"),
-        b"x",
-    )
-    .unwrap();
-    std::fs::write(dir.join("transformer/config.json"), b"{}").unwrap();
-    if complete {
-        std::fs::create_dir_all(dir.join("mllm")).unwrap();
-        std::fs::write(dir.join("mllm/model.safetensors"), b"x").unwrap();
-        std::fs::write(dir.join("mllm/tokenizer.json"), b"{}").unwrap();
-        std::fs::create_dir_all(dir.join("vae")).unwrap();
-        std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"x").unwrap();
-    }
-}
-
-/// A torn Boogu tier (transformer present, `mllm/tokenizer.json` + VAE absent) must fall through to a
-/// complete sibling rather than crash the loader on the first-read `mllm/tokenizer.json`.
-#[test]
-fn boogu_torn_tier_falls_through_to_a_complete_sibling() {
-    let request = resolved_request(
-        json!({ "model": "boogu_image", "advanced": {} })
-            .as_object()
-            .unwrap(),
-    );
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // `base` is the Q8 default folder (torn); `base-bf16` is complete.
-    seed_boogu_tier(root, "base", false);
-    seed_boogu_tier(root, "base-bf16", true);
-    assert_eq!(
-            boogu_model_subdir(root, &request),
-            root.join("base-bf16"),
-            "the torn Q8 `base/` must skip to the complete `base-bf16`, not crash on `mllm/tokenizer.json`"
-        );
-}
-
 /// `resolved_tier_is_complete` (the pre-flight completeness dispatcher behind the friendly
 /// `mlx_weights_gap` message) reports a torn SANA tier as incomplete and a whole one as complete.
 #[cfg(target_os = "macos")]
@@ -2103,43 +2042,6 @@ fn krea_default_tier_clamps_to_the_floor() {
             only_q8.path().join("q8"),
             "bf16 floor with only q8 installed → q8 (a floor tier not on disk falls to the best installed)"
         );
-}
-
-#[test]
-fn candle_lens_resolves_packed_turnkey_tier_subdir() {
-    let lens_request = |bits: serde_json::Value| {
-        resolved_request(
-            json!({ "model": "lens", "advanced": { "mlxQuantize": bits } })
-                .as_object()
-                .unwrap(),
-        )
-    };
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // A Lens turnkey ships packed per-tier subdirs (transformer + gpt-oss-20b MoE TE + FLUX.2 VAE).
-    seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
-    seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-    seed_tier(
-        root,
-        "bf16",
-        "diffusion_pytorch_model.safetensors.index.json",
-    );
-
-    // A/B tier toggle: default (q8, sc-10726) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each
-    // resolve to their tier subdir — the default now prefers the clean q8 tier (clamped to
-    // installed), matching `resolve_quant`'s Q8 default.
-    assert_eq!(
-        standard_tier_subdir(root, &lens_request(json!(null))),
-        root.join("q8")
-    );
-    assert_eq!(
-        standard_tier_subdir(root, &lens_request(json!(8))),
-        root.join("q8")
-    );
-    assert_eq!(
-        standard_tier_subdir(root, &lens_request(json!(0))),
-        root.join("bf16")
-    );
 }
 
 /// sc-9092 (epic 9083 gap #3, review fix): Ideogram + Boogu were left `macOnly:true` with only

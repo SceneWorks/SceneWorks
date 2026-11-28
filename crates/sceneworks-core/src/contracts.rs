@@ -175,7 +175,6 @@ string_enum! {
         // SW-7100: MiniMax-H3-Image stamps its own id — its weights, latent space and licence are
         // its own, not MiniMax-H3's.
         MinimaxH3Image => "minimax_h3_image",
-        LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
         ChromaDiffusers => "chroma_diffusers",

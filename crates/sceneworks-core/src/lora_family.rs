@@ -445,96 +445,9 @@ pub fn apply_model_manifest_defaults(
 fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: &str) {
     match family {
         "krea-2" => apply_krea_2_studio_surface_defaults(entry),
-        "mage-flow" => apply_mage_flow_studio_surface_defaults(entry),
         // sc-26680: an imported dense MiniMax-H3 DiT takes the shipped base partition's surface.
         "minimax-h3" => crate::minimax_h3_import::apply_minimax_h3_studio_surface_defaults(entry),
         _ => {}
-    }
-}
-
-/// The `mage-flow` Studio surface — see [`apply_family_studio_surface_defaults`].
-fn apply_mage_flow_studio_surface_defaults(entry: &mut Map<String, Value>) {
-    if let Some(limits) = entry
-        .entry("limits".to_owned())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-    {
-        limits.entry("resolutions".to_owned()).or_insert_with(|| {
-            json!([
-                "512x512",
-                "768x768",
-                "1024x1024",
-                "1536x1536",
-                "2048x2048",
-                "1280x720",
-                "1536x1024",
-                "2048x1024",
-                "2048x512",
-                "720x1280",
-                "1024x1536",
-                "1024x2048",
-                "512x2048"
-            ])
-        });
-        limits
-            .entry("count".to_owned())
-            .or_insert_with(|| json!([1, 2, 4]));
-        // Binding, not advisory: both sides must be a multiple of 16 or the engine refuses the
-        // geometry. An imported entry without it would let the Width/Height override offer sizes
-        // that fail at generate time.
-        limits
-            .entry("requiresDimensionsMultipleOf".to_owned())
-            .or_insert_with(|| json!(16));
-    }
-    if let Some(defaults) = entry
-        .entry("defaults".to_owned())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-    {
-        defaults
-            .entry("resolution".to_owned())
-            .or_insert_with(|| json!("1024x1024"));
-        // The undistilled Base regime a fine-tune inherits (the distilled Turbo checkpoints are a
-        // different starting point and are not a training target).
-        defaults
-            .entry("steps".to_owned())
-            .or_insert_with(|| json!(30));
-        defaults
-            .entry("guidanceScale".to_owned())
-            .or_insert_with(|| json!(5));
-        defaults
-            .entry("count".to_owned())
-            .or_insert_with(|| json!(1));
-    }
-    if let Some(mlx) = entry
-        .entry("mlx".to_owned())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-    {
-        // The >1536² memory-gate anchor (sc-13959). Load-bearing for a fine-tune in a way it is not
-        // for the builtin: `mage_flow_base` declares no `mlx.minMemoryGb` but defaults to the
-        // pre-quantized `q4` tier (7.87 GB measured peak), whereas a fine-tuned checkpoint is DENSE
-        // bf16 by construction — ~2.4x the resident weights — and this entry deliberately declares
-        // no `mlx.quantize` (the pre-quantized tiers carry an 8-bit floor a load-time quantize does
-        // not reproduce, sc-15071). With no floor, `resolutionMemory.js` has no basis to predict a
-        // peak and offers 2048² unconditionally on ANY Mac — and an MLX overcommit is an
-        // uncatchable SIGKILL, not a recoverable error.
-        //
-        // 20 GB, derived from the builtin manifest's own numbers rather than guessed:
-        //   install totals  q4 7.002 · q8 9.450 · bf16 17.464 GB
-        //   measured MLX unified peaks (sc-15071 note)  q4 7.87 · q8 10.11 GB
-        //   peak/install    1.124 · 1.070  =>  mean 1.097
-        //   bf16 predicted  17.464 x 1.097 ~= 19.2 GB
-        // cross-checked against the manifest's MEASURED `candle.vramGbByTier.bf16` of 20.41 GB.
-        // Rounded UP to 20: over-estimating hides a borderline bucket (safe), under-estimating
-        // offers one that SIGKILLs. This is an extrapolation, not an on-device measurement — the
-        // sc-15038 precedent (calibrate via `mlx::get_peak_memory`) applies to it too.
-        //
-        // Effect: everything at/below the 2.36 MP baseline stays unconditionally offered (including
-        // 2048x1024, which at 2.10 MP is below it); only true 2048² is gated, needing a ~49 GB host
-        // to clear the 0.9 headroom fraction.
-        mlx.entry("minMemoryGb".to_owned())
-            .or_insert_with(|| json!(20));
     }
 }
 
@@ -641,7 +554,6 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // Lens and Chroma have no distinct style-variation execution mode. Their builtin entries
         // and imported-family defaults must agree so an imported checkpoint cannot restore the
         // hidden no-op removed by sc-18481.
-        ("image", "lens") => vec!["text_to_image"],
         ("image", "sensenova-u1") => vec!["text_to_image", "edit_image", "vqa", "interleave"],
         ("image", "flux") => vec!["text_to_image"],
         // FLUX.2 (sc-11043, epic 11037): imported single-file Klein checkpoints, which reach a
@@ -683,7 +595,6 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // advertise NO conditioning on their descriptor: no reference, no multi-reference, no edit.
         // So text-to-image only: there is no separate style-variation route, `edit_image` needs a
         // `mage_flow_edit*` checkpoint, and there is no `character_image` identity surface.
-        ("image", "mage-flow") => vec!["text_to_image"],
         // Bernini still-image companion (epic 4699 / sc-5424): the same `Modality::Both`
         // engine the video `bernini` family uses, but the image-typed catalog id
         // (`bernini_image`) exposes only the still tasks — t2i (text→image) and i2i
@@ -3743,6 +3654,14 @@ fn lora_display_id(lora: &Value, index: usize) -> String {
 /// cannot load, or — for a base-model-gated family (Wan or LTX) — a recorded base model
 /// that differs from `model_id`. A LoRA that declares no family is skipped (the
 /// user vouches for it). Returns the user-facing message as `Err`.
+pub(crate) fn retired_lora_identity(lora: &Value) -> Option<String> {
+    lora_declared_families(lora)
+        .into_iter()
+        .chain(lora_base_model(lora))
+        .chain(lora_declared_model_ids(lora).into_iter().map(str::to_owned))
+        .find(|identity| crate::model_family::retired_image_family(identity).is_some())
+}
+
 pub fn validate_lora_compatibility(
     loras: &[Value],
     model_family: Option<&str>,
@@ -3771,6 +3690,12 @@ pub fn validate_lora_compatibility_with_manifest(
     }
     for (index, lora) in loras.iter().enumerate() {
         let lora_id = lora_display_id(lora, index);
+        if let Some(detail) = retired_lora_identity(lora)
+            .as_deref()
+            .and_then(crate::model_family::retired_image_detail)
+        {
+            return Err(format!("LoRA {lora_id}: {detail}"));
+        }
         let declared_model_ids = lora_declared_model_ids(lora);
         if let Some(model_id) = model_id {
             if !declared_model_ids.is_empty() && !declared_model_ids.contains(&model_id) {
@@ -7418,103 +7343,6 @@ mod tests {
             entry["ui"]["editReferences"]["secondaryLabel"],
             json!("Image 2 (optional)")
         );
-    }
-
-    /// sc-15036 (epic 14034 F6) — a full base fine-tune lands in the model catalog as a bare
-    /// entry: an id, a name, a family, and `paths.model`. Without the family defaults it would be
-    /// adapter-less with an EMPTY `capabilities` array, and the Image Studio picker (which filters
-    /// on `text_to_image`) would hide the model the user just spent hours training.
-    ///
-    /// Also pins the Studio surface it inherits from its base: the 13-bucket resolution ladder, the
-    /// 1024² default, the undistilled Base 30-step / CFG-5 regime, and — load-bearing — the BINDING
-    /// `requiresDimensionsMultipleOf: 16` stride, without which the free Width/Height override
-    /// offers geometry the engine rejects.
-    #[test]
-    fn a_fine_tuned_mage_flow_base_gets_the_family_surface_it_needs_to_be_selectable() {
-        let mut entry = serde_json::Map::new();
-        apply_model_manifest_defaults(&mut entry, "image", Some("mage-flow"));
-
-        assert_eq!(entry["adapter"], "mlx_mage");
-        // Text-to-image only. There is no separate style route; `edit_image` needs a
-        // `mage_flow_edit*` checkpoint, which is not a training target, and the non-edit Mage
-        // descriptors advertise no identity/conditioning surface.
-        assert_eq!(entry["capabilities"], json!(["text_to_image"]));
-        assert_eq!(entry["loraCompatibility"]["families"], json!(["mage-flow"]));
-
-        assert_eq!(
-            entry["limits"]["resolutions"],
-            json!([
-                "512x512",
-                "768x768",
-                "1024x1024",
-                "1536x1536",
-                "2048x2048",
-                "1280x720",
-                "1536x1024",
-                "2048x1024",
-                "2048x512",
-                "720x1280",
-                "1024x1536",
-                "1024x2048",
-                "512x2048"
-            ])
-        );
-        assert_eq!(entry["defaults"]["resolution"], "1024x1024");
-        assert_eq!(entry["defaults"]["steps"], json!(30));
-        assert_eq!(entry["defaults"]["guidanceScale"], json!(5));
-        assert_eq!(
-            entry["limits"]["requiresDimensionsMultipleOf"],
-            json!(16),
-            "the ÷16 stride is BINDING on Mage geometry, not advisory"
-        );
-        // Deliberately NO `mlx.quantize`: a fine-tune is dense bf16 and the pre-quantized tiers
-        // carry an 8-bit floor (sc-15071) that a load-time quantize does not reproduce, so packing
-        // one at load would render a tiled texture rather than the prompt.
-        assert!(
-            !entry["mlx"]
-                .as_object()
-                .expect("mlx block")
-                .contains_key("quantize"),
-            "a fine-tuned Mage checkpoint must not be load-time quantized by default"
-        );
-        // ...but it DOES declare a memory floor, and that pairing is the whole point: loading dense
-        // is exactly what makes the sc-13959 >1536² gate matter. With no floor, `resolutionMemory`
-        // has no basis to predict a peak and offers 2048² on ANY Mac — and an MLX overcommit is an
-        // uncatchable SIGKILL. Derived from the builtin manifest's measured q4/q8 unified peaks and
-        // cross-checked against its measured candle bf16 VRAM; see the arm for the arithmetic.
-        assert_eq!(
-            entry["mlx"]["minMemoryGb"],
-            json!(20),
-            "a dense fine-tune must anchor the >1536² memory gate"
-        );
-        // No conditioning surface is invented for it either.
-        let ui = entry["ui"].as_object().expect("ui object");
-        assert!(!ui.contains_key("img2img"), "Mage advertises no img2img");
-        assert!(
-            !ui.contains_key("editReferences"),
-            "the non-edit Mage variants take no reference images"
-        );
-    }
-
-    /// sc-15036 — an author-supplied value always wins over the family default, so the stamping can
-    /// never overwrite a catalog entry that already declares its own surface. Discriminating: the
-    /// author's one-bucket list survives while the untouched sibling keys are still filled.
-    #[test]
-    fn mage_flow_studio_defaults_never_overwrite_author_supplied_values() {
-        let mut entry = serde_json::Map::new();
-        entry.insert(
-            "limits".to_owned(),
-            json!({ "resolutions": ["768x768"], "requiresDimensionsMultipleOf": 32 }),
-        );
-        entry.insert("defaults".to_owned(), json!({ "steps": 8 }));
-        apply_model_manifest_defaults(&mut entry, "image", Some("mage-flow"));
-
-        assert_eq!(entry["limits"]["resolutions"], json!(["768x768"]));
-        assert_eq!(entry["limits"]["requiresDimensionsMultipleOf"], json!(32));
-        assert_eq!(entry["defaults"]["steps"], json!(8));
-        // ...and the gaps are still filled.
-        assert_eq!(entry["defaults"]["resolution"], "1024x1024");
-        assert_eq!(entry["limits"]["count"], json!([1, 2, 4]));
     }
 
     #[test]

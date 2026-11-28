@@ -80,15 +80,12 @@ pub(crate) enum CandleImageLane {
     ZImageIdentity,
     IdeogramEdit,
     IdeogramImg2Img,
-    BooguEdit,
-    MageEdit,
     /// MiniMax-H3-Image edit (SW-7101): ONE ordered list of 1..=16 reference images. Bespoke for the
     /// same reason as [`Self::QwenImage21Edit`]: the generic txt2img gate refuses `edit_image` and
     /// every conditioning carrier, and the id is itself a candle txt2img id.
     MinimaxH3ImageEdit,
     /// FLUX.3's ordered AE-only conditioning, served by the generic registered generator.
     Flux3Reference,
-    BooguImg2Img,
     KreaEdit,
     BerniniEdit,
     SdxlIpAdapter,
@@ -234,20 +231,6 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         models: ModelMatch::Any(&["ideogram_4", "ideogram_4_turbo"]),
         shape: |context| ideogram_img2img_candle_eligible(context.payload),
     },
-    CandleImageRoute {
-        lane: CandleImageLane::BooguEdit,
-        models: ModelMatch::Any(&["boogu_image_edit"]),
-        shape: |context| boogu_edit_candle_eligible(context.payload),
-    },
-    CandleImageRoute {
-        lane: CandleImageLane::MageEdit,
-        models: ModelMatch::Any(&[
-            "mage_flow_edit_base",
-            "mage_flow_edit",
-            "mage_flow_edit_turbo",
-        ]),
-        shape: |context| mage_edit_candle_eligible(context.payload),
-    },
     // Qwen-Image 2.1 reference / local editing (sc-24110). The Candle port registers the SAME
     // engine id as the MLX one and declares the SAME `Reference` + `MultiReference` conditioning,
     // so this lane's shape predicate is literally the MLX one — one request contract, one gate, two
@@ -286,11 +269,6 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         lane: CandleImageLane::MinimaxH3ImageEdit,
         models: ModelMatch::Any(&["minimax_h3_image"]),
         shape: |context| minimax_h3_image_edit_candle_eligible(context.payload),
-    },
-    CandleImageRoute {
-        lane: CandleImageLane::BooguImg2Img,
-        models: ModelMatch::Any(&["boogu_image", "boogu_image_turbo"]),
-        shape: |context| boogu_img2img_candle_eligible(context.payload),
     },
     CandleImageRoute {
         lane: CandleImageLane::KreaEdit,
@@ -2053,61 +2031,12 @@ pub(crate) fn ideogram_img2img_candle_eligible(payload: &Map<String, Value>) -> 
     has_nonempty_string(payload, "referenceAssetId")
 }
 
-/// Boogu instruction-edit candle-routing conditions (sc-7524, epic 6831). The candle `boogu_image_edit`
-/// engine serves `edit_image` mode with a `sourceAssetId` — a single-reference instruction TI2I (the
-/// source is VAE-encoded into the DiT reference latent AND read by the Qwen3-VL vision tower; no mask /
-/// inpaint / outpaint, the descriptor accepts only `Reference`). Same payload predicate as the other edit
-/// gates, gated to `boogu_image_edit` by the caller (only the Edit checkpoint edits — Base/Turbo are
-/// T2I-only). Like Ideogram, the candle lane reuses the generic `generate_candle_stream` (the source is
-/// resolved in-lane by `resolve_boogu_edit`), so there is no separate worker `*_available` gate to mirror
-/// — the worker's `is_candle_engine` + in-lane edit resolve cover it. Candle-only — macOS keeps the MLX
-/// `boogu_image_edit` registry generator's edit path.
-pub(crate) fn boogu_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    // One source: the single `sourceAssetId`, or the plural `referenceAssetIds` multi-image picker
-    // (sc-7645 — the Boogu DiT packs up to 5 references). Either routes the edit to candle.
-    has_nonempty_string(payload, "sourceAssetId")
-        || has_nonempty_string_array(payload, "referenceAssetIds")
-}
-
-/// Mage-Flow instruction-edit routing conditions (sc-14053). Every edit checkpoint accepts one
-/// required primary `sourceAssetId` followed by optional ordered `referenceAssetIds`; the worker
-/// turns that exact list into `Reference` / `MultiReference` conditioning for the registry generator.
-pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-    payload
-        .get("sourceAssetId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
 /// MiniMax-H3-Image edit (SW-7101) on candle: the MLX arm's shape with a NON-EMPTY ordered
 /// reference list (an empty one is text-to-image, which the generic txt2img lane serves).
 pub(crate) fn minimax_h3_image_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     minimax_h3_image_mlx_eligible(payload)
         && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
             .is_some_and(|ids| !ids.is_empty())
-}
-
-/// Boogu Base/Turbo img2img (reference-guided latent-init) candle-routing conditions (sc-11786, epic
-/// 8588). The registered `boogu_image` (Base) and `boogu_image_turbo` candle generators serve registry
-/// img2img: a single `Conditioning::Reference` in a **non-edit** request VAE-encodes to the clean init
-/// latent and denoises the reduced schedule tail (`candle-gen-boogu` `resolve_reference` +
-/// `init_time_step` — `render_base` / `render_turbo`). So a Base/Turbo job in a non-edit mode with a
-/// `referenceAssetId` is candle-eligible; the worker resolves the init generically
-/// (`model_supports_img2img`, sc-10134). Same payload predicate as [`zimage_img2img_candle_eligible`],
-/// gated to the Boogu Base/Turbo ids by the caller. DISJOINT from the `boogu_image_edit` multi-reference
-/// instruction-edit lane (`boogu_edit_candle_eligible`, a different engine id + `edit_image` mode + the
-/// Qwen3-VL vision tower). Mirrors the mlx-gen-boogu img2img (sc-10191).
-pub(crate) fn boogu_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    has_nonempty_string(payload, "referenceAssetId")
 }
 
 /// Bernini still-image i2i candle-routing conditions (sc-10996, epic 6562). The candle
@@ -2507,10 +2436,6 @@ pub(crate) fn training_job_is_candle_eligible_with_facts(
             _ => false,
         },
         "anima_lora" => base_model == "anima_base" && is_adapter,
-        "mage_flow_lora" => {
-            base_model == "mage_flow_base"
-                && (is_adapter || network_type.eq_ignore_ascii_case("full"))
-        }
         // Iris-3B generation (sc-25686): `candle-gen-iris` registers ONE trainer under the
         // generation install's id, serving LoRA, LoKr and the full (weights- or random-init) run.
         // Depth (sc-25687) is always a full fine-tune; restoration (sc-25688) is the full recipe or

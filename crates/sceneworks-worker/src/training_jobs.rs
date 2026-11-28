@@ -1458,7 +1458,7 @@ fn validate_training_target_config_resolved(
     let kernel = plan.target.kernel.as_str();
     if !matches!(
         kernel,
-        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "wan_lora" | "wan_moe_lora"
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "wan_lora" | "wan_moe_lora"
     ) {
         return Ok(engine_id);
     }
@@ -1476,11 +1476,7 @@ fn validate_training_target_config_resolved(
             "Candle trainer '{engine_id}' does not support resume."
         )));
     }
-    if matches!(
-        kernel,
-        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora"
-    ) && checkpointing
-    {
+    if matches!(kernel, "anima_lora" | "kolors_lora" | "sd3_lora") && checkpointing {
         return Err(WorkerError::InvalidPayload(format!(
             "Candle trainer '{engine_id}' does not support gradient checkpointing."
         )));
@@ -1494,11 +1490,6 @@ fn validate_training_target_config_resolved(
     if kernel == "anima_lora" && dtype != "bf16" {
         return Err(WorkerError::InvalidPayload(
             "Candle Anima training requires mixedPrecision=bf16.".to_owned(),
-        ));
-    }
-    if kernel == "mage_flow_lora" && network_type == "full" && dtype != "f32" {
-        return Err(WorkerError::InvalidPayload(
-            "Candle Mage full base fine-tuning requires mixedPrecision=f32.".to_owned(),
         ));
     }
     Ok(engine_id)
@@ -1789,7 +1780,7 @@ fn validate_new_family_request(
 ) -> WorkerResult<()> {
     if !matches!(
         plan.target.kernel.as_str(),
-        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "wan_lora" | "wan_moe_lora"
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "wan_lora" | "wan_moe_lora"
     ) {
         return Ok(());
     }
@@ -2585,10 +2576,6 @@ pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static 
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
         // LoRA/LoKr trainer under the same id as its generator (`"kolors"`), sc-4568.
         "kolors_lora" => (base_model == "kolors").then_some("kolors"),
-        // Lens trains the base (non-distilled) Lens DiT — the `SceneWorks/Lens` diffusers rehost
-        // since sc-8797 (microsoft/Lens is dead); the engine registers its LoRA/LoKr trainer
-        // under the base generator id `"lens"` (arch-identical to lens_turbo), sc-5148.
-        "lens_lora" => Some("lens"),
         // Krea trains the undistilled `krea/Krea-2-Raw` DiT; the engine registers its LoRA/LoKr
         // trainer under the base id `"krea_2_raw"` (arch-identical to krea_2_turbo), sc-7577/7578.
         "krea_lora" => Some("krea_2_raw"),
@@ -2625,25 +2612,6 @@ pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static 
         // only the Base trainer, so reject sibling and unknown identities here as a second gate.
         "anima_lora" => match base_model {
             "anima_base" => Some("anima_base"),
-            _ => None,
-        },
-        // Mage-Flow (epic 14034, sc-14055 LoRA/LoKr + sc-14056 full base fine-tune, mapped here in
-        // sc-15277): `mlx-gen-mage` registers ONE trainer, under the inference-generator id of the
-        // training base — `MODEL_ID = "mage_flow_base"` — serving `lora`, `lokr` AND the
-        // `networkType: "full"` base fine-tune off the same id (the network type travels in
-        // `TrainingConfig`, not in the trainer id).
-        //
-        // The base-model split is load-bearing rather than decorative. Mage registers SIX
-        // *generators* (Base/Turbo/RL and the three Edit variants) but only that one *trainer*, and
-        // `load_trainer` does no variant identity check — it loads whatever diffusers snapshot the
-        // plan's `baseModelPath` points at. So an unconditional `Some("mage_flow_base")` would take
-        // an Edit checkpoint and train it through the generation-only conditioning path, with no
-        // reference-image tokens: the Edit variants require Reference/MultiReference conditioning at
-        // inference, so the adapter would be fitted on a distribution the model never sees and would
-        // train silently WRONG rather than fail. Anything that is not the Base checkpoint therefore
-        // resolves to `None` and fails loudly. See `mage_flow_edit_base` in sc-15320.
-        "mage_flow_lora" => match base_model {
-            "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
         // Iris-3B generation (sc-25685 MLX / sc-25686 Candle): both backends register ONE trainer
@@ -11086,123 +11054,6 @@ mod tests {
         );
     }
 
-    /// sc-5180 — the Lens training cutover's worker smoke: load the Lens trainer from the installed
-    /// `SceneWorks/Lens` snapshot (the training-base diffusers rehost; the original `microsoft/Lens`
-    /// is dead, sc-8797) and run two LoRA micro-steps on a one-image dataset. Proves the
-    /// worker LINKS `mlx-gen-lens` (the `load_trainer("lens", …)` trainer registration survives
-    /// linker GC — the dead-strip gotcha that bit Kolors) and a real step runs (finite loss) + writes
-    /// an adapter through the full worker path. The trainer loads the gpt-oss encoder Q8 (~12 GB) +
-    /// the DiT bf16 (res 64 keeps the per-step graph tiny — the encoder load is the heavy part).
-    /// Run on demand:
-    /// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights_trains --nocapture`.
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore = "needs real SceneWorks/Lens weights + Metal device; loads the 20B gpt-oss encoder (Q8)"]
-    fn lens_real_weights_trains_a_lora_step() {
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"));
-        let snapshot = std::fs::read_dir(
-            home.join(".cache/huggingface/hub/models--SceneWorks--Lens/snapshots"),
-        )
-        .expect("lens snapshots dir")
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_dir() && path.join("transformer").is_dir())
-        .expect("a SceneWorks/Lens snapshot dir");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let image_path = tmp.path().join("swatch.png");
-        image::RgbImage::from_fn(256, 256, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
-        })
-        .save(&image_path)
-        .expect("write test image");
-        let output_dir = tmp.path().join("out");
-        std::fs::create_dir_all(&output_dir).unwrap();
-
-        let config = TrainingConfig {
-            rank: 4,
-            alpha: 4.0,
-            learning_rate: 1e-4,
-            steps: 2,
-            batch_size: 1,
-            gradient_accumulation: 1,
-            gradient_checkpointing: false,
-            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
-            full_finetune: false,
-            train_dtype: "bf16".to_owned(),
-            resolution: 64,
-            save_every: 0,
-            seed: 42,
-            optimizer: "adamw".to_owned(),
-            weight_decay: 0.0,
-            lr_scheduler: LrSchedule::parse("constant"),
-            lr_warmup_steps: 0,
-            network_type: NetworkType::parse("lora"),
-            decompose_factor: -1,
-            lora_target_modules: Vec::new(),
-            timestep_type: "sigmoid".to_owned(),
-            timestep_bias: "balanced".to_owned(),
-            loss_type: "mse".to_owned(),
-            trigger_word: None,
-            sample_every: 0,
-            sample_prompts: Vec::new(),
-            sample_steps: 20,
-            sample_guidance_scale: 1.0,
-            resume: false,
-            control_type: None,
-            model_options: Default::default(),
-            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
-            ..Default::default()
-        };
-        let request = TrainingRequest {
-            items: vec![TrainingItem {
-                reference_image_paths: Vec::new(),
-                image_path,
-                caption: "a colorful test swatch".to_owned(),
-                control_image_path: None,
-                subject_mask_path: None,
-                model_options: Default::default(),
-            }],
-            config,
-            output_dir: output_dir.clone(),
-            file_name: "lens_smoke.safetensors".to_owned(),
-            trigger_words: Vec::new(),
-            cancel: CancelFlag::new(),
-        };
-
-        let mut trainer = crate::inference_runtime::load_trainer(
-            "lens",
-            &LoadSpec::new(WeightsSource::Dir(snapshot)),
-        )
-        .expect("lens trainer loads from the explicit runtime catalog");
-        trainer
-            .validate(&request)
-            .expect("trainer accepts the plan");
-        let mut last_loss = f32::NAN;
-        let output = trainer
-            .train(&request, &mut |progress| {
-                if let TrainingProgress::Training { loss, .. } = progress {
-                    last_loss = loss;
-                }
-            })
-            .expect("training runs a step");
-
-        eprintln!(
-            "[lens-train-smoke] steps={} final_loss={} last_step_loss={} adapter={}",
-            output.steps,
-            output.final_loss,
-            last_loss,
-            output.adapter_path.display()
-        );
-        assert!(output.steps >= 1, "expected at least one micro-step");
-        assert!(output.final_loss.is_finite(), "final loss must be finite");
-        assert!(last_loss.is_finite(), "a training-step loss was observed");
-        assert!(
-            output_dir.join("lens_smoke.safetensors").exists(),
-            "trained adapter was written"
-        );
-    }
-
     /// Real-weights production-scale smoke (sc-4881 / sc-4874+4886+4887, Part A4): load the
     /// z-image trainer from the installed `Tongyi-MAI/Z-Image-Turbo` snapshot and run two LoRA
     /// micro-steps **at resolution 1024 with `train_dtype="bf16"`** — the exact configuration
@@ -11734,20 +11585,6 @@ mod tests {
             true,
             "candle_wan_smoke.safetensors",
         );
-    }
-
-    /// sc-7817 — the candle Lens training smoke. Loads `load_trainer("lens", …)` from the installed
-    /// `SceneWorks/Lens` snapshot (`tokenizer/ text_encoder/ transformer/ vae/` — the training-base
-    /// diffusers rehost; the original `microsoft/Lens` is dead, sc-8797) and trains two LoRA
-    /// micro-steps at resolution 64 (the gpt-oss-20b encoder load dominates; the per-step DiT graph
-    /// stays tiny). Checkpointing on for the large 48-layer MMDiT. Run on demand (one smoke per GPU):
-    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_lens_real_weights --nocapture`.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    #[test]
-    #[ignore = "needs real SceneWorks/Lens weights + a CUDA device; loads the gpt-oss-20b encoder"]
-    fn candle_lens_real_weights_trains_a_lora_step() {
-        let snapshot = candle_hf_snapshot("models--SceneWorks--Lens", "transformer");
-        candle_real_weights_smoke("lens", &snapshot, 64, true, "candle_lens_smoke.safetensors");
     }
 
     /// sc-8614 — the candle Krea 2 training smoke. Loads `load_trainer("krea_2_raw", …)` from the

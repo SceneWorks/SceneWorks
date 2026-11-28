@@ -32,18 +32,6 @@
       "candle": false,
       "mlx": false
     },
-    "boogu_image": {
-      "candle": true,
-      "mlx": false
-    },
-    "boogu_image_edit": {
-      "candle": true,
-      "mlx": false
-    },
-    "boogu_image_turbo": {
-      "candle": true,
-      "mlx": false
-    },
     "chatterbox_tts": {
       "candle": false
     },
@@ -129,38 +117,6 @@
     "krea_2_turbo": {
       "candle": true,
       "mlx": true
-    },
-    "lens": {
-      "candle": true,
-      "mlx": true
-    },
-    "lens_turbo": {
-      "candle": true,
-      "mlx": true
-    },
-    "mage_flow": {
-      "candle": false,
-      "mlx": false
-    },
-    "mage_flow_base": {
-      "candle": false,
-      "mlx": false
-    },
-    "mage_flow_edit": {
-      "candle": false,
-      "mlx": false
-    },
-    "mage_flow_edit_base": {
-      "candle": false,
-      "mlx": false
-    },
-    "mage_flow_edit_turbo": {
-      "candle": false,
-      "mlx": false
-    },
-    "mage_flow_turbo": {
-      "candle": false,
-      "mlx": false
     },
     "minimax_h3_image": {
       "candle": false,

@@ -136,22 +136,14 @@ fn image_request_mlx_eligible_with_context(
             sensenova_mlx_eligible_with_facts(payload, context.options)
         }
         "kolors" => kolors_mlx_eligible(payload),
-        "lens" | "lens_turbo" => lens_mlx_eligible(payload),
         "bernini_image" => bernini_image_mlx_eligible(payload),
         "ideogram_4" | "ideogram_4_turbo" => ideogram_mlx_eligible(payload),
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => boogu_mlx_eligible(payload),
         "krea_2_turbo" | "krea_2_raw" => krea_mlx_eligible_with_facts(payload, context.options),
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => sd3_5_mlx_eligible(payload),
         "sana_1600m" | "sana_sprint_1600m" => {
             sana_mlx_eligible_with_facts(model, payload, context.options)
         }
         "anima_base" | "anima_aesthetic" | "anima_turbo" => anima_mlx_eligible(payload),
-        "mage_flow_base" | "mage_flow" | "mage_flow_turbo" => {
-            mage_flow_mlx_eligible_with_facts(payload, context.options)
-        }
-        "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo" => {
-            mage_flow_edit_mlx_eligible_with_facts(payload, context.options)
-        }
         "moss_image_base" | "moss_image_sft" => {
             let entry = payload
                 .get("modelManifestEntry")
@@ -537,7 +529,7 @@ pub(crate) fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
 }
 
-fn mage_flow_mlx_eligible_with_facts(
+fn plain_txt2img_mlx_eligible_with_facts(
     payload: &Map<String, Value>,
     facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
@@ -567,7 +559,7 @@ pub(crate) fn iris_mlx_eligible_with_facts(
             | crate::resolved_options::RouteField::Invalid
     );
     !hires_fix_enabled
-        && mage_flow_mlx_eligible_with_facts(payload, facts)
+        && plain_txt2img_mlx_eligible_with_facts(payload, facts)
         && iris_quantize_is_a_tier_with_facts(facts)
         && !facts.quant_tier.is_present_nonnull()
 }
@@ -624,7 +616,7 @@ pub(crate) fn flux3_surface_eligible_with_facts(
         }
     };
     !hires_fix_enabled
-        && mage_flow_mlx_eligible_with_facts(&surface, facts)
+        && plain_txt2img_mlx_eligible_with_facts(&surface, facts)
         && payload.get("loras").is_none_or(|value| {
             value.is_null()
                 || value.as_array().is_some_and(|loras| {
@@ -648,7 +640,7 @@ pub(crate) fn supra2_mlx_eligible_with_facts(
             | crate::resolved_options::RouteField::Invalid
     );
     !hires_fix_enabled
-        && mage_flow_mlx_eligible_with_facts(payload, facts)
+        && plain_txt2img_mlx_eligible_with_facts(payload, facts)
         && !has_nonempty_array(payload, "loras")
         && !facts.mlx_quantize.is_present_nonnull()
         && !facts.quant_tier.is_present_nonnull()
@@ -681,23 +673,6 @@ pub(crate) fn minimax_h3_image_mlx_eligible(payload: &Map<String, Value>) -> boo
         && !crate::jobs_store::routing::route_nested_array_nonempty(&facts, "poses")
         && !crate::jobs_store::routing::route_nested_array_nonempty(&facts, "phases")
         && qwen_image_2_1_reference_ids(payload).is_some()
-}
-
-fn mage_flow_edit_mlx_eligible_with_facts(
-    payload: &Map<String, Value>,
-    facts: &crate::resolved_options::RouteOptionFacts,
-) -> bool {
-    if payload.get("mode").and_then(Value::as_str) != Some("edit_image") {
-        return false;
-    }
-
-    has_nonempty_string(payload, "sourceAssetId")
-        && !has_nonempty_string(payload, "referenceAssetId")
-        && !has_nonempty_string(payload, "maskAssetId")
-        && !has_nonempty_array(payload, "loras")
-        && !has_nonempty_array(payload, "controls")
-        && !has_nonempty_array(payload, "controlnets")
-        && !crate::jobs_store::routing::route_nested_array_nonempty(facts, "poses")
 }
 
 /// Z-Image (sc-3022) MLX-routing conditions, ported from
@@ -831,19 +806,6 @@ pub(crate) fn kolors_mlx_eligible(_payload: &Map<String, Value>) -> bool {
     true
 }
 
-/// Lens / Lens-Turbo (epic 3164 / sc-5105) is a pure T2I family — the `mlx-gen-lens` descriptor
-/// advertises no conditioning (no img2img / ControlNet / IP), and the base + turbo ids share the
-/// architecture/weights tree, differing only in their step/guidance defaults. Every non-edit
-/// `image_generate` job routes to the in-process Rust `mlx-gen-lens` worker on Mac. An `edit_image`
-/// mode — which Lens has no path for on any platform (`supportsEdit=false`) — stays off MLX so it is
-/// never silently run as plain T2I against a dropped source image (defensive; the UI never offers
-/// edit for Lens). Mirrors [`chroma_mlx_eligible`]. (LoRA/LoKr apply at load on the DiT — sc-3174 —
-/// so a LoRA never forces torch; LoRA/LoKr *training* is also native MLX now — the `lens_lora` kernel
-/// routes to the `mlx-gen-lens` Rust trainer via [`MLX_ROUTED_TRAINING_KERNELS`], sc-5148/sc-5180.)
-pub(crate) fn lens_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-}
-
 /// Bernini still-image companion (epic 4699 / sc-5424) MLX-routing conditions. The image-typed
 /// `bernini_image` id serves two still tasks on the same `engine_id:"bernini"` planner+renderer the
 /// video `bernini` id uses: plain text-to-image (t2i, the base path) and `edit_image` img2img (i2i —
@@ -875,20 +837,6 @@ pub(crate) fn bernini_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// stranding it.) macOS-only (the catalog flags `macOnly`); on Windows/Linux no `mlx` worker is
 /// registered, so nothing defers.
 pub(crate) fn ideogram_mlx_eligible(_payload: &Map<String, Value>) -> bool {
-    true
-}
-
-/// Boogu Image / Turbo / Edit (epic 6387) MLX-eligibility. Text-to-image (and any non-edit mode) is
-/// always eligible. `edit_image` is the **Edit checkpoint's** capability only — Base/Turbo are
-/// text-to-image (their semantic-edit path is incoherent without the Edit fine-tune, E7b-3), so an
-/// edit request is eligible for `boogu_image_edit` alone. This keeps `model_mac_support`'s `features.edit`
-/// false for Base/Turbo (it probes with `mode: edit_image`). macOS-only (the catalog flags `macOnly`);
-/// off-Mac no `mlx` worker registers.
-pub(crate) fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
-    if is_edit {
-        return payload.get("model").and_then(Value::as_str) == Some("boogu_image_edit");
-    }
     true
 }
 
@@ -1571,107 +1519,6 @@ mod tests {
             "MLX_ROUTED_MODELS ids with no reachable arm in `image_request_mlx_eligible` — the mlx \
              worker can never claim these, so their jobs queue forever: {stranded:?}"
         );
-    }
-
-    /// The generation variants serve plain text-to-image **and text-to-image + user adapters**
-    /// (sc-15328); every other conditioning shape fails closed.
-    ///
-    /// The single-adapter and stacked/mixed LoRA+LoKr shapes are asserted eligible here because that
-    /// is the whole capability: `mage_flow_lora`'s `limits.networkTypes` offers `lora` and `lokr`,
-    /// the picker offers the trained adapter, and `apply_mage_adapters` stacks mixed kinds. Before
-    /// sc-15328 the `loras` shape sat in the `unsupported` list below and no backend claimed the
-    /// job — it queued forever rather than failing.
-    #[test]
-    fn mage_flow_routes_plain_text_to_image_and_adapters() {
-        let mage_models = ["mage_flow_base", "mage_flow", "mage_flow_turbo"];
-        let eligible = [
-            json!({}),
-            json!({ "mode": "text_to_image", "prompt": "a lighthouse in fog" }),
-            json!({ "mode": "text_to_image", "loras": [], "referenceAssetIds": [] }),
-            // One trained LoRA — the sc-15328 reproduction shape.
-            json!({ "mode": "text_to_image", "loras": [{ "id": "adapter-1", "weight": 0.8 }] }),
-            // LoKr (sc-14056 exposes it in `limits.networkTypes`) and a stacked, mixed pair — both
-            // reach the same strict seam, so routing must not discriminate between them.
-            json!({ "mode": "text_to_image", "loras": [{ "id": "a", "networkType": "lokr" }] }),
-            json!({ "mode": "text_to_image", "loras": [
-                { "id": "a", "weight": 0.8 },
-                { "id": "b", "weight": 0.4, "networkType": "lokr" }
-            ] }),
-            // A mode-less payload with adapters is the API default (text-to-image).
-            json!({ "loras": [{ "id": "adapter-1" }] }),
-        ];
-        for model in mage_models {
-            for payload in &eligible {
-                assert!(
-                    image_request_mlx_eligible(
-                        model,
-                        payload.as_object().expect("eligible payload is an object")
-                    ),
-                    "{model} must route its supported plain text-to-image shape: {payload}"
-                );
-            }
-        }
-
-        let unsupported = [
-            json!({ "mode": "edit_image", "sourceAssetId": "asset-1" }),
-            json!({ "mode": "character_image", "referenceAssetId": "asset-1" }),
-            json!({ "mode": "text_to_image", "sourceAssetId": "asset-1" }),
-            json!({ "mode": "text_to_image", "referenceAssetId": "asset-1" }),
-            json!({ "mode": "text_to_image", "referenceAssetIds": ["asset-1"] }),
-            json!({ "mode": "text_to_image", "maskAssetId": "mask-1" }),
-            json!({ "mode": "text_to_image", "advanced": { "poses": [{}] } }),
-            json!({ "mode": "text_to_image", "controls": [{}] }),
-            json!({ "mode": "text_to_image", "controlnets": [{}] }),
-        ];
-        for model in mage_models {
-            for payload in &unsupported {
-                assert!(
-                    !image_request_mlx_eligible(
-                        model,
-                        payload
-                            .as_object()
-                            .expect("unsupported payload is an object")
-                    ),
-                    "{model} must fail closed for its unsupported request shape: {payload}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn mage_flow_edit_requires_source_and_preserves_optional_reference_shape() {
-        let models = [
-            "mage_flow_edit_base",
-            "mage_flow_edit",
-            "mage_flow_edit_turbo",
-        ];
-        for model in models {
-            for eligible in [
-                json!({ "mode": "edit_image", "sourceAssetId": "source" }),
-                json!({
-                    "mode": "edit_image",
-                    "sourceAssetId": "source",
-                    "referenceAssetIds": ["ref-b", "ref-a"]
-                }),
-            ] {
-                assert!(image_request_mlx_eligible(
-                    model,
-                    eligible.as_object().unwrap()
-                ));
-            }
-            for rejected in [
-                json!({ "mode": "edit_image", "referenceAssetIds": ["ref"] }),
-                json!({ "mode": "edit_image", "sourceAssetId": "   " }),
-                json!({ "mode": "text_to_image", "sourceAssetId": "source" }),
-                json!({ "mode": "edit_image", "sourceAssetId": "source", "maskAssetId": "mask" }),
-                json!({ "mode": "edit_image", "sourceAssetId": "source", "loras": [{"id":"x"}] }),
-            ] {
-                assert!(!image_request_mlx_eligible(
-                    model,
-                    rejected.as_object().unwrap()
-                ));
-            }
-        }
     }
 
     /// The two-reference (scene + person) Krea 2 Raw edit (epic 10871) carries its conditioning image in

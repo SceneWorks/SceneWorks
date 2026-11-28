@@ -12,6 +12,8 @@ pub(crate) async fn create_model_download_job(
     Path(model_id): Path<String>,
     ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    sceneworks_core::request_validation::reject_retired_image_identity("model", &model_id)
+        .map_err(crate::jobs::retired_model_error)?;
     let model = require_model_by_id(&state, &model_id).await?;
     // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
     //
@@ -391,6 +393,8 @@ pub(crate) async fn create_conditional_components_download_jobs(
     use sceneworks_core::model_usage_policy::{
         conditional_component_downloads, ConditionalComponentsError,
     };
+    sceneworks_core::request_validation::reject_retired_image_identity("model", &model_id)
+        .map_err(crate::jobs::retired_model_error)?;
     let model = require_model_by_id(&state, &model_id).await?;
     let rows = conditional_component_downloads(&model, &purpose).map_err(|error| match error {
         ConditionalComponentsError::NotDeclared { .. } => ApiError::typed(

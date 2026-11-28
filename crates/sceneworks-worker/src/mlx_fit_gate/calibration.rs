@@ -1,66 +1,6 @@
 //! mlx_fit_gate calibration owner.
 use super::*;
 
-/// Suffix shared by the worker's route/tier Mage calibration identities.
-/// The complete identities must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
-/// epic sc-22723) retired the single string `mage-flow-mlx-shared-ladder-2026-08-03-v1` for a
-/// table keyed on (route, PROVEN artifact tier) — `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`,
-/// eighteen cells — because the three tiers of one route are three different resident sets and one
-/// anchor cannot price all three. The engine binds a cell only when the tier is proven off the
-/// `quantization.bits` marker of the component directories the loader itself opened (DiT and text
-/// encoder agreeing) and equals `LoadSpec::quantize`, so the plan's `tier.quant` IS the tier axis.
-/// The worker mirrors the table here rather than calling the engine because the Resident-path
-/// handshake below is compiled on every platform; the macOS test
-/// `mage_estimator_fingerprint_matches_the_linked_provider_contract` pins every cell to the linked
-/// engine's `production_calibration_fingerprint`, so a move on either side is red at test time.
-/// The prior generation-peak token predated the shared ladder and caused every exact Mage request
-/// to fail the provider/gate handshake before selection.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) const MAGE_CALIBRATION_FINGERPRINT_SUFFIX: &str = "-mlx-shared-ladder-v1";
-
-/// The route label inside a Mage-Flow calibration string, mirroring
-/// `mlx_gen_mage::model::MageVariant::route_label` over the six registered ids. `None` for any id
-/// the engine does not serve: a plan naming one could only reach an unpaired estimator.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) fn mage_calibration_route_label(engine_id: &str) -> Option<&'static str> {
-    Some(match engine_id {
-        "mage_flow" => "mage-flow",
-        "mage_flow_base" => "mage-flow-base",
-        "mage_flow_turbo" => "mage-flow-turbo",
-        "mage_flow_edit" => "mage-flow-edit",
-        "mage_flow_edit_base" => "mage-flow-edit-base",
-        "mage_flow_edit_turbo" => "mage-flow-edit-turbo",
-        _ => return None,
-    })
-}
-
-/// The tier label inside a Mage-Flow calibration string, mirroring
-/// `mlx_gen_mage::model::calibration_tier_label`. `None` for a tier the family does not ship, so an
-/// unshipped tier is unnameable rather than collapsed onto a neighbour.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) fn mage_calibration_tier_label(quant: Option<gen_core::Quant>) -> Option<&'static str> {
-    match quant {
-        None => Some("bf16"),
-        Some(gen_core::Quant::Q4) => Some("q4"),
-        Some(gen_core::Quant::Q8) => Some("q8"),
-        Some(_) => None,
-    }
-}
-
-/// The production calibration identity the loaded `mlx-gen-mage` route publishes for one
-/// (route, tier) cell, or `None` when no cell exists for the pair.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(super) fn mage_calibration_fingerprint(
-    engine_id: &str,
-    quant: Option<gen_core::Quant>,
-) -> Option<String> {
-    let route = mage_calibration_route_label(engine_id)?;
-    let tier = mage_calibration_tier_label(quant)?;
-    Some(format!(
-        "mage-flow-{route}-{tier}{MAGE_CALIBRATION_FINGERPRINT_SUFFIX}"
-    ))
-}
-
 impl DecodeGeometryPolicyWire {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn into_core(self, model_id: &str) -> WorkerResult<MemoryDecodeGeometryPolicy> {
@@ -667,24 +607,17 @@ impl MlxRequestPlan {
             .resident_components()
             .iter()
             .any(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack);
-        // Mage's request estimator is provider-specific and already returns the adapter-free base
-        // peak, unlike the generic legacy estimator whose asset term contains external adapter
-        // files. Do not normalize bytes that were never present or the provider's later additive
-        // declaration would cancel to zero.
-        let legacy_includes_adapter_sources = !self.engine_id.starts_with("mage_flow");
         legacy_total_peak_bytes
             .saturating_sub(if declares_control_branch {
                 self.folded_control_bytes
             } else {
                 0
             })
-            .saturating_sub(
-                if declares_adapter_stack && legacy_includes_adapter_sources {
-                    self.folded_adapter_bytes
-                } else {
-                    0
-                },
-            )
+            .saturating_sub(if declares_adapter_stack {
+                self.folded_adapter_bytes
+            } else {
+                0
+            })
     }
 }
 

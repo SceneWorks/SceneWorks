@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 /**
  * TIER INTEGRITY checker + audit generator (sc-15799).
  *
@@ -29,34 +28,6 @@ import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
  *  5. The Krea control branch's declared `branchTierByBaseTier` agrees with the ledger: every base tier
  *     whose branch tier is ABOVE it must have a `controlBranch` exception row, and every base tier whose
  *     branch tier equals it must NOT.
- *  6. ANTI-DRIFT on the resolved Lens carve-out: the ledger and MLX fit gate must carry the same
- *     `sc-16014-resolution: rehosted-q4-q8` marker, and the ledger must contain no stale Lens text-
- *     encoder exception. This preserves the cross-source binding after the q4/q8 rehost eliminated the
- *     exception while the bf16-only MXFP4 expansion remained a fit-gate fact.
- *  7. `backends` is LOAD-BEARING, not a comment (sc-15799 review), and REQUIRED (sc-17395). The same
- *     declared tier can yield different residency on the two lanes — `sensenova_u1_8b::visionTower` is
- *     bf16 under mlx-gen and f32 under candle-gen, because the candle port widens the conv kernels — so
- *     the uniqueness key is **(model, component, LANE)**, not (model, component): a component whose
- *     residency genuinely differs per backend is split into one row per lane, and two rows may never
- *     claim the same lane. Lane names are validated, every declared lane must be one the ROUTER serves
- *     the model on, and the lane is PUBLISHED in the generated markdown so a per-backend claim is
- *     visible to a reader.
- *
- *     sc-15799 left `backends` optional, with omission meaning "both" — and the lane cross-check ran
- *     only when the key was PRESENT, so the default claim was the one nobody validated. Since every
- *     model in this ledger is routed on both lanes, each omitting row was silently asserting that its
- *     residentTier and cost hold identically under two independently-written loaders. They repeatedly
- *     do not. The key is now mandatory: see [`routedLanes`] for why the lane oracle is the routing
- *     tables and not the manifest's optional per-backend tuning block.
- *  8. The ledger validates against its own JSON Schema (`packages/schemas/tier-integrity.schema.json`),
- *     so an unknown or misspelled key is an error rather than a silently ignored field. The schema was
- *     unenforced when it was written, which is how it drifted to draft-07 while every sibling requires
- *     2020-12; `scripts/check-scaffold.mjs` now pins its conventions and this script applies it.
- *  9. Every VAE row declares a structured, receipt-bound scope. `full-autoencoder` counts encoder +
- *     decoder for a route that constructs both; `decoder-only` excludes encoder tensors when no
- *     advertised route on that row's backend constructs them. The receipt key binds that scope to the
- *     selected element count, so prose cannot disguise a mixed convention (sc-17435).
- *
  * Usage:
  *   node scripts/check-tier-integrity.mjs            # regenerate docs/generated/tier-integrity.*
  *   node scripts/check-tier-integrity.mjs --check    # verify + fail on drift (CI)
@@ -80,7 +51,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEDGER = "config/tier-integrity.jsonc";
 const SCHEMA = "packages/schemas/tier-integrity.schema.json";
 const MANIFEST = "config/manifests/builtin.models.jsonc";
-const MLX_FIT_GATE = "crates/sceneworks-worker/src/mlx_fit_gate.rs";
 const ROUTING_CATALOG = "crates/sceneworks-core/src/jobs_store/routing/catalog.rs";
 const ROUTING_CANDLE = "crates/sceneworks-core/src/jobs_store/routing/candle.rs";
 const ROUTING_MLX = "crates/sceneworks-core/src/jobs_store/routing/mlx.rs";
@@ -141,13 +111,6 @@ export const GRANDFATHERED_UNMEASURED = new Set();
  * The committed size of the completed amnesty migration. This must remain zero.
  */
 export const GRANDFATHERED_UNMEASURED_COUNT = 0;
-
-/**
- * Shared marker for the resolved Lens q4/q8 tier-integrity exception. It appears in the ledger source
- * and in `mlx_fit_gate.rs`; the checker requires both so removing the rows cannot silently erase the
- * fit-gate's remaining bf16-only MXFP4 accounting, or let that accounting drift back into a q4/q8 row.
- */
-const LENS_REHOST_RESOLUTION = "sc-16014-resolution: rehosted-q4-q8";
 
 function parseJsonc(body) {
   return JSON.parse(stripJsoncComments(body));
@@ -347,9 +310,7 @@ function schemaErrors(schema, value, root = schema, at = "$") {
  */
 export function validate({
   ledger,
-  ledgerSource,
   manifest,
-  mlxFitGate,
   routingCatalog,
   routingCandle,
   routingMlx,
@@ -835,32 +796,6 @@ export function validate({
     }
   }
 
-  // (6) Anti-drift: q4/q8 are re-hosted packed affine, so there is no Lens text-encoder exception.
-  // The shared source marker keeps that ledger decision bound to the fit gate, where the bf16-only
-  // MXFP4 expansion and architecture-specific activation transient still belong.
-  const staleLensRows = exceptions.filter(
-    (row) =>
-      ["lens", "lens_turbo"].includes(row.model) && row.component === "textEncoder",
-  );
-  if (staleLensRows.length > 0) {
-    errors.push(
-      `${LEDGER} still declares ${staleLensRows.length} Lens textEncoder exception row(s), but the ` +
-        `shipped q4/q8 turnkeys are re-hosted MLX affine packs resident at the selected tier. Remove ` +
-        `the stale row(s); bf16 MXFP4 materialization belongs only in ${MLX_FIT_GATE}.`,
-    );
-  }
-  for (const [file, source] of [
-    [LEDGER, ledgerSource],
-    [MLX_FIT_GATE, mlxFitGate],
-  ]) {
-    if (typeof source !== "string" || !source.includes(LENS_REHOST_RESOLUTION)) {
-      errors.push(
-        `${file} no longer contains "${LENS_REHOST_RESOLUTION}". The resolved ledger state and the ` +
-          `bf16-only fit-gate accounting must move together (sc-16014).`,
-      );
-    }
-  }
-
   // Sorted on the full uniqueness key, LANE included — two rows can now share (model, component), so
   // without the third term the generated audit's row order would depend on ledger order.
   rows.sort(
@@ -976,7 +911,6 @@ async function readInputs() {
     ledgerBody,
     manifestBody,
     memoryEvidence,
-    mlxFitGate,
     routingCatalog,
     routingCandle,
     routingMlx,
@@ -987,7 +921,6 @@ async function readInputs() {
     readFile(path.join(ROOT, LEDGER), "utf8"),
     readFile(path.join(ROOT, MANIFEST), "utf8"),
     readBuiltinMemoryEvidence(ROOT),
-    rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
     readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
     readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
     readFile(path.join(ROOT, ROUTING_MLX), "utf8"),
@@ -997,9 +930,7 @@ async function readInputs() {
   ]);
   return {
     ledger: parseJsonc(ledgerBody),
-    ledgerSource: ledgerBody,
     manifest: projectBuiltinMemoryEvidence(parseJsonc(manifestBody), memoryEvidence),
-    mlxFitGate,
     routingCatalog,
     routingCandle,
     routingMlx,
@@ -1131,37 +1062,6 @@ async function selfTest() {
     );
   }
 
-  // 3e. Restoring Mage's old whole-file scalar as a decoder byte count must fail arithmetic.
-  {
-    const ledger = clone();
-    const row = ledger.exceptions.find(
-      (item) => item.model === "mage_flow" && item.component === "vae",
-    );
-    row.evidence.costBytesByTier.q4 = 172478148 * 2;
-    expect(
-      "Mage decoder-only VAE element count",
-      validate({ ...inputs, ledger }).errors,
-      "does not reproduce the independent safetensors-header receipt",
-    );
-  }
-
-  // 3f. FLUX.2 decode receipts include both live BN-stat vectors and exclude the unused counter.
-  {
-    const ledger = clone();
-    const row = ledger.exceptions.find(
-      (item) =>
-        item.model === "lens" &&
-        item.component === "vae" &&
-        item.backends.join() === "candle",
-    );
-    row.evidence.costBytesByTier.q4 = 49620259 * 4;
-    expect(
-      "FLUX.2 decoder BN-stat element count",
-      validate({ ...inputs, ledger }).errors,
-      "does not reproduce the independent safetensors-header receipt",
-    );
-  }
-
   // 4. A "measured" row with no number.
   {
     const ledger = clone();
@@ -1191,24 +1091,13 @@ async function selfTest() {
     );
   }
 
-  // 6. The resolved Lens anti-drift binding.
-  {
-    expect(
-      "Lens rehost anti-drift",
-      validate({ ...inputs, mlxFitGate: "no resolution marker here" }).errors,
-      LENS_REHOST_RESOLUTION,
-    );
-  }
-
   // 7. `backends` LANE OVERLAP — the uniqueness key is (model, component, lane), so a component may be
-  //    split per lane, but two rows may never claim the same lane. Duplicating an mlx-only mage row
+  //    split per lane, but two rows may never claim the same lane. Duplicating an existing MLX row
   //    verbatim must fail: a naive `model::component::backends` string key would have let it through.
   {
     const ledger = clone();
-    const mageRow = ledger.exceptions.find(
-      (item) => item.model === "mage_flow_base" && item.component === "transformerHead",
-    );
-    ledger.exceptions.push(JSON.parse(JSON.stringify(mageRow)));
+    const row = ledger.exceptions.find((item) => item.backends.includes("mlx"));
+    ledger.exceptions.push(JSON.parse(JSON.stringify(row)));
     expect("lane overlap", validate({ ...inputs, ledger }).errors, 'declared twice for "mlx"');
   }
 
@@ -1296,34 +1185,6 @@ async function selfTest() {
     const ledger = clone();
     ledger.exceptions[0] = { ...ledger.exceptions[0], backend: ["mlx"] };
     expect("schema unknown key", validate({ ...inputs, ledger }).errors, 'unknown property "backend"');
-  }
-
-  // 9. A provider-local floor cannot remain ledger-only: deleting the shared manifest declaration
-  //    must make the tier decision, worker label, and UI visibly incomplete.
-  {
-    const manifest = JSON.parse(JSON.stringify(inputs.manifest));
-    const victim = manifest.models.find((entry) => entry.id === "mage_flow_base");
-    delete victim.precisionFloors;
-    expect(
-      "ledger floor missing from manifest",
-      validate({ ...inputs, manifest }).errors,
-      "has no matching precisionFloors declaration",
-    );
-  }
-
-  // 10. A shared floor must cover every hosted backend. Regressing the transformer-head row to the
-  //     historical MLX-only declaration must fail because Mage also ships a Candle lane.
-  {
-    const ledger = clone();
-    const victim = ledger.exceptions.find(
-      (row) => row.model === "mage_flow_base" && row.component === "transformerHead",
-    );
-    victim.backends = ["mlx"];
-    expect(
-      "manifest floor missing backend lane",
-      validate({ ...inputs, ledger }).errors,
-      'no matching exception for backend "candle"',
-    );
   }
 
   if (failures.length > 0) {

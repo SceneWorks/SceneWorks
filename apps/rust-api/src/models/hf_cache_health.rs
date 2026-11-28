@@ -334,19 +334,6 @@ pub(super) fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHe
     };
 
     let mut missing = Vec::new();
-    let is_mage = index
-        .get("_class_name")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "MageFlowPipeline");
-    if is_mage
-        && sceneworks_core::lora_family::detect_model_family(snapshot)
-            .ok()
-            .flatten()
-            .as_deref()
-            != Some("mage-flow")
-    {
-        missing.push("transformer/config.json (invalid Mage config)".to_owned());
-    }
     for (component, spec) in index {
         if component.starts_with('_') || spec.is_null() {
             continue;
@@ -375,8 +362,6 @@ pub(super) fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHe
             let component_entries = diffusers_component_entries(snapshot, component);
             if !diffusers_component_has_weight_file_in(&component_entries) {
                 missing.push(format!("{component}/<weights>"));
-            } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
-                missing.push(format!("{component}/<weights> (malformed safetensors)"));
             } else {
                 // A sharded component holds "a weight file" as soon as ONE shard landed. The
                 // component's own index declares the rest, so an interrupted download is only
@@ -385,15 +370,6 @@ pub(super) fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHe
                     component_missing_shards_in(&snapshot.join(component), &component_entries)
                 {
                     missing.push(format!("{component}/{shard}"));
-                }
-            }
-        } else if is_mage && component == "tokenizer" {
-            // Mage's Qwen3-VL AutoProcessor is a logical `tokenizer` component in model_index.json,
-            // but the published diffusers snapshots colocate its tokenizer + vision processor
-            // configs under `text_encoder/` beside the Qwen3-VL weights.
-            for config in ["tokenizer_config.json", "preprocessor_config.json"] {
-                if !path_is_valid_json_object(&snapshot.join("text_encoder").join(config)) {
-                    missing.push(format!("text_encoder/{config}"));
                 }
             }
         } else if !diffusers_component_has_valid_config_file(snapshot, component) {
@@ -528,22 +504,6 @@ pub(super) fn listed_shard_indexes_are_complete(snapshot: &FsPath, files: &[Stri
             path.parent().is_some_and(|dir| {
                 sceneworks_core::safetensors::indexed_shards_are_present(dir, &path)
             })
-        })
-}
-
-pub(super) fn diffusers_component_safetensors_are_valid(
-    snapshot: &FsPath,
-    component: &str,
-) -> bool {
-    let files = snapshot_files(&snapshot.join(component))
-        .into_iter()
-        .filter(|path| path.to_ascii_lowercase().ends_with(".safetensors"))
-        .collect::<Vec<_>>();
-    !files.is_empty()
-        && files.iter().all(|path| {
-            sceneworks_core::safetensors::file_is_structurally_valid(
-                &snapshot.join(component).join(path),
-            )
         })
 }
 

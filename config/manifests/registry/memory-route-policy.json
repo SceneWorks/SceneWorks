@@ -83,105 +83,6 @@
     },
     {
       "backend": "mlx",
-      "provider": "mage_flow_base",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain",
-        "lora"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "mlx",
-      "provider": "mage_flow",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain",
-        "lora"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "mlx",
-      "provider": "mage_flow_turbo",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain",
-        "lora"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "mlx",
-      "provider": "mage_flow_edit_base",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "edit_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "mlx",
-      "provider": "mage_flow_edit",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "edit_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "mlx",
-      "provider": "mage_flow_edit_turbo",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "edit_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "mlx",
       "provider": "krea_2_turbo",
       "tiers": [
         "bf16",
@@ -640,54 +541,6 @@
     },
     {
       "backend": "candle",
-      "provider": "boogu_image",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "candle",
-      "provider": "boogu_image_turbo",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "candle",
-      "provider": "boogu_image_edit",
-      "tiers": [
-        "bf16",
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "edit_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": false
-    },
-    {
-      "backend": "candle",
       "provider": "bernini",
       "tiers": [
         "bf16",
@@ -938,36 +791,6 @@
         "single_control"
       ],
       "requiresSequentialSelection": false
-    },
-    {
-      "backend": "candle",
-      "provider": "lens",
-      "tiers": [
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": true
-    },
-    {
-      "backend": "candle",
-      "provider": "lens_turbo",
-      "tiers": [
-        "q4",
-        "q8"
-      ],
-      "modes": [
-        "text_to_image"
-      ],
-      "loadProfiles": [
-        "plain"
-      ],
-      "requiresSequentialSelection": true
     },
     {
       "backend": "candle",

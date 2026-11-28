@@ -170,6 +170,7 @@ impl From<JobsStoreError> for ApiError {
                 Self::bad_request(format!("Invalid numeric value for {field}"))
             }
             JobsStoreError::InvalidRequestedGpu(detail) => Self::bad_request(detail),
+            JobsStoreError::RetiredModel(refusal) => crate::jobs::retired_model_error(refusal),
             JobsStoreError::InvalidResultItem(detail) => Self::bad_request(detail),
             JobsStoreError::ReplayUnavailable(reason) => Self::typed(
                 StatusCode::CONFLICT,

@@ -916,6 +916,8 @@ pub(crate) fn validate_static_job_options(
     job_type: &JobType,
     payload: &JsonObject,
 ) -> WorkerResult<()> {
+    sceneworks_core::request_validation::reject_retired_image_job(job_type, payload)
+        .map_err(WorkerError::Validation)?;
     if let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) {
         let entry = sceneworks_core::request_validation::facts_for_job(job_type, payload);
         let validation_view = matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)

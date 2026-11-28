@@ -74,13 +74,6 @@ pub(super) fn requested_receipt_variant(request: &ImageRequest) -> Option<String
 #[cfg(native_lane)]
 const IDEOGRAM_BF16_REPO: &str = "SceneWorks/ideogram-4";
 
-/// Exact snapshots used by the on-demand non-default tier fetches.  The API replaces a submitted
-/// `modelManifestEntry` with its resolved builtin/user manifest entry before enqueueing, so a repo
-/// different from the engine default is an intentional configured override.  First-party turnkeys
-/// never follow a mutable ref; configured override repos retain `main` because SceneWorks cannot know
-/// their release commit in advance.
-#[cfg(native_lane)]
-pub(super) const BOOGU_MLX_TURNKEY_REVISION: &str = "a459e614d408bfdf57089c32cc3da706f5a017de";
 #[cfg(native_lane)]
 pub(super) const IDEOGRAM_MLX_TURNKEY_REVISION: &str = "a3095855b8819dc0d6b067cb1354aaa7da189ff8";
 #[cfg(native_lane)]
@@ -123,9 +116,6 @@ fn pinned_turnkey_snapshot_for_request(
     }
     let root = crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, repo, revision)?;
     let selected = match request.model.as_str() {
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => {
-            boogu_model_subdir(&root, request)
-        }
         "ideogram_4" | "ideogram_4_turbo" => ideogram_model_subdir(&root, request),
         "z_image" => standard_tier_subdir(&root, request),
         _ => return None,
@@ -138,13 +128,6 @@ fn pinned_turnkey_snapshot_for_request(
                 || selected
                     .join("transformer/diffusion_pytorch_model.safetensors.index.json")
                     .is_file())
-    } else if request.model.starts_with("boogu_") {
-        selected
-            .join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file()
-            || selected
-                .join("transformer/diffusion_pytorch_model.safetensors.index.json")
-                .is_file()
     } else {
         selected.join("transformer/model.safetensors").is_file()
     };
@@ -442,15 +425,6 @@ pub(crate) fn resolve_weights_dir(
         receipt_variant.as_deref(),
     );
     let pinned_turnkey_snapshot = match request.model.as_str() {
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => {
-            pinned_turnkey_snapshot_for_request(
-                &settings.data_dir,
-                request,
-                &repo,
-                model.default_repo(),
-                BOOGU_MLX_TURNKEY_REVISION,
-            )
-        }
         "ideogram_4" | "ideogram_4_turbo" => pinned_turnkey_snapshot_for_request(
             &settings.data_dir,
             request,
@@ -508,15 +482,6 @@ pub(crate) fn resolve_weights_dir(
             }
         }
         return Ok(snapshot.map(|root| ideogram_model_subdir(&root, request)));
-    }
-    // Boogu (epic 6387) ships a turnkey with pre-packed Q8 `base/ turbo/ edit/` subfolders (default) +
-    // full-precision `*-bf16/`; point the engine at the variant's subfolder rather than the repo root
-    // (the packed weights auto-detect their quant on load).
-    if matches!(
-        request.model.as_str(),
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
-    ) {
-        return Ok(snapshot.map(|root| boogu_model_subdir(&root, request)));
     }
     // Krea 2 Turbo (epic 7565) + Krea 2 Raw (epic 9992) ship a turnkey with self-contained quant subdirs
     // (Turbo: packed `q8/` default + `q4/`; Raw: packed `q8/` default + `q4/` + dense `bf16/`); point the
@@ -1295,83 +1260,6 @@ pub(super) fn ideogram_model_subdir(root: &Path, request: &ImageRequest) -> Path
         .unwrap_or_else(|| root.to_path_buf())
 }
 
-/// Requested Boogu download subfolder. Even the default Q8 variant can be absent when only
-/// a sibling variant is installed. The load-side resolver separately chooses among complete tiers.
-pub(super) fn boogu_tier_subdir(variant: &str, bits: Option<i64>) -> String {
-    match crate::payload::tier_for_bits(bits, "q8") {
-        "bf16" => format!("{variant}-bf16"),
-        "q4" => format!("{variant}-q4"),
-        _ => variant.to_owned(),
-    }
-}
-
-/// Pick the engine-complete subfolder of a Boogu turnkey `root` for the requested variant. Each
-/// catalog id maps to a variant folder: `boogu_image`→`base`, `boogu_image_turbo`→`turbo`,
-/// `boogu_image_edit`→`edit`. **Q8 is the shipped default** (the pre-packed `<variant>/` folder),
-/// CLAMPED UP to the model's per-model quality floor (`mlx.minQualityTier`, sc-10731 via the shared
-/// [`preferred_tier`], sc-10777 — a bf16 floor raises the picker-less default to `<variant>-bf16/`); an
-/// explicit advanced `mlxQuantize` selects another tier (sc-8513, epic 8506): `<=0` → the dense
-/// `<variant>-bf16/`, `1..=4` → the packed `<variant>-q4/`. Falls back through Q8 → q4 → bf16 → `root`
-/// when the requested tier isn't downloaded, so a partial bundle surfaces as a load error rather than
-/// a silent half-load (a floor tier not on disk falls to the best installed). (The non-default tiers are
-/// on-demand downloads fetched by [`ensure_boogu_tier_present`] before this resolves, sc-6568/sc-8513.)
-pub(super) fn boogu_model_subdir(root: &Path, request: &ImageRequest) -> PathBuf {
-    let variant = match request.model.as_str() {
-        "boogu_image_turbo" => "turbo",
-        "boogu_image_edit" => "edit",
-        _ => "base",
-    };
-    let bits = request.resolved_quant_bits();
-    // q4/q8 ship a single packed transformer file; bf16 is the dense diffusers tree (SHARDED → only
-    // the `.index.json`). Accept either shape.
-    let present = |name: &str| -> Option<PathBuf> {
-        let dir = root.join(name);
-        let packed = dir
-            .join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file();
-        let sharded = dir
-            .join("transformer/diffusion_pytorch_model.safetensors.index.json")
-            .is_file();
-        (packed || sharded).then_some(dir)
-    };
-    let q4 = format!("{variant}-q4");
-    let bf16 = format!("{variant}-bf16");
-    // Boogu names its tiers `<variant>` (the packed Q8 shipped default), `<variant>-q4` and
-    // `<variant>-bf16` — map a generic [`preferred_tier`] tier name onto that layout.
-    let variant_folder = |tier: &str| -> String {
-        match tier {
-            "q8" => variant.to_owned(),
-            other => format!("{variant}-{other}"),
-        }
-    };
-    // The tier the request prefers: an explicit `mlxQuantize` pick maps directly (`<=0` → bf16, `1..=4` →
-    // q4, else Q8 — the same mapping the old `boogu_tier_subdir` load-path branch used), else the app-wide
-    // Q8 default (epic 10721 / sc-10726) CLAMPED UP to the model's per-model quality floor
-    // (`mlx.minQualityTier`, sc-10731) — the SAME shared, floor-aware logic as [`standard_tier_subdir`] /
-    // [`anima_tier_subdir`] (sc-10777, routing this resolver through [`preferred_tier`] instead of its own
-    // non-floor-aware Q8 default). No shipping Boogu model declares a floor, so this is byte-identical to
-    // the prior Q8-first default for every current variant; the routing keeps the resolver from silently
-    // landing below a floor should one ever be declared — a bf16 floor would raise the picker-less default
-    // from the packed Q8 up to the dense `<variant>-bf16`, capped by what's installed. The clean-tiers
-    // fallback (Q8 → q4 → bf16) is unchanged, so a partial bundle still surfaces as a load error.
-    //
-    // `nvfp4: false` (sc-11042): Boogu's `<variant>-bf16` MLX layout hosts no NVFP4 tier. Byte-identical
-    // to its pre-sc-11042 behavior; wire it here if one is ever converted.
-    let preferred = preferred_tier(bits, min_quality_floor(request), false);
-    // sc-12279 generalized: Boogu ships no `model_index.json`, so route the folder chain through the
-    // concrete `boogu_tier_complete` predicate — a torn tier (transformer present, `mllm/tokenizer.json`
-    // or VAE absent) now falls through to a complete sibling instead of crashing the loader on the
-    // missing tokenizer. Chain is folder names (`<variant>`, `<variant>-q4`, `<variant>-bf16`).
-    let chain = [variant_folder(preferred), variant.to_owned(), q4, bf16];
-    let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
-    pick_loadable_tier(
-        &chain_refs,
-        &present,
-        &sceneworks_core::mlx_tier_completeness::boogu_tier_complete,
-    )
-    .unwrap_or_else(|| root.to_path_buf())
-}
-
 /// Pick the engine-complete packed subdir of a Krea 2 Turbo turnkey `root`: `q4/` when the request opts
 /// into Q4 (`advanced.mlxQuantize <= 4`) AND it is downloaded, else the default `q8/` (the shipped
 /// default — the P1-validated near-lossless quant), CLAMPED UP to the model's per-model quality floor
@@ -1583,82 +1471,6 @@ async fn fetch_krea_convrot_base(
     .map(|_| ())
 }
 
-/// Ensure the requested Boogu variant/tier is complete in the shared snapshot before loading.
-/// Base, Turbo and Edit share a repository but have separate component directories. Even Q8
-/// may need fetching when only a sibling variant has been installed. Reuse the native cache
-/// downloader for missing or partial tiers, then check tokenizer and component-weight presence.
-#[cfg(native_lane)]
-pub(super) async fn ensure_boogu_tier_present(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-    request: &ImageRequest,
-) -> WorkerResult<()> {
-    let variant = match request.model.as_str() {
-        "boogu_image" => "base",
-        "boogu_image_turbo" => "turbo",
-        "boogu_image_edit" => "edit",
-        _ => return Ok(()),
-    };
-    let bits = request.resolved_quant_bits();
-    let tier = boogu_tier_subdir(variant, bits);
-    let Some(model) = mlx_model(&request.model) else {
-        return Ok(());
-    };
-    let repo = model_repo(request, &model);
-    let root = if repo == model.default_repo() {
-        crate::model_jobs::huggingface_pinned_snapshot_dir(
-            &settings.data_dir,
-            &repo,
-            BOOGU_MLX_TURNKEY_REVISION,
-        )
-    } else {
-        huggingface_snapshot_dir(&settings.data_dir, &repo)
-    };
-    let repo_is_installed = root.is_some()
-        || (repo == model.default_repo()
-            && huggingface_snapshot_dir(&settings.data_dir, &repo).is_some());
-    if !repo_is_installed {
-        // Turnkey not downloaded at all → leave it to the load path's "weights not found" error.
-        return Ok(());
-    }
-    let tier_dir = root.as_ref().map(|root| root.join(&tier));
-    // Base, Turbo and Edit share a repository, but installation of a sibling is not proof
-    // that this variant exists. Repair missing default tiers and incomplete non-default tiers.
-    if tier_dir
-        .as_ref()
-        .is_some_and(|dir| sceneworks_core::mlx_tier_completeness::boogu_tier_complete(dir))
-    {
-        return Ok(());
-    }
-    // The tier subfolder nests transformer/mllm/vae (leaf-dir globs, like the catalog Q8 entry).
-    let files = vec![
-        format!("{tier}/transformer/*"),
-        format!("{tier}/mllm/*"),
-        format!("{tier}/vae/*"),
-    ];
-    let revision = turnkey_tier_revision(&repo, model.default_repo(), BOOGU_MLX_TURNKEY_REVISION);
-    crate::model_jobs::ensure_hf_files_cached(api, settings, job, &repo, revision, &files).await?;
-    let installed = if repo == model.default_repo() {
-        crate::model_jobs::huggingface_pinned_snapshot_dir(
-            &settings.data_dir,
-            &repo,
-            BOOGU_MLX_TURNKEY_REVISION,
-        )
-    } else {
-        huggingface_snapshot_dir(&settings.data_dir, &repo)
-    };
-    if !installed.as_ref().is_some_and(|root| {
-        sceneworks_core::mlx_tier_completeness::boogu_tier_complete(&root.join(&tier))
-    }) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{}: downloaded Boogu tier {tier} is incomplete; expected transformer, mllm tokenizer/weights, and VAE",
-            request.model,
-        )));
-    }
-    Ok(())
-}
-
 /// On-demand fetch of Ideogram 4's non-default `q8/` tier (sc-9607, epic 9083). The catalog download
 /// pulls only the default `q4/` subdir (`files: ["q4/*"]`), so a job that opts into Q8
 /// ([`ideogram_tier_subdir`]: `> 4` → `q8/`) needs the `q8/` subdir pulled into the HF cache before
@@ -1806,11 +1618,6 @@ pub(super) fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<P
 #[cfg(all(test, target_os = "macos"))]
 #[path = "tests/resolved_artifact_provenance_tests.rs"]
 pub(crate) mod resolved_artifact_provenance_tests;
-
-#[cfg(native_lane)]
-#[cfg(test)]
-#[path = "tests/boogu_tier_tests.rs"]
-mod boogu_tier_tests;
 
 #[cfg(native_lane)]
 #[cfg(test)]

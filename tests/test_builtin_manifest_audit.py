@@ -331,135 +331,6 @@ def test_ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders():
     assert "supportsSequentialOffload" not in model["candle"]
 
 
-COMPONENTS_REPO = "SceneWorks/Mage-Flow-Components-mlx"
-COMPONENTS_REVISION = "c936de2a107ee8d0869137e73943f6414f23adaa"
-# Measured on the uploaded artifacts (sc-14980). Per-tier DiT, and the shared per-tier components.
-DIT_BYTES = {"q4": 2326294167, "q8": 4374163324, "bf16": 8231571754}
-TE_BYTES = {"q4": 4331077508, "q8": 4731076490, "bf16": 8887219239}
-VAE_BYTES = 345053168
-TIERS = ("q4", "q8", "bf16")
-
-
-def _assert_mage_tier_layout(model, model_id, repo, revision):
-    """sc-14980/sc-14979: the shared per-tier shape every Mage row must have.
-
-    Supersedes the sc-14047/sc-14050 "complete flat snapshot" pin: the tiers are physically
-    distinct `<tier>/` artifacts now, and the text encoder + VAE are hosted once as per-tier
-    co-requisites rather than duplicated into all six variant mirrors.
-    """
-    downloads = model["downloads"]
-    tiers = [d for d in downloads if not d.get("coRequisite")]
-    co_reqs = [d for d in downloads if d.get("coRequisite")]
-
-    assert [d["variant"] for d in tiers] == list(TIERS), model_id
-    assert sum(d.get("default") is True for d in tiers) == 1, model_id
-    for entry in tiers:
-        tier = entry["variant"]
-        assert entry["repo"] == repo, model_id
-        assert entry["revision"] == revision, model_id
-        # Each tier fetches ONLY its own subtree — this is what makes a per-tier delete reclaim
-        # real bytes. A shared full-snapshot predicate here would silently restore 0-byte deletes.
-        assert entry["files"] == [f"{tier}/*"], (model_id, tier)
-        assert entry["estimatedSizeBytes"] == DIT_BYTES[tier], (model_id, tier)
-
-    # The shared components: one mirror, one pinned revision, addressed per tier via `subdir`.
-    assert len(co_reqs) == 6, model_id
-    for component, sizes in (("text_encoder", TE_BYTES), ("vae", None)):
-        for tier in TIERS:
-            row = next(
-                d
-                for d in co_reqs
-                if d["componentId"] == component and d["variant"] == tier
-            )
-            assert row["repo"] == COMPONENTS_REPO, (model_id, component, tier)
-            assert row["revision"] == COMPONENTS_REVISION, (model_id, component, tier)
-            assert row["subdir"] == f"{tier}/{component}", (model_id, component, tier)
-            assert row["files"] == [f"{tier}/{component}/*"], (model_id, component, tier)
-            expected = sizes[tier] if sizes else VAE_BYTES
-            assert row["estimatedSizeBytes"] == expected, (model_id, component, tier)
-
-    assert model["mlx"]["standardTierLayout"] is True, model_id
-    assert model["mlx"]["quantize"] == 4, model_id
-    assert model["paths"]["model"] == f"${{HF_CACHE}}/{repo}"
-
-
-def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
-    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract.
-
-    sc-20246: `memoryStrategyContract` is now ENGINE-PROJECTED per variant
-    (scripts/generate-manifest-memory-declarations.mjs), so it is necessarily NOT shared — each
-    variant names its own provider and its own catalog modes. The shared-ladder pin below therefore
-    covers the hand-authored, measured keys, and the projected contract is asserted separately in
-    shape terms: it must be wholly engine-sourced and must never claim a rung this same block
-    declares structurally exempt.
-    """
-    contract = model["candle"].get("memoryStrategyContract")
-    assert contract is not None, model_id
-    exempt = set(model["candle"].get("memoryStrategyStructuralExemptions", {}))
-    for implementation in contract["implementations"]:
-        assert implementation["source"].startswith("config/engine-capabilities/"), model_id
-        assert implementation["rung"] not in exempt, (model_id, implementation["rung"])
-    assert contract["provider"] == model_id, model_id
-
-    assert {
-        key: value
-        for key, value in model["candle"].items()
-        if key != "memoryStrategyContract"
-    } == {
-        "minMemoryGb": 17,
-        "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
-        "vramMeasuredPixels": 1024 * 1024,
-        "measured": False,
-        "supportsSequentialOffload": True,
-        "memoryStrategyCapabilities": {
-            "bounded_attention": {
-                "parameters": {"attentionChunkSize": 67_108_864},
-                "overlays": ["none"],
-            },
-            "bounded_transformer_residency": {
-                "parameters": {
-                    "transformerWindowSize": 1,
-                    "transformerWindowComponent": "Dit",
-                },
-                "overlays": ["none"],
-            },
-        },
-        "memoryStrategyStructuralExemptions": {
-            "bounded_decode": {
-                "overlays": ["none", "lora"],
-                "evidence": [
-                    {
-                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
-                        "reason": "The provider contract classifies bounded decode as StructurallyNotApplicable because independent tiles cannot preserve Mage CoD normalization.",
-                    },
-                    {
-                        "source": "inference:crates/media/candle-gen/candle-gen-mage/src/vae.rs",
-                        "reason": "Mage VAE group normalization reduces over height and width, so a tile observes different statistics from the full latent field.",
-                    },
-                ],
-            },
-        },
-    }, model_id
-
-
-def test_mage_flow_generation_family_is_pinned_and_complete():
-    """sc-14047 + sc-14980: the generation variants ship physical per-tier artifacts."""
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    expected = {
-        "mage_flow_base": ("SceneWorks/Mage-Flow-Base", "d642341926fcdb450c17c8fbda03759e8f731c9b", 30, 5),
-        "mage_flow": ("SceneWorks/Mage-Flow", "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db", 20, 5),
-        "mage_flow_turbo": ("SceneWorks/Mage-Flow-Turbo", "79016f10f96b441bebb6e6f461838adb8fb3ff5c", 4, 1),
-    }
-    for model_id, (repo, revision, steps, guidance) in expected.items():
-        model = models[model_id]
-        assert model["family"] == "mage-flow"
-        assert model["macOnly"] is False
-        _assert_mage_candle_ladder(model, model_id)
-        assert model["defaults"]["steps"] == steps
-        assert model["defaults"]["guidanceScale"] == guidance
-        _assert_mage_tier_layout(model, model_id, repo, revision)
-
-
 def test_minimax_h3_sibling_dit_partition_ships_wherever_its_tier_does():
     """sc-22738: `transformer_ref/` is part of the MINIMUM LOADABLE SET, not a Ref2VA extra.
 
@@ -504,27 +375,6 @@ def test_minimax_h3_sibling_dit_partition_ships_wherever_its_tier_does():
                 "platform's install unloadable"
             )
 
-
-def test_mage_flow_edit_family_is_pinned_complete_and_source_gated():
-    """sc-14050 + sc-14980: every edit variant ships physical per-tier artifacts."""
-    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
-    expected = {
-        "mage_flow_edit_base": ("SceneWorks/Mage-Flow-Edit-Base", "6c119cdac7ce7cf8c1ab4990d9c8ca18641f2c5d", 30, 5),
-        "mage_flow_edit": ("SceneWorks/Mage-Flow-Edit", "dbd4a9c07faca94491ad88ab21225d62e054d9cc", 30, 5),
-        "mage_flow_edit_turbo": ("SceneWorks/Mage-Flow-Edit-Turbo", "75c11a2957aca2c78272984375502105b2b235ab", 4, 1),
-    }
-    for model_id, (repo, revision, steps, guidance) in expected.items():
-        model = models[model_id]
-        assert model["family"] == "mage-flow"
-        assert model["adapter"] == "mlx_mage"
-        assert model["capabilities"] == ["edit_image"]
-        assert model["macOnly"] is False
-        _assert_mage_candle_ladder(model, model_id)
-        assert model["defaults"]["steps"] == steps
-        assert model["defaults"]["guidanceScale"] == guidance
-        assert model["ui"]["sourceWithMultiReference"] is True
-        assert model["ui"]["recommendedFor"] == ["edit_image"]
-        _assert_mage_tier_layout(model, model_id, repo, revision)
 
 
 def _model_table_default_repos() -> dict[str, str]:
@@ -2930,34 +2780,6 @@ def test_krea_turbo_fit_schema_rejects_stale_or_incomplete_contract_evidence():
     )
 
 
-def test_boogu_candle_vram_tiers_cover_and_pin_the_default_q8_tier():
-    """sc-13533: both Boogu entries must carry a MEASURED q8 row — the tier they default to.
-
-    `mlx.quantize: 8` makes the image-lane resolvers derive q8 for a no-pick request, and the shipped
-    `base/`/`turbo/` Q8 turnkey is the ONLY variant `downloads` pulls. The candle blocks originally
-    shipped only {q4, bf16} (sc-13108 measured only those two), so
-    `vram_gate::predicted_peak_gb(entry, "q8")` found no row and fell through to the flat `minMemoryGb`
-    floor, sizing the default tier ~2 GB UNDER its real peak and without the fit gate's 2 GB headroom —
-    the permissive direction. The q8 rows below are the direct CUDA measurements (RTX PRO 6000
-    Blackwell, exclusive GPU, 1024², seed 42, native path) that close it. Never regress them, and never
-    drop the q8 key. Pairs with the Rust coverage lint
-    `every_image_model_budgets_its_default_tier_against_a_measured_row`.
-    """
-    manifest = _load_builtin_models_manifest()
-    expected = {
-        "boogu_image": {"q4": 31.7, "q8": 42.0, "bf16": 54.4},
-        "boogu_image_turbo": {"q4": 31.6, "q8": 42.1, "bf16": 54.5},
-    }
-    for model_id, tiers in expected.items():
-        entry = next(model for model in manifest["models"] if model["id"] == model_id)
-        assert {
-            tier: entry["candle"]["vramGbByTier"][tier] for tier in ("q4", "q8", "bf16")
-        } == tiers, model_id
-        # The coarse `minMemoryGb` floor must not sit BELOW the DEFAULT (q8) tier's measured peak —
-        # that under-floor (turbo shipped 40 < 42.1) was the second face of this bug, exposed whenever
-        # `predicted_peak_gb` falls back to `minMemoryGb`.
-        assert entry["candle"]["minMemoryGb"] >= tiers["q8"], model_id
-
 
 def test_wan_2_2_candle_vram_tiers_match_measured_peaks():
     """sc-13175: never regress the measured 5B SEQUENTIAL peaks (or slide back to the resident ones).
@@ -3647,14 +3469,9 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
 IMAGE_MODELS_WITH_EXPERIMENTAL_CFG = frozenset({
     "z_image_turbo",
     "z_image_edit",
-    "boogu_image_turbo",
     "krea_2_turbo",
     "sd3_5_large_turbo",
     "anima_turbo",
-    "mage_flow_turbo",
-    "mage_flow_edit_turbo",
-    "boogu_image",
-    "boogu_image_edit",
 })
 
 

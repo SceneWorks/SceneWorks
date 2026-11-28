@@ -187,15 +187,12 @@ pub fn pid_backbone_for(model: &str) -> Option<&'static str> {
         | "qwen_image_edit_2511_lightning"
         | "krea_2_turbo"
         | "krea_2_raw" => Some("qwenimage"),
-        "flux_dev" | "flux_schnell" | "pulid_flux_dev" | "boogu_image" | "boogu_image_turbo"
-        | "boogu_image_edit" | "chroma1_hd" | "chroma1_base" | "chroma1_flash"
-        | "z_image_turbo" | "z_image_edit" => Some("flux"),
+        "flux_dev" | "flux_schnell" | "pulid_flux_dev" | "chroma1_hd" | "chroma1_base"
+        | "chroma1_flash" | "z_image_turbo" | "z_image_edit" => Some("flux"),
         "flux2_dev"
         | "flux2_klein_9b"
         | "flux2_klein_9b_kv"
         | "flux2_klein_9b_true_v2"
-        | "lens"
-        | "lens_turbo"
         | "ideogram_4"
         | "ideogram_4_turbo" => Some("flux2"),
         "sdxl"
@@ -401,7 +398,6 @@ pub fn route_admits_source_asset_for_plain_img2img(model: &str) -> bool {
             | "sd3_5_large_turbo"
             | "sd3_5_medium"
             | "sana_1600m"
-            | "boogu_image"
             | "z_image"
             | "z_image_turbo"
             | "kolors"
@@ -471,7 +467,6 @@ pub fn route_admits_reference_asset_for_plain_img2img(
             | "sana_1_6b"
             | "sana_sprint_1600m"
             | "sana_sprint_1_6b"
-            | "boogu_image"
             | "krea_2_turbo"
             | "krea_2_raw"
     )

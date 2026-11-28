@@ -234,8 +234,6 @@ fn production_spec(engine: &str, tier_dir: &std::path::Path, tier: &str) -> Load
     // dense; its `qwen_native` arm accepts any tier. Neither arm fires unless the weights are a
     // directory and the precision is bf16, which is true of every spec this harness builds.
     let deferred = match engine {
-        "lens" => quant == Some(gen_core::Quant::Q4),
-        "lens_turbo" => quant.is_none(),
         other => deferred_materialization_routes().contains(other),
     };
     if deferred {

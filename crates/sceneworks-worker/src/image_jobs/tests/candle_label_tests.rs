@@ -173,35 +173,6 @@ fn registered_zimage_identity_routes_scored_source_metadata() {
 }
 
 #[test]
-fn mage_edit_preserves_primary_then_ordered_extra_references() {
-    let request = bound_request(json!({
-        "mode": "edit_image",
-        "model": "mage_flow_edit_turbo",
-        "sourceAssetId": "primary",
-        "referenceAssetIds": ["second", "third"]
-    }));
-    assert_eq!(
-        mage_edit_reference_ids(&request),
-        ["primary", "second", "third"]
-    );
-    assert_eq!(
-        CandleImageRoute::MageEdit.adapter_label(&request),
-        "candle_mage",
-        "Mage edit assets and generation sets must retain the Candle family label"
-    );
-
-    let missing_primary = bound_request(json!({
-        "mode": "edit_image",
-        "model": "mage_flow_edit",
-        "referenceAssetIds": ["orphan"]
-    }));
-    assert!(
-        mage_edit_reference_ids(&missing_primary).is_empty(),
-        "Mage edit must not reinterpret an optional reference as its required primary source"
-    );
-}
-
-#[test]
 fn candle_image_adapter_labels_are_per_family() {
     assert_eq!(candle_adapter_label("z_image_turbo"), "candle_z_image");
     assert_eq!(candle_adapter_label("flux_schnell"), "candle_flux");

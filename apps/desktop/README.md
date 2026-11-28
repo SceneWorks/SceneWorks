@@ -94,7 +94,7 @@ catalog (`config/manifests/builtin.models.jsonc`, `limits.minMemoryGb`). As a
 rough guide:
 
 - **Images** range from lightweight SDXL-class models up to ~30–60 GB for the
-  largest models (e.g. Lens, SenseNova U1 — the latter wants 96 GB+ unified
+  largest models (SenseNova U1 wants 96 GB+ unified
   memory on Apple Silicon).
 - **Video** (LTX-2.3, Wan 2.2) is the most demanding path; budget 24 GB+ VRAM on
   Windows and 96 GB+ unified memory on Mac for comfortable headroom.

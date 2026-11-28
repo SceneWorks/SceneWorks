@@ -1792,27 +1792,6 @@ pub(crate) fn imported_image_request_family_eligible(
             && !has_nonempty_string(payload, "characterLookId");
     }
 
-    // A Mage-Flow non-builtin id is a full base FINE-TUNE (sc-15036, epic 14034 F6) — the
-    // `transformer/`-shaped checkpoint a `networkType: "full"` training run writes, paired at load
-    // with the installed base's shared text encoder + VAE. The Mage generator advertises no
-    // conditioning on the non-edit variants, and `mlx_gen_mage::load_finetuned` refuses adapters
-    // outright, so this claims the plain **txt2img** surface ONLY. Everything else keeps flowing to
-    // its established route rather than being silently flattened to t2i here — including LoRAs,
-    // which are rejected on EVERY backend (unlike Krea's adapter-capable single-file lane, hence the
-    // explicit check rather than relying on `adapters_supported`).
-    if family == Some("mage-flow") {
-        return payload.get("mode").and_then(Value::as_str).map(str::trim) != Some("edit_image")
-            && !has_reference_list
-            && !has_loras
-            && !has_nonempty_string(payload, "referenceAssetId")
-            && !has_nonempty_string(payload, "sourceAssetId")
-            && !has_poses
-            && !has_phases
-            && !has_nonempty_string(payload, "maskAssetId")
-            && !has_nonempty_string(payload, "characterId")
-            && !has_nonempty_string(payload, "characterLookId");
-    }
-
     // Never on this bare-transformer lane, on any backend: multi-phase, inpaint mask, and
     // character / look identity conditioning (all need base-tier components it does not stage).
     if has_phases
@@ -2079,7 +2058,6 @@ const TRAINING_KERNEL_PRESENTATION_ORDER: &[(&str, u8, u8)] = &[
     ("z_image_lora", 1, 1),
     ("sdxl_lora", 2, 2),
     ("kolors_lora", 3, 3),
-    ("lens_lora", 4, 4),
     ("krea_lora", 5, 5),
     ("krea_control", u8::MAX, 6),
     ("sd3_lora", 6, 7),
@@ -2087,7 +2065,6 @@ const TRAINING_KERNEL_PRESENTATION_ORDER: &[(&str, u8, u8)] = &[
     ("wan_moe_lora", 8, 10),
     ("ltx_mlx_lora", 9, 8),
     ("anima_lora", 10, 11),
-    ("mage_flow_lora", 11, 12),
     ("iris_train", 12, 13),
     ("qwen_image_2_1_lora", 13, 14),
     ("qwen_image_2_1_edit_lora", 14, 15),
@@ -2159,7 +2136,6 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "sd3_lora",
     "anima_lora",
     "krea_control",
-    "mage_flow_lora",
     "iris_train",
     // Qwen Image 2.1 (sc-24159/sc-24160): native MLX + Candle trainers and no generic one, so a
     // generic worker refuses it while the candle exception admits it (it is candle-routed).
@@ -2931,121 +2907,6 @@ mod tests {
                 "{family} exact source must keep the pose picker dark"
             );
         }
-    }
-
-    /// sc-15036 (epic 14034 F6) — a full base fine-tune's exact transformer-directory source must
-    /// be claimable for plain txt2img and REFUSED for every shape that lane cannot serve.
-    ///
-    /// This is the routing half of "selectable at generation": before this, a `mage-flow`-family
-    /// non-builtin id fell through `image_model_mac_support` to "not available on Mac", so the
-    /// Studio hid the model entirely.
-    ///
-    /// Discriminating in both directions on ONE entry: t2i eligible, and each of edit / reference /
-    /// LoRA / pose / mask / character refused — a gate that simply returned `true` for the family
-    /// (the generic Krea-shaped arm) would pass the first assertion and fail the LoRA one, because
-    /// `mlx_gen_mage::load_finetuned` refuses adapters outright on EVERY backend.
-    #[test]
-    fn a_fine_tuned_mage_flow_base_is_native_routable_and_claims_txt2img_only() {
-        let finetune_id = "finetune_9f3c";
-        let payload = |extra: serde_json::Value| {
-            let mut value = serde_json::json!({
-                "model": finetune_id,
-                "modelManifestEntry": {
-                    "id": finetune_id,
-                    "family": "mage-flow",
-                    "importSourceShape": "transformer_directory",
-                    "paths": { "model": "/app/models/finetunes/finetune_9f3c" }
-                }
-            });
-            value
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
-            value.as_object().unwrap().clone()
-        };
-        let mlx = |p: &serde_json::Map<String, serde_json::Value>| {
-            imported_image_request_provider_eligible(finetune_id, p, "mlx")
-        };
-        let candle = |p: &serde_json::Map<String, serde_json::Value>| {
-            imported_image_request_family_eligible(
-                finetune_id,
-                p,
-                CANDLE_ROUTED_FAMILIES.as_slice(),
-                CANDLE_IMPORTED_CAPS,
-            )
-        };
-
-        // The family-only probe stays closed because it cannot select a source. The exact stamped
-        // manifest entry is what admits this provider route.
-        assert!(
-            !image_model_mac_support(finetune_id, Some("mage-flow")).supported,
-            "family identity alone must not invent a Mage loader"
-        );
-
-        assert!(
-            mlx(&payload(serde_json::json!({ "mode": "text_to_image" }))),
-            "plain txt2img is the shape the MLX fine-tuned lane serves"
-        );
-        assert!(
-            !candle(&payload(serde_json::json!({ "mode": "text_to_image" }))),
-            "Candle has no registered Mage imported provider"
-        );
-
-        for (label, extra) in [
-            (
-                "edit",
-                serde_json::json!({ "mode": "edit_image", "sourceAssetId": "s" }),
-            ),
-            (
-                "reference",
-                serde_json::json!({ "referenceAssetId": "asset-1" }),
-            ),
-            (
-                "reference list",
-                serde_json::json!({ "referenceAssetIds": ["a"] }),
-            ),
-            ("source", serde_json::json!({ "sourceAssetId": "a" })),
-            (
-                "lora",
-                serde_json::json!({ "loras": [{ "id": "adapter" }] }),
-            ),
-            ("pose", serde_json::json!({ "advanced": { "poses": [{}] } })),
-            (
-                "phases",
-                serde_json::json!({ "advanced": { "phases": [{}] } }),
-            ),
-            ("mask", serde_json::json!({ "maskAssetId": "m" })),
-            ("character", serde_json::json!({ "characterId": "c" })),
-            ("look", serde_json::json!({ "characterLookId": "l" })),
-        ] {
-            assert!(
-                !mlx(&payload(extra.clone())) && !candle(&payload(extra)),
-                "{label} must not be flattened to t2i on either native backend"
-            );
-        }
-
-        // The generated Mage full-fine-tune seam exists in the pinned Candle runtime, but no
-        // imported-provider registration currently makes that source claimable there.
-        assert!(
-            !CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
-            "test family projection must follow registered imported providers"
-        );
-        assert!(
-            !imported_image_request_provider_eligible(
-                finetune_id,
-                &payload(serde_json::json!({ "mode": "text_to_image" })),
-                "candle"
-            ),
-            "no candle mage-flow import route is registered, so the exact provider lookup must refuse"
-        );
-
-        // A BUILTIN Mage id keeps its id-keyed routing — the family path applies only to
-        // non-builtins, so the tiered snapshot lane is untouched.
-        assert!(!imported_image_request_provider_eligible(
-            "mage_flow_base",
-            &payload(serde_json::json!({ "mode": "text_to_image" })),
-            "mlx"
-        ));
     }
 
     #[test]

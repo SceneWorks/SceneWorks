@@ -1,8 +1,6 @@
 #[cfg(target_os = "macos")]
 use super::adapters::resolve_adapters;
 #[cfg(target_os = "macos")]
-use super::artifact_resolution::ensure_boogu_tier_present;
-#[cfg(target_os = "macos")]
 use super::artifact_resolution::ensure_ideogram_tier_present;
 #[cfg(target_os = "macos")]
 use super::artifact_resolution::model_path_override;
@@ -361,11 +359,6 @@ pub(super) async fn generate_stream_using(
     // Hoisted (also used at the load-spec seam below): the registered engine id, the sc-10733
     // capability-downtier fit key + `apply_residency_policy` sequential-capability key.
     let engine_id = model.engine_id();
-    // sc-6568: a bf16 opt-in for Boogu fetches the full-precision `<variant>-bf16/` subfolder on
-    // demand (the catalog ships only the Q8 default) before snapshot resolution. No-op for every
-    // other model / the default Q8 path. sc-9607: the same on-demand pattern for Ideogram's `q8/`
-    // tier (the catalog ships only q4) — was a documented follow-up, now wired on both lanes.
-    ensure_boogu_tier_present(api, settings, job, request).await?;
     ensure_ideogram_tier_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;

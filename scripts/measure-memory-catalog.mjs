@@ -1137,25 +1137,6 @@ export function requiredFilesFor(declaration, tier) {
 }
 
 /**
- * The shared Mage-Flow text-encoder + VAE rehost (sc-22733). Declared once and referenced by all six
- * Mage family rows: it is the SAME repository and the SAME revision for every variant and both
- * lanes, and both adapters read it through one `SCENEWORKS_MAGE_FLOW_COMPONENTS_*` family. The
- * revision is NOT pinned here — it is read from the manifest's own `coRequisite` download rows, so
- * a components re-host lands by editing the manifest alone.
- */
-export const MAGE_COMPONENTS = Object.freeze({
-  env: "MAGE_FLOW_COMPONENTS",
-  repo: "SceneWorks/Mage-Flow-Components-mlx",
-});
-
-/**
- * The two component ids both Mage engines advertise, in descriptor order. Bound to the adapter's own
- * `MAGE_COMPONENT_TEXT_ENCODER` / `MAGE_COMPONENT_VAE` constants by a test, so the directories this
- * script probes are the ones the adapters actually stage.
- */
-export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
-
-/**
  * One row per provider arm an adapter implements, mirroring `match provider` in
  * crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs and the env families the runbook lists
  * under "Adapter environment".
@@ -1392,29 +1373,6 @@ export const PROVIDER_FAMILIES = Object.freeze({
       ],
     },
   },
-  // The Mage-Flow family (sc-22733). SIX registered engine providers whose catalog ids are
-  // identical to their engine ids (worker `engines.rs` MODEL_TABLE), each with its OWN tiered
-  // rehost — so six rows rather than one shared family. What they DO share is the text encoder and
-  // the VAE: those are bit-identical across all six variants and are hosted once in
-  // `SceneWorks/Mage-Flow-Components-mlx`, which every Mage manifest entry declares as per-tier
-  // `coRequisite` downloads. Both engines resolve that split through `LoadSpec::components`
-  // (`mlx-gen-mage` `resolve_component_dirs`, `candle-gen-mage` `resolved_component_dirs`), so a
-  // Mage anchor binds TWO roots: the variant's tier root and the components SNAPSHOT (the tier is
-  // the first path element INSIDE it, which is why `components` resolves the snapshot rather than a
-  // tier root).
-  ...Object.fromEntries(
-    [
-      ["mage_flow", "MAGE_FLOW", "SceneWorks/Mage-Flow"],
-      ["mage_flow_base", "MAGE_FLOW_BASE", "SceneWorks/Mage-Flow-Base"],
-      ["mage_flow_turbo", "MAGE_FLOW_TURBO", "SceneWorks/Mage-Flow-Turbo"],
-      ["mage_flow_edit", "MAGE_FLOW_EDIT", "SceneWorks/Mage-Flow-Edit"],
-      ["mage_flow_edit_base", "MAGE_FLOW_EDIT_BASE", "SceneWorks/Mage-Flow-Edit-Base"],
-      ["mage_flow_edit_turbo", "MAGE_FLOW_EDIT_TURBO", "SceneWorks/Mage-Flow-Edit-Turbo"],
-    ].map(([provider, env, repo]) => [
-      provider,
-      { env, repo, arms: ["mlx", "candle"], components: MAGE_COMPONENTS },
-    ]),
-  ),
   // The SD3.5 family (sc-22730). Three DISTINCT engine providers, each with its own tiered rehost
   // and therefore its own env family — unlike `z_image_edit`/`pulid_flux`, none of them is an alias
   // for another's backbone, so serving one from another's artifact would re-label that route's
@@ -1578,10 +1536,6 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // The engine id equals the catalog model id for all five, so the family key, the plan row's
   // `provider` and the anchor key's modelId are the same token.
   kolors: { env: "KOLORS", repo: "SceneWorks/kolors-mlx", arms: ["mlx", "candle"] },
-  lens: { env: "LENS", repo: "SceneWorks/lens-mlx", arms: ["mlx", "candle"], requiredTensorComponents: ["text_encoder", "transformer", "vae"] },
-  // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split from
-  // `flux1_dev`: a turbo plan satisfied by base weights would re-label the base model's peaks.
-  lens_turbo: { env: "LENS_TURBO", repo: "SceneWorks/lens-turbo-mlx", arms: ["mlx", "candle"], requiredTensorComponents: ["text_encoder", "transformer", "vae"] },
   // Ideogram is the only shipped family whose tiers do NOT all come from one repository, which is
   // what `tiers` exists for: `q4`/`q8` are the packed `SceneWorks/ideogram-4-mlx` turnkey, and
   // `bf16` is the separate `SceneWorks/ideogram-4` repo at a separate revision (worker
@@ -2987,65 +2941,6 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     }
     row.env[component.env] = root;
   }
-  // The shared component snapshot a split-layout family stages its text encoder and VAE from
-  // (sc-22733, Mage-Flow). Unlike `upstream`, this root is a co-requisite the MANIFEST ships, and
-  // unlike the tier root above it is the SNAPSHOT: the tier is the first path element inside it,
-  // and the adapters join `<tier>/text_encoder` and `<tier>/vae` themselves. Absent is
-  // `weights_missing` — a Mage load whose components are not staged cannot open at all, because the
-  // variant rehost carries no `text_encoder/` or `vae/` sibling for the loader to fall back to.
-  if (family.components && !Array.isArray(family.components)) {
-    // The components are declared PER TIER (one co-requisite row per component per tier), so the
-    // row for THIS tier is what says the tier's text encoder and VAE are shipped at all. No row is
-    // `weights_missing` — the cell is planned and the arm exists, the host merely cannot bind the
-    // artifact — never a thrown error that aborts the whole `--list` (sc-22733 review).
-    const download = (models.find((entry) => entry.id === parts.modelId)?.downloads ?? []).find(
-      (row) => row.repo === family.components.repo && row.coRequisite && row.variant === parts.tier,
-    );
-    if (!download) {
-      row.roots.push({ label: "components snapshot", path: `$SCENEWORKS_${family.components.env}_ROOT` });
-      return {
-        ...row, status: "weights_missing",
-        reason: `manifest ${parts.modelId} declares no ${family.components.repo} components row for tier ${parts.tier}`,
-      };
-    }
-    const root = await firstExistingDirectory(
-      hubs.map((hub) => snapshotPath(hub, family.components.repo, download.revision)),
-    );
-    row.roots.push({
-      label: "components snapshot",
-      path: root ?? snapshotPath(hubs[0], family.components.repo, download.revision),
-    });
-    if (!root) {
-      return {
-        ...row, status: "weights_missing",
-        reason: `no ${family.components.repo}@${download.revision.slice(0, 8)} snapshot on this host`,
-      };
-    }
-    // The tier's own two component directories, not just the snapshot: a partially-fetched
-    // components mirror is exactly as unloadable as an absent one, and reporting the cell
-    // `runnable` would send an operator to book a capture that cannot open its text encoder.
-    const missing = [];
-    for (const component of MAGE_COMPONENT_IDS) {
-      const componentRoot = path.join(root, parts.tier, component);
-      // A config-only directory is not a staged encoder/VAE. The loader opens
-      // safetensors directly here; otherwise --download-missing never repairs it.
-      if (!(await hasComponentWeights(componentRoot))) {
-        missing.push(`${parts.tier}/${component}`);
-      }
-      for (const shard of await missingIndexedShards(componentRoot)) {
-        missing.push(`${parts.tier}/${component}/${shard}`);
-      }
-    }
-    if (missing.length > 0) {
-      return {
-        ...row, status: "weights_missing",
-        reason: `${family.components.repo} snapshot ${root} is missing ${missing.join(", ")}`,
-      };
-    }
-    row.env[`SCENEWORKS_${family.components.env}_REPOSITORY`] = family.components.repo;
-    row.env[`SCENEWORKS_${family.components.env}_REVISION`] = download.revision;
-    row.env[`SCENEWORKS_${family.components.env}_ROOT`] = root;
-  }
   // An identity stack the worker fetches on first use rather than declaring as a manifest download
   // has nothing for the harness to resolve, so the operator stages it and names it here. An unset
   // or absent path is `weights_missing` — the host simply lacks the artifact — not a gap.
@@ -3219,9 +3114,6 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
   if (family.upstream) repositories.push({ label: "upstream root", repo: family.upstream.repo });
   for (const component of requiredComponentsFor(family, row.backend, row.tier)) {
     repositories.push({ label: `component ${component.env}`, repo: component.repo });
-  }
-  if (family.components && !Array.isArray(family.components)) {
-    repositories.push({ label: "components snapshot", repo: family.components.repo });
   }
 
   const seen = new Set();

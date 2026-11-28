@@ -35,9 +35,6 @@ pub(super) fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> 
         return None;
     }
     let identity = match (provider_id, tier) {
-        (LENS_TURBO_ID, "q4") => {
-            "lens-candle-cuda-shared-ladder-device-format-blocks-v1".to_owned()
-        }
         (KOLORS_ID, tier) => format!("kolors-candle-kolors-{tier}-staged-chatglm-unet-f32-vae-v1"),
         (IDEOGRAM_ID, tier) => {
             format!("ideogram4-candle-request-scoped-staged-residency-v1-base-{tier}")
@@ -45,8 +42,6 @@ pub(super) fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> 
         (IDEOGRAM_TURBO_ID, tier) => {
             format!("ideogram4-candle-request-scoped-staged-residency-v1-turbo-{tier}")
         }
-        (LENS_ID, tier) => format!("lens-base-{tier}-candle-cuda-shared-ladder-v1"),
-        (LENS_TURBO_ID, tier) => format!("lens-turbo-{tier}-candle-cuda-shared-ladder-v1"),
         // sc-24112: `candle-gen-qwen-image-2-1`'s `memory_strategy::MEMORY_CALIBRATION_FINGERPRINT`,
         // ONE derived identity for every tier (the load shape is its separate typed axis).
         (QWEN_IMAGE_2_1_ID, _) => QWEN_IMAGE_2_1_CANDLE_FINGERPRINT.to_owned(),
@@ -69,7 +64,6 @@ pub(super) fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> 
 #[cfg(test)]
 pub(super) fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
     fingerprint.starts_with(runtime_cuda::calibration::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
-        || fingerprint.starts_with(runtime_cuda::calibration::lens::STATIC_BEHAVIOR_FINGERPRINT)
         // Retired plan namespace: this string is not an engine identity at the pinned source.
         || fingerprint.starts_with("ideogram4-candle-request-scoped-staged-residency-static-v1")
         // Retired pre-sc-22732 all-tier spelling, also absent from the current engine exports.
@@ -105,8 +99,6 @@ pub(super) fn turnkey_fixture_slug(provider: &str) -> Option<&'static str> {
         KOLORS_ID => Some("kolors"),
         IDEOGRAM_ID => Some("ideogram-4"),
         IDEOGRAM_TURBO_ID => Some("ideogram-4-turbo"),
-        LENS_ID => Some("lens"),
-        LENS_TURBO_ID => Some("lens-turbo"),
         QWEN_IMAGE_2_1_ID => Some("qwen-image-2-1"),
         QWEN_IMAGE_2_1_TURBO_ID => Some("qwen-image-2-1-turbo"),
         _ => None,

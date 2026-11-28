@@ -8,6 +8,66 @@ pub use sceneworks_options::request_validation::{
     VALIDATOR_SCHEMA_VERSION,
 };
 
+/// The same refusal is used for current requests and stored carriers from older releases.
+pub fn reject_retired_image_identity(field: &str, identity: &str) -> Result<(), ValidationRefusal> {
+    let Some(detail) = crate::model_family::retired_image_detail(identity) else {
+        return Ok(());
+    };
+    let mut refusal = ValidationRefusal::new(field, detail);
+    refusal.code = "retired_model";
+    refusal.context = Box::new(serde_json::json!({ "identity": identity, "field": field }));
+    Err(refusal)
+}
+
+pub fn reject_retired_image_entry(entry: &JsonObject) -> Result<(), ValidationRefusal> {
+    if let Some(identity) = crate::model_family::retired_image_entry(entry) {
+        reject_retired_image_identity("model", identity)?;
+    }
+    Ok(())
+}
+
+pub fn reject_retired_image_job(
+    job_type: &crate::contracts::JobType,
+    payload: &JsonObject,
+) -> Result<(), ValidationRefusal> {
+    use crate::contracts::JobType::*;
+    use serde_json::Value;
+    let fields: &[&str] = match job_type {
+        ImageGenerate | ImageEdit | ImageDetail | ImageUpscale | ImageInterleave | PromptRefine => {
+            &["model", "checkpointModelId"]
+        }
+        ModelDownload | ModelConvert | ModelImport | LoraImport => {
+            &["modelId", "family", "baseModel"]
+        }
+        LoraTrain | ControlTraining => &["baseModel", "targetId", "kernel"],
+        _ => return Ok(()),
+    };
+    for field in fields {
+        if let Some(identity) = payload.get(*field).and_then(Value::as_str) {
+            reject_retired_image_identity(field, identity)?;
+        }
+        if let Some(plan) = payload.get("plan") {
+            let identity = plan.get(*field).or_else(|| plan.get("target")?.get(*field));
+            if let Some(identity) = identity.and_then(Value::as_str) {
+                reject_retired_image_identity(field, identity)?;
+            }
+        }
+    }
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if let Some(entry) = payload.get(key).and_then(Value::as_object) {
+            reject_retired_image_entry(entry)?;
+        }
+    }
+    if let Some(loras) = payload.get("loras").and_then(Value::as_array) {
+        for lora in loras {
+            if let Some(identity) = crate::lora_family::retired_lora_identity(lora) {
+                reject_retired_image_identity("loras", &identity)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn precision_facts(entry: &JsonObject) -> Cow<'_, JsonObject> {
     if crate::source_precision::SourcePrecision::for_entry(entry).is_none()
         && !entry.contains_key("sourcePrecision")

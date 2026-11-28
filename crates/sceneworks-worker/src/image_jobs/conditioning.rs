@@ -749,13 +749,6 @@ pub(super) fn ideogram_edit_strength(
         .clamp(0.05, 1.0)
 }
 
-/// Upper bound on reference images for a Boogu instruction edit (sc-7645). The DiT's
-/// `image_index_embedding` carries 5 per-image index slots (OmniGen2 lineage), so `N ∈ [1, 5]`
-/// references can be packed into one edit (e.g. subject-from-A composed into scene-from-B); a plural
-/// picker beyond that is capped here. Matches the `mlx-gen-boogu` / `candle-gen-boogu` `MAX_EDIT_REFS`.
-#[cfg(native_lane)]
-pub(super) const BOOGU_MAX_EDIT_REFERENCES: usize = 5;
-
 /// One `Conditioning::Reference` (a single reference) or one `Conditioning::MultiReference` (2–5) from
 /// the resolved Boogu edit references (cloned per output). Empty references → empty (T2I fallback).
 /// The single case stays a `Reference` so it is byte-identical to the pre-sc-7645 single-reference
@@ -863,61 +856,6 @@ fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, ima
         },
         plane,
     ))
-}
-
-/// Reference asset ids for a Boogu instruction edit, in order. The multi-image picker sends the plural
-/// `referenceAssetIds` — take all of them, capped at [`BOOGU_MAX_EDIT_REFERENCES`]; with no plural list
-/// it falls back to the single Image-Edit `sourceAssetId` (`edit_image` mode). Mirrors
-/// `edit_reference_ids`.
-#[cfg(native_lane)]
-pub(super) fn boogu_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if !request.reference_asset_ids.is_empty() {
-        // The parsed list is already trimmed + non-empty (sceneworks-core `string_list`).
-        return request
-            .reference_asset_ids
-            .iter()
-            .take(BOOGU_MAX_EDIT_REFERENCES)
-            .cloned()
-            .collect();
-    }
-    if let Some(id) = request
-        .source_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        return vec![id.to_owned()];
-    }
-    Vec::new()
-}
-
-/// Mage Edit always conditions on the required primary source first, followed by the optional
-/// `referenceAssetIds` exactly in client order.
-#[cfg(native_lane)]
-pub(super) fn mage_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if request.mode != "edit_image" {
-        return Vec::new();
-    }
-    let Some(source) = request
-        .source_asset_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    else {
-        return Vec::new();
-    };
-    let mut ids = Vec::with_capacity(1 + request.reference_asset_ids.len());
-    ids.push(source.to_owned());
-    ids.extend(request.reference_asset_ids.iter().cloned());
-    ids
-}
-
-#[cfg(native_lane)]
-pub(super) fn is_mage_edit_model(model: &str) -> bool {
-    matches!(
-        model,
-        "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo"
-    )
 }
 
 /// One resolved Qwen-Image 2.1 condition image, with the alpha plane it arrived with (sc-24110).
@@ -1230,16 +1168,9 @@ pub(super) fn resolve_generic_lane_inputs(
     // values as the historical inline 5-way match, table-ized into one resolver (sc-8828, F-026).
     // The strict-pose ControlNet / edit tiers divert earlier in `resolve_image_route`.
     let lane = resolve_generic_lane_conditioning(request, settings, project_path, has_reference)?;
-    // Registry instruction edits: Boogu resolves 1..5 sources; Mage resolves its required primary
-    // source followed by every optional reference in client order. Both thread through
-    // `generate_one` as `Reference` (one) / `MultiReference` (many), never the img2img-init slot.
-    // The alpha plane of each `edit_refs` entry — only Qwen-Image 2.1 ever fills it (S4 contract).
+    // Ordered edit references and their per-image alpha planes.
     let mut edit_ref_alpha: Vec<Option<image::GrayImage>> = Vec::new();
-    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
-        resolve_boogu_edit(request, settings, project_path)?
-    } else if is_mage_edit_model(&request.model) {
-        resolve_mage_edit(request, settings, project_path)?
-    } else if is_qwen_image_2_1_edit(request) {
+    let edit_refs: Vec<Image> = if is_qwen_image_2_1_edit(request) {
         // Qwen-Image 2.1 reference / local editing (sc-24110): ONE ordered list of 1..=10 condition
         // images, source → mask → submitted references. No `ImageRoute` variant of its own — the id
         // is in MODEL_TABLE, so an edit lands on the generic `Mlx` arm exactly as Mage Edit does,
@@ -1308,61 +1239,6 @@ pub(super) fn guard_qwen_image_2_1_lane_slots(
         ));
     }
     Ok(())
-}
-
-/// Resolve the Boogu instruction-edit sources: the `N ∈ [1, 5]` reference images (plural
-/// `referenceAssetIds`, else the single `sourceAssetId` — [`boogu_edit_reference_ids`]), each fit to the
-/// output W×H (so it satisfies the engine's multiple-of-16 guard and aligns to the target aspect).
-/// Returns the references in order; **empty** when not an edit / no source. The engine treats one
-/// reference as `Conditioning::Reference` and 2–5 as `Conditioning::MultiReference` (each read by the
-/// Qwen3-VL vision tower + VAE-encoded into the DiT spatial sequence). The per-reference strength is
-/// inert for Boogu (the edit is structural — the engine ignores `Conditioning::Reference.strength`). No
-/// mask / outpaint path (the descriptor accepts only `Reference` / `MultiReference`).
-///
-/// Shared by the macOS MLX `generate_stream` and the off-Mac candle `generate_candle_stream` (sc-7524):
-/// Boogu is the same engine family for T2I and edit on both backends (the registered `boogu_image_edit`
-/// resolves the source `Reference`(s) in-lane, like Ideogram), so both lanes resolve the edit sources the
-/// same way. Its deps (`load_reference_image`, `fit_engine_image`) already compile off-Mac under
-/// `backend-candle` (the Ideogram edit path uses them too).
-#[cfg(native_lane)]
-pub(super) fn resolve_boogu_edit(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Vec<Image>> {
-    if request.mode != "edit_image" {
-        return Ok(Vec::new());
-    }
-    let ids = boogu_edit_reference_ids(request);
-    let mut references = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let source =
-            load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
-        let source = fit_engine_image(source, request.width, request.height, &request.fit_mode)?;
-        references.push(source);
-    }
-    Ok(references)
-}
-
-#[cfg(native_lane)]
-pub(super) fn resolve_mage_edit(
-    request: &ImageRequest,
-    settings: &Settings,
-    project_path: &Path,
-) -> WorkerResult<Vec<Image>> {
-    let ids = mage_edit_reference_ids(request);
-    let mut references = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let source =
-            load_reference_image(&settings.data_dir, &request.project_id, id, project_path)?;
-        references.push(fit_engine_image(
-            source,
-            request.width,
-            request.height,
-            &request.fit_mode,
-        )?);
-    }
-    Ok(references)
 }
 
 /// Resolve the Ideogram 4 `edit_image` conditioning (sc-6303) into the base MLX path's
@@ -1802,7 +1678,7 @@ pub(super) struct LaneConditioning {
 /// These base providers accept a plain img2img source in the single-reference slot.
 #[cfg(native_lane)]
 pub(super) fn ordinary_img2img_uses_reference_slot(model: &str) -> bool {
-    matches!(model, "sana_1600m" | "boogu_image")
+    matches!(model, "sana_1600m")
 }
 
 /// Resolve an ordinary single-source img2img input supplied as `sourceAssetId`.

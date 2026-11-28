@@ -2569,6 +2569,11 @@ fn validate_training_submission(
     // dry-run resolves and validates the plan without producing weights; a real
     // run hands the same plan to the worker's Z-Image LoRA kernel.
     //
+    sceneworks_core::request_validation::reject_retired_image_identity(
+        "targetId",
+        &payload.target_id,
+    )
+    .map_err(crate::jobs::retired_model_error)?;
     // Targets come from the Rust-owned registry; the request only names one.
     let registry = effective_training_targets();
     let target = registry
@@ -2948,24 +2953,6 @@ async fn prepare_training_submission(
             {
                 return Err(ApiError::bad_request(message));
             }
-        } else if training_is_full_finetune(&payload.config) {
-            let base_model_dir = resolve_base_model_path(target, &data_dir);
-            if let Some(message) = sceneworks_worker::full_finetune_memory_error(
-                FsPath::new(&base_model_dir),
-                // Epic 2123 E7 (sc-2127): with resolution buckets the run trains at every listed
-                // resolution, so the envelope is the LARGEST one, not `resolution`.
-                sceneworks_core::training::training_max_resolution(&payload.config),
-                // The accumulator buffer is a real term in the envelope, not a detail — see
-                // `FULL_FINETUNE_ACCUM_MULTIPLIER`. Passing the configured window is what keeps a
-                // 64–80 GB Mac out of an uncatchable SIGKILL.
-                payload.config.gradient_accumulation,
-                // The BASE MODEL's label, not the target's: a training target is named for what it
-                // normally produces ("Mage-Flow Base LoRA"), which reads as nonsense in a full-tune
-                // rejection ("A full base fine-tune of Mage-Flow Base LoRA at 1024px…").
-                &training_base_model_label(target),
-            ) {
-                return Err(ApiError::bad_request(message));
-            }
         }
     }
 
@@ -3079,37 +3066,11 @@ async fn prepare_training_submission(
     // generation (krea_2 trains against krea_2_raw but applies on krea_2_turbo). `register_completed_\
     // control_overlay` writes this into the control-overlay manifest; the security-sensitive id/scope/
     // source are recomputed from trusted inputs there, so this stays purely descriptive.
-    // A full base fine-tune registers as a MODEL, not an adapter (sc-15036, epic 14034 F6). Swap
-    // the LoRA-shaped descriptive fields for a model-catalog entry: `type`/`family` drive the
-    // Studio's per-family surface (`apply_model_manifest_defaults` fills `adapter`, `capabilities`,
-    // resolutions and defaults at registration time, exactly as the model-import job does), and
-    // `paths.model` is what `install_state_for` and the worker's render lane both resolve the
-    // checkpoint through. `networkType` is deliberately kept — it is the field that says this entry
-    // came from a `"full"` run, and the completion registrar keys the third arm off the plan's
-    // `outputKind` rather than off it. The security-sensitive id/source are recomputed from trusted
-    // inputs in `register_trained_base_checkpoint`, so this stays purely descriptive.
     if is_base_checkpoint {
         if let Some(entry) = manifest_entry.as_object_mut() {
             entry.remove("triggerWords");
             entry.insert("type".to_owned(), Value::String("image".to_owned()));
-            entry.insert(
-                "paths".to_owned(),
-                json!({ "model": output_dir.display().to_string() }),
-            );
-            entry.insert(
-                "importSourceShape".to_owned(),
-                Value::String("transformer_directory".to_owned()),
-            );
-            // The catalog has one global user manifest; record the effective scope honestly rather
-            // than echoing a "project" the model store cannot honour.
             entry.insert("scope".to_owned(), Value::String("global".to_owned()));
-            entry.insert(
-                "files".to_owned(),
-                json!([
-                    sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
-                    sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE,
-                ]),
-            );
         }
     }
 
@@ -3874,45 +3835,6 @@ fn macos_wan_base_path(data_dir: &FsPath, target: &TrainingTarget) -> Option<Str
     None
 }
 
-/// Whether a training request selects the **full base fine-tune** path (sc-14056) — `advanced.
-/// networkType == "full"` — rather than a LoRA/LoKr adapter. Drives the full-tune memory-envelope
-/// submit gate ([`full_finetune_memory_error`](sceneworks_worker::full_finetune_memory_error)). A
-/// missing / other value (`"lora"`, `"lokr"`) is the adapter path, so this is additive: existing LoRA
-/// submissions are unaffected.
-/// The **base model's** display label for a training target, derived from the target's name by
-/// dropping the trailing output-kind word.
-///
-/// A training target is named for the artifact it normally produces — "Mage-Flow Base LoRA",
-/// "SDXL LoRA" — which is exactly wrong in a message about fine-tuning the base itself: the sc-14056
-/// full-tune rejection read "A full base fine-tune of Mage-Flow Base LoRA at 1024px…". The target
-/// carries no separate base-model display name (`base_model` is an id like `mage_flow_base`), so
-/// strip the suffix. Names without a recognized suffix are returned unchanged.
-pub(crate) fn training_base_model_label(
-    target: &sceneworks_core::training::TrainingTarget,
-) -> String {
-    const OUTPUT_KIND_SUFFIXES: [&str; 4] = ["lora", "lokr", "control", "controlnet"];
-    let name = target.name.trim();
-    let Some((head, last)) = name.rsplit_once(char::is_whitespace) else {
-        return name.to_owned();
-    };
-    if OUTPUT_KIND_SUFFIXES
-        .iter()
-        .any(|suffix| last.eq_ignore_ascii_case(suffix))
-    {
-        let head = head.trim_end();
-        if !head.is_empty() {
-            return head.to_owned();
-        }
-    }
-    name.to_owned()
-}
-
-pub(crate) fn training_is_full_finetune(
-    config: &sceneworks_core::training::TrainingConfig,
-) -> bool {
-    sceneworks_core::training::config_is_full_finetune(config)
-}
-
 /// Single source of truth for where a training run's adapter is written and its
 /// LoRA registered, derived only from trusted inputs: the scope, the owning
 /// project, and the pre-allocated LoRA id. `create_training_job` uses it to place
@@ -4024,28 +3946,6 @@ pub(crate) fn resolve_finetune_output_location(
             .join("manifests")
             .join("user.models.jsonc"),
     )
-}
-
-/// The directory-shaped sibling of [`trusted_adapter_files`] (sc-15036).
-///
-/// A full base fine-tune does not produce an adapter FILE; it produces a diffusers **transformer
-/// component directory** — `config.json` plus the diffusers weight file — which is what the model
-/// catalog entry's `paths.model` points at and what `mlx_gen_mage::load_finetuned` reads. So
-/// `trusted_adapter_files`, whose whole contract is `output_dir.join(name).is_file()` on a declared
-/// adapter name, can only ever return `None` here.
-///
-/// Same security posture as its sibling: nothing is read out of the mutable job payload. The
-/// component file names are recomputed from the shared
-/// [`sceneworks_core::base_weights`] constants — the same pair the worker's render lane and the
-/// import gate probe — so "registered" and "loadable" cannot drift, and a torn run (weights written,
-/// config missing, or vice versa) is refused rather than registered as a model that fails at load.
-pub(crate) fn trusted_base_checkpoint_files(output_dir: &FsPath) -> Option<Vec<String>> {
-    sceneworks_core::base_weights::is_mage_flow_transformer_dir(output_dir).then(|| {
-        vec![
-            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE.to_owned(),
-            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE.to_owned(),
-        ]
-    })
 }
 
 /// Maps a control training target's family to its inference-side control identity (sc-10165, B4): the

@@ -3999,8 +3999,6 @@ mod krea_imported;
 #[cfg(native_lane)]
 mod krea_multiphase;
 #[cfg(native_lane)]
-mod mage_finetuned;
-#[cfg(native_lane)]
 mod sdxl_imported;
 #[cfg(target_os = "macos")]
 mod sensenova;

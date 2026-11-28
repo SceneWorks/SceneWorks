@@ -90,19 +90,6 @@ pub(crate) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str)
     }
 }
 
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn is_mage_engine(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo"
-    )
-}
-
 /// Certify the complete artifact identity consumed by one registered image load. Most providers
 /// are self-contained, so their identity is the tier directory alone. Mage is split: its DiT lives
 /// in the model-specific snapshot while the text encoder and VAE live in a shared pinned snapshot.
@@ -125,7 +112,7 @@ pub(crate) fn candle_certified_load_spec(
                 manifest_entry,
                 engine_id,
             );
-    if !is_mage_engine(engine_id) && !declaration_owned {
+    if !declaration_owned {
         return candle_certified_artifact_path(engine_id, settings, weights_dir, tier);
     }
     let Some(downloads) = manifest_entry.get("downloads").and_then(Value::as_array) else {
@@ -182,7 +169,7 @@ pub(crate) fn candle_certified_load_spec(
     // change and sc-20799) reports every such route uncertified, which silently strips its
     // receipt-priced admission down to resident-only.
     let descriptor = crate::inference_runtime::media_descriptor(engine_id);
-    if !is_mage_engine(engine_id) && descriptor.is_none() {
+    if descriptor.is_none() {
         return spec.components.is_empty()
             && (spec.text_encoder.is_none() || spec.validate_prepared_file_pins().is_ok())
             && certify(None, weights_dir);
@@ -1053,8 +1040,3 @@ mod chroma_load_seal_tests;
 #[cfg(test)]
 #[path = "tests/ideogram_load_seal_tests.rs"]
 mod ideogram_load_seal_tests;
-
-#[cfg(native_lane)]
-#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
-#[path = "tests/mage_artifact_certification_tests.rs"]
-mod mage_artifact_certification_tests;

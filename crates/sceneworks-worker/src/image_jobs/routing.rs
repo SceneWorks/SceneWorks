@@ -20,8 +20,6 @@ use super::conditioning::edit_grouping;
 #[cfg(target_os = "macos")]
 use super::conditioning::grouped_edit_image_count;
 #[cfg(not(target_os = "macos"))]
-use super::conditioning::is_mage_edit_model;
-#[cfg(not(target_os = "macos"))]
 use super::conditioning::is_minimax_h3_image_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_qwen_image_2_1_edit;
@@ -116,13 +114,6 @@ use super::krea_imported::KREA_IMPORTED_ENGINE;
 use super::krea_multiphase::krea_multiphase_available;
 use super::krea_multiphase::request_has_multiphase;
 use super::krea_turbo_raw::krea_turbo_on_raw_available;
-#[cfg(test)]
-use super::mage_finetuned::mage_finetuned_available;
-use super::mage_finetuned::PreparedMageFinetunedTransformer;
-#[cfg(not(target_os = "macos"))]
-use super::mage_finetuned::MAGE_FINETUNED_ENGINE;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::MAGE_FINETUNED_ENGINE;
 use super::mlx_model;
 #[cfg(not(target_os = "macos"))]
 use super::moss::moss_adapter_label;
@@ -364,14 +355,6 @@ pub(super) enum ImageRoute {
     /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
     /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
     SdxlImported,
-    /// This app's OWN full base fine-tune of Mage-Flow Base (sc-15036, epic 14034 F6): a non-builtin
-    /// `mage-flow`-family catalog entry whose `paths.model` is a complete diffusers transformer
-    /// component dir → the bespoke fine-tuned lane, which stages the installed base's shared text
-    /// encoder + VAE and loads through `mage::load_finetuned`. A builtin Mage id never reaches here
-    /// (`resolve_mage_finetuned_transformer` returns `None` for a `MODEL_TABLE` id), so the tiered
-    /// snapshot path is untouched. txt2img only — the non-edit Mage variants advertise no
-    /// conditioning and the fine-tuned entrypoint refuses adapters.
-    MageFinetuned,
     InstantId,
     /// Generic SDXL OpenPose ControlNet, shared by the five independently accepted model ids.
     SdxlControl,
@@ -491,7 +474,6 @@ fn resolve_image_route_with_imported_availability(
     imported_control_available: bool,
     imported_available: bool,
     sdxl_imported_available: bool,
-    mage_finetuned_available: bool,
 ) -> Option<ImageRoute> {
     if execution.map_or_else(
         || flux1_ipadapter_pose_combination(request),
@@ -597,11 +579,6 @@ fn resolve_image_route_with_imported_availability(
         Some(ImageRoute::KreaImported)
     } else if sdxl_imported_available {
         Some(ImageRoute::SdxlImported)
-    } else if mage_finetuned_available {
-        // A fine-tuned Mage-Flow base (sc-15036). The fine-tune's id is in no `MODEL_TABLE`, so
-        // `mlx_available` is `false` for it — this arm is what routes it to real MLX generation at
-        // all. A builtin Mage id is claimed by the generic `mlx_available` arm below, unchanged.
-        Some(ImageRoute::MageFinetuned)
     } else if instantid_available(request, settings) {
         Some(ImageRoute::InstantId)
     } else if execution.map_or_else(
@@ -724,7 +701,6 @@ pub(super) fn resolve_image_route(
         krea_imported_control_available(request, settings),
         krea_imported_available(request, settings),
         sdxl_imported_available(request, settings),
-        mage_finetuned_available(request, settings),
     )
 }
 
@@ -735,7 +711,6 @@ pub(super) enum PreparedImageRoute {
     KreaImported(Box<PreparedKreaImportedSources>),
     KreaImportedControl(Box<PreparedKreaImportedControlSources>),
     SdxlImported(Box<PreparedSdxlImportedSources>),
-    MageFinetuned(Box<PreparedMageFinetunedTransformer>),
 }
 
 #[cfg(target_os = "macos")]
@@ -747,7 +722,6 @@ impl PreparedImageRoute {
             Self::KreaImported(_) => ImageRoute::KreaImported,
             Self::KreaImportedControl(_) => ImageRoute::KreaImportedControl,
             Self::SdxlImported(_) => ImageRoute::SdxlImported,
-            Self::MageFinetuned(_) => ImageRoute::MageFinetuned,
         }
     }
 }
@@ -774,8 +748,6 @@ pub(super) fn prepare_image_route(
         None
     };
     let sdxl = super::sdxl_imported::prepare_sdxl_imported_sources_resolved(request, settings)?;
-    let mage_finetuned =
-        super::mage_finetuned::prepare_mage_finetuned_transformer_resolved(request, settings)?;
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         Some(request),
@@ -784,7 +756,6 @@ pub(super) fn prepare_image_route(
         imported_control.is_some(),
         imported.is_some(),
         sdxl.is_some(),
-        mage_finetuned.is_some(),
     ) else {
         // Zero lanes claimed the request. For a plan-backed entry that is never "no route": the
         // plan route declined only because the entry has SceneWorks-owned bytes some bespoke lane
@@ -808,9 +779,6 @@ pub(super) fn prepare_image_route(
         )),
         ImageRoute::SdxlImported => PreparedImageRoute::SdxlImported(Box::new(
             sdxl.expect("prepared SDXL imported route lost its sources"),
-        )),
-        ImageRoute::MageFinetuned => PreparedImageRoute::MageFinetuned(Box::new(
-            mage_finetuned.expect("prepared Mage fine-tuned route lost its transformer"),
         )),
         route => PreparedImageRoute::Plain(route),
     }))
@@ -883,9 +851,6 @@ impl ImageRoute {
             // conditioning; strict-pose requests use the separate control route above.
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
-            // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
-            // renders, each its own seed. No angle/pose grouping (the lane claims no conditioning).
-            | ImageRoute::MageFinetuned
             | ImageRoute::FluxIpAdapterPoseReject
             | ImageRoute::PoseControlBaseMissing
             | ImageRoute::PoseReject => request.count,
@@ -939,7 +904,6 @@ impl ImageRoute {
             ImageRoute::CheckpointPlan => CHECKPOINT_PLAN_ENGINE,
             ImageRoute::KreaImported | ImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             ImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
-            ImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             ImageRoute::InstantId => INSTANTID_ENGINE,
             ImageRoute::PulidFlux => PULID_ADAPTER_LABEL,
             ImageRoute::PoseControlBaseMissing | ImageRoute::PoseReject => STUB_ADAPTER,
@@ -976,9 +940,6 @@ pub(super) enum CandleImageRoute {
     SenseNovaEdit,
     /// Z-Image img2img / edit (sc-6595).
     ZimageEdit,
-    /// Mage-Flow Base/RL/Turbo instruction edit. Uses the generic registry stream, but requires
-    /// source-first ordered multi-reference conditioning rather than the plain T2I request shape.
-    MageEdit,
     /// Qwen-Image 2.1 reference / local editing (sc-24110). `qwen_image_2_1` is ALSO a candle
     /// txt2img id, so a conditioned request must divert here first or the generic arm would render
     /// it as plain text-to-image and silently drop every reference. Uses the same generic registry
@@ -1023,8 +984,6 @@ pub(super) enum CandleImageRoute {
     /// Off-Mac twin of [`ImageRoute::CheckpointPlan`] (sc-20634): a plan-backed user checkpoint
     /// resolved through the plan store and rendered by the registry-bound candle provider.
     CheckpointPlan,
-    /// A generated full-fine-tune Mage transformer paired with the installed Base TE/VAE.
-    MageFinetuned,
     /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
     /// the three caller-staged SDXL components.
     SdxlImported,
@@ -1110,7 +1069,6 @@ impl CandleImageRoute {
             | CandleImageRoute::QwenImageComfyui
             | CandleImageRoute::ZimageEdit
             | CandleImageRoute::KolorsEdit
-            | CandleImageRoute::MageEdit
             | CandleImageRoute::KreaEdit
             | CandleImageRoute::KreaTurboOnRaw
             | CandleImageRoute::KreaMultiPhase
@@ -1221,7 +1179,6 @@ impl CandleImageRoute {
             CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
             CandleImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
             CandleImageRoute::CheckpointPlan => CHECKPOINT_PLAN_ENGINE,
-            CandleImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
             CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
             CandleImageRoute::KolorsIpAdapter => kolors_ipadapter::KOLORS_IPADAPTER_ENGINE,
@@ -1242,7 +1199,6 @@ impl CandleImageRoute {
             CandleImageRoute::Flux2Comfyui => flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
             CandleImageRoute::MossImageEdit
-            | CandleImageRoute::MageEdit
             | CandleImageRoute::QwenImage21Edit
             | CandleImageRoute::MinimaxH3ImageEdit
             | CandleImageRoute::Flux3Reference
@@ -1260,7 +1216,6 @@ pub(super) enum PreparedCandleImageRoute {
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
     QwenImageComfyui(Box<qwen_comfyui_candle::ComfyuiQwenPaths>),
     Flux2Comfyui(Box<flux2_comfyui_candle::ComfyuiFlux2Paths>),
-    MageFinetuned(Box<PreparedMageFinetunedTransformer>),
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -1274,7 +1229,6 @@ impl PreparedCandleImageRoute {
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
             Self::QwenImageComfyui(_) => CandleImageRoute::QwenImageComfyui,
             Self::Flux2Comfyui(_) => CandleImageRoute::Flux2Comfyui,
-            Self::MageFinetuned(_) => CandleImageRoute::MageFinetuned,
         }
     }
 }
@@ -1298,7 +1252,6 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
     zimage_comfyui_available: bool,
     qwen_comfyui_available: bool,
     flux2_comfyui_available: bool,
-    mage_finetuned_available: bool,
 ) -> Option<CandleImageRoute> {
     if !settings.backend_candle_enabled {
         return None;
@@ -1359,14 +1312,6 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         Some(CandleImageRoute::SenseNovaEdit)
     } else if zimage_edit_candle_available(request, settings) {
         Some(CandleImageRoute::ZimageEdit)
-    } else if is_mage_edit_model(&request.model)
-        && request.mode == "edit_image"
-        && request
-            .source_asset_id
-            .as_deref()
-            .is_some_and(|id| !id.trim().is_empty())
-    {
-        Some(CandleImageRoute::MageEdit)
     } else if request
         .flux3_reference_request
         .as_ref()
@@ -1380,8 +1325,8 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // before load, rather than a missing/invalid slot falling through to a T2I or stub path.
         Some(CandleImageRoute::Flux3Reference)
     } else if is_qwen_image_2_1_edit(request) {
-        // Qwen-Image 2.1 reference / local editing (sc-24110), named by the resolver for the same
-        // reason Mage Edit is: the id is a candle txt2img id, so a conditioned request that fell
+        // Qwen-Image 2.1 reference / local editing (sc-24110) uses the same id as txt2img.
+        // A conditioned request that fell
         // through would be rendered as plain T2I with every reference silently dropped. The core
         // router's `CandleImageLane::QwenImage21Edit` claims exactly these shapes.
         Some(CandleImageRoute::QwenImage21Edit)
@@ -1503,10 +1448,6 @@ pub(super) fn resolve_candle_image_route_with_prepared_availability(
         // `is_candle_engine`, so this bespoke text-to-image/img2img/edit route must claim them before
         // the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
-    } else if mage_finetuned_available {
-        // A fine-tuned Mage-Flow base (sc-15036): its id is in no `MODEL_TABLE` / `is_candle_engine`
-        // arm, so this route is what dispatches it to real candle generation at all.
-        Some(CandleImageRoute::MageFinetuned)
     } else if sdxl_imported_available {
         Some(CandleImageRoute::SdxlImported)
     } else if zimage_comfyui_available {
@@ -1637,7 +1578,6 @@ pub(super) fn resolve_candle_image_route(
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
         qwen_comfyui_candle::qwen_comfyui_available(request, settings),
         flux2_comfyui_candle::flux2_comfyui_available(request, settings),
-        mage_finetuned_available(request, settings),
     )
 }
 
@@ -1683,8 +1623,6 @@ pub(super) fn prepare_candle_image_route(
     let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources_resolved(request, settings)?;
     let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources_resolved(request, settings)?;
     let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources_resolved(request, settings)?;
-    let mage_finetuned =
-        super::mage_finetuned::prepare_mage_finetuned_transformer_resolved(request, settings)?;
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         Some(request),
@@ -1695,7 +1633,6 @@ pub(super) fn prepare_candle_image_route(
         zimage.is_some(),
         qwen.is_some(),
         flux2.is_some(),
-        mage_finetuned.is_some(),
     ) else {
         // See the macOS twin: zero lanes claimed a plan-backed entry means the bespoke lane the
         // plan route deferred to does not exist for this shape. Raise the retained typed refusal
@@ -1723,9 +1660,6 @@ pub(super) fn prepare_candle_image_route(
         )),
         CandleImageRoute::Flux2Comfyui => PreparedCandleImageRoute::Flux2Comfyui(Box::new(
             flux2.expect("prepared FLUX.2 route lost its sources"),
-        )),
-        CandleImageRoute::MageFinetuned => PreparedCandleImageRoute::MageFinetuned(Box::new(
-            mage_finetuned.expect("prepared Mage fine-tuned route lost its transformer"),
         )),
         route => PreparedCandleImageRoute::Plain(route),
     }))
@@ -1785,7 +1719,6 @@ pub(super) fn candle_adapter_label(model: &str) -> &'static str {
         // MiniMax-H3-Image (SW-7100): the off-Mac sibling of the `mlx_minimax_h3_image` label.
         "minimax_h3_image" => "candle_minimax_h3_image",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
-        "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
         "sensenova_u1_8b"
         | "sensenova_u1_8b_infographic_v2"
@@ -1794,13 +1727,6 @@ pub(super) fn candle_adapter_label(model: &str) -> &'static str {
         | "sensenova_u1_8b_infographic_v2_fast"
         | "sensenova_u1_8b_infographic_v3_fast" => "candle_sensenova",
         "ideogram_4" | "ideogram_4_turbo" => "candle_ideogram",
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => "candle_boogu",
-        "mage_flow_base"
-        | "mage_flow"
-        | "mage_flow_turbo"
-        | "mage_flow_edit_base"
-        | "mage_flow_edit"
-        | "mage_flow_edit_turbo" => "candle_mage",
         "krea_2_turbo" | "krea_2_raw" => "candle_krea",
         // Stable Diffusion 3.5 (sc-7880): Large / Large Turbo / Medium share the candle SD3.5 engine.
         "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => "candle_sd3",

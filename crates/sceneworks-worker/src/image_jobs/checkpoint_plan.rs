@@ -6,7 +6,6 @@ use super::krea_imported::resolve_krea_imported_base_tier;
 #[cfg(target_os = "macos")]
 use super::krea_imported::KREA_IMPORTED_DEFAULT_STEPS;
 use super::krea_multiphase::request_has_multiphase;
-use super::mage_finetuned::resolve_mage_finetuned_components;
 #[cfg(not(target_os = "macos"))]
 use super::prepare_cached_candle_base_floor;
 use super::resolve_seed;
@@ -1195,18 +1194,10 @@ fn resolve_checkpoint_plan_component(
                     pin: Some(pin),
                 });
             }
-            let resolved_components = checkpoint_plan_family_components(
-                family,
-                component,
-                &resolved.checkpoint_id,
-                settings,
-            )?;
-            Ok(CheckpointPlanComponent {
-                id: component,
-                source: resolved_components,
-                consumed: None,
-                pin: None,
-            })
+            Err(WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:missing-component] checkpoint {:?} ({family} family) requires                  component '{component}', which this runtime cannot supply for that family",
+                resolved.checkpoint_id
+            )))
         }
     }
 }
@@ -1214,45 +1205,6 @@ fn resolve_checkpoint_plan_component(
 /// The fused-LDM tokenizer component id (SDXL's `ldm_tokenizer`), spelled here because the constant
 /// lives in the MLX-only `mlx-gen-sdxl` crate while this route serves both backends.
 const CHECKPOINT_PLAN_LDM_TOKENIZER_COMPONENT: &str = "ldm_tokenizer";
-
-/// Each plan family's SHARED-COMPONENT resolver: `(plan family, resolver)`.
-///
-/// The sibling of [`CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`] for families whose provider declares named
-/// components rather than one base snapshot. Catalog data, not family truth: the descriptor already
-/// says WHICH components are required; this is only the app's answer to where that family installed
-/// them. Each entry is the family's EXISTING resolver — the same function, not a copy — so a missing
-/// component produces one message and one completeness probe no matter which route asked.
-///
-/// A family with no row refuses the component by name rather than loading a neighbour's (E8).
-#[allow(clippy::type_complexity)]
-pub(super) const CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS: &[(
-    &str,
-    fn(&Settings) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>>,
-)] = &[("mage-flow", resolve_mage_finetuned_components)];
-
-/// One provider-declared component resolved through its family's own component resolver.
-fn checkpoint_plan_family_components(
-    family: &str,
-    component: &str,
-    checkpoint_id: &str,
-    settings: &Settings,
-) -> WorkerResult<WeightsSource> {
-    let unsupplyable = || {
-        WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:missing-component] checkpoint {checkpoint_id:?} ({family} family) \
-             requires component '{component}', which this runtime cannot supply for that family"
-        ))
-    };
-    let (_, resolve) = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
-        .iter()
-        .find(|(candidate, _)| *candidate == family)
-        .ok_or_else(unsupplyable)?;
-    // The family's own resolver raises its own actionable error when the components are not
-    // installed; that error is propagated verbatim rather than replaced with a generic one.
-    resolve(settings)?
-        .remove(component)
-        .ok_or_else(unsupplyable)
-}
 
 /// Each plan family's resident base tier resolver: `(plan family, resolver)`.
 ///

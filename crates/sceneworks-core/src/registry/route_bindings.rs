@@ -197,10 +197,8 @@ pub const TRAINER_TARGET_BINDINGS: &[(&str, &str, &str)] = &[
     ("kolors_lora", "kolors", "kolors"),
     ("krea_2_control", "krea_2_control", "krea_2_control"),
     ("krea_2_raw_lora", "krea_2_raw", "krea_2_raw"),
-    ("lens_turbo_lora", "lens", "lens"),
     ("ltx_2_5_video_lora", "ltx_2_5", "ltx_2_5_distilled"),
     ("ltx_video_lora", "ltx_2_3", "ltx_2_3"),
-    ("mage_flow_base_lora", "mage_flow_base", "mage_flow_base"),
     (
         "minimax_h3_image_edit_lora",
         "minimax_h3_image",
@@ -242,7 +240,6 @@ pub fn trainer_engine_id(backend: &str, kernel: &str, base_model: &str) -> Optio
         "z_image_lora" => Some("z_image_turbo"),
         "sdxl_lora" => Some("sdxl"),
         "kolors_lora" => (base_model == "kolors").then_some("kolors"),
-        "lens_lora" => Some("lens"),
         "krea_lora" => Some("krea_2_raw"),
         "krea_control" => Some("krea_2_control"),
         "sd3_lora" => match base_model {
@@ -266,7 +263,6 @@ pub fn trainer_engine_id(backend: &str, kernel: &str, base_model: &str) -> Optio
             _ => None,
         },
         "anima_lora" => (base_model == "anima_base").then_some("anima_base"),
-        "mage_flow_lora" => (base_model == "mage_flow_base").then_some("mage_flow_base"),
         "iris_train" => match base_model {
             "iris_3b" => Some("iris_3b"),
             "iris_3b_depth" => Some("iris_3b_depth"),

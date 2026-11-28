@@ -845,6 +845,13 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// Unknown scaling, containers without an importer and heterogeneous conventions without one
 /// truthful persisted codec identity remain explicit refusals.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
+    if let Some(detail) = verdict
+        .family
+        .as_deref()
+        .and_then(crate::model_family::retired_image_detail)
+    {
+        return Err(detail);
+    }
     if verdict.family.as_deref().is_some_and(|family| {
         image_import_encoding_supported(family, verdict.component, verdict.quant)
     }) {
@@ -3731,47 +3738,6 @@ mod tests {
             QuantFormat::Bf16,
         ));
         assert!(import_detection_supported(&detection).is_ok());
-    }
-
-    /// sc-15036 — Mage-Flow is the DIRECTORY-shaped member of the import gate. The triple gate
-    /// accepts a dense bf16 transformer (the shape a full base fine-tune writes) and refuses the
-    /// wrong component and the pre-quantized tiers, each with its own reason.
-    #[test]
-    fn import_supported_accepts_a_dense_mage_flow_transformer_and_names_every_refusal() {
-        assert!(import_supported(&verdict(
-            Some("mage-flow"),
-            ComponentRole::Transformer,
-            QuantFormat::Bf16
-        ))
-        .is_ok());
-
-        let wrong_component = import_supported(&verdict(
-            Some("mage-flow"),
-            ComponentRole::Vae,
-            QuantFormat::Bf16,
-        ))
-        .expect_err("a VAE is not a Mage-Flow backbone");
-        assert!(
-            wrong_component.contains("transformer"),
-            "reason: {wrong_component}"
-        );
-
-        for quant in [
-            QuantFormat::Fp8E4m3,
-            QuantFormat::ComfyQuantPacked,
-            QuantFormat::Gguf,
-        ] {
-            let refused = import_supported(&verdict(
-                Some("mage-flow"),
-                ComponentRole::Transformer,
-                quant,
-            ))
-            .expect_err("unverified source encodings must be refused");
-            assert!(
-                refused.contains(quant.as_str()),
-                "the refusal must name the encoding it saw: {refused}"
-            );
-        }
     }
 
     /// sc-15036 — the directory-shape probe the import gate and the worker's render lane SHARE.

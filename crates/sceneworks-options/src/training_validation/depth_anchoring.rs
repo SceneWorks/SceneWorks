@@ -296,7 +296,6 @@ pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
         "z_image_turbo" => Catalog(&TAEF1_MODEL),
         "sdxl" | "kolors" => Catalog(&TAESDXL_MODEL),
         "sd3_5_large" | "sd3_5_medium" => Catalog(&TAESD3_MODEL),
-        "lens" => Catalog(&TAEF2_MODEL),
         "qwen_image_2_1" => Catalog(&TAEQI2_1_MODEL),
         "krea_2_raw" | "anima_base" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => {
             Catalog(&TAEW2_1_MODEL)

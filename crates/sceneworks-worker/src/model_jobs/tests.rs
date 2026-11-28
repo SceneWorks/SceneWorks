@@ -798,9 +798,16 @@ mod convert_registry_tests {
 
         for &converter in NATIVE_CONVERTERS {
             let job = convert_job(converter);
-            let resolved = resolve_convert_plan(&api, &settings, &job, checkpoint_dir, None, &Default::default())
-                .await
-                .expect("resolver runs without an infra error");
+            let resolved = resolve_convert_plan(
+                &api,
+                &settings,
+                &job,
+                checkpoint_dir,
+                None,
+                &Default::default(),
+            )
+            .await
+            .expect("resolver runs without an infra error");
             if let Err(err) = &resolved {
                 assert_ne!(
                     err.message, "Unknown MLX converter.",
@@ -813,9 +820,16 @@ mod convert_registry_tests {
         // A converter NOT in the registry is rejected as unknown — proving the check above is
         // meaningful and that the fallback still fires.
         let bogus = convert_job("definitely_not_a_real_converter");
-        let resolved = resolve_convert_plan(&api, &settings, &bogus, checkpoint_dir, None, &Default::default())
-            .await
-            .expect("resolver runs without an infra error");
+        let resolved = resolve_convert_plan(
+            &api,
+            &settings,
+            &bogus,
+            checkpoint_dir,
+            None,
+            &Default::default(),
+        )
+        .await
+        .expect("resolver runs without an infra error");
         match resolved {
             Err(err) => assert_eq!(err.message, "Unknown MLX converter."),
             Ok(_) => panic!("a bogus converter must not resolve to a plan"),
@@ -978,8 +992,10 @@ mod tier_builder {
                 bits > 0,
                 "boogu assemble builds a packed Q tier (set SC8513_BITS=4 or 8)"
             );
-            runtime_macos::converters::boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
-                .unwrap_or_else(|error| panic!("boogu assemble failed: {error}"));
+            runtime_macos::converters::boogu::convert::assemble_quantized_snapshot(
+                &src, &out, bits,
+            )
+            .unwrap_or_else(|error| panic!("boogu assemble failed: {error}"));
             eprintln!("[sc-8513] DONE {tier} at {}", out.display());
             return;
         }
@@ -1908,20 +1924,6 @@ mod co_requisite_tests {
         ),
     ];
 
-    fn mage_descriptor(id: &'static str) -> gen_core::ModelDescriptor {
-        gen_core::ModelDescriptor {
-            id,
-            family: "mage-flow",
-            backend: "mlx",
-            modality: gen_core::Modality::Image,
-            capabilities: gen_core::Capabilities::default(),
-            encoder_contract: None,
-            denoiser_output_latent_space: None,
-            required_components: &["text_encoder", "vae"],
-            control_kinds: None,
-        }
-    }
-
     /// The six SHIPPED Mage rows, whose shared text encoder + VAE are per-tier co-requisites.
     const MAGE_MODEL_IDS: &[&str] = &[
         "mage_flow_base",
@@ -1991,51 +1993,6 @@ mod co_requisite_tests {
                 assert!(dir.is_dir(), "{model_id}: {component} dir must exist");
             }
         }
-    }
-
-    /// Asking for a tier whose shared components are NOT installed fails BEFORE the engine load,
-    /// rather than silently handing back another tier's text encoder.
-    #[test]
-    fn mage_co_requisites_refuse_a_tier_that_is_not_installed() {
-        let _env = crate::test_env::isolate_hf_cache();
-        let data_dir = tempfile::tempdir().expect("temp data dir");
-        let manifest = builtin_manifest_entry("mage_flow_base");
-        stage_mage_components(data_dir.path(), &manifest, "q4");
-
-        let error = resolve_co_requisites_for_tier(
-            &mage_descriptor("mage_flow_base"),
-            &manifest,
-            &settings_at(data_dir.path().to_path_buf()),
-            Some("bf16"),
-        )
-        .expect_err("bf16 components are not staged, so resolution must fail");
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("not installed") || message.contains("missing"),
-            "the failure must be actionable, got {message}"
-        );
-    }
-
-    /// A per-tier component with NO tier in scope is refused rather than guessed. Picking the first
-    /// matching row would silently serve a bf16 text encoder to a q4 render.
-    #[test]
-    fn mage_co_requisites_refuse_to_guess_a_tier_when_none_is_resolved() {
-        let _env = crate::test_env::isolate_hf_cache();
-        let data_dir = tempfile::tempdir().expect("temp data dir");
-        let manifest = builtin_manifest_entry("mage_flow_base");
-        stage_mage_components(data_dir.path(), &manifest, "q4");
-
-        let error = resolve_co_requisites_for_tier(
-            &mage_descriptor("mage_flow_base"),
-            &manifest,
-            &settings_at(data_dir.path().to_path_buf()),
-            None,
-        )
-        .expect_err("three per-tier rows with no tier in scope must not be guessed");
-        assert!(
-            format!("{error:?}").contains("refusing to guess"),
-            "got {error:?}"
-        );
     }
 
     #[test]

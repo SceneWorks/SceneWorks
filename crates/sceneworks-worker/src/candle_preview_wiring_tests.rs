@@ -370,11 +370,7 @@ fn bespoke_candle_requests_bind_a_live_preview_sink() {
 /// Failing mutation: drop `preview,` from `mage_finetuned.rs`'s `GenerationRequest` literal.
 #[test]
 fn imported_checkpoint_lanes_bind_a_live_preview_sink() {
-    for file in [
-        "sdxl_imported.rs",
-        "mage_finetuned.rs",
-        "checkpoint_plan.rs",
-    ] {
+    for file in ["sdxl_imported.rs", "checkpoint_plan.rs"] {
         let bindings = preview_bindings(&source_for(file), "GenerationRequest");
         assert!(
             !bindings.is_empty(),

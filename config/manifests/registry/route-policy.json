@@ -2,54 +2,6 @@
   "schemaVersion": 1,
   "image": [
     {
-      "id": "mage_flow_base",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
-      "id": "mage_flow",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
-      "id": "mage_flow_turbo",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
-      "id": "mage_flow_edit_base",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
-      "id": "mage_flow_edit",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
-      "id": "mage_flow_edit_turbo",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
       "id": "z_image_turbo",
       "mlxRouted": true,
       "candleRouted": true,
@@ -316,22 +268,6 @@
       "candleQuantLora": true
     },
     {
-      "id": "lens",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
-      "id": "lens_turbo",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": false,
-      "candleLora": false,
-      "candleQuantLora": true
-    },
-    {
       "id": "bernini_image",
       "mlxRouted": true,
       "candleRouted": true,
@@ -354,30 +290,6 @@
       "candleQuant": false,
       "candleLora": false,
       "candleQuantLora": true
-    },
-    {
-      "id": "boogu_image",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": true,
-      "candleLora": false,
-      "candleQuantLora": false
-    },
-    {
-      "id": "boogu_image_turbo",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": true,
-      "candleLora": false,
-      "candleQuantLora": false
-    },
-    {
-      "id": "boogu_image_edit",
-      "mlxRouted": true,
-      "candleRouted": true,
-      "candleQuant": true,
-      "candleLora": false,
-      "candleQuantLora": false
     },
     {
       "id": "krea_2_turbo",

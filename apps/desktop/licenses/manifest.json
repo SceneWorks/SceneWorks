@@ -660,25 +660,6 @@
       ]
     },
     {
-      "id": "boogu-image",
-      "models": [
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit"
-      ],
-      "name": "Boogu-Image 0.1",
-      "publisher": "Boogu",
-      "license": "Apache-2.0",
-      "homepage": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
-      "usage": "Image generation + instruction-edit model (Base / Turbo / Edit). SceneWorks downloads on first use a converted copy of the upstream Apache-2.0 weights, re-hosted at SceneWorks/boogu-image-mlx. Redistributed with attribution as permitted by Apache-2.0.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "boogu-image-apache"
-        }
-      ]
-    },
-    {
       "id": "chroma1",
       "models": [
         "chroma1_base",
@@ -852,24 +833,6 @@
         {
           "label": "Notice & Krea 2 Community License reference",
           "key": "krea-2-notice"
-        }
-      ]
-    },
-    {
-      "id": "lens",
-      "models": [
-        "lens",
-        "lens_turbo"
-      ],
-      "name": "Lens",
-      "publisher": "Lens",
-      "license": "MIT",
-      "homepage": "https://huggingface.co/SceneWorks/Lens",
-      "usage": "Image generation model (base + turbo). SceneWorks downloads on first use a converted copy of the upstream MIT weights, re-hosted at SceneWorks/lens-mlx and SceneWorks/lens-turbo-mlx. Redistributed with attribution as permitted by the MIT License.",
-      "documents": [
-        {
-          "label": "MIT License",
-          "key": "lens-mit"
         }
       ]
     },
@@ -1484,31 +1447,6 @@
         {
           "label": "BSD 3-Clause License",
           "key": "cephes-bsd-3-clause"
-        }
-      ]
-    },
-    {
-      "id": "mage",
-      "models": [
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo"
-      ],
-      "name": "Mage-Flow (microsoft/Mage)",
-      "publisher": "Microsoft",
-      "license": "MIT",
-      "homepage": "https://github.com/microsoft/Mage",
-      "platforms": [
-        "macos"
-      ],
-      "usage": "Native MLX generation and instruction editing from the Base, RL and Turbo Mage-Flow checkpoints mirrored by SceneWorks, plus a faithful Rust/MLX source port of the microsoft/Mage reference implementation — the 4B NR-MMDiT denoiser, Mage-VAE codec, and Qwen3-VL text and vision encoder. The MIT notice is included for both weight distribution and binary redistribution.",
-      "documents": [
-        {
-          "label": "MIT License",
-          "key": "mage-mit"
         }
       ]
     },
