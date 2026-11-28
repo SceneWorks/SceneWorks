@@ -12,7 +12,10 @@ let container;
 let root;
 beforeEach(() => { global.IS_REACT_ACT_ENVIRONMENT = true; ({ container, root } = mountRoot()); });
 afterEach(async () => { await unmountRoot(root, container); });
-const message = (state) => state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the authored option";
+function expectFeedback(state) {
+  if (state === "pending") expect(container.querySelector('[role="status"]')).toBeNull();
+  else expect(container.textContent).toContain(state === "server-required" ? "Reconnect to continue" : "Fix the authored option");
+}
 const refusal = { code: "invalid_generation_option", field: "maxNewTokens", detail: "Fix the authored option" };
 
 it.each(["pending", "server-required", "invalid"])("blocks VQA %s and permits confirmed feedback", async (state) => {
@@ -26,7 +29,7 @@ it.each(["pending", "server-required", "invalid"])("blocks VQA %s and permits co
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
   });
   expect(container.querySelector("button").disabled).toBe(true);
-  expect(container.textContent).toContain(message(state));
+  expectFeedback(state);
   await click(container.querySelector("button"));
   expect(onAsk).not.toHaveBeenCalled();
   feedback.value = { state: "valid" };
@@ -41,7 +44,7 @@ it.each(["pending", "server-required", "invalid"])("blocks character test %s, in
   const props = { selectedCharacter: { id: "character" }, imageModels: [], latestAssets: [], testPrompt: "portrait", testCount: 1, testResolution: "1024x1024", testLookId: "", testModel: "", submitTest };
   await act(async () => root.render(<CharacterTest {...props} testFeedback={{ state, refusal }} testRefusal={state === "invalid" ? refusal : null} />));
   expect(container.querySelector('[type="submit"]').disabled).toBe(true);
-  expect(container.textContent).toContain(message(state));
+  expectFeedback(state);
   await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   expect(submitTest).not.toHaveBeenCalled();
   await act(async () => root.render(<CharacterTest {...props} testFeedback={{ state: "valid" }} />));

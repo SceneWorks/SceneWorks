@@ -254,7 +254,8 @@ describe("TrainingStudio — Iris", () => {
     await renderAndPickDataset(ctx);
     const start = () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Start training");
     expect(start().disabled).toBe(true);
-    expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the Iris options");
+    if (state === "pending") expect(container.textContent).not.toContain("Checking options with the server");
+    else expect(container.textContent).toContain(state === "server-required" ? "Reconnect to continue" : "Fix the Iris options");
     await act(async () => start().dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(ctx.createTrainingJob).not.toHaveBeenCalled();
     feedbackState.value = { state: "valid" };

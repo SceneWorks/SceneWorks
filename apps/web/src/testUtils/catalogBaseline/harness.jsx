@@ -113,7 +113,7 @@ export function controls(container, persistenceKey) {
 }
 export async function click(node) {
   if (!node) throw new Error("Missing baseline interaction target");
-  await settleServerFeedback(node.ownerDocument);
+  await settleServerFeedback();
   await act(async () => node.click());
 }
 export async function change(node, value) {
@@ -122,14 +122,13 @@ export async function change(node, value) {
     Object.getOwnPropertyDescriptor(proto, "value").set.call(node, value);
     node.dispatchEvent(new Event(node.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
   });
-  await settleServerFeedback(node.ownerDocument);
+  await settleServerFeedback();
 }
-async function settleServerFeedback(document) {
-  await vi.waitFor(() => {
-    if ([...document.querySelectorAll('[role="status"]')].some((node) =>
-      node.textContent.includes("Checking options with the server"))) {
-      throw new Error("Waiting for server option feedback");
-    }
+async function settleServerFeedback() {
+  // Load the same validator as the hook and let act flush the immediate fixture
+  // response. Routine validation no longer renders a user-facing pending status.
+  await act(async () => {
+    await import("../../portableValidation.js");
   });
 }
 export function submissionButton(container, studio) {
@@ -171,7 +170,7 @@ export async function mount(catalog, row, saved = {}, overrides = {}) {
     return <SimpleUiContext.Provider value={simple}><Screen />{sheet ? <SimpleSheet onClose={() => setSheet(null)} phone={false} title={sheet.title}>{sheet.body ?? <SimpleSheetOptions kind={sheet.kind} options={sheet.options} onSelect={(value) => { sheet.onSelect(value); setSheet(null); }} />}</SimpleSheet> : null}</SimpleUiContext.Provider>;
   }
   await act(async () => root.render(<AppContext.Provider value={context}><Shell /></AppContext.Provider>));
-  await settleServerFeedback(container.ownerDocument);
+  await settleServerFeedback();
   const close = async () => { await act(async () => root.unmount()); container.remove(); };
   return { container, root, context, calls, persistenceKey, close, getPersisted };
 }

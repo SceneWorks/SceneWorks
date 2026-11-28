@@ -112,8 +112,8 @@ describe("portable authored form feedback", () => {
     />));
     const button = [...host.querySelectorAll("button")].find((item) => item.textContent === "Upscale clip");
     expect(button.disabled).toBe(true);
-    expect(host.querySelector('[role="status"]').textContent).toContain(state === "pending"
-      ? "Checking options with the server" : "Reconnect to continue");
+    if (state === "pending") expect(host.querySelector('[role="status"]')).toBeNull();
+    else expect(host.querySelector('[role="status"]').textContent).toContain("Reconnect to continue");
     act(() => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(createVideoUpscaleJob).not.toHaveBeenCalled();
   });
@@ -135,9 +135,9 @@ describe("portable authored form feedback", () => {
     const track = buttons.find((item) => item.textContent === "Save Track");
     expect(analyze.disabled).toBe(true);
     expect(track.disabled).toBe(true);
-    expect([...host.querySelectorAll('[role="status"]')].map((item) => item.textContent)).toEqual([
-      expect.stringContaining(state === "pending" ? "Checking options with the server" : "Reconnect to continue"),
-      expect.stringContaining(state === "pending" ? "Checking options with the server" : "Reconnect to continue"),
+    expect([...host.querySelectorAll('[role="status"]')].map((item) => item.textContent)).toEqual(state === "pending" ? [] : [
+      expect.stringContaining("Reconnect to continue"),
+      expect.stringContaining("Reconnect to continue"),
     ]);
     act(() => {
       analyze.dispatchEvent(new MouseEvent("click", { bubbles: true }));

@@ -43,8 +43,8 @@ async function switchProject(id) {
   await settle();
 }
 const startButton = () => [...container.querySelectorAll("button")].find((node) => node.textContent === "Start training");
-// Start training stays disabled while the draft's server options check is pending
-// ("Checking options with the server…"). That check resolves through dynamic imports of the
+// Start training stays disabled while the draft's server options check is pending.
+// That check resolves through dynamic imports of the
 // portable validator, which a fixed microtask flush cannot outlast on a cold module graph, so
 // wait for the real signal. Each poll is a whole act() turn, so the feedback update always
 // lands inside act and never between turns.
