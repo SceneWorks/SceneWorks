@@ -150,6 +150,8 @@ import {
   HF_DOTFILE_EXCLUDES,
   fetchAnchorSnapshots,
   hubGlobRegExp,
+  HF_FETCH_BACKOFF_MS,
+  hubFailureIsTransient,
   tierDownloadRows,
   manifestPlatform,
   HF_CLI_CANDIDATES,
@@ -8176,15 +8178,55 @@ test("a fetch that exits 0 but lands nothing for a glob is a failed fetch, named
     [PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "bf16"],
   ]);
   const stub = await stubHuggingFaceCli({ noop: true });
+  const waits = [];
   const args = {
     ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
-    campaign: "sc-dl-test", hfCache: [hub],
+    campaign: "sc-dl-test", hfCache: [hub], fetchSleep: async (ms) => { waits.push(ms); },
   };
   const { rows } = await withStubCli(stub, () => planRun(args, root));
   const refused = rows.find((row) => row.key === "qwen_image:q4:mlx");
   assert.equal(refused.status, "weights_missing");
   assert.match(refused.reason, /download failed:.*exited 0 but no file matching q4\/\* is under/);
-  assert.equal((await stub.invocations()).length, 1);
+  assert.match(refused.reason, new RegExp(`still failing after ${HF_FETCH_BACKOFF_MS.length + 1} attempts with backoff`));
+  // The silent no-op is the rate-limited host's signature, so it is retried, bounded, with backoff.
+  assert.equal((await stub.invocations()).length, HF_FETCH_BACKOFF_MS.length + 1);
+  assert.deepEqual(waits, [...HF_FETCH_BACKOFF_MS]);
+  for (const argv of await stub.invocations()) assert.ok(argv.includes("--include"));
+});
+
+test("hub fetch: a rate-limited or 5xx fetch is retried with backoff and lands; a 401 fails at once", async () => {
+  const hub = await mkdtemp(path.join(tmpdir(), "catalog-hub-retry-"));
+  const models = [{ id: "qwen_image", downloads: [{ repo: PROVIDER_FAMILIES.qwen_image.repo, revision: DOWNLOAD_REVISION, variant: "q4", files: ["q4/*"] }] }];
+  const row = { key: "qwen_image:q4:mlx", modelId: "qwen_image", tier: "q4", backend: "mlx", provider: "qwen_image" };
+  const landing = async (_cli, argv, { env }) => {
+    assert.equal(env.HF_DEBUG, "1", "the fetch child runs with HF_DEBUG=1 for the hub's own reason");
+    calls += 1;
+    if (calls === 1) throw Object.assign(new Error("hf exited 1"), { code: 1, stderr: "huggingface_hub.errors.HfHubHTTPError: 429 Client Error: Too Many Requests for url" });
+    if (calls === 2) throw Object.assign(new Error("hf exited 1"), { code: 1, stderr: "503 Server Error: Service Unavailable" });
+    const tier = snapshotPath(hub, PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "q4");
+    await mkdir(tier, { recursive: true });
+    await writeFile(path.join(tier, "model.safetensors"), "w");
+    return { stdout: "", stderr: "" };
+  };
+  let calls = 0;
+  const waits = [];
+  const lines = [];
+  const outcome = await fetchAnchorSnapshots(row, models, {
+    cacheRoot: hub, platform: "macos", runCommand: landing, clis: ["hf"],
+    sleep: async (ms) => { waits.push(ms); }, log: (line) => lines.push(line),
+  });
+  assert.equal(outcome.failed, null);
+  assert.equal(calls, 3);
+  assert.deepEqual(waits, HF_FETCH_BACKOFF_MS.slice(0, 2));
+  assert.match(lines.join(" "), /transient hub failure on attempt 1\/6 .*429 Client Error: Too Many Requests/);
+  calls = 0;
+  const denied = await fetchAnchorSnapshots(row, models, {
+    cacheRoot: await mkdtemp(path.join(tmpdir(), "catalog-hub-denied-")), platform: "macos", clis: ["hf"], sleep: async () => { throw new Error("must not wait"); },
+    runCommand: async () => { calls += 1; throw Object.assign(new Error("hf exited 1"), { code: 1, stderr: "401 Client Error: Unauthorized" }); },
+  });
+  assert.equal(calls, 1, "a non-transient refusal is the answer, not a reason to retry");
+  assert.match(denied.failed, /401 Client Error/);
+  assert.ok(hubFailureIsTransient("Too Many Requests") && hubFailureIsTransient("502 Bad Gateway") && !hubFailureIsTransient("404 Client Error: Entry Not Found"));
 });
 
 test("hub globs match the way the CLI's fnmatch does, with * crossing directories", () => {

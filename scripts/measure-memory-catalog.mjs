@@ -3428,6 +3428,48 @@ async function snapshotFileStats(root) {
 }
 
 /**
+ * SW-6138: the waits between attempts of one hub fetch (ms): 30 s doubling to 8 min, six attempts
+ * and about 15.5 minutes in all. Bounded, so a host that is rate-limited for an hour fails the
+ * anchor by name rather than holding the walk.
+ */
+export const HF_FETCH_BACKOFF_MS = Object.freeze([30_000, 60_000, 120_000, 240_000, 480_000]);
+
+/** Hub CLI output naming a failure worth retrying: a rate limit, a server error or a network fault. */
+export const HF_TRANSIENT_PATTERN = /\b429\b|too many requests|rate.?limit|\b50[0234]\b|internal server error|bad gateway|service unavailable|gateway time-?out|connection ?error|connection (?:reset|aborted|refused)|read ?timed? ?out|timed out|temporary failure in name resolution|remote end closed|cannot reach the hub|offline mode|we cannot find the appropriate snapshot/i;
+
+export function hubFailureIsTransient(text) {
+  return HF_TRANSIENT_PATTERN.test(String(text ?? ""));
+}
+
+/** The last few non-empty lines of hub CLI output, for a one-line reason. */
+export function hubOutputTail(text, lines = 3) {
+  return String(text ?? "").split("\n").map((line) => line.trim()).filter(Boolean).slice(-lines).join(" | ").slice(0, 400);
+}
+
+/**
+ * One hub CLI invocation, falling through to the next CLI spelling only when one is MISSING. The
+ * child alone gets `HF_DEBUG=1` (huggingface_hub's verbose logging and full tracebacks), so a
+ * failure carries the hub's own reason rather than a bare exit code.
+ */
+export async function runHubFetch(clis, argv, { runCommand = run, env = process.env } = {}) {
+  let lastError = null;
+  for (const cli of clis) {
+    try {
+      const { stdout = "", stderr = "" } = (await runCommand(cli, argv, { env: { ...env, HF_DEBUG: "1" } })) ?? {};
+      return { ok: true, output: `${stdout}\n${stderr}` };
+    } catch (error) {
+      lastError = error;
+      if (error?.code !== "ENOENT") break;
+    }
+  }
+  if (!lastError || lastError.code === "ENOENT") {
+    return { ok: false, missingCli: true, transient: false, output: "", reason: failureReason(lastError ?? new Error("no Hugging Face CLI on PATH")) };
+  }
+  const output = `${lastError.stdout ?? ""}\n${lastError.stderr ?? ""}\n${lastError.message ?? ""}`;
+  return { ok: false, transient: hubFailureIsTransient(output), output, reason: failureReason(lastError) };
+}
+
+/**
  * Fetch every snapshot one `weights_missing` anchor needs into `cacheRoot`, one at a time.
  *
  * Serial on purpose: these are multi-GB transfers on a runner whose link is the bottleneck (the
@@ -3446,6 +3488,7 @@ export async function fetchAnchorSnapshots(row, models, {
   env = process.env,
   runCommand = run,
   clis = HF_CLI_CANDIDATES,
+  sleep = (ms) => new Promise((done) => setTimeout(done, ms)),
 } = {}) {
   const { targets, unfetchable } = anchorDownloadTargets(row, models, { families, platform });
   if (targets.length === 0) {
@@ -3462,50 +3505,45 @@ export async function fetchAnchorSnapshots(row, models, {
       fetched.push({ ...target, dryRun: true });
       continue;
     }
-    let lastError = null;
-    let ran = true;
-    // One invocation per glob — see `hfDownloadArgvs`. Every one of them must land: a target whose
-    // second glob failed is exactly as unloadable as one whose first did.
-    for (const argv of hfDownloadArgvs(target, cacheRoot)) {
-      let landed = false;
-      for (const cli of clis) {
-        try {
-          await runCommand(cli, argv, { env });
-          landed = true;
-          break;
-        } catch (error) {
-          lastError = error;
-          // Only a MISSING cli falls through to the next spelling; a real download failure is the
-          // answer, not a reason to run a second tool.
-          if (error?.code !== "ENOENT") break;
-        }
-      }
-      if (!landed) { ran = false; break; }
-    }
-    if (!ran) {
-      return {
-        fetched,
-        failed: `${target.repo}@${target.revision.slice(0, 8)}: ${failureReason(lastError ?? new Error("no Hugging Face CLI on PATH"))}`,
-        unfetchable,
-      };
-    }
     const staged = snapshotPath(cacheRoot, target.repo, target.revision);
+    // One invocation per glob -- see `hfDownloadArgvs`. Every one of them must land: a target whose
+    // second glob failed is exactly as unloadable as one whose first did.
+    //
     // SW-6138 (run 46124090866): a zero exit is not a landed fetch. For a commit-hash revision,
-    // huggingface_hub's `snapshot_download` answers a failed Hub API call by RETURNING the existing
-    // local snapshot folder unchanged, so a snapshot already holding another tier "succeeds" with
-    // nothing fetched: krea_2_turbo landed `q4/transformer/*` and none of its five later globs, and
-    // z_image_turbo's `q4/*` landed nothing at all, every invocation exiting 0. Each glob must now
-    // match at least one file under the staged snapshot, or the target fails by name.
-    const unlanded = await unlandedGlobs(staged, target.include);
-    if (unlanded.length > 0) {
-      return {
-        fetched,
-        failed: `${target.repo}@${target.revision.slice(0, 8)}: the hub CLI exited 0 but no file matching `
-          + `${unlanded.join(" ")} is under ${staged}; huggingface_hub returns an existing snapshot unchanged `
-          + "when its Hub API call fails, so check this host's Hub connectivity, rate limit and free space "
-          + `on ${cacheRoot}`,
-        unfetchable,
-      };
+    // huggingface_hub's `snapshot_download` answers a failed Hub API call -- a 429 rate limit, a 5xx,
+    // a dropped connection -- by RETURNING the existing local snapshot folder unchanged, so a
+    // snapshot already holding another tier "succeeds" with nothing fetched: krea_2_turbo landed
+    // `q4/transformer/*` and none of its five later globs, and z_image_turbo's `q4/*` landed nothing,
+    // every invocation exiting 0, on a host that was uploading models at the time. So each glob is
+    // checked for a landed file right after its invocation, and a transient failure (that silent
+    // no-op, or a non-zero exit whose output names a 429/5xx/connection fault) is retried with
+    // bounded exponential backoff (`HF_FETCH_BACKOFF_MS`). The fetch child alone runs with
+    // `HF_DEBUG=1`, so the hub's own reason is in the output this quotes.
+    for (const [index, argv] of hfDownloadArgvs(target, cacheRoot).entries()) {
+      const glob = target.include[index] ?? null;
+      let outcome = null;
+      for (let attempt = 1; attempt <= HF_FETCH_BACKOFF_MS.length + 1; attempt += 1) {
+        outcome = await runHubFetch(clis, argv, { runCommand, env });
+        if (outcome.missingCli) break;
+        const unlanded = outcome.ok ? await unlandedGlobs(staged, glob === null ? [] : [glob]) : [];
+        if (outcome.ok && unlanded.length === 0) break;
+        if (outcome.ok) {
+          outcome = { ok: false, transient: true, output: outcome.output, reason: `the hub CLI exited 0 but no file matching ${unlanded.join(" ")} is under ${staged}; huggingface_hub returns an existing snapshot unchanged when its Hub API call fails` };
+        }
+        if (!outcome.transient || attempt > HF_FETCH_BACKOFF_MS.length) break;
+        const wait = HF_FETCH_BACKOFF_MS[attempt - 1];
+        log(`download: ${row.key} ${target.repo}@${target.revision.slice(0, 8)} ${glob ?? "(whole snapshot)"}: transient hub failure on attempt ${attempt}/${HF_FETCH_BACKOFF_MS.length + 1} (${outcome.reason}${outcome.output ? `; hub said: ${hubOutputTail(outcome.output)}` : ""}); retrying in ${Math.round(wait / 1000)}s`);
+        await sleep(wait);
+      }
+      if (!outcome.ok) {
+        return {
+          fetched,
+          failed: `${target.repo}@${target.revision.slice(0, 8)}: ${outcome.reason}`
+            + `${outcome.transient ? ` (still failing after ${HF_FETCH_BACKOFF_MS.length + 1} attempts with backoff; check this host's Hub rate limit, connectivity and free space on ${cacheRoot})` : ""}`
+            + `${outcome.output ? `; hub said: ${hubOutputTail(outcome.output)}` : ""}`,
+          unfetchable,
+        };
+      }
     }
     const stats = await snapshotFileStats(staged);
     log(`download: ${row.key} ${target.repo}@${target.revision.slice(0, 8)} ${stats.files} files, ${stats.bytes} bytes`);
@@ -5501,6 +5539,8 @@ export async function planRun(args, root = ROOT) {
       // the candidate list and pay an ENOENT for a spelling this box is already known not to have.
       const outcome = await fetchAnchorSnapshots(row, models, {
         cacheRoot, dryRun: args.dryRun, ...(cli ? { clis: [cli] } : {}),
+        // A test seam only (no CLI flag): the backoff's waits, so a retried fetch is not 15 minutes.
+        ...(args.fetchSleep ? { sleep: args.fetchSleep } : {}),
       });
       if (outcome.failed) {
         row.reason = `${missingReason} (download failed: ${outcome.failed})`;

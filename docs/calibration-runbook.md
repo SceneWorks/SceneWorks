@@ -1971,6 +1971,16 @@ gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
   -f download_missing=true
 ```
 
+- **A zero exit is not a landed fetch, and a rate limit is retried (SW-6138).** For a commit-hash
+  revision, huggingface_hub's `snapshot_download` answers a failed Hub API call (a 429 rate
+  limit, a 5xx, a dropped connection) by returning the existing local snapshot folder unchanged
+  and exiting 0. Run 46124090866 landed only `q4/transformer/*` of krea_2_turbo's six globs, and
+  nothing of z_image_turbo's `q4/*`, while the host was uploading models. Every glob is therefore
+  checked for a landed file right after its invocation. A silent no-op, or a non-zero exit whose
+  output names a 429/5xx/connection fault (`HF_TRANSIENT_PATTERN`), is retried with bounded
+  exponential backoff (`HF_FETCH_BACKOFF_MS`: 30 s doubling to 8 min, six attempts, about
+  15.5 min). Any other refusal (401, 404) fails at once. The fetch child alone runs with
+  `HF_DEBUG=1`, and the anchor's `download failed:` reason quotes the hub's last lines.
 - **Only `weights_missing` anchors.** A `runnable` cell is never re-fetched, and a cell refused for
   any other reason (`no_adapter_arm`, `lane_undeclared`, `exceeded_current`, `harness_unsupported`)
   is not a weights problem and gets no download. After the fetch the cell is classified **again**,
