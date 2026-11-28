@@ -17,7 +17,16 @@ export const LOSSY_KERNELS = ["int8", "sol"];
 export const DEFAULT_SOL_TOPK_RATIO = 0.5;
 
 export function lossyAttentionDefaults() {
-  return { enabled: false, kernel: "int8", pvPrecision: "value_dtype", topkRatio: DEFAULT_SOL_TOPK_RATIO };
+  // `recorded` is a replayed recipe's full `lossyAttention` object: every field the control does not
+  // expose (Sol `tau`, sinks, tail, query chunking, INT8 K centering, a second kernel) rides through
+  // it untouched, and only the fields the control shows are overlaid on it.
+  return {
+    enabled: false,
+    kernel: "int8",
+    pvPrecision: "value_dtype",
+    topkRatio: DEFAULT_SOL_TOPK_RATIO,
+    recorded: null,
+  };
 }
 
 /** The model's `lossyAttention` capability (`{ int8: {served, reason?}, sol: {...} }`) or null. */
@@ -45,49 +54,78 @@ export function validSolTopkRatio(value) {
   return Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : null;
 }
 
+const SOL_RATIO_ERROR = "Sol-Attn top-k ratio must be a number above 0 and at most 1.";
+
+function cloneKernelConfig(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : null;
+}
+
+/** The kernels the studio state selects: one, or both when replaying a recipe that used both. */
+export function selectedLossyKernels(state) {
+  return state.kernel === "both" ? ["int8", "sol"] : [state.kernel];
+}
+
 /**
  * Resolve the studio state to the outgoing `advanced.lossyAttention` wire. Returns
- * `{ block, error }`: `block` is null when the control is off, unavailable, or the chosen kernel
- * is not served by this model (so a sticky choice from another model never leaks onto one that
- * would refuse it); `error` names an out-of-range Sol top-k ratio.
+ * `{ block, error }`: `block` is null when the control is off or unavailable. Without a replayed
+ * recipe, a kernel this model does not serve falls back to one it does (a sticky choice from another
+ * model never leaks onto one that would refuse it). A replayed recipe's configuration is kept
+ * whole — only the fields the control exposes are overlaid — and a recorded kernel this model
+ * cannot take is an error rather than a silent substitution.
  */
 export function resolveLossyAttention({ backend, model, options }) {
   const state = { ...lossyAttentionDefaults(), ...(options ?? {}) };
   if (!state.enabled || !lossyAttentionAvailable(backend, model)) return { block: null, error: null };
   const served = servedLossyKernels(model);
-  const kernel = served.includes(state.kernel) ? state.kernel : served[0];
-  if (kernel === "int8") {
-    const int8 = state.pvPrecision === "int8" ? { pvPrecision: "int8" } : {};
-    return { block: { int8 }, error: null };
+  const recorded = state.recorded && typeof state.recorded === "object" ? state.recorded : null;
+  let kernels = selectedLossyKernels(state);
+  if (!recorded && !served.includes(kernels[0])) kernels = [served[0]];
+  const unserved = kernels.filter((kernel) => !served.includes(kernel));
+  if (unserved.length) {
+    return {
+      block: null,
+      error: `This model cannot take the recipe's ${unserved.map((kernel) => (kernel === "int8" ? "INT8" : "Sol-Attn")).join(" and ")} lossy attention; pick a kernel it serves.`,
+    };
   }
-  const topkRatio = validSolTopkRatio(state.topkRatio);
-  if (topkRatio === null) {
-    return { block: null, error: "Sol-Attn top-k ratio must be a number above 0 and at most 1." };
+  const block = {};
+  for (const kernel of kernels) block[kernel] = cloneKernelConfig(recorded?.[kernel]) ?? {};
+  if (block.int8 && (state.pvPrecision !== "value_dtype" || "pvPrecision" in block.int8)) {
+    block.int8.pvPrecision = state.pvPrecision === "int8" ? "int8" : "value_dtype";
   }
-  return { block: { sol: { topkRatio } }, error: null };
+  if (block.sol) {
+    const edited = state.topkRatio !== null && state.topkRatio !== undefined && state.topkRatio !== "";
+    if (edited) {
+      const topkRatio = validSolTopkRatio(state.topkRatio);
+      if (topkRatio === null) return { block: null, error: SOL_RATIO_ERROR };
+      block.sol.topkRatio = topkRatio;
+      delete block.sol.tau;
+    } else if (!("tau" in block.sol) && !("topkRatio" in block.sol)) {
+      return { block: null, error: SOL_RATIO_ERROR };
+    }
+  }
+  return { block, error: null };
 }
 
-/** Studio state restored from a recipe's recorded `lossyAttention` (replay); defaults when absent. */
+/**
+ * Studio state restored from a recipe's recorded `lossyAttention` (replay); defaults when absent.
+ * The whole recorded object is kept in `recorded`, so replaying with nothing changed re-sends it.
+ */
 export function lossyAttentionFromRecipe(raw) {
   const defaults = lossyAttentionDefaults();
   if (!raw || typeof raw !== "object") return defaults;
-  if (raw.int8 && typeof raw.int8 === "object") {
-    return {
-      ...defaults,
-      enabled: true,
-      kernel: "int8",
-      pvPrecision: raw.int8.pvPrecision === "int8" ? "int8" : "value_dtype",
-    };
-  }
-  if (raw.sol && typeof raw.sol === "object") {
-    return {
-      ...defaults,
-      enabled: true,
-      kernel: "sol",
-      topkRatio: validSolTopkRatio(raw.sol.topkRatio) ?? DEFAULT_SOL_TOPK_RATIO,
-    };
-  }
-  return defaults;
+  const int8 = cloneKernelConfig(raw.int8);
+  const sol = cloneKernelConfig(raw.sol);
+  if (!int8 && !sol) return defaults;
+  const recorded = { ...(int8 ? { int8 } : {}), ...(sol ? { sol } : {}) };
+  return {
+    ...defaults,
+    enabled: true,
+    kernel: int8 && sol ? "both" : int8 ? "int8" : "sol",
+    pvPrecision: int8?.pvPrecision === "int8" ? "int8" : "value_dtype",
+    // A tau-selected recipe has no ratio: `null` keeps its `tau` unless the user types one.
+    topkRatio: sol ? (validSolTopkRatio(sol.topkRatio) ?? ("tau" in sol ? null : DEFAULT_SOL_TOPK_RATIO)) : DEFAULT_SOL_TOPK_RATIO,
+    recorded,
+  };
 }
 
 /** One-line summary of a recipe's `attentionExecution` receipt (did the kernel actually run). */

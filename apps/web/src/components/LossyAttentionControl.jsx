@@ -1,9 +1,9 @@
 import React from "react";
 import {
   DEFAULT_SOL_TOPK_RATIO,
-  attentionExecutionSummary,
   lossyAttentionAvailable,
   lossyAttentionDefaults,
+  selectedLossyKernels,
   servedLossyKernels,
 } from "../lossyAttention.js";
 
@@ -19,14 +19,22 @@ export const LOSSY_ATTENTION_TOOLTIP =
 const KERNEL_LABELS = {
   int8: "INT8 QK attention (recommended)",
   sol: "Sol-Attn sparse attention",
+  both: "INT8 + Sol-Attn (from the recipe)",
 };
 
 export function LossyAttentionControl({ backend, model, value, onChange, error }) {
   if (!lossyAttentionAvailable(backend, model)) return null;
   const state = { ...lossyAttentionDefaults(), ...(value ?? {}) };
   const served = servedLossyKernels(model);
-  const kernel = served.includes(state.kernel) ? state.kernel : served[0];
+  const recorded = state.recorded && typeof state.recorded === "object" ? state.recorded : null;
+  // A replayed recipe keeps its own kernel choice (an unserved one surfaces as `error`); otherwise a
+  // sticky choice from another model shows the first kernel this model serves.
+  const replayedBoth = Boolean(recorded?.int8 && recorded?.sol);
+  const kernel = recorded || served.includes(state.kernel) ? state.kernel : served[0];
+  const kernels = selectedLossyKernels({ kernel });
   const update = (patch) => onChange({ ...state, kernel, ...patch });
+  const options = [...served, ...(replayedBoth && served.length > 1 ? ["both"] : [])];
+  const tau = recorded?.sol && "tau" in recorded.sol ? recorded.sol.tau : null;
   return (
     <details className="lossy-attention-control" open={state.enabled || undefined}>
       <summary title={LOSSY_ATTENTION_TOOLTIP}>Experimental: lossy attention</summary>
@@ -48,14 +56,14 @@ export function LossyAttentionControl({ backend, model, value, onChange, error }
               onChange={(event) => update({ kernel: event.target.value })}
               value={kernel}
             >
-              {served.map((key) => (
+              {(options.includes(kernel) ? options : [...options, kernel]).map((key) => (
                 <option key={key} value={key}>
-                  {KERNEL_LABELS[key]}
+                  {KERNEL_LABELS[key] ?? key}
                 </option>
               ))}
             </select>
           </label>
-          {kernel === "int8" ? (
+          {kernels.includes("int8") ? (
             <label>
               P·V precision
               <select
@@ -67,7 +75,8 @@ export function LossyAttentionControl({ backend, model, value, onChange, error }
                 <option value="int8">INT8 P·V (faster, more lossy)</option>
               </select>
             </label>
-          ) : (
+          ) : null}
+          {kernels.includes("sol") ? (
             <label>
               Top-k ratio
               <input
@@ -75,12 +84,16 @@ export function LossyAttentionControl({ backend, model, value, onChange, error }
                 max={1}
                 min={0.05}
                 onChange={(event) => update({ topkRatio: event.target.value })}
+                placeholder={tau !== null ? `tau ${tau} (from the recipe)` : undefined}
                 step={0.05}
                 type="number"
-                value={state.topkRatio ?? DEFAULT_SOL_TOPK_RATIO}
+                value={state.topkRatio ?? (tau !== null ? "" : DEFAULT_SOL_TOPK_RATIO)}
               />
             </label>
-          )}
+          ) : null}
+          {recorded ? (
+            <span className="field-hint">Recipe settings not shown here are kept as recorded.</span>
+          ) : null}
           <span className="field-hint">
             Lossy: output differs from the exact path. CUDA only; not a default.
           </span>
@@ -88,17 +101,5 @@ export function LossyAttentionControl({ backend, model, value, onChange, error }
         </>
       ) : null}
     </details>
-  );
-}
-
-/** A lossy-attention asset's receipt: whether the requested kernel actually ran, from the
- *  worker's `rawAdapterSettings.attentionExecution` (recorded only for an opted-in job). */
-export function AttentionExecutionNote({ asset, receipt = asset?.recipe?.rawAdapterSettings?.attentionExecution }) {
-  const summary = attentionExecutionSummary(receipt);
-  if (!summary) return null;
-  return (
-    <div className="attention-execution-note" role="note" aria-label="Lossy attention">
-      Lossy attention: {summary}
-    </div>
   );
 }

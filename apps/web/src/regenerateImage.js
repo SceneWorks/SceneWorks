@@ -35,6 +35,8 @@ export function imageRecipeRequest(asset, models = []) {
   delete advanced.moss_image_edit_execution_report;
   delete advanced.pagExecutionReport;
   delete advanced.pag_execution_report;
+  // SW-6132: the worker-owned lossy attention receipt; the request (`lossyAttention`) replays whole.
+  delete advanced.attentionExecution;
   delete advanced.mossImageSampleIndex;
   delete advanced.checkpointWeightFacts;
   delete advanced.memoryStrategy;

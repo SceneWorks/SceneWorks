@@ -1,8 +1,9 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
-import { AttentionExecutionNote, LOSSY_ATTENTION_TOOLTIP, LossyAttentionControl } from "./LossyAttentionControl.jsx";
-import { lossyAttentionDefaults } from "../lossyAttention.js";
+import { LOSSY_ATTENTION_TOOLTIP, LossyAttentionControl } from "./LossyAttentionControl.jsx";
+import AttentionExecutionNote from "./AttentionExecutionNote.jsx";
+import { lossyAttentionDefaults, lossyAttentionFromRecipe } from "../lossyAttention.js";
 
 const BOTH = { id: "krea2", lossyAttention: { int8: { served: true }, sol: { served: true } } };
 const INT8_ONLY = {
@@ -85,5 +86,15 @@ describe("LossyAttentionControl (SW-6132)", () => {
     );
     act(() => root.render(<AttentionExecutionNote asset={{ recipe: { rawAdapterSettings: {} } }} />));
     expect(container.querySelector(".attention-execution-note")).toBeNull();
+  });
+
+  it("shows a replayed recipe's own selection and keeps what it does not expose", () => {
+    render({ value: lossyAttentionFromRecipe({ int8: { kCentering: "always" }, sol: { tau: 1, tail: false } }) });
+    expect(container.querySelector('select[aria-label="Lossy attention kernel"]').value).toBe("both");
+    const ratio = container.querySelector('input[aria-label="Sol-Attn top-k ratio"]');
+    expect(ratio.value).toBe("");
+    expect(ratio.getAttribute("placeholder")).toBe("tau 1 (from the recipe)");
+    expect(container.querySelector('select[aria-label="INT8 attention P·V precision"]')).not.toBeNull();
+    expect(container.textContent).toContain("Recipe settings not shown here are kept as recorded.");
   });
 });

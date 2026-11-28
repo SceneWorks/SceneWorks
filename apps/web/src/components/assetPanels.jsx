@@ -2,7 +2,6 @@ import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedb
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
-import { AttentionExecutionNote } from "./LossyAttentionControl.jsx";
 import React from "react";
 import { getMediaTicket, isAbortError, subscribeMediaTicket } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
@@ -41,6 +40,18 @@ import { issue } from "../validation/issues.js";
 import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
 import { depthAssetDetails, isDepthAsset } from "../depthJobs.js";
+
+// SW-6132: only an asset whose job opted in to lossy attention carries a receipt, so the note is a
+// lazy chunk fetched for those assets alone (never part of the initial bundle).
+const LazyAttentionExecutionNote = React.lazy(() => import("./AttentionExecutionNote.jsx"));
+function AttentionExecutionNote({ asset }) {
+  if (!asset?.recipe?.rawAdapterSettings?.attentionExecution) return null;
+  return (
+    <React.Suspense fallback={null}>
+      <LazyAttentionExecutionNote asset={asset} />
+    </React.Suspense>
+  );
+}
 
 // Zoom/pan model for the fullscreen image preview (sc-8728). Mirrors the Image
 // Editor canvas convention (`view = { scale, x, y }`, ImageEditor.jsx): `scale`
