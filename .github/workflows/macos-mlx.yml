@@ -952,6 +952,14 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || ((github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, '[Mac2]')) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, '[Mac2]'))) && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
+      # Match the hosted Metal lane's lean debug information; bound compiler
+      # memory and writes to the shared dev-host volume during a cold build.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). The nax pool is small and hand-registered — GitHub's
     # hosted images cannot run this lane at all, so capacity is exactly the Macs
@@ -961,14 +969,10 @@ jobs:
     # calibration+provisioning dispatch gets four hours for the approximately 57 GiB
     # public snapshot.
     #
-    # The 45 is now LOOSE and deliberately left alone. It was sized against a
-    # ~6-14 min warm build+test+clippy, and both clippy steps plus the workspace suite
-    # have since moved to `macos-checks`; the PR path here is a build, one test target
-    # and the capability dump. A cold MLX-from-source rebuild still has to fit, which is
-    # what the headroom is really for. Re-size it from measured runs after the split has
-    # a few weeks of data rather than guessing it down now — guessing budgets down from
-    # an estimate instead of a measurement is the sc-16981 defect.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && ((inputs.run_memory_calibration && inputs.provision_qwen_snapshot) || (inputs.run_five_rung_reference && inputs.provision_z_image_snapshot)) && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    # Run 46144902229 exhausted 45 minutes while its managed cold cache was still
+    # compiling dependencies. Match the hosted lane's finite two-hour cold-build
+    # allowance, preserving the four-hour explicit provisioning profiles.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && ((inputs.run_memory_calibration && inputs.provision_qwen_snapshot) || (inputs.run_five_rung_reference && inputs.provision_z_image_snapshot)) && 240 || 120 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch

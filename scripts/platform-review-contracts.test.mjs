@@ -2973,8 +2973,19 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
   );
   assert.match(
     workflow,
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(\(inputs\.run_memory_calibration && inputs\.provision_qwen_snapshot\) \|\| \(inputs\.run_five_rung_reference && inputs\.provision_z_image_snapshot\)\) && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(\(inputs\.run_memory_calibration && inputs\.provision_qwen_snapshot\) \|\| \(inputs\.run_five_rung_reference && inputs\.provision_z_image_snapshot\)\) && 240 \|\| 120 \}\}/,
   );
+  const timeout = workflowExpression(workflowJob(workflow, "nax-worker"), "timeout-minutes");
+  for (const [event, inputs, expected] of [
+    ["pull_request", {}, 120],
+    ["push", {}, 120],
+    ["workflow_dispatch", {}, 120],
+    ["workflow_dispatch", { run_five_rung_reference: true }, 120],
+    ["workflow_dispatch", { run_memory_calibration: true, provision_qwen_snapshot: true }, 240],
+    ["workflow_dispatch", { run_five_rung_reference: true, provision_z_image_snapshot: true }, 240],
+  ]) {
+    assert.equal(evaluateWorkflow(timeout, event, inputs), expected);
+  }
   assert.match(
     workflow,
     /provision_qwen_snapshot requires run_memory_calibration=true/,
