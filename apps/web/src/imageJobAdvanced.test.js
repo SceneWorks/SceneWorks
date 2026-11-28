@@ -28,8 +28,8 @@ function offState(overrides = {}) {
     flashAttn: true,
     promptEnhance: false,
     enhancePrompt: false,
-    precisionToggle: false,
-    bf16Precision: false,
+
+
     showTierPicker: false,
     quantTier: "default",
     showPidToggle: false,
@@ -78,7 +78,7 @@ it.each([
     }
   }
   expect(buildImageJobAdvanced(offState({
-    selectedModel, precisionToggle: true, bf16Precision: true,
+    selectedModel,
   }))).not.toHaveProperty("mlxQuantize");
 });
 
@@ -257,28 +257,6 @@ describe("buildImageJobAdvanced", () => {
     ).toBe(true);
   });
 
-  it("keeps the Boogu precision and quant-tier mlxQuantize spreads disjoint", () => {
-    // Boogu precision toggle: bf16 selected, no tier picker → mlxQuantize:0.
-    expect(
-      buildImageJobAdvanced(offState({ precisionToggle: true, bf16Precision: true, showTierPicker: false }))
-        .mlxQuantize,
-    ).toBe(0);
-    // Its !showTierPicker guard suppresses the Boogu path when a tier picker is present;
-    // the tier path then decides. With a "default" pseudo-tier the tier path also omits,
-    // so neither spread leaks mlxQuantize.
-    expect(
-      buildImageJobAdvanced(
-        offState({ precisionToggle: true, bf16Precision: true, showTierPicker: true, quantTier: "default" }),
-      ),
-    ).not.toHaveProperty("mlxQuantize");
-    // With a real picked tier, that tier's quant value wins (q8 -> 8), never the Boogu 0.
-    expect(
-      buildImageJobAdvanced(
-        offState({ precisionToggle: true, bf16Precision: true, showTierPicker: true, quantTier: "q8" }),
-      ).mlxQuantize,
-    ).toBe(8);
-  });
-
   it("maps the picked quant tier to mlxQuantize (bf16->0, q8->8, q4->4) and omits the 'default' pseudo-tier", () => {
     expect(buildImageJobAdvanced(offState({ showTierPicker: true, quantTier: "q4" })).mlxQuantize).toBe(4);
     expect(buildImageJobAdvanced(offState({ showTierPicker: true, quantTier: "bf16" })).mlxQuantize).toBe(0);
@@ -310,7 +288,7 @@ describe("buildImageJobAdvanced", () => {
     // downloaded. Now the resolved tier rides the payload regardless of the picker's visibility.
     expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "q4" })).mlxQuantize).toBe(4);
     expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "q8" })).mlxQuantize).toBe(8);
-    // A non-matrix model keeps `quantTier` empty/"default" → still omitted (disjoint from Boogu).
+    // A non-matrix model keeps `quantTier` empty/"default" → still omitted (without a model-specific override).
     expect(buildImageJobAdvanced(offState({ showTierPicker: false, quantTier: "default" }))).not.toHaveProperty(
       "mlxQuantize",
     );

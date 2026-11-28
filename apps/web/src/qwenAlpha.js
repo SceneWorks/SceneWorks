@@ -60,7 +60,7 @@ export function modelSupportsAlphaOutput(model) {
 // Should the transparency toggle be shown at all for this model?
 //
 // Separate from the value so a stale sticky `true` on a non-capable model is inert — the same shape
-// `showPidToggle` / `bf16Precision` use in ImageStudio. The toggle is hidden rather than disabled:
+// `showPidToggle` use in ImageStudio. The toggle is hidden rather than disabled:
 // a control that can never apply to this model is noise, not information.
 export function showTransparencyToggle(model) {
   return modelSupportsAlphaOutput(model);

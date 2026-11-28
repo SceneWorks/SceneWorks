@@ -26,7 +26,6 @@ fn entry(id: &str, family: &str) -> JsonObject {
     let source = match family {
         "krea_2" => "transformer_file",
         "sdxl" => "fused_checkpoint",
-        "mage-flow" => "transformer_directory",
         _ => "comfy_ui_tree",
     };
     json!({
@@ -52,7 +51,7 @@ fn withdrawn(object: &JsonObject) -> bool {
 
 #[test]
 fn dense_conversion_notice_follows_shared_route_quants_across_families() {
-    for family in ["krea_2", "sdxl", "mage-flow", "z_image"] {
+    for family in ["krea_2", "sdxl", "z_image"] {
         for (format, label) in [("bf16", "BF16"), ("f16", "FP16"), ("f32", "FP32")] {
             let mut model = entry("dense-import", family);
             model.insert("importQuantFormat".to_owned(), json!(format));
@@ -157,62 +156,6 @@ fn imported_krea_2_advertises_adapters_on_both_registered_backends() {
     assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
 }
 
-/// Generated Mage-Flow full fine-tunes render plain text-to-image on MLX, whose provider seam
-/// rejects adapters — so that projection withdraws the LoRA promise while preserving the
-/// routable model itself. Candle declares no `mage-flow` imported provider at all, so it has no
-/// opinion to project and must leave the entry untouched: withdrawing there would advertise a
-/// lane that exists and merely lacks adapters, which is a different and false claim.
-#[test]
-fn mage_flow_withdraws_adapters_only_on_the_lane_that_serves_it() {
-    let mut on_mlx = entry("finetune_9f3c", "mage-flow");
-    apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
-    assert!(
-        withdrawn(&on_mlx),
-        "MLX renders generated Mage t2i but cannot load adapters: {on_mlx:?}"
-    );
-
-    let untouched = entry("finetune_9f3c", "mage-flow");
-    let mut on_candle = entry("finetune_9f3c", "mage-flow");
-    apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
-    assert_eq!(
-        on_candle, untouched,
-        "candle declares no mage-flow imported provider, so there is no promise to withdraw"
-    );
-}
-
-/// The LANE-SCOPED verdict above is per-lane truth; the PRODUCTION binding must still publish a
-/// withdrawal on a candle-only deployment. sc-15328's hang was exactly this shape — no explicit
-/// empty family list, so `families_from_value_chain` fell back to `family`, the API accepted a
-/// LoRA submission, and no worker could claim it. That regressed on every non-macOS build the
-/// moment the advertisement became facts-derived, because candle registers no `mage-flow`
-/// imported provider and therefore answers "no opinion" rather than "refuses adapters".
-#[test]
-fn a_candle_only_build_still_withdraws_mage_adapters_from_the_other_lane() {
-    let mut object = entry("finetune_9f3c", "mage-flow");
-    // The production binding's own lane (candle) has no opinion here.
-    assert_eq!(
-        imported_lora_advertisement_verdict(&object, false, true),
-        None
-    );
-    // MLX is the lane that serves the family and refuses adapters, and that refusal is what
-    // must reach the entry regardless of which engine this build links.
-    assert_eq!(
-        imported_lora_advertisement_verdict(&object, true, false),
-        Some(false)
-    );
-    write_imported_lora_advertisement(&mut object, false);
-    assert!(withdrawn(&object), "{object:?}");
-    assert_eq!(object["loraCompatibility"]["families"], json!([]));
-
-    // A positive advertisement must NOT cross lanes: offering adapters this build cannot claim
-    // is the same hang pointed the other way.
-    let krea = entry("user_kreamania_variant5", "krea_2");
-    assert_eq!(
-        imported_lora_advertisement_verdict(&krea, true, false),
-        Some(true)
-    );
-}
-
 /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
 /// than family. Neither may be touched — this projection only ever removes a promise nothing
 /// can keep.
@@ -248,18 +191,6 @@ fn support_and_withdrawal_preserve_sibling_compatibility_keys() {
     assert_eq!(
         supported["loraCompatibility"], compatibility,
         "Candle's supported Krea adapter family and sibling keys must remain untouched"
-    );
-
-    let mut withdrawn_entry = entry("finetune_9f3c", "mage-flow");
-    withdrawn_entry.insert(
-        "loraCompatibility".to_owned(),
-        json!({ "families": ["mage-flow"], "supported": true, "types": ["character", "style"] }),
-    );
-    apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, true, false);
-    assert!(withdrawn(&withdrawn_entry));
-    assert_eq!(
-        withdrawn_entry["loraCompatibility"]["types"],
-        json!(["character", "style"])
     );
 }
 
@@ -451,29 +382,6 @@ fn external_comfyui_surface_uses_exact_candle_registration() {
     assert_eq!(qwen["ui"], json!({}));
     assert!(qwen.get("runtimeQuantTiers").is_none());
     assert_eq!(qwen["loraCompatibility"], json!({}));
-
-    let mut mage_on_mlx = entry("finetune_9f3c", "mage-flow");
-    apply_model_manifest_defaults(&mut mage_on_mlx, "image", Some("mage-flow"));
-    apply_imported_provider_surface_for_lanes(&mut mage_on_mlx, true, false);
-    assert!(mage_on_mlx["capabilities"]
-        .as_array()
-        .is_some_and(|values| values.contains(&json!("text_to_image"))));
-    assert_eq!(
-        mage_on_mlx["runtimeQuantTiers"],
-        json!(["q4", "q8", "bf16"])
-    );
-
-    let mut mage_on_candle = entry("finetune_9f3c", "mage-flow");
-    apply_model_manifest_defaults(&mut mage_on_candle, "image", Some("mage-flow"));
-    apply_imported_provider_surface_for_lanes(&mut mage_on_candle, false, true);
-    assert!(mage_on_candle["capabilities"]
-        .as_array()
-        .is_some_and(|values| !values.contains(&json!("text_to_image"))));
-    assert!(
-        mage_on_candle.get("loraCompatibility").is_none(),
-        "an empty route set must abstain instead of manufacturing compatibility metadata"
-    );
-    assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
 }
 
 #[test]
@@ -493,11 +401,6 @@ fn imported_checkpoints_inherit_the_providers_request_size_envelope() {
         );
         assert!(krea["limits"].get("maxPixels").is_none(), "{label}");
     }
-    // A grid the provider declares comes along too (Mage-Flow's ÷16 native stride).
-    let mut mage = entry("finetune_9f3c", "mage-flow");
-    apply_model_manifest_defaults(&mut mage, "image", Some("mage-flow"));
-    apply_imported_provider_surface_for_lanes(&mut mage, true, false);
-    assert_eq!(mage["limits"]["requiresDimensionsMultipleOf"], json!(16));
     // An author's own envelope is never overwritten by the provider's.
     let mut authored = entry("kreamania_v8", "krea_2");
     authored.insert("limits".into(), json!({"maxDimension": 2048}));
@@ -508,11 +411,7 @@ fn imported_checkpoints_inherit_the_providers_request_size_envelope() {
 
 #[test]
 fn imported_sampling_menus_follow_the_exact_provider_and_preserve_authored_values() {
-    for (family, provider) in [
-        ("krea_2", "krea_2_turbo"),
-        ("mage-flow", "mage_flow_base"),
-        ("sdxl", "sdxl"),
-    ] {
+    for (family, provider) in [("krea_2", "krea_2_turbo"), ("sdxl", "sdxl")] {
         let mut imported = entry("my_fine_tune", family);
         apply_imported_provider_surface_for_lanes(&mut imported, true, false);
         let builtin = sceneworks_core::builtin_manifests::builtin_model_entry(provider).unwrap();

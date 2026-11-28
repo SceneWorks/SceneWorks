@@ -37,7 +37,6 @@ function img2imgPidState(overrides = {}) {
     characterId: null,
     characterLookId: null,
     multiReference: false,
-    sourceWithMultiReference: false,
     editSecondPair: null,
     sourceAssetId: null,
     controlPreprocessSourceId: null,
@@ -69,8 +68,8 @@ function img2imgPidState(overrides = {}) {
     flashAttn: true,
     promptEnhance: false,
     enhancePrompt: false,
-    precisionToggle: false,
-    bf16Precision: false,
+
+
     showTierPicker: false,
     quantTier: "default",
     showPidToggle: true,
@@ -125,8 +124,6 @@ describe("buildImageJobRequest", () => {
       { sourceAssetId: null, referenceAssetIds: ["source", "second"], referenceAssetId: null }],
     ["multi-reference edit", { mode: "edit_image", multiReference: true, sourceAssetId: "hidden", referenceAssetIds: ["first", "second"] },
       { sourceAssetId: null, referenceAssetIds: ["first", "second"], referenceAssetId: null }],
-    ["source plus references", { mode: "edit_image", sourceWithMultiReference: true, sourceAssetId: "source", referenceAssetIds: ["reference"] },
-      { sourceAssetId: "source", referenceAssetIds: ["reference"], referenceAssetId: null }],
     ["character over img2img", { mode: "character_image", referenceAssetId: "character", supportsImg2img: true },
       { sourceAssetId: null, referenceAssetIds: undefined, referenceAssetId: "character" }],
     ["img2img over hidden character", { referenceAssetId: "hidden-character", supportsImg2img: true },
@@ -205,20 +202,6 @@ describe("buildImageJobRequest", () => {
       }),
     );
     expect(esrgan.upscale).toEqual({ enabled: true, factor: 4, engine: "real-esrgan" });
-  });
-
-  it("keeps Mage Edit's required source separate from its ordered optional references", () => {
-    const request = buildImageJobRequest(
-      img2imgPidState({
-        mode: "edit_image",
-        model: "mage_flow_edit",
-        sourceWithMultiReference: true,
-        sourceAssetId: "source",
-        referenceAssetIds: ["reference-b", "reference-a"],
-      }),
-    );
-    expect(request.sourceAssetId).toBe("source");
-    expect(request.referenceAssetIds).toEqual(["reference-b", "reference-a"]);
   });
 
   it("routes the img2img reference to the top-level referenceAssetId on an img2img model", () => {

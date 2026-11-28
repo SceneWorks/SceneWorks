@@ -458,10 +458,7 @@ fn request_for_true_cfg(steps: u32, true_cfg: f32) -> impl Fn(u32, u32) -> Gener
 
 const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";
 const SDXL_BF16_SENTINEL: &str = "unet/diffusion_pytorch_model.fp16.safetensors";
-// Lens AND Krea pack the DiT under transformer/diffusion_pytorch_model.safetensors …
-const LENS_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
-// … but Krea's DENSE bf16 DiT is SHARDED (…-0000N-of-0000M.safetensors), so its tier-presence
-// sentinel is the shard index the plain name would miss (the same split lens-turbo bf16 has).
+// Krea's dense bf16 DiT is sharded, so its tier-presence sentinel is the shard index.
 const SHARDED_DIT_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors.index.json";
 // … while Z-Image AND Qwen-Image pack the DiT under transformer/model.safetensors.
 const ZIMAGE_SENTINEL: &str = "transformer/model.safetensors";
@@ -538,7 +535,7 @@ fn sweep_krea_2_turbo_q8() {
         "RS_KREA_TURBO_DIR",
         "SceneWorks/krea-2-turbo-mlx",
         "q8",
-        LENS_SENTINEL,
+        DIT_SENTINEL,
     );
     sweep_tier(
         "krea_2_turbo",
@@ -589,53 +586,11 @@ fn sweep_qwen_image_q8() {
     );
 }
 
-/// Lens, packed q4 — the other 14.04 GiB@1024² anchor from sc-10863, and the largest packed tier in
-/// the set (17.67 GiB on disk).
-#[test]
-#[ignore = "sc-16195 resolution sweep; needs SceneWorks/lens-mlx q4 cached + an Apple-Silicon Mac"]
-fn sweep_lens_q4() {
-    let dir = resolve_tier_dir("RS_LENS_Q4_DIR", "SceneWorks/lens-mlx", "q4", LENS_SENTINEL);
-    sweep_tier("lens", "q4", "lens", &dir, request_for(20, Some(5.0)));
-}
-
 // ── sc-16209 family-completeness additions ─────────────────────────────────────────────────────
 // One representative text-to-image descriptor per remaining MLX architecture. These ignored tests
 // intentionally exist even when this checkout lacks a complete local turnkey: an unavailable row is
 // recorded as unmeasured and therefore MUST keep the generic estimator fallback. Adding a provider
 // anchor without a successful row from this harness is a review failure.
-
-/// Mage-Flow uses a split install: the selected transformer's tier is the primary source while the
-/// provider-owned text encoder and VAE are staged as explicit LoadSpec components.
-#[test]
-#[ignore = "sc-16209 resolution sweep; needs Mage-Flow + Mage-Flow-Components-mlx bf16 cached + an Apple-Silicon Mac"]
-fn sweep_mage_flow_bf16() {
-    let transformer = resolve_tier_dir(
-        "RS_MAGE_FLOW_DIR",
-        "SceneWorks/Mage-Flow",
-        "bf16",
-        DIT_SENTINEL,
-    );
-    let components = resolve_tier_dir(
-        "RS_MAGE_COMPONENTS_DIR",
-        "SceneWorks/Mage-Flow-Components-mlx",
-        "bf16",
-        "text_encoder/model.safetensors",
-    );
-    let spec = LoadSpec::new(WeightsSource::Dir(transformer.clone()))
-        .with_component(
-            "text_encoder",
-            WeightsSource::Dir(components.join("text_encoder")),
-        )
-        .with_component("vae", WeightsSource::Dir(components.join("vae")));
-    sweep_with_spec(
-        "mage_flow",
-        "bf16",
-        "mage_flow",
-        &transformer,
-        spec,
-        request_for(20, Some(5.0)),
-    );
-}
 
 #[test]
 #[ignore = "sc-16209 resolution sweep; needs SceneWorks/ideogram-4-mlx q8 cached + an Apple-Silicon Mac"]
@@ -758,24 +713,6 @@ fn sweep_bernini_image_bf16() {
             video_mode: Some("t2i".into()),
             ..make_request(width, height)
         },
-    );
-}
-
-#[test]
-#[ignore = "sc-16209 resolution sweep; needs SceneWorks/boogu-image-mlx turbo cached + an Apple-Silicon Mac"]
-fn sweep_boogu_image_turbo_q8() {
-    let dir = resolve_tier_dir(
-        "RS_BOOGU_DIR",
-        "SceneWorks/boogu-image-mlx",
-        "turbo",
-        DIT_SENTINEL,
-    );
-    sweep_tier(
-        "boogu_image_turbo",
-        "q8",
-        "boogu_image_turbo",
-        &dir,
-        request_for(4, None),
     );
 }
 

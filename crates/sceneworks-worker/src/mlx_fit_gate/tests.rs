@@ -1791,7 +1791,7 @@ impl gen_core::Generator for ReferenceRenderGenerator {
 fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
     RequestGenerator {
         descriptor: gen_core::ModelDescriptor {
-            id: "mage_flow",
+            id: "fit_fixture",
             family: "test",
             backend: "mlx",
             modality: gen_core::Modality::Image,
@@ -1805,10 +1805,29 @@ fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerat
     }
 }
 
+fn fixture_memory_contract() -> MemoryProviderContract {
+    let mut contract = MemoryProviderContract::compatibility_default(
+        "fit_fixture",
+        MemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: true,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: true,
+            cache_eviction: true,
+        },
+    );
+    contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+        "fit-fixture-q4-v1",
+        gen_core::LoadShape::EagerMaterialization,
+    ));
+    contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+    contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
+    contract
+}
+
 fn request_plan() -> MlxRequestPlan {
     MlxRequestPlan {
-        engine_id: "mage_flow",
-        model_id: "mage_flow".to_owned(),
+        engine_id: "fit_fixture",
+        model_id: "fit_fixture".to_owned(),
         tier: MemoryNumericTier {
             precision: gen_core::Precision::Bf16,
             quant: Some(gen_core::Quant::Q4),
@@ -1826,52 +1845,6 @@ fn request_plan() -> MlxRequestPlan {
         calibration: MlxCalibrationConfig::Absent,
         load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
     }
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn mage_q4_memory_identity_includes_descriptor_component_floors() {
-    let source = WeightsSource::Dir(std::path::PathBuf::from("/nonexistent/mage-fixture"));
-    let q4 = LoadSpec::new(source.clone()).with_quant(gen_core::Quant::Q4);
-    let q4_plan = MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &q4, None, None);
-    let advertised = crate::inference_runtime::media_descriptor("mage_flow")
-        .unwrap()
-        .capabilities
-        .component_precision_floors;
-    assert_eq!(q4_plan.tier.component_precision_floors, advertised);
-    assert_eq!(advertised.len(), 2);
-
-    let q8 = LoadSpec::new(source).with_quant(gen_core::Quant::Q8);
-    let q8_plan = MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &q8, None, None);
-    assert!(q8_plan.tier.component_precision_floors.is_empty());
-    assert_ne!(q4_plan.tier, q8_plan.tier);
-}
-
-fn mage_request_contract() -> MemoryProviderContract {
-    use gen_core::MemoryCalibrationIdentity;
-
-    let mut contract = MemoryProviderContract::compatibility_default(
-        "mage_flow",
-        MemoryBackendRealization::MlxMetal {
-            bounded_wired_residency: true,
-            lazy_or_mmap_materialization: true,
-            explicit_evaluation_and_synchronization: true,
-            cache_eviction: true,
-        },
-    );
-    contract.calibration = Some(MemoryCalibrationIdentity::new(
-        mage_request_fingerprint(),
-        gen_core::LoadShape::EagerMaterialization,
-    ));
-    contract.asset_facts.base_bytes = gib_to_bytes(6.0);
-    contract.asset_facts.transformer_bytes = gib_to_bytes(6.0);
-    contract
-}
-
-/// The (route, tier) cell `request_plan()` names: `mage_flow` at q4.
-fn mage_request_fingerprint() -> String {
-    mage_calibration_fingerprint("mage_flow", Some(gen_core::Quant::Q4))
-        .expect("mage_flow q4 is a shipped Mage-Flow cell")
 }
 
 fn request_inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
@@ -8533,11 +8506,6 @@ fn a_narrowed_parameter_range_degrades_to_estimates_and_spares_valid_siblings() 
 const FLUX1_CONTROL_BYTES: u64 = 4_281_779_224;
 #[cfg(target_os = "macos")]
 const FLUX2_CONTROL_BYTES: u64 = 8_232_506_680;
-// The pinned Lens bf16 turnkeys share this exact three-shard MXFP4 encoder on disk. The provider
-// footprint query, not a copied resident-byte constant, supplies its load-exact expansion.
-#[cfg(target_os = "macos")]
-const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
-
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ResidentOnlyAuditSurface {
@@ -8576,7 +8544,6 @@ struct SourceBoundShippedTier {
 enum SourceBoundManifestDisposition {
     GenericSelector,
     PulidIdentityExcluded,
-    MageSplitComponentsExcluded,
 }
 
 #[cfg(target_os = "macos")]
@@ -8603,13 +8570,11 @@ struct SourceBoundExcludedCell {
 /// production routers expand this family scope into the exact candidate inventory.
 #[cfg(target_os = "macos")]
 const RESIDENT_ONLY_AUDIT_FAMILIES: &[&str] = &[
-    "boogu",
     "chroma",
     "flux",
     "flux2-dev",
     "flux2-klein",
     "ideogram",
-    "lens",
     "sd3",
 ];
 
@@ -8617,9 +8582,7 @@ const RESIDENT_ONLY_AUDIT_FAMILIES: &[&str] = &[
 fn source_bound_manifest_classifications(
     models: &[Value],
 ) -> Result<Vec<SourceBoundManifestClassification>, String> {
-    use SourceBoundManifestDisposition::{
-        GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
-    };
+    use SourceBoundManifestDisposition::{GenericSelector, PulidIdentityExcluded};
 
     let mut classifications = Vec::new();
     let mut unique = std::collections::BTreeSet::new();
@@ -8635,12 +8598,8 @@ fn source_bound_manifest_classifications(
             .ok_or_else(|| format!("shipped MLX image entry {manifest_id} has no string family"))?;
         let resolved = crate::engines::mlx_model(manifest_id);
         let is_pulid = crate::image_jobs::is_pulid_flux_model(manifest_id);
-        let routed_as_mage = resolved
-            .as_ref()
-            .is_some_and(|model| model.adapter_label() == "mlx_mage");
-        let in_mage_family = family == "mage-flow";
         let in_audit_family = RESIDENT_ONLY_AUDIT_FAMILIES.contains(&family);
-        if !in_audit_family && !is_pulid && !in_mage_family && !routed_as_mage {
+        if !in_audit_family && !is_pulid {
             continue;
         }
         if !unique.insert(manifest_id) {
@@ -8660,13 +8619,6 @@ fn source_bound_manifest_classifications(
                     ));
             }
             PulidIdentityExcluded
-        } else if in_mage_family || routed_as_mage {
-            if !in_mage_family || !routed_as_mage {
-                return Err(format!(
-                        "{manifest_id} Mage split-component classification drifted: expected family=mage-flow and a production mlx_mage route"
-                    ));
-            }
-            MageSplitComponentsExcluded
         } else if in_audit_family {
             if resolved.is_none() {
                 return Err(format!(
@@ -8911,9 +8863,7 @@ fn source_bound_excluded_inventory_from_classifications(
     models: &[Value],
     classifications: &[SourceBoundManifestClassification],
 ) -> Result<Vec<SourceBoundExcludedCell>, String> {
-    use SourceBoundManifestDisposition::{
-        GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
-    };
+    use SourceBoundManifestDisposition::{GenericSelector, PulidIdentityExcluded};
 
     let mut cells = std::collections::BTreeSet::new();
     for classification in classifications {
@@ -8941,22 +8891,6 @@ fn source_bound_excluded_inventory_from_classifications(
                     ));
                 }
                 "pulid_flux"
-            }
-            MageSplitComponentsExcluded => {
-                let resolved =
-                    crate::engines::mlx_model(&classification.manifest_id).ok_or_else(|| {
-                        format!(
-                            "{} no longer resolves through the production Mage route",
-                            classification.manifest_id
-                        )
-                    })?;
-                if classification.family != "mage-flow" || resolved.adapter_label() != "mlx_mage" {
-                    return Err(format!(
-                        "{} no longer matches the Mage split-component exclusion",
-                        classification.manifest_id
-                    ));
-                }
-                resolved.engine_id()
             }
             GenericSelector => unreachable!("generic entries were skipped above"),
         };
@@ -9133,50 +9067,7 @@ fn audit_load_spec(
         tempfile::tempdir_in(fixtures.root.path()).map_err(|error| error.to_string())?,
     );
     let weights = fixture.path().join("weights");
-    if provider_id == "lens" && tier == "q4" {
-        // The production worker opts this one route into the load-exact deferred contract.
-        // Build the same component/config shape its registry contract inspects; a flat sparse
-        // file would make the lookup fall back and falsely classify measured Lens q4 as
-        // Resident-only.
-        let text_encoder_bytes = base_asset_bytes / 3;
-        let transformer_bytes = base_asset_bytes / 3;
-        let vae_bytes = base_asset_bytes - text_encoder_bytes - transformer_bytes;
-        for (component, bytes) in [
-            ("text_encoder", text_encoder_bytes),
-            ("transformer", transformer_bytes),
-            ("vae", vae_bytes),
-        ] {
-            set_sparse_valid_safetensor(&weights.join(component).join("model.safetensors"), bytes)?;
-        }
-        for component in ["text_encoder", "transformer"] {
-            std::fs::write(
-                weights.join(component).join("config.json"),
-                r#"{"quantization":{"bits":4,"group_size":64}}"#,
-            )
-            .map_err(|error| error.to_string())?;
-        }
-    } else if matches!(provider_id, "lens" | "lens_turbo") && tier == "bf16" {
-        if base_asset_bytes < LENS_BF16_TEXT_ENCODER_DISK_BYTES {
-            return Err(format!(
-                "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
-            ));
-        }
-        set_sparse_valid_safetensor(
-            &weights.join("text_encoder/model.safetensors"),
-            LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-        )?;
-        set_sparse_valid_safetensor(
-            &weights.join("transformer/model.safetensors"),
-            base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-        )?;
-        std::fs::write(
-            weights.join("text_encoder/config.json"),
-            r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
-        )
-        .map_err(|error| error.to_string())?;
-    } else if let Some(encoder_bytes) =
-        write_audited_flux2_encoder_fixture(&weights, provider_id, tier)?
-    {
+    if let Some(encoder_bytes) = write_audited_flux2_encoder_fixture(&weights, provider_id, tier)? {
         let remaining_bytes = base_asset_bytes.checked_sub(encoder_bytes).ok_or_else(|| {
             format!(
                 "{provider_id} {tier} registry encoder fixture uses {encoder_bytes} bytes, \
@@ -9464,14 +9355,14 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         source_bound_manifest_classifications(models).expect("source-bound classifications");
     assert_eq!(
         classifications.len(),
-        26,
+        15,
         "the source-derived generic-plus-excluded model inventory changed"
     );
     let generic_manifest_ids =
         source_bound_generic_manifest_ids(&classifications).collect::<Vec<_>>();
     assert_eq!(
         generic_manifest_ids.len(),
-        19,
+        14,
         "the generic-selector model inventory changed"
     );
     let surfaces = source_bound_audit_surfaces_from_manifest_ids(generic_manifest_ids)
@@ -9480,7 +9371,7 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         .expect("source-bound candidate inventory");
     assert_eq!(
         source_inventory.len(),
-        62,
+        53,
         "the source-derived candidate inventory changed; update the recorded audit result"
     );
     let excluded_inventory =
@@ -9490,21 +9381,11 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         .iter()
         .filter(|cell| cell.disposition == SourceBoundManifestDisposition::PulidIdentityExcluded)
         .count();
-    let mage_excluded = excluded_inventory
-        .iter()
-        .filter(|cell| {
-            cell.disposition == SourceBoundManifestDisposition::MageSplitComponentsExcluded
-        })
-        .count();
     assert_eq!(pulid_excluded, 3, "PuLID must account for q4/q8/bf16");
     assert_eq!(
-        mage_excluded, 18,
-        "the six Mage variants must each account for q4/q8/bf16"
-    );
-    assert_eq!(
         source_inventory.len() + pulid_excluded,
-        65,
-        "every route/tier cell in the eight-family story scope must be classified"
+        56,
+        "every shipped candidate and PuLID route/tier cell must be classified"
     );
     let classified_excluded =
         source_bound_classified_excluded_inventory(models, &excluded_inventory)
@@ -9566,14 +9447,10 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         )
         .expect("source-bound audit spec");
         let media = crate::inference_runtime::media();
-        assert!(
-                !matches!(cell.provider_id, "lens" | "lens_turbo"),
-                "Lens materialization can change the resident total and must not enter the raw-source audit"
-            );
         let activation_anchor_bytes = media
             .activation_memory_bytes_1024(cell.provider_id)
             .expect("source-bound activation query");
-        // Every audited spec is directory-backed, and for these non-Lens providers the
+        // Every audited spec is directory-backed, and for these providers the
         // provider footprint can only refine the text-encoder split; it cannot change the
         // total used by the Resident path below. Let the production planner derive that total
         // from the sparse source sizes directly. Asking the provider registry for a redundant
@@ -9771,14 +9648,6 @@ fn resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones() {
     let (_, cells) = source_bound_resident_only_cells_from_inventory(models, &source_inventory)
         .expect("production resident-only cells");
     assert!(
-        !cells.iter().any(|cell| {
-            cell.manifest_id == "lens"
-                && cell.tier == "q4"
-                && cell.surface == ResidentOnlyAuditSurface::Base
-        }),
-        "base Lens q4 must remain on its production measured deferred-materialization contract"
-    );
-    assert!(
         !cells
             .iter()
             .any(|cell| cell.provider_id == "flux2_dev_edit"),
@@ -9876,82 +9745,6 @@ fn resident_only_audit_inventory_rejects_duplicate_and_zero_cell_drop_mutations(
         drop_error.contains("flux_schnell"),
         "zero-cell drop must name its missing source route: {drop_error}"
     );
-}
-
-/// Explicit-exclusion mutation proof. PuLID is inside the eight-family story scope but takes
-/// the identity-conditioned route outside MODEL_TABLE; Mage is outside that family scope but
-/// must remain named because its split component tree cannot be represented by the generic
-/// single-root sparse fixture. Neither exclusion may disappear or drift families silently.
-#[cfg(target_os = "macos")]
-#[test]
-fn resident_only_audit_exclusions_reject_pulid_and_mage_scope_mutations() {
-    let manifest: Value =
-        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
-            .expect("builtin model manifest parses")
-            .clone();
-    let models = manifest["models"].as_array().expect("manifest models");
-    let classifications =
-        source_bound_manifest_classifications(models).expect("source classifications");
-    let expected = source_bound_excluded_inventory_from_classifications(models, &classifications)
-        .expect("source excluded inventory");
-
-    let missing_pulid = classifications
-        .iter()
-        .filter(|item| item.manifest_id != "pulid_flux_dev")
-        .cloned()
-        .collect::<Vec<_>>();
-    let actual = source_bound_excluded_inventory_from_classifications(models, &missing_pulid)
-        .expect("the mutated exclusion list still resolves");
-    let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
-        .expect_err("removing PuLID classification must fail exact equality");
-    assert!(error.contains("pulid_flux_dev"), "wrong failure: {error}");
-
-    let reclassified_pulid = classifications
-        .iter()
-        .cloned()
-        .map(|mut item| {
-            if item.manifest_id == "pulid_flux_dev" {
-                item.disposition = SourceBoundManifestDisposition::GenericSelector;
-            }
-            item
-        })
-        .collect::<Vec<_>>();
-    let actual = source_bound_excluded_inventory_from_classifications(models, &reclassified_pulid)
-        .expect("the mutated disposition list still resolves");
-    let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
-        .expect_err("changing PuLID classification must fail exact equality");
-    assert!(error.contains("pulid_flux_dev"), "wrong failure: {error}");
-
-    let missing_mage = classifications
-        .iter()
-        .filter(|item| {
-            item.disposition != SourceBoundManifestDisposition::MageSplitComponentsExcluded
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let actual = source_bound_excluded_inventory_from_classifications(models, &missing_mage)
-        .expect("the mutated exclusion list still resolves");
-    let error = require_exact_source_bound_excluded_inventory(&expected, &actual)
-        .expect_err("removing Mage scope must fail exact equality");
-    assert!(error.contains("mage_flow"), "wrong failure: {error}");
-
-    let mut pulid_family_drift = models.clone();
-    pulid_family_drift
-        .iter_mut()
-        .find(|model| model["id"] == "pulid_flux_dev")
-        .expect("PuLID manifest entry")["family"] = Value::String("not-flux".to_owned());
-    let error = source_bound_manifest_classifications(&pulid_family_drift)
-        .expect_err("PuLID family drift must fail classification");
-    assert!(error.contains("PuLID bespoke classification drifted"));
-
-    let mut mage_family_drift = models.clone();
-    mage_family_drift
-        .iter_mut()
-        .find(|model| model["id"] == "mage_flow")
-        .expect("Mage manifest entry")["family"] = Value::String("flux".to_owned());
-    let error = source_bound_manifest_classifications(&mage_family_drift)
-        .expect_err("Mage family drift must fail classification");
-    assert!(error.contains("Mage split-component classification drifted"));
 }
 
 /// sc-18251: the PREMISE of applying the composition leg to Resident, pinned against gen-core
@@ -10609,7 +10402,7 @@ fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
     use gen_core::{MemoryParameterRanges, MemoryStrategyCapability, MemoryStrategySupport};
 
     let contract_with = |missing: MemoryStrategy| {
-        let mut contract = mage_request_contract();
+        let mut contract = fixture_memory_contract();
         contract.strategies = MemoryStrategy::ALL
             .into_iter()
             .map(|strategy| MemoryStrategyCapability {
@@ -10656,7 +10449,7 @@ fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
     // full. Without this, a `memory_for_selection` that returned `Default` unconditionally would
     // satisfy both assertions above.
     let all_implemented = {
-        let mut contract = mage_request_contract();
+        let mut contract = fixture_memory_contract();
         contract.strategies = MemoryStrategy::ALL
             .into_iter()
             .map(|strategy| MemoryStrategyCapability {
@@ -10695,7 +10488,7 @@ fn an_unimplemented_rung_is_not_engaged_by_a_deeper_selection() {
 
 #[test]
 fn request_scope_reselects_a_b_a_without_fragmenting_request_axes() {
-    let generator = request_generator(Some(mage_request_contract()));
+    let generator = request_generator(Some(fixture_memory_contract()));
     let plan = request_plan();
     let budget = MemoryBudget {
         total_bytes: gib_to_bytes(16.0),
@@ -10955,11 +10748,10 @@ fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
 /// whole measurement in the area term, with the request budget's remaining OS reserve added as
 /// a separate fixed term.
 ///
-/// This is the lens dense path ([`HeadroomAllowance::LENS_DENSE`], sc-11924). Subtracting the
-/// legacy 2 GiB request-budget reserve from its 29.88 GiB BARE activation measurement would
-/// under-predict above 1024² by `2·MP`. The safe decomposition is fixed 2 + 29.88·MP.
+/// A synthetic 29.88 GiB transient must scale entirely with area, with the OS reserve added once.
 #[test]
 fn a_bare_transient_allowance_keeps_its_whole_area_term() {
+    const TRANSIENT_GB: f64 = 29.88;
     let asset_gb = 28.43_f64;
     let plan = |headroom: HeadroomAllowance| {
         let fixed_reserve_bytes = gib_to_bytes(
@@ -10968,8 +10760,8 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
         let activation_anchor_bytes =
             gib_to_bytes((headroom.total_gb - headroom.os_reserve_gb).max(0.0));
         MlxRequestPlan {
-            engine_id: "lens_turbo",
-            model_id: "lens_turbo".to_owned(),
+            engine_id: "fit_fixture",
+            model_id: "fit_fixture".to_owned(),
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: None,
@@ -10985,7 +10777,10 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
             load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     };
-    let dense = plan(HeadroomAllowance::LENS_DENSE);
+    let dense = plan(HeadroomAllowance {
+        total_gb: 29.88,
+        os_reserve_gb: 0.0,
+    });
     let peak_gb = |plan: &MlxRequestPlan, width, height| {
         plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1))) as f64
             / BYTES_PER_GIB
@@ -10996,13 +10791,13 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
         (1152, 2048, 2.25),
         (2048, 2048, 4.0),
     ] {
-        let expected = asset_gb + 2.0 + LENS_DENSE_HEADROOM_GB * megapixels;
+        let expected = asset_gb + 2.0 + TRANSIENT_GB * megapixels;
         assert!(
-                (peak_gb(&dense, width, height) - expected).abs() < 1e-6,
-                "{width}x{height}: a bare-transient allowance must scale WHOLLY with area — \
-                 expected fixed 2 + {LENS_DENSE_HEADROOM_GB}*{megapixels} = {expected:.4}, got {:.4}",
-                peak_gb(&dense, width, height)
-            );
+            (peak_gb(&dense, width, height) - expected).abs() < 1e-6,
+            "{width}x{height}: a bare-transient allowance must scale WHOLLY with area — \
+                 expected fixed 2 + {TRANSIENT_GB}*{megapixels} = {expected:.4}, got {:.4}",
+            peak_gb(&dense, width, height)
+        );
     }
 
     // Control: the generic allowance, which really does contain a reserve, must NOT behave that
@@ -11017,7 +10812,7 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
 
 #[test]
 fn request_scope_charges_external_committed_memory_and_never_accepts_zero_zero() {
-    let generator = request_generator(Some(mage_request_contract()));
+    let generator = request_generator(Some(fixture_memory_contract()));
     let plan = request_plan();
     let inputs = request_inputs(512, 512, 1);
     let external = evaluate_request_with_budget(
@@ -12500,270 +12295,6 @@ fn post_load_external_delta_never_reclassifies_or_subtracts_resident_bytes() {
 }
 
 #[test]
-fn mage_resident_path_requires_the_provider_calibration_handshake() {
-    let error = evaluate_request_with_budget(
-        &request_generator(None),
-        &request_plan(),
-        &request_inputs(512, 512, 1),
-        MemoryCacheState::Cold,
-        OffloadPolicy::Resident,
-        MemoryBudget {
-            total_bytes: gib_to_bytes(16.0),
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        gib_to_bytes(8.0),
-        0,
-        &[],
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains(&mage_request_fingerprint()),
-        "the production Resident path must compare the loaded provider fingerprint: {error}"
-    );
-}
-
-#[test]
-fn mage_resident_path_refuses_a_contract_from_another_tier() {
-    // A loaded q8 Mage contract carries a real production identity — but not the cell the q4
-    // plan names. The handshake must key on the plan's tier, not merely on "some Mage cell".
-    let q8_fingerprint = mage_calibration_fingerprint("mage_flow", Some(gen_core::Quant::Q8))
-        .expect("mage_flow q8 is a shipped Mage-Flow cell");
-    assert_ne!(q8_fingerprint, mage_request_fingerprint());
-    let mut contract = mage_request_contract();
-    contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
-        q8_fingerprint.clone(),
-        gen_core::LoadShape::EagerMaterialization,
-    ));
-    let evaluate = |contract: MemoryProviderContract| {
-        evaluate_request_with_budget(
-            &request_generator(Some(contract)),
-            &request_plan(),
-            &request_inputs(512, 512, 1),
-            MemoryCacheState::Cold,
-            OffloadPolicy::Resident,
-            MemoryBudget {
-                total_bytes: gib_to_bytes(64.0),
-                committed_bytes: 0,
-                reclaimable_bytes: 0,
-                reserved_headroom_bytes: 0,
-            },
-            gib_to_bytes(8.0),
-            0,
-            &[],
-        )
-    };
-    let error = evaluate(contract).unwrap_err().to_string();
-    assert!(
-        error.contains("does not match") && error.contains(&mage_request_fingerprint()),
-        "a q8 identity must be refused against a q4 plan by naming the q4 cell: {error}"
-    );
-    assert!(
-        !error.contains(&q8_fingerprint),
-        "the refusal names the EXPECTED cell, not the loaded one: {error}"
-    );
-    // Positive control: the same contract carrying the plan's own cell is admitted.
-    evaluate(mage_request_contract())
-        .expect("the matching (route, tier) identity passes the Resident-path handshake");
-}
-
-#[test]
-fn mage_calibration_cells_are_the_eighteen_distinct_shipped_pairs() {
-    let routes = [
-        "mage_flow",
-        "mage_flow_base",
-        "mage_flow_turbo",
-        "mage_flow_edit",
-        "mage_flow_edit_base",
-        "mage_flow_edit_turbo",
-    ];
-    let tiers = [None, Some(gen_core::Quant::Q4), Some(gen_core::Quant::Q8)];
-    let mut cells = std::collections::BTreeSet::new();
-    for route in routes {
-        for tier in tiers {
-            let cell = mage_calibration_fingerprint(route, tier)
-                .unwrap_or_else(|| panic!("{route} {tier:?} is a shipped cell"));
-            assert!(
-                cells.insert(cell),
-                "{route} {tier:?} collides with another cell"
-            );
-        }
-        assert_eq!(
-            mage_calibration_fingerprint(route, Some(gen_core::Quant::Nvfp4)),
-            None,
-            "{route}: NVFP4 is not a Mage-Flow MLX tier and must stay unnameable"
-        );
-    }
-    assert_eq!(cells.len(), 18);
-    assert_eq!(
-        mage_calibration_fingerprint("mage_flow_lora", Some(gen_core::Quant::Q4)),
-        None,
-        "an id the engine does not serve names no cell"
-    );
-    assert!(!cells.contains("mage-flow-mlx-shared-ladder-2026-08-03-v1"));
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
-    use runtime_macos::converters::mage::model::{production_calibration_fingerprint, MODEL_IDS};
-    let tiers = [
-        None,
-        Some(gen_core::Quant::Q4),
-        Some(gen_core::Quant::Q8),
-        Some(gen_core::Quant::Nvfp4),
-    ];
-    for engine_id in MODEL_IDS {
-        for tier in tiers {
-            assert_eq!(
-                mage_calibration_fingerprint(engine_id, tier),
-                production_calibration_fingerprint(engine_id, tier),
-                "{engine_id} {tier:?}: the worker's Mage peak estimator must fail at test time \
-                     when the linked provider identity table moves",
-            );
-        }
-    }
-    assert_eq!(
-        production_calibration_fingerprint("mage_flow_lora", None),
-        None,
-        "the engine serves exactly MODEL_IDS; the worker table must not name more"
-    );
-}
-
-#[test]
-fn mage_adapter_requests_require_and_consume_declared_residency() {
-    use gen_core::{
-        ComponentPrecisionFloor, MemoryComponentKind, MemoryComponentResidency, MemoryFormulaKind,
-        MemoryFormulaVariable, MemoryResidentComponent, PrecisionFloorComponent,
-    };
-
-    let mut inputs = request_inputs(512, 512, 1);
-    inputs.adapter_count = 1;
-    let root_guard = tempfile::Builder::new()
-        .prefix("mage-request-adapter-plan-")
-        .tempdir()
-        .expect("temp dir");
-    let root = root_guard.path();
-    let base = root.join("base.safetensors");
-    let adapter = root.join("adapter.safetensors");
-    std::fs::write(&base, vec![0_u8; 100]).unwrap();
-    std::fs::write(&adapter, vec![0_u8; 5_750]).unwrap();
-    let spec = LoadSpec::new(WeightsSource::File(base))
-        .with_quant(gen_core::Quant::Q4)
-        .with_adapters(vec![gen_core::AdapterSpec::new(
-            adapter,
-            1.0,
-            gen_core::AdapterKind::Lora,
-        )]);
-    let plan = MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &spec, None, None);
-    assert_eq!(plan.folded_adapter_bytes, 5_750);
-    let error = evaluate_request_with_budget(
-        &request_generator(Some(mage_request_contract())),
-        &plan,
-        &inputs,
-        MemoryCacheState::Cold,
-        OffloadPolicy::Resident,
-        MemoryBudget {
-            total_bytes: gib_to_bytes(128.0),
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        gib_to_bytes(8.0),
-        0,
-        &[],
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("did not declare load-exact adapter residency"));
-
-    const BASE_PEAK_GIB: f64 = 18.73;
-    const ADAPTER_GIB: f64 = 5.75;
-    let mut contract = mage_request_contract();
-    let phases = contract.lifecycle.phases.clone();
-    contract.asset_facts.overlay_bytes = gib_to_bytes(ADAPTER_GIB);
-    contract.formula = MemoryFormulaKind::ComponentPhaseEnvelope {
-        phases,
-        variables: vec![
-            MemoryFormulaVariable::PixelCount,
-            MemoryFormulaVariable::BatchCount,
-            MemoryFormulaVariable::OverlayBytes,
-        ],
-        resident_components: vec![MemoryResidentComponent {
-            id: "adapter_stack".to_owned(),
-            kind: MemoryComponentKind::AdapterStack,
-            resident_bytes: gib_to_bytes(ADAPTER_GIB),
-            bounded_by: None,
-            residency: MemoryComponentResidency::WholeRender,
-        }],
-    };
-    const PRECISION_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
-        component: PrecisionFloorComponent::TransformerHead,
-        selected_tier: gen_core::Quant::Q4,
-        resident_tier: gen_core::Quant::Q8,
-    }];
-    let mut generator = request_generator(Some(contract.clone()));
-    generator.descriptor.capabilities.component_precision_floors = PRECISION_FLOORS;
-    let evaluated = evaluate_request_with_budget(
-        &generator,
-        &plan,
-        &inputs,
-        MemoryCacheState::Cold,
-        OffloadPolicy::Resident,
-        MemoryBudget {
-            total_bytes: gib_to_bytes(128.0),
-            committed_bytes: 0,
-            reclaimable_bytes: 0,
-            reserved_headroom_bytes: 0,
-        },
-        gib_to_bytes(BASE_PEAK_GIB),
-        0,
-        &[],
-    )
-    .expect("load-exact adapter residency narrows Mage's refusal");
-    assert_eq!(
-        evaluated.context.predicted_peak_bytes,
-        gib_to_bytes(BASE_PEAK_GIB).saturating_add(gib_to_bytes(ADAPTER_GIB)),
-        "the measured 18.73 GiB base must become 24.48 GiB with additive adapters"
-    );
-    assert_eq!(
-        evaluated.context.selection.tier.component_precision_floors, PRECISION_FLOORS,
-        "provider precision floors must participate in the selected evidence identity"
-    );
-
-    contract.asset_facts.overlay_bytes = 0;
-    if let MemoryFormulaKind::ComponentPhaseEnvelope {
-        resident_components,
-        ..
-    } = &mut contract.formula
-    {
-        resident_components[0].resident_bytes = 0;
-    }
-    assert!(
-        evaluate_request_with_budget(
-            &request_generator(Some(contract)),
-            &plan,
-            &inputs,
-            MemoryCacheState::Cold,
-            OffloadPolicy::Resident,
-            MemoryBudget {
-                total_bytes: gib_to_bytes(128.0),
-                committed_bytes: 0,
-                reclaimable_bytes: 0,
-                reserved_headroom_bytes: 0,
-            },
-            gib_to_bytes(BASE_PEAK_GIB),
-            0,
-            &[],
-        )
-        .is_err(),
-        "mutation guard: zero adapter bytes must restore the refusal"
-    );
-}
-
-#[test]
 fn optimized_fingerprint_mismatch_fails_closed() {
     use gen_core::{
         MemoryCalibrationIdentity, MemoryParameterRanges, MemoryStrategyCapability,
@@ -12773,7 +12304,7 @@ fn optimized_fingerprint_mismatch_fails_closed() {
     let plan = request_plan();
     let inputs = request_inputs(1024, 1024, 1);
     let mut contract = MemoryProviderContract::compatibility_default(
-        "mage_flow",
+        "fit_fixture",
         MemoryBackendRealization::MlxMetal {
             bounded_wired_residency: true,
             lazy_or_mmap_materialization: true,
@@ -12782,7 +12313,7 @@ fn optimized_fingerprint_mismatch_fails_closed() {
         },
     );
     contract.calibration = Some(MemoryCalibrationIdentity::new(
-        mage_request_fingerprint(),
+        "fit-fixture-q4-v1",
         gen_core::LoadShape::EagerMaterialization,
     ));
     contract.asset_facts.base_bytes = gib_to_bytes(6.0);
@@ -12824,8 +12355,8 @@ fn optimized_fingerprint_mismatch_fails_closed() {
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            model_family: "mage_flow".to_owned(),
-            resolved_route: "mage_flow".to_owned(),
+            model_family: "fit_fixture".to_owned(),
+            resolved_route: "fit_fixture".to_owned(),
             backend: gen_core::MemoryBackend::Mlx,
             tier: plan.tier,
             load_shape: gen_core::LoadShape::EagerMaterialization,
@@ -13125,107 +12656,6 @@ fn predicted_peak_is_weights_plus_headroom_and_zero_is_no_signal() {
     assert_eq!(predicted_peak_gb(0), None);
 }
 
-/// NOTE (sc-16014): these numbers remain the bf16/MXFP4 calibration; they no longer describe q4/q8,
-/// whose re-hosted affine packs eliminated the tier-integrity exception. The ledger and this file
-/// share the `sc-16014-resolution: rehosted-q4-q8` marker so a future artifact change must reconcile
-/// both sources rather than reviving or erasing the exception silently.
-#[test]
-fn lens_dense_calibration_covers_the_measured_full_peak_without_blanket_inflation() {
-    let gib = BYTES_PER_GIB;
-    let lens_materialized = (45.67 * gib).ceil() as u64;
-    let lens_peak = predicted_peak_gb_with_headroom(lens_materialized, LENS_DENSE_HEADROOM_GB)
-        .expect("lens signal");
-    assert!(lens_peak >= 75.55, "{lens_peak} GiB must cover 75.55 GiB");
-
-    // A bf16-on-disk family keeps the generic calculation; no global dense-tier multiplier.
-    let ordinary_bf16 = (28.43 * gib).ceil() as u64;
-    let ordinary_peak = predicted_peak_gb(ordinary_bf16).expect("ordinary signal");
-    assert!((ordinary_peak - 46.43).abs() < 1e-6);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn lens_provider_footprint_distinguishes_storage_format() {
-    let root_guard = tempfile::Builder::new()
-        .prefix("mlx_fit_gate_sc11924_")
-        .tempdir()
-        .expect("temp dir");
-    let root = root_guard.path();
-    let (te_disk, dit_disk, vae_disk) = (256_u64, 272_u64, 288_u64);
-    let disk_total = te_disk + dit_disk + vae_disk;
-    for (component, bytes) in [
-        ("text_encoder", te_disk),
-        ("transformer", dit_disk),
-        ("vae", vae_disk),
-    ] {
-        crate::test_fixture_disk::set_sparse_valid_safetensor(
-            &root.join(component).join("model.safetensors"),
-            bytes,
-        )
-        .expect("valid structural fixture for the provider's strict header reader");
-    }
-    std::fs::write(
-        root.join("text_encoder").join("config.json"),
-        r#"{"dtype":"bfloat16","quantization_config":{"quant_method":"mxfp4"}}"#,
-    )
-    .expect("mxfp4 marker");
-    let spec = LoadSpec::new(WeightsSource::Dir(root.to_path_buf()));
-    let (dense_total, dense_te, dense_headroom) = spec_component_bytes("lens_turbo", &spec);
-    let expected_te = (30.07 * BYTES_PER_GIB).ceil() as u64;
-    assert_eq!(dense_te, expected_te);
-    assert_eq!(dense_total, expected_te + dit_disk + vae_disk);
-    assert_eq!(dense_headroom, HeadroomAllowance::LENS_DENSE);
-    // sc-16195: a bare measured transient carries NO OS reserve, so the request estimator
-    // must leave the whole allowance in its area term for this path.
-    assert_eq!(dense_headroom.os_reserve_gb, 0.0);
-    for engine_id in ["lens", "lens_turbo"] {
-        let plan = MlxRequestPlan::for_spec_and_manifest(engine_id, engine_id, &spec, None, None);
-        assert_eq!(plan.fixed_reserve_bytes, gib_to_bytes(2.0));
-        assert_eq!(
-            plan.activation_headroom_bytes,
-            gib_to_bytes(2.0 + LENS_DENSE_HEADROOM_GB),
-            "{engine_id} dense/MXFP4 must preserve the format-aware 29.88 GiB activation fallback"
-        );
-    }
-
-    std::fs::write(
-        root.join("text_encoder").join("config.json"),
-        r#"{"dtype":"bfloat16"}"#,
-    )
-    .expect("bf16 marker");
-    let (bf16_total, bf16_te, bf16_headroom) = spec_component_bytes("lens_turbo", &spec);
-    assert_eq!(
-        (bf16_total, bf16_te),
-        (disk_total, te_disk),
-        "bf16-on-disk has no MXFP4 materialization delta"
-    );
-    assert_eq!(
-        bf16_headroom,
-        HeadroomAllowance::LENS_DENSE,
-        "the Lens activation transient remains architecture-specific even without a weight upcast"
-    );
-
-    std::fs::write(
-            root.join("text_encoder").join("config.json"),
-            // The re-hosted q4/q8 configs retain this inherited MXFP4 marker. The load-bearing MLX
-            // affine marker must win, or the fit gate would inflate the already-packed experts.
-            r#"{"quantization":{"bits":8,"group_size":64},"quantization_config":{"quant_method":"mxfp4"}}"#,
-        )
-        .expect("packed marker with inherited MXFP4 metadata");
-    let (packed_total, packed_te, packed_headroom) = spec_component_bytes("lens_turbo", &spec);
-    assert_eq!((packed_total, packed_te), (disk_total, te_disk));
-    assert_eq!(packed_headroom, HeadroomAllowance::GENERIC);
-    for engine_id in ["lens", "lens_turbo"] {
-        let plan = MlxRequestPlan::for_spec_and_manifest(engine_id, engine_id, &spec, None, None);
-        assert_eq!(plan.fixed_reserve_bytes, gib_to_bytes(2.0));
-        assert_eq!(
-            plan.activation_headroom_bytes,
-            gib_to_bytes(16.0),
-            "{engine_id} packed q4/q8 must preserve the generic 14 GiB activation fallback"
-        );
-    }
-}
-
 #[test]
 fn fit_decision_rejects_only_a_genuine_overflow() {
     let budget = MlxMemoryBudget { total_gb: 16.0 };
@@ -13294,12 +12724,6 @@ fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
 
     let additive = LoadSpec::new(WeightsSource::Dir(weights.clone()))
         .with_adapters(vec![adapter_spec.clone()]);
-    assert_eq!(spec_component_bytes("mage_flow", &additive).0, 1_250);
-    assert_eq!(
-        MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &additive, None, None)
-            .folded_adapter_bytes,
-        250
-    );
     // SW-7101: MiniMax-H3-Image installs every LoRA as a forward-time residual, dense or packed,
     // so the gate prices the adapter bytes on top of the weights.
     for spec in [
@@ -13352,8 +12776,7 @@ fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
     );
 }
 
-/// sc-15154: a split-layout tier's staged co-requisites are part of what it loads. Mage-Flow's
-/// per-tier dir holds the DiT alone; the shared text encoder and VAE must still count.
+/// A split-layout tier still counts staged components outside the transformer directory.
 #[test]
 fn a_staged_component_counts_toward_the_tier_that_loads_it() {
     let root_guard = tempfile::Builder::new()
@@ -13374,36 +12797,17 @@ fn a_staged_component_counts_toward_the_tier_that_loads_it() {
 
     // Nothing staged — the pre-fix reading, and still correct for a flat snapshot.
     let bare = LoadSpec::new(WeightsSource::Dir(tier.clone()));
-    assert_eq!(spec_component_bytes("mage_flow_edit", &bare).0, 3_000);
+    assert_eq!(spec_component_bytes("split_layout_fixture", &bare).0, 3_000);
 
     // Staged the way the load stages them.
     let staged = bare
         .clone()
         .with_component("text_encoder", WeightsSource::Dir(te))
         .with_component("vae", WeightsSource::Dir(vae));
-    let (total, te_bytes, _) = spec_component_bytes("mage_flow_edit", &staged);
-    println!(
-        "mage_flow_edit split tier: bare total={} staged total={total} staged te={te_bytes}",
-        spec_component_bytes("mage_flow_edit", &bare).0
-    );
     assert_eq!(
-        total, 9_000,
+        spec_component_bytes("split_layout_fixture", &staged).0,
+        9_000,
         "the staged text encoder and VAE are weights this tier holds resident"
-    );
-    // The TEXT-ENCODER split comes from the provider's own footprint at the pinned inference
-    // revision, which must likewise resolve the STAGED dir and not `<tier>/text_encoder`. A zero
-    // here would collapse the sequential schedule's `max(te, rest)` onto the whole model and
-    // silently over-reject, so it is asserted rather than inferred from the total.
-    //
-    // macOS ONLY: the MLX media registry — and therefore any provider footprint — is compiled in
-    // on macOS alone. Off-macOS `footprint()` yields `None`, `resolve_text_encoder_bytes` falls
-    // back to the diffusers `text_encoder*` subdir scan of the TIER dir, and that is correctly 0
-    // here. The `total` assertions above are registry-free and hold on every platform, which is
-    // what this test is really for.
-    #[cfg(target_os = "macos")]
-    assert_eq!(
-        te_bytes, 5_000,
-        "mage_flow's per-component footprint must follow the staged component dirs"
     );
 
     // A component that resolves INSIDE the weights dir was already counted by the scan, so it
@@ -13411,7 +12815,7 @@ fn a_staged_component_counts_toward_the_tier_that_loads_it() {
     let flat_te = write(tier.join("text_encoder"), 700);
     let flat = LoadSpec::new(WeightsSource::Dir(tier))
         .with_component("text_encoder", WeightsSource::Dir(flat_te));
-    assert_eq!(spec_component_bytes("mage_flow_edit", &flat).0, 3_700);
+    assert_eq!(spec_component_bytes("split_layout_fixture", &flat).0, 3_700);
 }
 
 #[test]
@@ -13741,7 +13145,7 @@ fn imported_file_plan_prices_consumed_companions_not_replaced_snapshot_transform
 #[cfg(target_os = "macos")]
 #[test]
 fn engine_supports_sequential_is_derived_from_the_registered_capability() {
-    // The earlier-wired families (sdxl / z-image / qwen / lens / krea) still resolve true — proving
+    // The earlier-wired families (sdxl / z-image / qwen / krea) still resolve true — proving
     // dropping the hardcoded allowlist introduced no regression for the already-covered engines.
     for id in [
         "sdxl",
@@ -13754,8 +13158,6 @@ fn engine_supports_sequential_is_derived_from_the_registered_capability() {
         "qwen_image_2_1_turbo",
         "qwen_image_edit",
         "qwen_image_control",
-        "lens",
-        "lens_turbo",
         "krea_2_turbo",
         "krea_2_raw",
         "krea_2_edit",
@@ -13793,9 +13195,6 @@ fn engine_supports_sequential_is_derived_from_the_registered_capability() {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
     ] {
         assert!(
             engine_supports_sequential(id),
@@ -13912,8 +13311,6 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
         "qwen_image_2_1_turbo",
         "qwen_image_edit",
         "qwen_image_control",
-        "lens",
-        "lens_turbo",
         "krea_2_turbo",
         "krea_2_raw",
         "krea_2_edit",
@@ -13942,9 +13339,6 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
         "bernini",
         "bernini_renderer",
         "krea_realtime_14b",
@@ -14016,22 +13410,8 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
 /// loop does not demand a sweep entry for them. This is an OBSERVED fact about each descriptor,
 /// read back from `engine_engages_staged_residency` in that same test, not a claim that the
 /// provider never stages anything.
-///
-/// That distinction matters for the six Mage engines. The generated matrix publishes their
-/// `staged_residency` cells as `Anchored`, which folds to "implemented" in the census — but it
-/// does so from MEASURED ANCHORS, not from this predicate, which the generator consults only to
-/// choose between `Implemented` and `Missing`. So the matrix and this list do not disagree:
-/// Mage has evidence and no advertised capability bit. Whether `mlx-gen-mage`'s descriptor
-/// SHOULD advertise one is a real question about that provider and predates sc-24108, which
-/// added this loop; it is recorded here rather than silently absorbed.
 #[cfg(target_os = "macos")]
 const ENGINES_WITHOUT_A_STAGED_RESIDENCY_CAPABILITY: &[&str] = &[
-    "mage_flow",
-    "mage_flow_base",
-    "mage_flow_edit",
-    "mage_flow_edit_base",
-    "mage_flow_edit_turbo",
-    "mage_flow_turbo",
     // sc-26325: native MOSS accepts resident/eager loading and advertises neither staging bit.
     "moss_image_base",
     "moss_image_sft",

@@ -2150,21 +2150,6 @@ pub(super) fn stamp_legacy_import_source_shape(
     let Some(path) = legacy_import_installed_path(object, data_dir) else {
         return;
     };
-    if object.get("family").and_then(Value::as_str) == Some("mage-flow")
-        && path.is_dir()
-        && sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path)
-    {
-        object.insert(
-            "importSourceShape".to_owned(),
-            Value::String("transformer_directory".to_owned()),
-        );
-        if let Some(file) = confined_primary_weight_file(&path) {
-            if let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&file) {
-                object.insert("importQuantFormat".into(), json!(verdict.quant.as_str()));
-            }
-        }
-        return;
-    }
     let Some(weight_file) = confined_primary_weight_file(&path) else {
         return;
     };
@@ -2434,6 +2419,12 @@ pub(super) async fn load_model_catalog_inputs(
     let user_model_ids = manifest.user_model_ids.clone();
     let builtin_model_ids = manifest.builtin_model_ids.clone();
     let mut models = manifest.merged.clone();
+    models.retain(|model| {
+        model
+            .as_object()
+            .and_then(sceneworks_core::model_family::retired_image_entry)
+            .is_none()
+    });
     // A trained checkpoint (Iris full export) takes its generation surface from its engine's entry
     // on every read, never from a registration-time snapshot.
     for model in &mut models {
@@ -2521,6 +2512,12 @@ pub(super) async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec
     let mut external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))
     })?;
+    external.retain(|model| {
+        model
+            .as_object()
+            .and_then(sceneworks_core::model_family::retired_image_entry)
+            .is_none()
+    });
     for model in &mut external {
         if let Some(object) = model.as_object_mut() {
             apply_imported_provider_surface(object);
@@ -2560,6 +2557,10 @@ pub(crate) async fn resolve_model_manifest_entry(
     state: &AppState,
     model_id: &str,
 ) -> Result<Value, ApiError> {
+    use sceneworks_core::request_validation::{
+        reject_retired_image_entry, reject_retired_image_identity,
+    };
+    reject_retired_image_identity("model", model_id).map_err(crate::jobs::retired_model_error)?;
     // External ComfyUI base models (epic 10451 Phase 2, sc-10667/10668) are synthesized in the
     // catalog, not declared in a jsonc manifest, so the jsonc lookup below would return `{}` and
     // the worker would never receive their `components[]` (the DiT/TE/VAE paths). Forward the
@@ -2579,6 +2580,9 @@ pub(crate) async fn resolve_model_manifest_entry(
         .map_err(|err| ApiError::internal(format!("external base scan task failed: {err}")))?;
         // Absent (root unconfigured, file vanished) → `{}`, the same fall-back the worker already
         // handles for an unknown model id.
+        if let Some(entry) = row.as_ref().and_then(Value::as_object) {
+            reject_retired_image_entry(entry).map_err(crate::jobs::retired_model_error)?;
+        }
         return Ok(row.unwrap_or_else(|| json!({})));
     }
     let manifest_dir = state.settings.config_dir.join("manifests");
@@ -2624,6 +2628,9 @@ pub(crate) async fn resolve_model_manifest_entry(
             entry = embedded;
             catalog_scope = Some("builtin");
         }
+    }
+    if let Some(object) = entry.as_object() {
+        reject_retired_image_entry(object).map_err(crate::jobs::retired_model_error)?;
     }
     sceneworks_core::registry::project_option_route_facts(&mut entry);
     inherit_provider_decoder_downloads(&mut entry, &builtin);

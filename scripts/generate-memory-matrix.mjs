@@ -131,12 +131,6 @@ const GENERATION_CAPABILITIES = new Set([
 export const MODEL_STORIES = {
   moss_image_base: { mlx: 26323, candle: 26324 },
   moss_image_sft: { mlx: 26323, candle: 26324 },
-  mage_flow_edit_base: { mlx: 15450, candle: 15841 },
-  mage_flow_edit: { mlx: 15451, candle: 15844 },
-  mage_flow_edit_turbo: { mlx: 15452, candle: 15847 },
-  mage_flow_base: { mlx: 15453, candle: 15850 },
-  mage_flow: { mlx: 15454, candle: 15853 },
-  mage_flow_turbo: { mlx: 15455, candle: 15856 },
   z_image_turbo: { mlx: 15456, candle: 15859 },
   z_image: { mlx: 15457, candle: 16170 },
   z_image_edit: { mlx: 15458, candle: 15862 },
@@ -165,8 +159,6 @@ export const MODEL_STORIES = {
   minimax_h3_image: { mlx: 7100, candle: 7100 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
-  lens: { mlx: 15462, candle: 17489 },
-  lens_turbo: { mlx: 15463, candle: 15874 },
   sensenova_u1_8b: { mlx: 15464, candle: 15877 },
   sensenova_u1_8b_infographic_v2: { mlx: 15465, candle: 15880 },
   sensenova_u1_8b_infographic_v3: { mlx: 15466, candle: 15883 },
@@ -177,9 +169,6 @@ export const MODEL_STORIES = {
   flux_dev: { mlx: 15471, candle: 15898 },
   ideogram_4: { mlx: 15472, candle: 15901 },
   ideogram_4_turbo: { mlx: 15473, candle: 15904 },
-  boogu_image: { mlx: 15474, candle: 15907 },
-  boogu_image_turbo: { mlx: 15475, candle: 15910 },
-  boogu_image_edit: { mlx: 15476, candle: 17481 },
   krea_2_turbo: { mlx: 15477, candle: 15913 },
   krea_2_raw: { mlx: 15478, candle: 15916 },
   flux2_klein_9b: { mlx: 15479, candle: 15919 },
@@ -213,14 +202,11 @@ export const MODEL_STORIES = {
 // Candle family twin is filed.
 export const FAMILY_STORIES = {
   26323: { mlx: 26323, candle: 26324 },
-  15509: { mlx: 15509, candle: 15813 },
   15510: { mlx: 15510, candle: 15815 },
   15511: { mlx: 15511, candle: 15817 },
-  15512: { mlx: 15512, candle: 15819 },
   15513: { mlx: 15513, candle: 15821 },
   15514: { mlx: 15514, candle: 15823 },
   15515: { mlx: 15515, candle: 15825 },
-  15516: { mlx: 15516, candle: 15827 },
   15517: { mlx: 15517, candle: 15829 },
   15518: { mlx: 15518, candle: 15831 },
   15519: { mlx: 15519, candle: 15833 },
@@ -380,14 +366,11 @@ export function familyGroup(modelId) {
   if (modelId === "krea_realtime_14b") return "krea-realtime";
   if (modelId === "svd") return "svd";
   if (modelId === "bernini") return 15528;
-  if (modelId.startsWith("mage_flow")) return 15509;
   if (modelId.startsWith("z_image")) return 15510;
   if (modelId.startsWith("qwen_image")) return 15511;
-  if (modelId.startsWith("lens")) return 15512;
   if (modelId.startsWith("sensenova")) return 15513;
   if (modelId === "flux_schnell" || modelId === "flux_dev") return 15514;
   if (modelId.startsWith("ideogram")) return 15515;
-  if (modelId.startsWith("boogu")) return 15516;
   if (modelId.startsWith("krea_2")) return 15517;
   if (modelId.startsWith("flux2_klein")) return 15518;
   if (modelId === "flux2_dev") return 15519;

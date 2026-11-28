@@ -424,7 +424,6 @@ mod tests {
         let candle_kernels = training_kernels_from_facts(&candle, &targets.targets);
         for kernels in [&mlx_kernels, &candle_kernels] {
             for kernel in [
-                "mage_flow_lora",
                 "ltx_mlx_lora",
                 "qwen_image_2_1_lora",
                 "qwen_image_2_1_edit_lora",
@@ -440,7 +439,7 @@ mod tests {
         let missing_kernels = training_kernels_from_facts(&missing, &targets.targets);
         assert!(!missing_kernels.contains("qwen_image_2_1_lora"));
         assert!(!missing_kernels.contains("qwen_image_2_1_edit_lora"));
-        assert!(missing_kernels.contains("mage_flow_lora"));
+        assert!(missing_kernels.contains("ltx_mlx_lora"));
 
         let mut incapable = candle.clone();
         let qwen = incapable.trainers.get_mut("qwen_image_2_1").unwrap();

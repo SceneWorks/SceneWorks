@@ -552,13 +552,6 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
     ),
     (
         "src/image_jobs/checkpoint_plan.rs",
-        "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS",
-        "Catalog data, not family truth: the adapter's `component_topology` says WHICH components \
-         are required; this says where THIS app installed them. Mage-Flow's fine-tunes live at \
-         `<data>/models/finetunes/<loraId>`, outside `CheckpointPlanStore::installs_root()`.",
-    ),
-    (
-        "src/image_jobs/checkpoint_plan.rs",
         "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS",
         "Catalog data, not family truth: the adapter declares the `base-snapshot` dependency and \
          which families satisfy it; this is only where the app installed that tier.",
@@ -576,7 +569,7 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          but no resident base model id or tier either, and no typed `ModelSpec` declares itself the \
          resident base for a family's imports, so there is no typed source to derive this pairing \
          from: it is product data that names which shipped install an import borrows. Pinned in BOTH directions against \
-         CHECKPOINT_PLAN_RESIDENT_BASE_TIERS + CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS, and \
+         CHECKPOINT_PLAN_RESIDENT_BASE_TIERS, and \
          against each family resolver's own repo/tier constants, by \
          `the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables`, so a family \
          added to the plan tables cannot skip this one and this one cannot drift off them.",
@@ -935,7 +928,7 @@ fn no_family_allow_list_exists_outside_the_recorded_exception_inventory() {
 }
 
 /// The plan-driven route is adapter-mediated: `checkpoint_plan.rs` names a family only inside its
-/// three recorded catalog-data tables, never in a branch.
+/// two recorded catalog-data tables, never in a branch.
 ///
 /// This is the "no bespoke imported route" half, and it is the half the allow-list sweep cannot see:
 /// `if family == "flux2" { .. }` declares no constant. The route resolves its adapter, its provider,
@@ -944,7 +937,7 @@ fn no_family_allow_list_exists_outside_the_recorded_exception_inventory() {
 /// construction a bespoke route.
 ///
 /// Failing mutation: add `if resolved.family() == "flux2" { .. }` anywhere in `checkpoint_plan.rs`
-/// outside the three tables.
+/// outside the two tables.
 #[test]
 fn the_checkpoint_plan_route_names_a_family_only_inside_its_recorded_tables() {
     let file = "src/image_jobs/checkpoint_plan.rs";
@@ -964,13 +957,13 @@ fn the_checkpoint_plan_route_names_a_family_only_inside_its_recorded_tables() {
         })
         .map(|(_, _, range)| range)
         .collect();
-    // Fixture check: all three of this file's recorded tables were located. Without it a scanner
+    // Fixture check: both of this file's recorded tables were located. Without it a scanner
     // that found zero tables would leave every literal "outside a table", and one that swallowed
     // the whole file would leave every literal inside one — opposite failures, both silent.
     assert_eq!(
         tables.len(),
-        3,
-        "expected the plan route's three recorded family tables, located {}",
+        2,
+        "expected the plan route's two recorded family tables, located {}",
         tables.len()
     );
 

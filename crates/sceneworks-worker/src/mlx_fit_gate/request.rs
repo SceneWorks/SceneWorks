@@ -771,19 +771,6 @@ pub(super) fn select_request_with_budget_using_bundle(
     } else {
         provider_contract
     };
-    if plan.engine_id.starts_with("mage_flow")
-        && inputs.adapter_count > 0
-        && !contract.resident_components().iter().any(|component| {
-            component.kind == gen_core::MemoryComponentKind::AdapterStack
-                && component.resident_bytes > 0
-        })
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{} request includes {} adapter(s), but the loaded provider did not declare \
-             load-exact adapter residency; refusing an unbounded MLX request",
-            plan.engine_id, inputs.adapter_count
-        )));
-    }
     let calibration_fingerprint = contract
         .calibration
         .as_ref()
@@ -1021,32 +1008,6 @@ pub(super) fn select_request_with_budget_using_bundle(
         count = inputs.count.max(1),
         "selected MLX memory-admission path"
     );
-    if plan.engine_id.starts_with("mage_flow") {
-        // The expected identity is the (route, tier) cell of THIS plan: a loaded q8 contract must
-        // not admit a q4 request, and a route or tier the engine never ships names no cell at all.
-        let expected_fingerprint = mage_calibration_fingerprint(plan.engine_id, plan.tier.quant)
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "{} {:?} names no Mage-Flow calibration cell; refusing request admission \
-                     against an unpaired estimator",
-                    plan.engine_id, plan.tier.quant
-                ))
-            })?;
-        if !matches!(
-            contract.calibration.as_ref(),
-            Some(identity)
-                if identity.abi == gen_core::MEMORY_CALIBRATION_ABI
-                    && identity.fingerprint == expected_fingerprint
-        ) {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
-                 request admission against an unpaired estimator",
-                plan.engine_id,
-                gen_core::MEMORY_CALIBRATION_ABI,
-                expected_fingerprint
-            )));
-        }
-    }
     // The caller estimates the base-model pipeline. Let the provider's canonical contract seam add
     // any separately declared auxiliary networks before either fit selection or warm-cache credit.
     // Exact evidence already describes the whole request peak and therefore remains authoritative.
@@ -1099,9 +1060,6 @@ pub(super) fn select_request_with_budget_using_bundle(
         .committed_bytes
         .saturating_sub(attributable_resident_bytes);
     let predicted_peak_bytes = modeled_peak_bytes;
-    // `request_total_peak_bytes` is the generic weights+headroom total on every route except
-    // `mage_flow`, whose resident peak is the provider's own `generation_peak_gb` scalar.
-    let resident_peak_is_provider_scalar = plan.engine_id.starts_with("mage_flow");
     let (resident_selection, resident) = resident_evidence(
         contract,
         plan.tier,
@@ -1256,7 +1214,7 @@ pub(super) fn select_request_with_budget_using_bundle(
         // not contain. `None` takes the policy's undeclared-floor arm, whose doc says the fix for
         // a lane that wants better is to declare a real split, not to widen a number.
         candidate_activation_bytes.push(None);
-        candidate_charges_generic_headroom.push(!resident_peak_is_provider_scalar);
+        candidate_charges_generic_headroom.push(true);
         selections.extend(additional_evidence.iter().map(|item| MemorySelection {
             strategy: item.key.strategy,
             parameters: item.key.parameters,
@@ -1767,32 +1725,23 @@ pub(super) fn select_request_with_budget_using_bundle(
 
 #[cfg(target_os = "macos")]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
+pub(crate) fn live_request_budget(_engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
     // remain committed. This makes A→B→A independent of B's freed scratch without reloading A.
     mlx_rs::memory::clear_cache();
     let committed_bytes = mlx_rs::memory::get_active_memory() as u64;
     let reclaimable_bytes = mlx_rs::memory::get_cache_memory() as u64;
-    let (total_bytes, reserved_headroom_bytes) = if engine_id.starts_with("mage_flow") {
-        let safe_gb = runtime_macos::memory_helpers::mage::memory::production_safe_budget_gb()
-            .map_err(|error| {
-                crate::provider_error(error, |error| {
-                    WorkerError::InvalidPayload(error.to_string())
-                })
-            })?;
-        (decimal_gb_to_bytes(safe_gb), 0)
-    } else {
-        let total_gib = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "MLX unified-memory budget is unavailable; refusing an unbounded request"
-                        .to_owned(),
-                )
-            })?
-            .total_gb;
-        let reserve = crate::fit_gate::legacy_unified_reserve(total_gib);
-        (gib_to_bytes(total_gib), gib_to_bytes(reserve.gb))
-    };
+    let total_gib = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "MLX unified-memory budget is unavailable; refusing an unbounded request"
+                    .to_owned(),
+            )
+        })?
+        .total_gb;
+    let total_bytes = gib_to_bytes(total_gib);
+    let reserved_headroom_bytes =
+        gib_to_bytes(crate::fit_gate::legacy_unified_reserve(total_gib).gb);
     Ok(MemoryBudget {
         total_bytes,
         committed_bytes,
@@ -1803,18 +1752,7 @@ pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget>
 
 #[cfg(target_os = "macos")]
 pub(super) fn request_total_peak_bytes(plan: &MlxRequestPlan, geometry: MemoryGeometry) -> u64 {
-    if plan.engine_id.starts_with("mage_flow") {
-        decimal_gb_to_bytes(
-            runtime_macos::memory_helpers::mage::memory::generation_peak_gb(
-                plan.tier.quant,
-                geometry.width,
-                geometry.height,
-                geometry.batch,
-            ),
-        )
-    } else {
-        plan.generic_total_peak_bytes(geometry)
-    }
+    plan.generic_total_peak_bytes(geometry)
 }
 
 /// Preserve the constructor's weights floor for eager/unadopted loads. Sequential specs have

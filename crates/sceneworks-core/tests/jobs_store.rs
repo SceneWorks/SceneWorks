@@ -4684,50 +4684,6 @@ fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
     assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
 }
 
-/// sc-15328 (epic 14034 F6) — a Mage-Flow render carrying a trained `mage-flow` LoRA must be
-/// CLAIMED, end to end through the real store, by the mlx worker.
-///
-/// This is the defect's own reproduction, at the layer the user feels it. Before the fix,
-/// `mage_flow_mlx_eligible` refused any payload with a non-empty `loras`, and every Mage
-/// `ModelCaps` row is `candle_lora: false` — so BOTH claims below returned `None` and the job
-/// stayed `queued` / "Waiting for an available worker." forever, with no error and an idle worker.
-/// The `None` from the generic torch worker is asserted first precisely so that a green here means
-/// "mlx claimed it", never "everyone claims everything".
-#[test]
-fn mage_flow_image_job_with_a_lora_is_claimed_by_the_mlx_worker() {
-    let store = store("mlx-routing-mage-lora");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
-    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
-
-    let job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "mage_flow_base",
-                "prompt": "a photograph of a golden retriever sitting on grass",
-                "loras": [{ "id": "lora_tqrstmark", "weight": 0.8 }]
-            }),
-            "auto",
-        ))
-        .expect("job creates");
-
-    assert!(
-        store
-            .claim_portable("worker-torch")
-            .expect("torch claim ok")
-            .is_none(),
-        "Mage-Flow uses native backends; the generic torch descriptor must not claim it"
-    );
-    let claimed = store
-        .claim_portable("worker-mlx")
-        .expect("mlx claim ok")
-        .expect(
-            "the mlx worker must claim a Mage render carrying a LoRA — otherwise NO backend does \
-             and the job queues forever (sc-15328)",
-        );
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mlx"));
-}
-
 #[test]
 fn qwen_edit_image_job_defers_to_mlx_worker() {
     let store = store("mlx-routing-qwen-edit");
@@ -6487,11 +6443,6 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     // Lens / Lens-Turbo (epic 3164 / sc-5105) are MLX-routed now — pure T2I, so both are supported
     // and in the picker with no gap reason. The edit-mode gating (Lens has no edit path) is asserted
     // in `model_mac_support_feature_flags_mirror_routing_without_over_gating`.
-    for id in ["lens", "lens_turbo"] {
-        let lens = model_mac_support(id, "image", None);
-        assert!(lens.supported, "{id} should be MLX-supported");
-        assert!(lens.reason.is_none(), "{id} should carry no gap reason");
-    }
     // PuLID-FLUX (sc-3344) is MLX-routed now — it stays in the picker as a supported face-ID
     // backbone (character_image reference), no longer a torch-only port-epic gap.
     let pulid = model_mac_support("pulid_flux_dev", "image", None);
@@ -6581,12 +6532,6 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // Lens / Lens-Turbo (epic 3164 / sc-5105) are pure T2I — no edit path on any platform, so
     // `edit_image` is gated off (mirrors Chroma / FLUX.1); a lens edit job never silently degrades to
     // T2I against a dropped source image.
-    for id in ["lens", "lens_turbo"] {
-        assert!(
-            !model_mac_support(id, "image", None).features.edit,
-            "{id} has no edit path → edit must be gated off"
-        );
-    }
     // Bernini still-image companion (epic 4699 / sc-5424): the image-typed `bernini_image` id
     // serves t2i + i2i (`edit_image`) on MLX → supported with edit enabled. (Like lens/chroma it
     // gates only `edit_image`, so the "available in some MLX config" `reference`/`pose` probes come
@@ -7603,7 +7548,6 @@ fn candle_worker_claims_candle_native_training_kernels() {
     let cases: &[(&str, &str, &str)] = &[
         ("sdxl_lora", "sdxl", "lora"),
         ("z_image_lora", "z_image_turbo", "lokr"),
-        ("lens_lora", "lens", "lora"),
         ("krea_lora", "krea_2_raw", "lokr"),
         ("ltx_mlx_lora", "ltx_2_3", "lora"),
         ("kolors_lora", "kolors", "lokr"),
@@ -7614,9 +7558,6 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("wan_moe_lora", "wan_2_2_t2v_14b", "lokr"),
         ("wan_moe_lora", "wan_2_2_i2v_14b", "lora"),
         ("anima_lora", "anima_base", "lokr"),
-        ("mage_flow_lora", "mage_flow_base", "lora"),
-        ("mage_flow_lora", "mage_flow_base", "lokr"),
-        ("mage_flow_lora", "mage_flow_base", "full"),
         // sc-24160: the Qwen Image 2.1 Candle trainer, both adapter kinds.
         ("qwen_image_2_1_lora", "qwen_image_2_1", "lora"),
         ("qwen_image_2_1_lora", "qwen_image_2_1", "lokr"),
@@ -7653,8 +7594,6 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
         ("wan_moe_lora", "wan_2_2_i2v_14b", "lokr"),
         ("wan_moe_lora", "wan_2_2_unknown", "lora"),
         ("anima_lora", "anima_turbo", "lora"),
-        ("mage_flow_lora", "mage_flow_edit_base", "lora"),
-        ("mage_flow_lora", "mage_flow_base", "mystery"),
         // sc-24160: the 2.1 trainer never takes the distinct 2512 bases nor a non-adapter run.
         ("qwen_image_2_1_lora", "qwen_image", "lora"),
         ("qwen_image_2_1_lora", "qwen_image_edit", "lokr"),
@@ -7681,68 +7620,6 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
                 .is_none(),
             "candle must refuse unsupported {kernel}/{base_model}/{network_type}"
         );
-    }
-}
-
-/// sc-14056 — THE CUTOVER PROOF. Before this change `mage_flow_lora` sat in
-/// `MLX_ONLY_TRAINING_KERNELS` (so every generic/candle worker refused it) but in NO routed set (so
-/// the mlx worker refused it too). The net effect was that a Mage training job — LoRA *or* full base
-/// fine-tune — was claimable by nobody and queued forever, which also stranded the already-merged
-/// sc-14055 LoRA trainer.
-///
-/// This drives the real store: create the job, then claim it, for BOTH network types. It fails if the
-/// kernel is dropped from `MLX_ROUTED_TRAINING_KERNELS` (mlx stops claiming) and it fails if the
-/// kernel is dropped from `MLX_ONLY_TRAINING_KERNELS` (a generic worker starts claiming a job it has
-/// no trainer for and would fail terminally). Both halves are asserted per network type.
-///
-/// sc-15277 — READ THIS BEFORE TRUSTING IT. This test is correct and it PASSED while Mage training
-/// was completely broken from the app, because **claiming is not executing**: the worker claimed the
-/// job and `engine_trainer_id` then had no `mage_flow_lora` arm, so every run died ~2s later with
-/// "No native trainer for kernel 'mage_flow_lora'". The claim→execute hop is guarded in the worker
-/// crate by `every_mlx_routed_training_kernel_resolves_to_a_trainer_for_every_offered_network_type`
-/// (crates/sceneworks-worker/src/training_jobs.rs). The `mage_flow_edit_base` rows are gone with the
-/// target itself — routing is per-KERNEL, so they never added coverage here, and the edit checkpoint
-/// has no trainer at all (sc-15320).
-#[test]
-fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
-    for (base_model, network_type) in [("mage_flow_base", "lora"), ("mage_flow_base", "full")] {
-        let store = store(&format!("mage-training-{base_model}-{network_type}"));
-
-        // A generic (non-Rust) training descriptor must still defer: there is no torch Mage trainer,
-        // so claiming would fail the job terminally instead of leaving it for the mlx worker.
-        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-
-        let job = store
-            .create_job(mlx_training_job(
-                "mage_flow_lora",
-                base_model,
-                network_type,
-                false,
-                "auto",
-            ))
-            .expect("job creates");
-
-        assert!(
-            store
-                .claim_portable("worker-torch")
-                .expect("torch claim ok")
-                .is_none(),
-            "a generic worker must defer mage_flow_lora ({base_model}/{network_type}) — it has no \
-             Mage trainer"
-        );
-        // …and the mlx worker DOES claim it. This is the half that was broken: without
-        // `mage_flow_lora` in `MLX_ROUTED_TRAINING_KERNELS` the job queues forever.
-        register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
-        let claimed = store
-            .claim_portable("worker-mlx")
-            .expect("mlx claim ok")
-            .unwrap_or_else(|| {
-                panic!(
-                    "the mlx worker must claim mage_flow_lora ({base_model}/{network_type}) — a \
-                     kernel that is MLX-only but not MLX-routed is claimable by nobody"
-                )
-            });
-        assert_eq!(claimed.id, job.id, "{base_model}/{network_type}");
     }
 }
 

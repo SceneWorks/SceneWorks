@@ -157,7 +157,6 @@ pub fn parse_flux2_convert_base_claim_id(source_id: &str) -> Option<(&str, &str,
 pub fn trainer_required_component_ids(base_model: &str, backend: &str) -> &'static [&'static str] {
     match (base_model, backend) {
         ("sdxl", "candle") => &["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"],
-        ("mage_flow_base", "mlx" | "candle") => &["text_encoder", "vae"],
         ("iris_3b", "mlx" | "candle") => &["text_encoder"],
         ("moss_image_base", "mlx" | "candle") => {
             &[gen_core::moss_image::MOSS_SHARED_SNAPSHOT_COMPONENT]

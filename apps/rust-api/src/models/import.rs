@@ -25,19 +25,6 @@ pub(super) fn import_source_supported(source: &FsPath) -> Result<Option<String>,
         sceneworks_core::base_weights::detect_import_source_weights(source, &weight_file)
             .map_err(model_family_inspection_error)?;
     import_detection_supported(&detection).map_err(ApiError::bad_request)?;
-    if matches!(
-        &detection,
-        BaseWeightDetection::Recognized(verdict)
-            if verdict.family.as_deref() == Some("mage-flow")
-    ) && (!source.is_dir()
-        || !sceneworks_core::base_weights::is_mage_flow_transformer_dir(source))
-    {
-        return Err(ApiError::bad_request(
-            "Model import for the 'mage-flow' family requires a complete transformer directory \
-             containing config.json and diffusion_pytorch_model.safetensors; a bare weights file \
-             is refused because the loader cannot derive its architecture.",
-        ));
-    }
     // H3 source shapes are codec-owned: dense/sharded diffusers or native single-file. The worker
     // canonicalizes native bytes through the shared derivative cache before the provider opens it.
     if matches!(
@@ -699,6 +686,10 @@ pub(crate) async fn queue_model_import_job(
     // A task/base declaration constrains architecture even if the caller omitted `family`.
     // Local bytes reconcile below; deferred remote/linked inspection must carry this same
     // constraint into the worker instead of treating it as descriptive catalog metadata.
+    for identity in payload.family.iter().chain(payload.base_model.iter()) {
+        sceneworks_core::request_validation::reject_retired_image_identity("family", identity)
+            .map_err(crate::jobs::retired_model_error)?;
+    }
     validate_minimax_h3_import_declaration(&payload)?;
     let declaration = json!({"family":payload.family,"baseModel":payload.base_model,"minimaxH3Partition":payload.minimax_h3_partition});
     if sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(
@@ -1295,6 +1286,10 @@ pub(crate) fn reconcile_model_family(
     detected: Option<String>,
     _context: &str,
 ) -> Result<Option<String>, ApiError> {
+    for family in supplied.iter().chain(detected.iter()) {
+        sceneworks_core::request_validation::reject_retired_image_identity("family", family)
+            .map_err(crate::jobs::retired_model_error)?;
+    }
     reconcile_detected_family(supplied, detected).map_err(|mismatch| {
         ApiError::bad_request(format!(
             "Model files appear to be {}, but family was declared as {}. Re-import with family {} or pick different files.",

@@ -1100,68 +1100,6 @@ fn ideogram_4_text_to_image_and_edit_route_to_mlx() {
 }
 
 #[test]
-fn boogu_text_to_image_and_edit_route_to_mlx() {
-    // sc-6399 (epic 6387): the three Boogu ids are in MLX_ROUTED_MODELS and route to the native
-    // `mlx-gen-boogu` engine. Base + Turbo are text-to-image; Edit is the instruction image-edit.
-    for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
-        assert!(
-            image_request_mlx_eligible(model, &object(json!({ "model": model, "prompt": "p" }))),
-            "{model} text-to-image must route to MLX"
-        );
-        assert!(
-            image_request_mlx_eligible(model, &Map::new()),
-            "{model} bare payload"
-        );
-    }
-
-    // Edit routes to MLX for the Edit checkpoint only — Base/Turbo are text-to-image (their
-    // semantic-edit path is incoherent without the Edit fine-tune, E7b-3).
-    let edit_payload = |model: &str| {
-        object(json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset_1" }))
-    };
-    assert!(image_request_mlx_eligible(
-        "boogu_image_edit",
-        &edit_payload("boogu_image_edit")
-    ));
-    assert!(!image_request_mlx_eligible(
-        "boogu_image",
-        &edit_payload("boogu_image")
-    ));
-    assert!(!image_request_mlx_eligible(
-        "boogu_image_turbo",
-        &edit_payload("boogu_image_turbo")
-    ));
-
-    // UI gating oracle: all three are Mac-supported (reach the Text → Image picker); only Edit
-    // advertises `features.edit` (Base/Turbo are T2I — the catalog `edit_image` capability +
-    // this flag both gate the Edit tab to `boogu_image_edit`).
-    for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
-        assert!(
-            model_mac_support(model, "image", None).supported,
-            "{model} must be Mac-supported"
-        );
-    }
-    assert!(
-        model_mac_support("boogu_image_edit", "image", None)
-            .features
-            .edit,
-        "boogu_image_edit supports edit"
-    );
-    assert!(
-        !model_mac_support("boogu_image", "image", None)
-            .features
-            .edit,
-        "boogu_image (Base) is text-to-image only"
-    );
-    assert!(
-        !model_mac_support("boogu_image_turbo", "image", None)
-            .features
-            .edit,
-        "boogu_image_turbo is text-to-image only"
-    );
-}
-
-#[test]
 fn krea_2_turbo_text_to_image_and_edit_route_to_mlx() {
     // sc-7572: Krea 2 Turbo has a native `mlx-gen-krea` text-to-image engine. sc-11640: it ALSO serves
     // the Kontext-style edit surface on the CFG-free distilled few-step recipe (`krea_2_turbo_edit`) —

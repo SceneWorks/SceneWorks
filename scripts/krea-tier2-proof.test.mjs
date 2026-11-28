@@ -61,7 +61,7 @@ test("Krea candidate fingerprints must belong to one exact reviewed source set",
 test("the current Krea linked-source checkout matches the reviewed candidate", async () => {
   const source = await Promise.all(LINKED_SOURCE_FILES.map((file) => readFile(new URL(`../${file}`, import.meta.url), "utf8")));
   const fingerprints = source.map((bytes) => sha256(bytes.replaceAll("\r\n", "\n")));
-  assert.equal(reviewedKreaLinkedSourceCandidate(fingerprints), "6ffb4ef8404571ca511f4d8681c239aa56a3456e");
+  assert.equal(reviewedKreaLinkedSourceCandidate(fingerprints), "decdbeadc814909c7aec9983cc9bc5fde1ceb3ab");
   for (let i = 0; i < fingerprints.length; i++) {
     assert.throws(() => reviewedKreaLinkedSourceCandidate(fingerprints.with(i, "0".repeat(64))), /one reviewed source set/);
   }

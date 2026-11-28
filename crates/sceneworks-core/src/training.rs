@@ -425,7 +425,6 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             illustrious_xl_v1_lora_target(),
             illustrious_xl_v2_lora_target(),
             kolors_lora_target(),
-            lens_turbo_lora_target(),
             krea_raw_lora_target(),
             krea_control_target(),
             sd3_large_lora_target(),
@@ -444,26 +443,6 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             wan_lora_target(),
             wan_t2v_14b_lora_target(),
             wan_i2v_14b_lora_target(),
-            // Mage-Flow keeps the trailing slot so the stable first-target default stays Z-Image.
-            //
-            // ONE Mage target, deliberately (sc-15277): epic 14034 confirms "Base = training
-            // target" and scopes F6 to "LoRA + full base fine-tune vs **Base**", and `mlx-gen-mage`
-            // registers exactly one trainer — under `mage_flow_base`. sc-14054 also registered a
-            // `mage_flow_edit_base_lora` contract ahead of any trainer; while the kernel was in no
-            // routed set that target merely queued forever, but sc-14056's cutover turned it into a
-            // CLAIM-THEN-FAIL: the mlx worker takes the job and `engine_trainer_id` then rejects it
-            // ~2s later. Advertising a target the product cannot execute is the defect, so it is not
-            // offered. Restoring it needs a real Mage EDIT trainer (reference-image latents in the
-            // cache step and the edit input-sequence assembly in the training forward — an Edit
-            // adapter trained through the generation-only path is fitted on a distribution the model
-            // never sees at inference) — tracked in sc-15320, not written off.
-            mage_flow_lora_target(
-                "mage_flow_base_lora",
-                "Mage-Flow Base LoRA",
-                "mage_flow_base",
-                "SceneWorks/Mage-Flow-Base",
-                "Train an image LoRA against the undistilled Mage-Flow Base model.",
-            ),
             // Iris-3B generation (epic sc-25678, S7 sc-25685 MLX / S8 sc-25686 Candle): LoRA, LoKr
             // and full fine-tuning (weights- or random-init) over the native trainers.
             iris::iris_generation_target(),
@@ -513,7 +492,6 @@ const NOISE_TARGETS: &[&str] = &[
     "kolors_lora",
     "sd3_5_large_lora",
     "sd3_5_medium_lora",
-    "lens_turbo_lora",
     "krea_2_raw_lora",
     "anima_base_lora",
     "wan_lora",
@@ -521,7 +499,6 @@ const NOISE_TARGETS: &[&str] = &[
     "wan_i2v_14b_lora",
     "ltx_video_lora",
     "ltx_2_5_video_lora",
-    "mage_flow_base_lora",
     "qwen_image_2_1_lora",
     "qwen_image_2_1_edit_lora",
     // SW-7103: the H3-Image trainer declares `TrainingTechniques::ADAPTER_NOISE` (weight and
@@ -539,14 +516,12 @@ const SUBJECT_MASK_TARGETS: &[&str] = &[
     "kolors_lora",
     "sd3_5_large_lora",
     "sd3_5_medium_lora",
-    "lens_turbo_lora",
     "krea_2_raw_lora",
     "anima_base_lora",
     "wan_lora",
     "wan_t2v_14b_lora",
     "wan_i2v_14b_lora",
     "ltx_video_lora",
-    "mage_flow_base_lora",
     "qwen_image_2_1_lora",
     "qwen_image_2_1_edit_lora",
     "moss_image_base_lora",
@@ -1700,101 +1675,6 @@ where
     preset
 }
 
-/// Mage-Flow LoRA training targets.
-///
-/// Both foundation variants are flat, dense diffusers snapshots. Their catalog `q4`/`q8`/`bf16`
-/// variants are logical load-time choices over the same installed files, rather than separate
-/// on-disk tier directories. Pointing at the live SceneWorks mirrors keeps the training pre-flight
-/// resolver aligned with what Model Manager installs on macOS and Windows/Linux (sc-14054).
-///
-/// The execution kernel is registered here as the stable contract consumed by the Mage trainer
-/// slice (sc-14055). Until a worker advertises that kernel, the existing worker-capability gate
-/// leaves jobs queued rather than treating registration itself as runtime support.
-fn mage_flow_lora_target(
-    id: &str,
-    name: &str,
-    base_model: &str,
-    base_model_repo: &str,
-    description: &str,
-) -> TrainingTarget {
-    TrainingTarget {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        modality: TrainingModality::Image,
-        output_kind: TrainingOutputKind::Lora,
-        family: "mage-flow".to_owned(),
-        base_model: base_model.to_owned(),
-        base_model_repo: Some(base_model_repo.to_owned()),
-        kernel: "mage_flow_lora".to_owned(),
-        defaults: TrainingConfig {
-            rank: 16,
-            alpha: ContractNumber::from(16),
-            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
-            steps: 3000,
-            batch_size: 1,
-            gradient_accumulation: 1,
-            resolution: 1024,
-            save_every: 250,
-            seed: 42,
-            optimizer: "adamw8bit".to_owned(),
-            trigger_word: None,
-            advanced: object(json!({
-                "mixedPrecision": "bf16",
-                "cacheLatents": true,
-                "cacheTextEmbeddings": true,
-                "gradientCheckpointing": true,
-                "networkType": "lora",
-                "timestepType": "sigmoid",
-                "timestepBias": "high_noise",
-                "lossType": "mse",
-                "weightDecay": 0.0001,
-                "lrScheduler": "constant",
-                "sampleEvery": 500,
-                "sampleSteps": 30,
-                "sampleGuidanceScale": 5.0,
-                "qualityPreset": "balanced",
-                "outputScope": "project",
-                "requestedGpu": "auto"
-            })),
-            extra: ExtraFields::new(),
-        },
-        limits: object(json!({
-            "rank": [4, 128],
-            "alpha": [1, 128],
-            "steps": [200, 6000],
-            "resolutions": [512, 768, 1024],
-            "batchSize": [1, 4],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // The Training Studio builds its network-type picker STRAIGHT from this list, so an
-            // entry missing here makes the capability unreachable from the product no matter what
-            // the engine can do. Both non-`lora` entries were exactly that defect:
-            //
-            // - `lokr` (sc-14055): the `mlx-gen-mage` trainer advertises `supports_lokr` and ships a
-            //   real LoKr branch (verified: loss 0.245 → 0.121, velocity shift 0.711), and Mage
-            //   inference installs LoKr through the same strict adapter loader as LoRA
-            //   (`apply_mage_adapters`, stacked + mixed) — so the produced adapter is selectable and
-            //   loadable. Only this list kept it from being offerable.
-            // - `full` (sc-14056): the **full base fine-tune** — the trainer updates every DiT weight
-            //   and writes a fine-tuned checkpoint instead of an adapter. Mage-Flow is the only family
-            //   with that path today, so this is the only target that advertises it. A full run is
-            //   additionally admission-gated at submit by the unified-memory pre-flight
-            //   (`full_finetune_memory_error`), which refuses machines that cannot hold it.
-            //
-            // Order is adapter kinds first, then the non-adapter path.
-            "networkTypes": ["lora", "lokr", "full"],
-            "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"],
-        })),
-        ui: object(json!({
-            "label": name,
-            "description": description,
-            "recommendedFor": ["character", "style"],
-            "datasetModality": "image"
-        })),
-        extra: ExtraFields::new(),
-    }
-}
-
 fn z_image_turbo_lora_target() -> TrainingTarget {
     TrainingTarget {
         id: "z_image_turbo_lora".to_owned(),
@@ -1865,118 +1745,6 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
             "description": "Train an image LoRA for the Z-Image-Turbo base model.",
-            "recommendedFor": ["character", "style"]
-        })),
-        extra: ExtraFields::new(),
-    }
-}
-
-/// Image LoRA training for Microsoft Lens, applied at inference to Lens-Turbo.
-///
-/// Lens-Turbo is a 4-step *distillation* of `microsoft/Lens`; training a LoRA
-/// directly on the distilled velocity field drifts (the same trap that produced
-/// off-identity LoRAs on Z-Image-Turbo). So this target trains against the
-/// non-distilled `microsoft/Lens` (20-step, CFG 5.0) — the direct weight-parent
-/// of Turbo, so the adapter transfers cleanly — and the output registers as a
-/// `lens` family LoRA the Lens adapter loads onto Lens-Turbo at generation time.
-/// `base_model_repo` points the plan's `baseModelPath` at the Lens HF cache,
-/// independent of the served `lens_turbo` model. Microsoft pulled the original
-/// `microsoft/Lens*` repos from HF, so the base is the `SceneWorks/Lens` re-host
-/// (sc-8797) — a self-contained diffusers snapshot rebuilt from Comfy-Org/Lens +
-/// openai/gpt-oss-20b (MXFP4) + FLUX.2-dev, layout-identical to the original, the
-/// same repo the off-Mac candle inference lane loads (sc-8799). The old
-/// `microsoft/Lens-Base` (50-step supervised) fallback (sc-1584) died with the
-/// pull; `advanced.baseModelRepo` still overrides the source if another appears.
-///
-/// Unlike Z-Image's separate `to_q/to_k/to_v`, Lens uses *fused* QKV attention
-/// (`img_qkv`/`txt_qkv`) plus joint-attention output projections. The image output
-/// `to_out` is an `nn.ModuleList([Linear, Identity])`, so the trainable Linear is
-/// `to_out.0` (PEFT errors if pointed at the ModuleList — sc-2218); `to_add_out` is
-/// a plain Linear. The Z-Image defaults would match nothing and inject no adapter.
-fn lens_turbo_lora_target() -> TrainingTarget {
-    TrainingTarget {
-        id: "lens_turbo_lora".to_owned(),
-        name: "Lens LoRA".to_owned(),
-        modality: TrainingModality::Image,
-        output_kind: TrainingOutputKind::Lora,
-        family: "lens".to_owned(),
-        base_model: "lens".to_owned(),
-        // sc-13860: intentionally the flat `SceneWorks/Lens` diffusers re-host, NOT the `SceneWorks/lens-mlx`
-        // inference turnkey. The catalog `lens` entry installs BOTH — `lens-mlx` (q4/q8/bf16 packed MLX
-        // subdirs) for generation AND `SceneWorks/Lens` as a `training` variant (builtin.models.jsonc). The
-        // flat-diffusers LoRA trainer cannot read the packed turnkey subdirs, and training on the distilled
-        // Lens-Turbo drifts (see the doc comment above), so this must stay `SceneWorks/Lens`. It IS
-        // catalog-installable, so this is not the false-"not installed" class the sibling targets hit.
-        base_model_repo: Some("SceneWorks/Lens".to_owned()),
-        kernel: "lens_lora".to_owned(),
-        defaults: TrainingConfig {
-            rank: 16,
-            alpha: ContractNumber::from(16),
-            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
-            steps: 3000,
-            batch_size: 1,
-            gradient_accumulation: 1,
-            resolution: 1024,
-            save_every: 250,
-            seed: 42,
-            optimizer: "adamw8bit".to_owned(),
-            trigger_word: None,
-            advanced: object(json!({
-                "mixedPrecision": "bf16",
-                "cacheLatents": true,
-                "cacheTextEmbeddings": true,
-                "gradientCheckpointing": true,
-                "networkType": "lora",
-                "timestepType": "sigmoid",
-                "timestepBias": "high_noise",
-                "lossType": "mse",
-                "weightDecay": 0.0001,
-                // Learning-rate scheduler (see the Z-Image target); the worker
-                // honors `constant`/`linear`/`cosine` with an optional warmup.
-                "lrScheduler": "constant",
-                // Lens uses fused QKV attention plus joint-attention output
-                // projections, NOT Z-Image's separate to_q/to_k/to_v. ``to_out`` is
-                // a ModuleList, so its Linear is ``to_out.0`` — PEFT (LoRA + LoKr)
-                // errors on the ModuleList itself (sc-2218). Suffixes must match the
-                // LensTransformer2DModel module names or PEFT injects nothing.
-                "loraTargetModules": ["img_qkv", "txt_qkv", "to_out.0", "to_add_out"],
-                // Non-distilled training base: the SceneWorks/Lens diffusers re-host
-                // (the original microsoft/Lens is dead, sc-8797). Override via this
-                // key to train on an alternative checkpoint (sc-1584).
-                "baseModelRepo": "SceneWorks/Lens",
-                // In-training previews render on the loaded base model (not the
-                // distilled Turbo), so they use the base's 20-step / CFG 5.0
-                // settings — 4-step / CFG 1.0 on the non-distilled base is garbage.
-                // Heavier than Turbo previews, so a wider cadence by default.
-                "sampleEvery": 500,
-                "sampleSteps": 20,
-                "sampleGuidanceScale": 5.0,
-                "qualityPreset": "balanced",
-                "outputScope": "project",
-                "requestedGpu": "auto"
-            })),
-            extra: ExtraFields::new(),
-        },
-        limits: object(json!({
-            "rank": [4, 128],
-            "alpha": [1, 128],
-            "steps": [200, 6000],
-            // Lens snaps onto 1024/1440 base-resolution buckets; 768 is allowed
-            // for lower-VRAM runs.
-            "resolutions": [768, 1024, 1440],
-            "batchSize": [1, 4],
-            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
-            // Lens trains + infers in a separate sidecar venv; both the trainer
-            // (lens_train_runner) and inference (lens_runner) gained PEFT LoKr
-            // build/save + injection (epic 2193, sc-2218), keyed off the fused-QKV
-            // target modules above.
-            "networkTypes": ["lora", "lokr"],
-            "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"],
-        })),
-        ui: object(json!({
-            "label": "Lens LoRA",
-            "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
             "recommendedFor": ["character", "style"]
         })),
         extra: ExtraFields::new(),
@@ -3971,8 +3739,8 @@ mod tests {
             let target = builtin_training_targets()
                 .targets
                 .into_iter()
-                .find(|target| target.base_model == "mage_flow_base")
-                .expect("the Mage-Flow Base training target is registered");
+                .find(|target| target.base_model == "iris_3b")
+                .expect("Iris generation training target is registered");
             let mut config = target.defaults.clone();
             match advanced {
                 Value::Object(map) => {

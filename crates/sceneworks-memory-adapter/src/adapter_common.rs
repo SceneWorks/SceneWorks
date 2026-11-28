@@ -33,18 +33,6 @@ pub struct QwenEditArtifact {
     pub spec: LoadSpec,
 }
 
-/// The two artifact triples one Mage capture opens: the variant's own tier root, and the shared
-/// text-encoder/VAE components snapshot.
-#[derive(Clone, Debug)]
-pub struct MageArtifactSource {
-    pub repository: String,
-    pub revision: String,
-    pub root: PathBuf,
-    pub components_repository: String,
-    pub components_revision: String,
-    pub components_root: PathBuf,
-}
-
 pub fn strategy_name(strategy: MemoryStrategy) -> &'static str {
     match strategy {
         MemoryStrategy::Resident => "resident",
@@ -194,14 +182,6 @@ pub fn validate_plan_identity(
              production identity is {expected_fingerprint}"));
     }
     Ok(())
-}
-
-pub fn mage_mode(edit: bool) -> &'static str {
-    if edit {
-        "edit_image"
-    } else {
-        "text_to_image"
-    }
 }
 
 pub fn instantid_fixture_seed(request: &Value, prefix: &str) -> Result<u64, String> {

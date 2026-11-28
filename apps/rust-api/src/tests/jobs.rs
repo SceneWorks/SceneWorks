@@ -7956,9 +7956,8 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
     assert_eq!(count, 1, "only the supported imported Pose request queues");
 }
 
-#[cfg(target_os = "macos")]
 #[tokio::test]
-async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
+async fn retired_image_models_stay_unavailable_at_image_enqueue() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let model_path = temp_dir.path().join("data/imported/finetune-mage");
     std::fs::create_dir_all(&model_path).expect("model directory creates");
@@ -7984,65 +7983,95 @@ async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() 
     .expect("user manifest writes");
     let settings = test_settings(&temp_dir);
     let jobs_db_path = settings.jobs_db_path.clone();
-    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
-    register_imported_fixture_worker(&state, "finetune_mage", &model_path, "mlx", "macos");
-
-    for (label, extra) in [
-        (
-            "edit",
-            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
-        ),
-        ("reference", json!({ "referenceAssetId": "reference-1" })),
-        (
-            "multi-phase",
-            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
-        ),
-        (
-            "unsupported quant tier",
-            json!({ "advanced": { "quantTier": "nvfp4" } }),
-        ),
+    let app = create_app(settings).expect("app creates");
+    for model in [
+        "boogu_image",
+        "boogu_image_turbo",
+        "boogu_image_edit",
+        "lens",
+        "lens_turbo",
+        "mage_flow_base",
+        "mage_flow",
+        "mage_flow_turbo",
+        "mage_flow_edit_base",
+        "mage_flow_edit",
+        "mage_flow_edit_turbo",
+        "finetune_mage",
     ] {
-        let mut payload = json!({
-            "projectId": "project-1",
-            "model": "finetune_mage",
-            "mode": "text_to_image",
-            "prompt": "mist over hills",
-            "count": 1,
-        });
-        payload
-            .as_object_mut()
-            .expect("request object")
-            .extend(extra.as_object().expect("extra object").clone());
-        let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {error}");
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({"projectId":"project-1","model":model,"mode":"text_to_image","prompt":"mist over hills","count":1}),
+        ).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
+        assert_eq!(error["code"], "retired_model", "{model}: {error}");
         assert!(
             error["detail"]
                 .as_str()
-                .is_some_and(|detail| detail.contains("imported_unsupported")),
-            "{label} must fail at exact imported-provider admission: {error}"
+                .unwrap()
+                .contains("Choose a supported model"),
+            "{error}"
         );
     }
-
-    let (status, created) = request(
-        app,
-        "POST",
-        "/api/v1/image/jobs",
-        json!({
-            "projectId": "project-1",
-            "model": "finetune_mage",
-            "mode": "text_to_image",
-            "prompt": "mist over hills",
-            "count": 1,
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
-
     let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
     let count: i64 = connection
         .query_row("select count(*) from jobs", [], |row| row.get(0))
         .expect("job count reads");
-    assert_eq!(count, 1, "only the exact registered generate shape queues");
+    assert_eq!(count, 0);
+    assert!(model_path.join("model.safetensors").is_file());
+}
+
+#[tokio::test]
+async fn retired_model_history_is_readable_but_cannot_be_replayed() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings = test_settings(&directory);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).unwrap();
+    let (status, created) = request(
+        app.clone(), "POST", "/api/v1/image/jobs",
+        json!({"projectId":"project-1","mode":"text_to_image","prompt":"historical image","count":1}),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let mut historical = created["payload"].clone();
+    historical["model"] = json!("lens");
+    let connection = rusqlite::Connection::open(jobs_db_path).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "update jobs set payload_json = ?1, status = 'completed' where id = ?2",
+                rusqlite::params![historical.to_string(), id],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
+    let (status, historical) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(historical["payload"]["model"], "lens");
+    for (kind, payload) in [
+        ("retry", json!({"payloadChanges":{}})),
+        ("duplicate", json!({"payloadChanges":{}})),
+        ("exact-replay", json!({})),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{kind}"),
+            payload,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind}: {error}");
+        assert_eq!(error["code"], "retired_model", "{kind}: {error}");
+    }
 }
 
 /// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.

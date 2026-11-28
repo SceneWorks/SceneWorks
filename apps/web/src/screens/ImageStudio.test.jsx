@@ -1401,7 +1401,6 @@ describe("ImageStudio edit source picker", () => {
 
   it.each([
     ["multiReference", "Select images"],
-    ["sourceWithMultiReference", "Select references"],
   ])("imports multiple edit references through the standard File Upload tab (%s)", async (capability, buttonLabel) => {
     const source = { id: "source", projectId: "project_1", type: "image", displayName: "Source", status: {} };
     const importAsset = vi.fn(async (file) => ({
@@ -1436,7 +1435,7 @@ describe("ImageStudio edit source picker", () => {
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")));
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({
       mode: "edit_image", referenceAssetIds: ["a.png", "b.png"],
-      sourceAssetId: capability === "sourceWithMultiReference" ? "source" : null,
+      sourceAssetId: null,
     }));
   });
 });
@@ -1696,10 +1695,10 @@ describe("ImageStudio model picker capability gating", () => {
     features: {},
     training: { supportedKernels: [], lokrOnWanSupported: false },
   };
-  const LENS_TURBO = {
+  const LANE_MODEL = {
     ...Z_IMAGE,
-    id: "lens_turbo",
-    name: "Lens-Turbo",
+    id: "test_lane_model",
+    name: "a text-only model",
     capabilities: ["text_to_image"],
     macSupport: { supported: true, features: { edit: false, reference: false } },
   };
@@ -1823,12 +1822,12 @@ describe("ImageStudio model picker capability gating", () => {
   it("enables the Mac Edit tab when any available model supports edit mode (sc-5589)", async () => {
     await render(
       baseContext({
-        imageModels: [LENS_TURBO, TORCH_ONLY_EDIT, QWEN_EDIT],
+        imageModels: [LANE_MODEL, TORCH_ONLY_EDIT, QWEN_EDIT],
         macCapabilities: MAC_CAPS,
       }),
     );
 
-    expect(field(container, "Model").value).toBe("lens_turbo");
+    expect(field(container, "Model").value).toBe("test_lane_model");
     expect(modeButton("Edit").disabled).toBe(false);
 
     await click(modeButton("Edit"));
@@ -1842,7 +1841,7 @@ describe("ImageStudio model picker capability gating", () => {
   it("disables the Mac Edit tab when no available model supports edit mode", async () => {
     await render(
       baseContext({
-        imageModels: [LENS_TURBO, TORCH_ONLY_EDIT],
+        imageModels: [LANE_MODEL, TORCH_ONLY_EDIT],
         macCapabilities: MAC_CAPS,
       }),
     );
@@ -1851,100 +1850,8 @@ describe("ImageStudio model picker capability gating", () => {
     expect(modeButton("Edit").title).toBe("No available Mac model supports this mode.");
   });
 
-  // Boogu-Image-0.1 (epic 6387 / sc-6400) is backend-driven — no dedicated JSX. Base/Turbo are
-  // text-to-image, Edit is the instruction-edit checkpoint, and (unlike Ideogram) Boogu is
-  // natural-language, so it must render the plain prompt textarea, NOT the structured caption builder.
-  const BOOGU_BASE = {
-    ...Z_IMAGE,
-    id: "boogu_image",
-    name: "Boogu Image",
-    family: "boogu",
-    capabilities: ["text_to_image"],
-    macSupport: { supported: true, features: { edit: false, reference: false } },
-  };
-  const BOOGU_TURBO = {
-    ...Z_IMAGE,
-    id: "boogu_image_turbo",
-    name: "Boogu Image Turbo",
-    family: "boogu",
-    capabilities: ["text_to_image"],
-    macSupport: { supported: true, features: { edit: false, reference: false } },
-  };
-  const BOOGU_EDIT = {
-    ...Z_IMAGE,
-    id: "boogu_image_edit",
-    name: "Boogu Image Edit",
-    family: "boogu",
-    capabilities: ["edit_image"],
-    macSupport: { supported: true, features: { edit: true, reference: false } },
-  };
-
-  it("surfaces Boogu Base/Turbo in Text (plain prompt, not the structured builder) and Edit in the Edit tab (sc-6400)", async () => {
-    await render(
-      baseContext({
-        imageModels: [BOOGU_BASE, BOOGU_TURBO, BOOGU_EDIT],
-        macCapabilities: MAC_CAPS,
-      }),
-    );
-
-    // Text tab: Base + Turbo (text_to_image); the Edit checkpoint is excluded.
-    const textOptions = modelOptionValues();
-    expect(textOptions).toContain("boogu_image");
-    expect(textOptions).toContain("boogu_image_turbo");
-    expect(textOptions).not.toContain("boogu_image_edit");
-
-    // Boogu is natural-language (no `structuredPrompt`) → the plain prompt textarea, NOT the
-    // Ideogram structured-caption builder.
-    expect(document.body.querySelector('textarea[aria-label="Prompt"]')).toBeTruthy();
-
-    // Edit tab enabled, and lists only the Edit checkpoint.
-    expect(modeButton("Edit").disabled).toBe(false);
-    await click(modeButton("Edit"));
-    await act(async () => {});
-    expect(field(container, "Model").value).toBe("boogu_image_edit");
-    expect(modelOptionValues()).toEqual(["boogu_image_edit"]);
-  });
-
-  it("offers the Refine-my-prompt control for Boogu — prompt enhancement reuses prompt_refine (sc-6401)", async () => {
-    await render(baseContext({ imageModels: [BOOGU_BASE, BOOGU_TURBO], macCapabilities: MAC_CAPS }));
-
-    // Boogu is non-structured, so the plain-prompt path renders RefinePromptControl ("Refine my
-    // prompt"). It drives the prompt_refine utility with Boogu's prompt guide as the rewriter context
-    // (S4) — the optional, user-editable enhancement step; raw prompt remains the fallback.
-    const refineButton = promptToolButton("Refine");
-    expect(refineButton).toBeTruthy();
-  });
-
-  // The Boogu precision checkbox specifically (class-scoped so it never collides with the tier
-  // picker's "Full precision (bf16)" <option> text when both would otherwise be in the DOM).
-  const precisionLabel = (root) =>
-    root.querySelector("label.boogu-precision-toggle");
-  // The quant tier, the precision toggle and the hardware knobs sit in the Model & output tab;
-  // the post-passes (PiD, Upscale, Hires.fix) in Upscale & finish.
   const openAdvanced = async (root) => openSettingsTab("Model", root);
   const openFinish = async (root) => openSettingsTab("Upscale & finish", root);
-
-  it("exposes the Full-precision (bf16) toggle for Boogu in Advanced when ui.precisionToggle is set (sc-6568)", async () => {
-    await render(
-      baseContext({
-        imageModels: [{ ...BOOGU_BASE, ui: { precisionToggle: true } }],
-        macCapabilities: MAC_CAPS,
-      }),
-    );
-    await openAdvanced(container);
-    await act(async () => {});
-    const toggle = precisionLabel(container);
-    expect(toggle).toBeTruthy();
-    // Default off → the packed Q8 build (no mlxQuantize emitted).
-    expect(toggle.querySelector('input[type="checkbox"]').checked).toBe(false);
-  });
-
-  it("hides the precision toggle when the model omits ui.precisionToggle — catalog-gated, not family-hardcoded (sc-6568)", async () => {
-    await render(baseContext({ imageModels: [BOOGU_BASE], macCapabilities: MAC_CAPS }));
-    await openAdvanced(container);
-    await act(async () => {});
-    expect(precisionLabel(container)).toBeFalsy();
-  });
 
   // Generation-time quant-tier toggle (sc-8515). A quant-matrix model exposes per-tier install
   // state; the studio renders a picker only when >1 tier is installed, and routes the pick via
@@ -1996,14 +1903,12 @@ describe("ImageStudio model picker capability gating", () => {
       catalogScope: "user",
       runtimeQuantTiers: ["q4", "q8", "bf16"],
       sourcePrecision: { label },
-      ui: { precisionToggle: true },
     };
     await render(baseContext({ createImageJob, imageModels: [builtin, imported], macCapabilities: MAC_CAPS }));
     setSelect(field(container, "Model"), imported.id);
     await openAdvanced(container);
     expect(container.querySelector(".settings-field-tier strong").textContent).toBe(label);
     expect(tierPicker(container)).toBeNull();
-    expect(precisionLabel(container)).toBeNull();
     await clickGenerate();
     const payload = createImageJob.mock.calls.at(-1)[0];
     expect(payload.model).toBe(imported.id);
@@ -2294,31 +2199,6 @@ describe("ImageStudio model picker capability gating", () => {
     await act(async () => {});
     expect(tierPicker(container).value).toBe("q4");
     expect(floorNote()).toBeFalsy();
-  });
-
-  // Disjointness guard (sc-8515): the tier picker and Boogu's ui.precisionToggle both write
-  // advanced.mlxQuantize and MUST never co-render/co-emit. In the catalog they are disjoint —
-  // Boogu downloads via `base/`-style subfolder globs (no downloads[].variant keys), so it is
-  // not a hasVariantMatrix model and showTierPicker is false for it. This constructs the
-  // (catalog-impossible) both-set model to prove the `!showTierPicker` guard keeps them apart.
-  it("suppresses the precision toggle and emits only the tier quant when a matrix model also sets precisionToggle (sc-8515)", async () => {
-    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
-    await render(
-      baseContext({
-        createImageJob,
-        imageModels: [{ ...matrixModel(["q4", "bf16"], "q4"), ui: { precisionToggle: true } }],
-        macCapabilities: MAC_CAPS,
-      }),
-    );
-    await openAdvanced(container);
-    await act(async () => {});
-    // Tier picker wins; the Boogu precision checkbox is suppressed (guarded by !showTierPicker).
-    expect(tierPicker(container)).toBeTruthy();
-    expect(precisionLabel(container)).toBeFalsy();
-    // Default tier q4 → mlxQuantize 4, NOT the precision-toggle's bf16 sentinel 0.
-    await vi.waitFor(() => expect(generateButton().disabled).toBe(false));
-    await clickGenerate();
-    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
 
   // Per-(screen, model) sticky last-tier (sc-10727 / epic 10721). An explicit pick is persisted and
@@ -3751,7 +3631,7 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
   });
 
   it("lets Turbo users enable negatives and shift independently of a default-only scheduler", async () => {
-    const turbo = { ...GUIDED, id: "mage_flow_turbo", family: "mage-flow",
+    const turbo = { ...GUIDED, id: "test_cfg_turbo", family: "test-cfg",
       image: { supportsGuidance: true, supportsNegativePrompt: true, negativePromptRequiresGuidance: true, supportsSchedulerShift: true },
       defaults: { ...GUIDED.defaults, guidanceScale: 1, schedulerShift: 6 },
       limits: { ...GUIDED.limits, samplers: ["default"], schedulers: ["default"] } };

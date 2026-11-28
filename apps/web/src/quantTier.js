@@ -93,7 +93,7 @@ export function isNvfp4Tier(tier) {
 
 // Human labels for the picker, keyed by tier. Unknown/"default" tiers fall back to the raw key.
 // "training" is NOT a quant tier: it's the flat-diffusers LoRA-training base some tiered models
-// (lens, sc-8797) additionally host on macOS. It's absent from TIER_QUANTIZE, so the generation
+// additionally host. It's absent from TIER_QUANTIZE, so the generation
 // picker and RAM suggestion ignore it; only the Models download panel lists it (with this label).
 const TIER_LABELS = {
   bf16: "Full precision (bf16)",

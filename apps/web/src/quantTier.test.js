@@ -268,7 +268,7 @@ describe("installedTiers", () => {
   });
 
   it("returns [] for a model with no variant matrix", () => {
-    expect(installedTiers({ id: "boogu", hasVariantMatrix: false, variants: [] })).toEqual([]);
+    expect(installedTiers({ id: "test_non_matrix", hasVariantMatrix: false, variants: [] })).toEqual([]);
     expect(installedTiers({ id: "x" })).toEqual([]);
     expect(installedTiers(undefined)).toEqual([]);
   });
@@ -676,7 +676,7 @@ describe("allPossibleTiers — the full display set (all tiers, installed or not
   });
 
   it("returns [] when the model exposes no tier information", () => {
-    expect(allPossibleTiers({ id: "boogu", hasVariantMatrix: false })).toEqual([]);
+    expect(allPossibleTiers({ id: "test_non_matrix", hasVariantMatrix: false })).toEqual([]);
     expect(allPossibleTiers(undefined)).toEqual([]);
   });
 });

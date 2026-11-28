@@ -49,8 +49,6 @@ use super::adapters::resolve_prepared_adapters;
 use super::adapters::PreparedAdapters;
 #[cfg(native_lane)]
 use super::apply_inline_iris_restore;
-#[cfg(target_os = "macos")]
-use super::artifact_resolution::boogu_model_subdir;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::artifact_resolution::candle_weights_gap;
 #[cfg(target_os = "macos")]
@@ -65,8 +63,6 @@ use super::artifact_resolution::resolve_flux_ip_adapter_dir;
 use super::artifact_resolution::resolve_weights_dir;
 #[cfg(native_lane)]
 use super::artifact_resolution::turnkey_tier_revision;
-#[cfg(native_lane)]
-use super::artifact_resolution::BOOGU_MLX_TURNKEY_REVISION;
 #[cfg(native_lane)]
 use super::artifact_resolution::IDEOGRAM_MLX_TURNKEY_REVISION;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -135,16 +131,12 @@ use super::checkpoint_plan::request_is_checkpoint_plan_backed;
 #[cfg(native_lane)]
 use super::checkpoint_plan::PreparedCheckpointPlanSources;
 #[cfg(native_lane)]
-use super::checkpoint_plan::CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS;
-#[cfg(native_lane)]
 use super::checkpoint_plan::CHECKPOINT_PLAN_RESIDENT_BASE_TIERS;
 use super::civitai_lora_key;
 #[cfg(target_os = "macos")]
 use super::conditioning::angle_prompt_augment;
 #[cfg(target_os = "macos")]
 use super::conditioning::augment_prompt_for_angle;
-#[cfg(target_os = "macos")]
-use super::conditioning::boogu_edit_reference_ids;
 #[cfg(native_lane)]
 use super::conditioning::build_qwen_image_2_1_conditioning;
 #[cfg(target_os = "macos")]
@@ -159,8 +151,6 @@ use super::conditioning::edit_reference_ids;
 use super::conditioning::guard_qwen_image_2_1_lane_slots;
 #[cfg(target_os = "macos")]
 use super::conditioning::identity_strength;
-#[cfg(target_os = "macos")]
-use super::conditioning::is_mage_edit_model;
 #[cfg(native_lane)]
 use super::conditioning::is_minimax_h3_image_edit;
 #[cfg(native_lane)]
@@ -171,8 +161,6 @@ use super::conditioning::load_reference_alpha;
 use super::conditioning::load_reference_image;
 #[cfg(target_os = "macos")]
 use super::conditioning::load_reference_image_with;
-#[cfg(target_os = "macos")]
-use super::conditioning::mage_edit_reference_ids;
 #[cfg(native_lane)]
 use super::conditioning::parse_poses;
 #[cfg(native_lane)]
@@ -203,8 +191,6 @@ use super::conditioning::FlattenPolicy;
 use super::conditioning::PoseInput;
 #[cfg(native_lane)]
 use super::conditioning::QwenImage21Reference;
-#[cfg(target_os = "macos")]
-use super::conditioning::BOOGU_MAX_EDIT_REFERENCES;
 #[cfg(target_os = "macos")]
 use super::conditioning::MAX_EDIT_REFERENCES;
 #[cfg(native_lane)]
@@ -532,26 +518,6 @@ use super::load_spec::load_engine;
 #[cfg(native_lane)]
 use super::load_spec::load_spec;
 use super::lora_weight;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::mage_finetuned_available;
-#[cfg(native_lane)]
-use super::mage_finetuned::mage_finetuned_generation_request;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::mage_finetuned_memory_load_shape_with;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::prepare_mage_finetuned_transformer;
-#[cfg(native_lane)]
-use super::mage_finetuned::resolve_mage_finetuned_transformer;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::resolve_plan_backed_mage_finetuned_transformer;
-#[cfg(native_lane)]
-use super::mage_finetuned::MAGE_FINETUNED_BASE_MODEL;
-#[cfg(native_lane)]
-use super::mage_finetuned::MAGE_FINETUNED_COMPONENT_TIER;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::MAGE_FINETUNED_MEMORY_ROUTE;
-#[cfg(target_os = "macos")]
-use super::mage_finetuned::MAGE_FLOW_PLAN_FAMILY;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::memory::downtier_candidate_tiers;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -699,8 +665,6 @@ use super::sampling::resolve_guidance;
 use super::sampling::resolve_negative_prompt;
 #[cfg(native_lane)]
 use super::sampling::resolve_steps;
-#[cfg(target_os = "macos")]
-use super::sampling::resolve_true_cfg;
 #[cfg(native_lane)]
 use super::sampling::resolved_option_or_manifest_f32;
 #[cfg(native_lane)]
@@ -7735,13 +7699,6 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "kolors" }))),
         "mlx_kolors"
     );
-    // Lens / Lens-Turbo are MLX-routed (sc-5105) via the MODEL_TABLE registry families → both record
-    // the shared mlx_lens adapter label.
-    assert_eq!(adapter_id(&request(json!({ "model": "lens" }))), "mlx_lens");
-    assert_eq!(
-        adapter_id(&request(json!({ "model": "lens_turbo" }))),
-        "mlx_lens"
-    );
     // Bernini still-image companion (sc-5424) IS a MODEL_TABLE row (engine `bernini`).
     assert_eq!(
         adapter_id(&request(json!({ "model": "bernini_image" }))),
@@ -7837,8 +7794,6 @@ fn mlx_engine_registry_links_image_families() {
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "kolors",
-        "lens",
-        "lens_turbo",
         // Bernini still-image companion (sc-5424): the `Modality::Both` engine must appear in the
         // explicit IMAGE catalog too (the "no generator registered" trap).
         "bernini",
@@ -8009,94 +7964,6 @@ fn flux2_klein_9b_kv_real_weights_generates_one_image() {
         Some(1.0),
         None,
     );
-}
-
-/// Real-weights smoke: base Lens (epic 3164 / sc-5105, re-hosted sc-8767) — 20-step, standard
-/// guidance 5.0 + a negative prompt (the `mlx-gen-lens` descriptor is `supports_guidance` +
-/// `supports_negative_prompt`, NOT true-CFG). The upstream `microsoft/Lens` source is dead (Microsoft
-/// pulled it); base `lens` now defaults to the tier-subdir'd `SceneWorks/lens-mlx`, so this loads the
-/// `bf16/` tier subdir (the flat diffusers tree: tokenizer/ text_encoder/ transformer/ vae/) at the Q8
-/// default (encoder MoE + DiT). Needs the HF cache + a Metal device; run on demand:
-/// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights`.
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "needs real SceneWorks/lens-mlx weights + Metal device"]
-fn lens_real_weights_generates_one_image() {
-    smoke_generate_one(
-        "lens",
-        hf_snapshot("models--SceneWorks--lens-mlx").join("bf16"),
-        Some(5.0),
-        Some("blurry, low quality".to_owned()),
-    );
-}
-
-/// Real-weights smoke: Lens-Turbo (the distilled 4-step / guidance 1.0 variant, ≈ no CFG) — same
-/// architecture/weights tree as base Lens, different defaults. Loads the `SceneWorks/lens-turbo-mlx`
-/// `bf16/` tier subdir (mirrors the base `lens` smoke; the dead flat `microsoft/Lens-Turbo` repo was
-/// retired, sc-8797/sc-8965). Needs the HF cache + a Metal device; run on demand:
-/// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights`.
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "needs real SceneWorks/lens-turbo-mlx weights + Metal device"]
-fn lens_turbo_real_weights_generates_one_image() {
-    smoke_generate_one(
-        "lens_turbo",
-        hf_snapshot("models--SceneWorks--lens-turbo-mlx").join("bf16"),
-        Some(1.0),
-        None,
-    );
-}
-
-/// Real-weights smoke: Lens-Turbo at a **1024 resolution bucket** (sc-5105 acceptance — the Lens port
-/// supports 1024/1440 × 9 ARs; the worker forwards `width`/`height` straight to the engine, which
-/// validates ÷16). Confirms the larger latent + the 20B Q8 encoder run at a real bucket size on Mac,
-/// not just the 512² basic smoke. Run on demand:
-/// `cargo test -p sceneworks-worker --lib -- --ignored lens_turbo_real_weights_bucket`.
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "needs real SceneWorks/lens-turbo-mlx weights + Metal device"]
-fn lens_turbo_real_weights_bucket_resolution() {
-    let model = mlx_model("lens_turbo").unwrap();
-    let generator = load_engine(
-        model.engine_id(),
-        hf_snapshot("models--SceneWorks--lens-turbo-mlx").join("bf16"),
-        Some(gen_core::Quant::Q8),
-        Vec::new(),
-        None,
-    )
-    .unwrap();
-    let cancel = gen_core::CancelFlag::new();
-    let (w, h, pixels) = generate_one(
-        generator.as_ref(),
-        "a serene mountain lake at dawn",
-        1024,
-        1024,
-        7,
-        model.default_steps(),
-        Some(1.0),
-        None,
-        None,
-        &[],
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-        &PromptEnhance::default(),
-        gen_core::PromptEnhancementSink::default(),
-        gen_core::PreviewSink::default(),
-        &cancel,
-        &mut |_p| {},
-    )
-    .unwrap();
-    assert_eq!((w, h), (1024, 1024));
-    assert_eq!(pixels.len(), 1024 * 1024 * 3);
-    assert!(pixels.windows(2).any(|w| w[0] != w[1]));
 }
 
 /// Real-weights smoke: FLUX.2-klein-9b-true_v2 (wikeeyang undistilled fine-tune,
@@ -8386,80 +8253,6 @@ fn krea_2_turbo_bf16_real_weights_loads_and_generates() {
     )
     .unwrap();
     eprintln!("[krea-bf16] GENERATED {w}x{h}");
-    assert_eq!((w, h), (size, size));
-    assert_eq!(pixels.len(), (size * size * 3) as usize);
-    assert!(
-        pixels.windows(2).any(|p| p[0] != p[1]),
-        "render is flat (degenerate)"
-    );
-}
-
-/// Q4 tier verify (sc-8513, epic 8506): load the packed Boogu `<variant>-q4/` tier (`Quant::Q4`) — the
-/// new lighter quant that joins the shipped Q8 + dense bf16 — through the real worker `boogu_image`
-/// engine path and render. The `assemble_quantized_snapshot` builder packs transformer + mllm to Q4
-/// (vae dense); this proves the packed turnkey loads + generates. Point `SCENEWORKS_BOOGU_Q4_DIR` at a
-/// built/downloaded `<variant>-q4/` dir; `SCENEWORKS_BOOGU_ENGINE` selects the variant
-/// (`boogu_image` default / `boogu_image_turbo` / `boogu_image_edit`). Run:
-/// `SCENEWORKS_BOOGU_Q4_DIR=… cargo test -p sceneworks-worker --release --lib -- --ignored boogu_q4_real_weights`.
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "needs a built/downloaded Boogu q4 tier + a high-memory Metal device"]
-fn boogu_q4_real_weights_loads_and_generates() {
-    let dir = std::path::PathBuf::from(
-        std::env::var("SCENEWORKS_BOOGU_Q4_DIR")
-            .expect("set SCENEWORKS_BOOGU_Q4_DIR to a built/downloaded boogu <variant>-q4 dir"),
-    );
-    let engine =
-        std::env::var("SCENEWORKS_BOOGU_ENGINE").unwrap_or_else(|_| "boogu_image".to_owned());
-    let size: u32 = std::env::var("SCENEWORKS_BOOGU_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
-    eprintln!(
-        "[boogu-q4] loading {engine} packed Q4 from {}…",
-        dir.display()
-    );
-    let generator = load_engine(&engine, dir, Some(gen_core::Quant::Q4), Vec::new(), None).unwrap();
-    eprintln!("[boogu-q4] LOADED — generating {size}²…");
-    let cancel = gen_core::CancelFlag::new();
-    // The `edit` variant is an instruction-edit engine — it requires a source reference (sc-7645,
-    // passed as a single `multi_references` image). base/turbo are plain t2i (`&[]`).
-    let edit_refs: Vec<Image> = if engine.contains("edit") {
-        vec![synthetic_rgb(size, size, |x, y| {
-            [(x * 255 / size) as u8, (y * 255 / size) as u8, 128]
-        })]
-    } else {
-        Vec::new()
-    };
-    let (w, h, pixels) = generate_one(
-        generator.as_ref(),
-        "a serene mountain lake at dawn",
-        size,
-        size,
-        42,
-        8,
-        None,
-        None,
-        None,
-        &edit_refs,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-        &PromptEnhance::default(),
-        gen_core::PromptEnhancementSink::default(),
-        gen_core::PreviewSink::default(),
-        &cancel,
-        &mut |_| {},
-    )
-    .unwrap();
-    eprintln!("[boogu-q4] GENERATED {w}x{h}");
     assert_eq!((w, h), (size, size));
     assert_eq!(pixels.len(), (size * size * 3) as usize);
     assert!(
@@ -11665,100 +11458,6 @@ fn build_edit_conditioning_single_vs_multi() {
     }
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn boogu_edit_reference_ids_prefers_plural_then_source() {
-    // sc-7645: the multi-image picker's plural `referenceAssetIds` wins, in order (over `sourceAssetId`).
-    assert_eq!(
-        boogu_edit_reference_ids(&request(json!({
-            "projectId": "p", "mode": "edit_image",
-            "referenceAssetIds": ["a", "b", "c"], "sourceAssetId": "ignored"
-        }))),
-        vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
-    );
-    // With no plural list it falls back to the single Image-Edit `sourceAssetId`.
-    assert_eq!(
-        boogu_edit_reference_ids(&request(json!({
-            "projectId": "p", "mode": "edit_image", "sourceAssetId": "src_1"
-        }))),
-        vec!["src_1".to_owned()]
-    );
-    // Capped at BOOGU_MAX_EDIT_REFERENCES (5) — a 7-image pick keeps the first five.
-    assert_eq!(
-        boogu_edit_reference_ids(&request(json!({
-            "projectId": "p", "mode": "edit_image",
-            "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g"]
-        })))
-        .len(),
-        BOOGU_MAX_EDIT_REFERENCES
-    );
-    // Neither a plural list nor a source → empty (the generic lane runs plain txt2img).
-    assert!(boogu_edit_reference_ids(&request(json!({ "projectId": "p" }))).is_empty());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn mage_edit_reference_ids_keeps_source_first_then_ordered_optional_references() {
-    assert_eq!(
-        mage_edit_reference_ids(&request(json!({
-            "projectId": "p",
-            "mode": "edit_image",
-            "sourceAssetId": "source",
-            "referenceAssetIds": ["reference-b", "reference-a"]
-        }))),
-        vec![
-            "source".to_owned(),
-            "reference-b".to_owned(),
-            "reference-a".to_owned()
-        ]
-    );
-    assert!(mage_edit_reference_ids(&request(json!({
-        "projectId": "p",
-        "mode": "edit_image",
-        "referenceAssetIds": ["reference-only"]
-    })))
-    .is_empty());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn mage_edit_request_shape_reaches_each_registered_engine() {
-    for model in [
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-    ] {
-        let request = request(json!({
-            "projectId": "p",
-            "model": model,
-            "mode": "edit_image",
-            "prompt": "Replace the background with a field of sunflowers",
-            "sourceAssetId": "source",
-            "referenceAssetIds": ["reference-b", "reference-a"]
-        }));
-        assert!(is_mage_edit_model(&request.model));
-        assert_eq!(
-            crate::engines::mlx_model(model)
-                .expect("registered Mage Edit engine")
-                .engine_id(),
-            model
-        );
-        assert_eq!(
-            mage_edit_reference_ids(&request),
-            ["source", "reference-b", "reference-a"]
-        );
-        let image = gen_core::Image {
-            width: 8,
-            height: 8,
-            pixels: stub_rgb8(8, 8, 1),
-        };
-        match build_reference_conditioning(&[image.clone(), image]).as_slice() {
-            [gen_core::Conditioning::MultiReference { images }] => assert_eq!(images.len(), 2),
-            other => panic!("{model}: expected MultiReference request shape, got {other:?}"),
-        }
-    }
-}
-
 /// sc-24110 — the ORDER of the Qwen-Image 2.1 conditioning list, worker side.
 ///
 /// Not cosmetic and not bookkeeping: upstream numbers the images in the prompt template
@@ -13060,7 +12759,7 @@ async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_can
 
 #[cfg(target_os = "macos")]
 #[test]
-fn boogu_build_reference_conditioning_single_vs_multi() {
+fn build_reference_conditioning_preserves_single_and_multi_reference() {
     // sc-7645: one reference stays a `Reference` (byte-identical to the single-reference edit path);
     // 2–5 become a single `MultiReference` (the DiT packs all of them). Empty → no conditioning.
     let img = |seed| gen_core::Image {
@@ -16341,11 +16040,6 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             "candle_krea_imported",
         ),
         (
-            CandleImageRoute::MageFinetuned,
-            "finetune_mage",
-            "candle_mage_finetuned",
-        ),
-        (
             CandleImageRoute::SdxlImported,
             "external_sdxl",
             "candle_sdxl_imported",
@@ -17905,139 +17599,6 @@ fn ideogram_tier_subdir_maps_q8_optin() {
     assert_eq!(ideogram_tier_subdir(Some(-1)), None);
 }
 
-/// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
-/// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
-/// default). Turbo retains its CFG-off default zero and accepts explicit guidance. Runs on Mac without weights.
-#[cfg(target_os = "macos")]
-#[test]
-fn boogu_engine_defaults_and_quant_resolution() {
-    let base = mlx_model("boogu_image").expect("boogu_image in MODEL_TABLE");
-    assert_eq!(base.engine_id(), "boogu_image");
-    assert_eq!(base.adapter_label(), "mlx_boogu");
-    assert_eq!(base.default_steps(), 50);
-    let turbo = mlx_model("boogu_image_turbo").expect("boogu_image_turbo in MODEL_TABLE");
-    assert_eq!(turbo.engine_id(), "boogu_image_turbo");
-    assert_eq!(turbo.default_steps(), 4);
-    let edit = mlx_model("boogu_image_edit").expect("boogu_image_edit in MODEL_TABLE");
-    assert_eq!(edit.engine_id(), "boogu_image_edit");
-
-    let req = |model: &str, advanced: Value| {
-        request(json!({
-            "projectId": "p", "model": model, "prompt": "p", "advanced": advanced,
-            "modelManifestEntry": { "mlx": { "quantize": 8 } },
-        }))
-    };
-    // Base retains guidance 4.0; Turbo retains its CFG-off default zero.
-    assert_eq!(
-        resolve_guidance(&req("boogu_image", json!({})), &base),
-        Some(4.0)
-    );
-    assert_eq!(
-        resolve_guidance(&req("boogu_image_turbo", json!({})), &turbo),
-        Some(0.0)
-    );
-    assert_eq!(
-        resolve_guidance(
-            &req("boogu_image_turbo", json!({ "guidanceScale": 1.5 })),
-            &turbo
-        ),
-        Some(1.5)
-    );
-    // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
-    assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({})), None),
-        (Some(Quant::Q8), Some(8))
-    ));
-    assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 4 })), None),
-        (Some(Quant::Q4), Some(4))
-    ));
-    assert!(matches!(
-        resolve_quant(&req("boogu_image", json!({ "mlxQuantize": 0 })), None),
-        (None, None)
-    ));
-}
-
-/// `boogu_model_subdir` maps each id to its variant folder (`base`/`turbo`/`edit`), picks the
-/// pre-packed Q8 `<variant>/` by default, the packed `<variant>-q4/` for `mlxQuantize 1..=4`, and the
-/// dense `<variant>-bf16/` for `mlxQuantize <= 0` — each only when present, else falling back through
-/// Q8 → q4 → bf16 → root, so a request for a not-yet-downloaded tier resolves the Q8 default rather
-/// than half-loading (sc-8513). Consistent with krea/ideogram (`<=4`→q4, `<=0`→bf16).
-#[cfg(target_os = "macos")]
-#[test]
-fn boogu_subdir_prefers_q8_and_opts_into_q4_or_bf16() {
-    let root = tempfile::tempdir().unwrap();
-    let touch = |sub: &str| {
-        let dir = root.path().join(sub).join("transformer");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), b"stub").unwrap();
-    };
-    let req = |model: &str, advanced: Value| {
-        request(json!({ "projectId": "p", "model": model, "prompt": "p", "advanced": advanced }))
-    };
-    // Variant mapping + Q8 default.
-    touch("base");
-    touch("turbo");
-    touch("edit");
-    assert_eq!(
-        boogu_model_subdir(root.path(), &req("boogu_image", json!({}))),
-        root.path().join("base")
-    );
-    assert_eq!(
-        boogu_model_subdir(root.path(), &req("boogu_image_turbo", json!({}))),
-        root.path().join("turbo")
-    );
-    assert_eq!(
-        boogu_model_subdir(root.path(), &req("boogu_image_edit", json!({}))),
-        root.path().join("edit")
-    );
-    // q4/bf16 opt-ins fall back to the Q8 folder when their subfolder is absent (not yet downloaded).
-    assert_eq!(
-        boogu_model_subdir(
-            root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 4 }))
-        ),
-        root.path().join("base"),
-        "q4 opt-in falls back to Q8 when base-q4 absent",
-    );
-    assert_eq!(
-        boogu_model_subdir(
-            root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 0 }))
-        ),
-        root.path().join("base"),
-        "bf16 opt-in falls back to Q8 when base-bf16 absent",
-    );
-    // With the tier folders present: `1..=4` → q4, `<=0` → bf16; Q8 stays the default.
-    touch("base-q4");
-    touch("base-bf16");
-    assert_eq!(
-        boogu_model_subdir(
-            root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 4 }))
-        ),
-        root.path().join("base-q4")
-    );
-    assert_eq!(
-        boogu_model_subdir(
-            root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 2 }))
-        ),
-        root.path().join("base-q4")
-    );
-    assert_eq!(
-        boogu_model_subdir(
-            root.path(),
-            &req("boogu_image", json!({ "mlxQuantize": 0 }))
-        ),
-        root.path().join("base-bf16")
-    );
-    assert_eq!(
-        boogu_model_subdir(root.path(), &req("boogu_image", json!({}))),
-        root.path().join("base")
-    );
-}
-
 /// Raw-settings lineage: the Ideogram recipe records the real-inference flag, repo, resolved
 /// steps/guidance/quant, AND the sc-6147 structured-prompt blob passes through verbatim
 /// (`mlx_raw_settings` clones `advanced`, so the asset recipe can rehydrate the builder).
@@ -18520,225 +18081,6 @@ fn ideogram_4_real_weights_edit_img2img_and_inpaint() {
 // `boogu_subdir_*`); here is the S5 (sc-6402) real-weight #[ignore] smoke driving all three ids
 // (Base / Turbo / Edit) through the registry load seam against the published turnkey.
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Resolve the cached Boogu turnkey snapshot ROOT (the dir holding the `base`/`turbo`/`edit` variant
-/// subfolders) for the real-weight smoke: env override `SCENEWORKS_MLX_BOOGU_DIR` → else the cached
-/// `SceneWorks/boogu-image-mlx` snapshot. `None` ⇒ skip (the ~23 GB/variant weights live outside CI).
-/// A root "counts" once any one variant's transformer is present, so a partial download (e.g. only
-/// `base/` pulled so far) still resolves and the smoke validates whatever is on disk.
-#[cfg(target_os = "macos")]
-fn boogu_dir() -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-    let has_any_variant = |root: &Path| {
-        ["base", "turbo", "edit"].iter().any(|v| {
-            root.join(v)
-                .join("transformer/diffusion_pytorch_model.safetensors")
-                .is_file()
-        })
-    };
-    if let Ok(dir) = std::env::var("SCENEWORKS_MLX_BOOGU_DIR") {
-        let path = PathBuf::from(dir.trim());
-        if has_any_variant(&path) {
-            return Some(path);
-        }
-    }
-    let snaps =
-        dirs_home().join(".cache/huggingface/hub/models--SceneWorks--boogu-image-mlx/snapshots");
-    std::fs::read_dir(&snaps)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|root| has_any_variant(root))
-}
-
-/// Real-weights smoke (sc-6402, epic 6387): drive all three Boogu ids — Base (T2I true-CFG), Turbo
-/// (DMD few-step, CFG-free) and Edit (instruction edit over a source Reference) — through the SAME
-/// `boogu_model_subdir` → `load_engine` → `crate::inference_runtime::load("boogu_*")` seam the
-/// worker uses, proving the runtime catalog includes Boogu and the production quant / guidance /
-/// edit-conditioning resolution is consumed end-to-end. Each variant loads with the resolved Q8 spec
-/// over its packed `<variant>/` subdir, generates once, asserts a non-constant RGB8 image of the
-/// requested size with denoise progress, then DROPS the generator before the next loads (one ~23 GB
-/// model resident at a time — peak footprint is per-variant, well within `minMemoryGb: 64`). Variants
-/// not yet downloaded are skipped + reported; at least one must be present. Steps default low (env
-/// `BOOGU_SMOKE_STEPS` / `BOOGU_SMOKE_TURBO_STEPS` / `BOOGU_SMOKE_RES`): this checks mechanics, not
-/// quality (quality is an eyeball pass on the saved render). Run on demand:
-/// `cargo test -p sceneworks-worker --lib -- --ignored boogu_real_weights --nocapture`.
-#[cfg(target_os = "macos")]
-#[ignore = "loads the real Boogu turnkey (~23 GB/variant); run manually on a Mac with SceneWorks/boogu-image-mlx cached"]
-#[test]
-fn boogu_real_weights_generates_base_turbo_edit() {
-    let Some(root) = boogu_dir() else {
-        eprintln!(
-            "skipping boogu_real_weights: no SceneWorks/boogu-image-mlx snapshot found \
-             (set SCENEWORKS_MLX_BOOGU_DIR or download the turnkey)"
-        );
-        return;
-    };
-    let env_u32 = |key: &str, default: u32| {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(default)
-    };
-    let res = env_u32("BOOGU_SMOKE_RES", 512);
-    let base_steps = env_u32("BOOGU_SMOKE_STEPS", 8);
-    let turbo_steps = env_u32("BOOGU_SMOKE_TURBO_STEPS", 4);
-
-    let cancel = gen_core::CancelFlag::new();
-    let enhance = PromptEnhance::default();
-
-    // Edit source, pre-sized to res×res so it satisfies the engine's multiple-of-16 guard (the
-    // worker's `resolve_boogu_edit` fits the real source the same way). With `BOOGU_SMOKE_EDIT_SRC`
-    // set to a PNG it loads + resizes that image — best for the quality eyeball (feed the Base render
-    // → a clearly judgeable instruction edit); otherwise a synthetic diagonal gradient (mechanics).
-    let source = match std::env::var("BOOGU_SMOKE_EDIT_SRC") {
-        Ok(path) if !path.trim().is_empty() => {
-            let decoded = image::open(path.trim())
-                .unwrap_or_else(|e| panic!("open BOOGU_SMOKE_EDIT_SRC {}: {e}", path.trim()))
-                .to_rgb8();
-            let fitted =
-                image::imageops::resize(&decoded, res, res, image::imageops::FilterType::Lanczos3);
-            Image {
-                width: res,
-                height: res,
-                pixels: fitted.into_raw(),
-            }
-        }
-        _ => Image {
-            width: res,
-            height: res,
-            pixels: (0..res * res)
-                .flat_map(|i| {
-                    [
-                        (255 * (i % res) / res) as u8,
-                        (255 * (i / res) / res) as u8,
-                        160u8,
-                    ]
-                })
-                .collect(),
-        },
-    };
-    let edit_ref = (source, 1.0f32);
-
-    // (id, steps, prompt). Base/Turbo are T2I; Edit additionally takes the source Reference (resolved
-    // per-id below — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT latent).
-    let cases = [
-        (
-            "boogu_image",
-            base_steps,
-            "a red fox sitting in a snowy forest at golden hour",
-        ),
-        (
-            "boogu_image_turbo",
-            turbo_steps,
-            "a red fox sitting in a snowy forest at golden hour",
-        ),
-        (
-            "boogu_image_edit",
-            base_steps,
-            "make it night with a full moon and cool blue light",
-        ),
-    ];
-
-    let mut ran = 0u32;
-    for (id, steps, prompt) in cases {
-        // Only the Edit variant consumes the source Reference; Base/Turbo are pure T2I.
-        let reference = (id == "boogu_image_edit").then_some(&edit_ref);
-        let req = request(json!({
-            "projectId": "p", "model": id, "prompt": "p", "advanced": {},
-            "modelManifestEntry": { "mlx": { "quantize": 8 } },
-        }));
-        let dir = boogu_model_subdir(&root, &req);
-        if !dir
-            .join("transformer/diffusion_pytorch_model.safetensors")
-            .is_file()
-        {
-            eprintln!(
-                "skipping {id}: variant dir {} not downloaded",
-                dir.display()
-            );
-            continue;
-        }
-        let model = mlx_model(id).unwrap();
-        // The exact production spec: Q8 over the packed `<variant>/` weights, with the resolved
-        // guidance (4.0 Base/Edit, None Turbo) + true_cfg (None for all boogu — Base/Edit forward
-        // CFG via the `guidance` scalar; Turbo is CFG-free).
-        let (quant, _bits) = resolve_quant(&req, None);
-        let guidance = resolve_guidance(&req, &model);
-        let true_cfg = resolve_true_cfg(&req, &model);
-
-        let generator = load_engine(id, dir, quant, Vec::new(), None)
-            .unwrap_or_else(|error| panic!("{id} load failed: {error}"));
-        let mut steps_seen = 0u32;
-        let (w, h, pixels) = generate_one(
-            generator.as_ref(),
-            prompt,
-            res,
-            res,
-            42,
-            steps,
-            guidance,
-            None,
-            reference,
-            &[],
-            None,
-            true_cfg,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-            &enhance,
-            gen_core::PromptEnhancementSink::default(),
-            gen_core::PreviewSink::default(),
-            &cancel,
-            &mut |p| {
-                if let gen_core::Progress::Step { current, .. } = p {
-                    steps_seen = steps_seen.max(current);
-                }
-            },
-        )
-        .unwrap_or_else(|error| panic!("boogu {id} generation failed: {error}"));
-        assert_eq!(
-            pixels.len(),
-            (w * h * 3) as usize,
-            "{id}: RGB8-sized buffer"
-        );
-        assert!(
-            w == res && h == res,
-            "{id}: output matches requested {res}²"
-        );
-        assert!(steps_seen >= 1, "{id}: expected denoise step progress");
-        assert!(
-            pixels.windows(2).any(|x| x[0] != x[1]),
-            "{id}: non-constant image"
-        );
-        eprintln!("boogu {id}: {w}x{h} RGB8, {steps_seen} steps observed");
-        // Opt-in PNG dump for the eyeball/quality pass (`BOOGU_SMOKE_OUT=<dir>`): mechanics are
-        // asserted above; a human reviews the saved render for actual quality.
-        if let Ok(out_dir) = std::env::var("BOOGU_SMOKE_OUT") {
-            let out_dir = out_dir.trim();
-            std::fs::create_dir_all(out_dir).unwrap_or_else(|e| panic!("create {out_dir}: {e}"));
-            let path = std::path::Path::new(out_dir).join(format!("{id}.png"));
-            image::RgbImage::from_raw(w, h, pixels)
-                .expect("RGB8 buffer → RgbImage")
-                .save(&path)
-                .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
-            eprintln!("  wrote {}", path.display());
-        }
-        ran += 1;
-        // generator dropped here → frees the ~23 GB model before the next variant loads.
-    }
-    assert!(
-        ran >= 1,
-        "expected at least one boogu variant present under {}",
-        root.display()
-    );
-    eprintln!("boogu real-weights smoke: {ran}/3 variants validated");
-}
 
 // ---------------------------------------------------------------------------
 // Shared strict-control driver (sc-8243): the `(engine_id, control_repo, supported_kinds)` single
@@ -21189,21 +20531,9 @@ fn instantid_revisions_are_pinned_commits_not_main() {
 #[cfg(native_lane)]
 #[test]
 fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
-    assert_pinned_revision("BOOGU_MLX_TURNKEY_REVISION", BOOGU_MLX_TURNKEY_REVISION);
     assert_pinned_revision(
         "IDEOGRAM_MLX_TURNKEY_REVISION",
         IDEOGRAM_MLX_TURNKEY_REVISION,
-    );
-
-    let boogu = mlx_model("boogu_image").expect("Boogu engine");
-    assert_eq!(boogu.default_repo(), "SceneWorks/boogu-image-mlx");
-    assert_eq!(
-        turnkey_tier_revision(
-            boogu.default_repo(),
-            boogu.default_repo(),
-            BOOGU_MLX_TURNKEY_REVISION,
-        ),
-        BOOGU_MLX_TURNKEY_REVISION
     );
 
     let ideogram = mlx_model("ideogram_4").expect("Ideogram engine");
@@ -21217,14 +20547,6 @@ fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
         IDEOGRAM_MLX_TURNKEY_REVISION
     );
 
-    assert_eq!(
-        turnkey_tier_revision(
-            "example/custom-boogu",
-            boogu.default_repo(),
-            BOOGU_MLX_TURNKEY_REVISION,
-        ),
-        "main"
-    );
     assert_eq!(
         turnkey_tier_revision(
             "example/custom-ideogram",
@@ -21245,18 +20567,11 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
     let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
-    for (repo, revision, relative) in [
-        (
-            "SceneWorks/boogu-image-mlx",
-            BOOGU_MLX_TURNKEY_REVISION,
-            "base-q4/transformer/diffusion_pytorch_model.safetensors",
-        ),
-        (
-            "SceneWorks/ideogram-4-mlx",
-            IDEOGRAM_MLX_TURNKEY_REVISION,
-            "q8/transformer/model.safetensors",
-        ),
-    ] {
+    for (repo, revision, relative) in [(
+        "SceneWorks/ideogram-4-mlx",
+        IDEOGRAM_MLX_TURNKEY_REVISION,
+        "q8/transformer/model.safetensors",
+    )] {
         let cache = hub.join(format!("models--{}", repo.replace('/', "--")));
         std::fs::create_dir_all(cache.join("refs")).unwrap();
         std::fs::write(cache.join("refs/main"), "stale-main").unwrap();
@@ -21266,20 +20581,6 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
             std::fs::write(file, contents).unwrap();
         }
     }
-
-    let boogu = request(json!({
-        "projectId": "p", "model": "boogu_image",
-        "advanced": {"mlxQuantize": 4},
-        "modelManifestEntry": {"repo": "SceneWorks/boogu-image-mlx"}
-    }));
-    assert_eq!(
-        resolve_weights_dir(&boogu, &settings).unwrap(),
-        Some(
-            hub.join("models--SceneWorks--boogu-image-mlx/snapshots")
-                .join(BOOGU_MLX_TURNKEY_REVISION)
-                .join("base-q4")
-        )
-    );
 
     let ideogram = request(json!({
         "projectId": "p", "model": "ideogram_4",
@@ -21295,20 +20596,20 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
         )
     );
 
-    let override_repo = "example/custom-boogu";
-    let override_cache = hub.join("models--example--custom-boogu");
+    let override_repo = "example/custom-ideogram";
+    let override_cache = hub.join("models--example--custom-ideogram");
     let override_revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(override_cache.join("refs")).unwrap();
     std::fs::write(override_cache.join("refs/main"), override_revision).unwrap();
     let override_file = override_cache
         .join("snapshots")
         .join(override_revision)
-        .join("base-q4/transformer")
-        .join("diffusion_pytorch_model.safetensors");
+        .join("q4/transformer")
+        .join("model.safetensors");
     std::fs::create_dir_all(override_file.parent().unwrap()).unwrap();
     std::fs::write(override_file, b"override").unwrap();
     let override_request = request(json!({
-        "projectId": "p", "model": "boogu_image",
+        "projectId": "p", "model": "ideogram_4",
         "advanced": {"mlxQuantize": 4},
         "modelManifestEntry": {"repo": override_repo}
     }));
@@ -21318,7 +20619,7 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
             override_cache
                 .join("snapshots")
                 .join(override_revision)
-                .join("base-q4")
+                .join("q4")
         )
     );
 }
@@ -23739,387 +23040,6 @@ fn krea_imported_control_mlx_gpu_smoke() {
     eprintln!("[DONE] KreaImportedControl lane validated on real weights.");
 }
 
-/// Settings + a complete fine-tuned Mage transformer component dir under the app data root
-/// (sc-15036): the `config.json` + `diffusion_pytorch_model.safetensors` pair the trainer's
-/// `save_full_checkpoint` writes into `<data>/models/finetunes/<id>`.
-#[cfg(native_lane)]
-fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::PathBuf) {
-    let checkpoint = dir
-        .join("models")
-        .join("finetunes")
-        .join("finetune_9f3c0a11");
-    std::fs::create_dir_all(&checkpoint).unwrap();
-    std::fs::write(
-        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
-        br#"{"_class_name":"MageFlow"}"#,
-    )
-    .unwrap();
-    std::fs::write(
-        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
-        b"dit",
-    )
-    .unwrap();
-    let mut settings = crate::test_env::offline_settings();
-    settings.data_dir = dir.to_path_buf();
-    (settings, checkpoint)
-}
-
-/// sc-15036 — `resolve_mage_finetuned_transformer` claims ONLY a non-builtin `mage-flow`-family
-/// entry whose recorded path is a COMPLETE transformer component dir.
-///
-/// Discriminating on each of the four conditions independently: a builtin Mage id must keep its
-/// tiered-snapshot path, a wrong family is not this lane's job, and a TORN checkpoint (either
-/// component file missing) is refused here rather than failing deep inside the load.
-#[cfg(native_lane)]
-#[test]
-fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpoint() {
-    let dir = tempfile::tempdir().unwrap();
-    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
-    let path_str = checkpoint.to_str().unwrap();
-
-    let finetune = request(json!({
-        "projectId": "p", "model": "finetune_9f3c0a11",
-        "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
-    }));
-    let prepared = resolve_mage_finetuned_transformer(&finetune, &settings)
-        .expect("resolve ok")
-        .expect("a complete fine-tuned checkpoint resolves");
-    assert_eq!(
-        prepared.directory,
-        std::fs::canonicalize(&checkpoint).unwrap_or(checkpoint.clone())
-    );
-    assert_eq!(
-        prepared.config.loader_path(),
-        prepared
-            .directory
-            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)
-    );
-    assert_eq!(
-        prepared.weights.loader_path(),
-        prepared
-            .directory
-            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)
-    );
-
-    // A BUILTIN Mage id keeps loading from its own per-tier snapshot through the generic lane.
-    assert!(
-        mlx_model("mage_flow_base").is_some(),
-        "precondition: mage_flow_base is a builtin native engine"
-    );
-    let builtin = request(json!({
-        "projectId": "p", "model": "mage_flow_base",
-        "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
-    }));
-    assert_eq!(
-        resolve_mage_finetuned_transformer(&builtin, &settings).expect("resolve ok"),
-        None,
-        "a builtin Mage id must NOT take the fine-tuned path"
-    );
-
-    // Wrong family → not this lane.
-    let wrong_family = request(json!({
-        "projectId": "p", "model": "some_import",
-        "modelManifestEntry": { "family": "krea_2", "paths": { "model": path_str } }
-    }));
-    assert_eq!(
-        resolve_mage_finetuned_transformer(&wrong_family, &settings).expect("resolve ok"),
-        None
-    );
-
-    // A TORN checkpoint — weights present, architecture config missing — is refused here.
-    let torn = dir.path().join("models").join("finetunes").join("torn");
-    std::fs::create_dir_all(&torn).unwrap();
-    std::fs::write(
-        torn.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
-        b"dit",
-    )
-    .unwrap();
-    let torn_job = request(json!({
-        "projectId": "p", "model": "finetune_torn",
-        "modelManifestEntry": { "family": "mage-flow", "paths": { "model": torn.to_str().unwrap() } }
-    }));
-    assert_eq!(
-        resolve_mage_finetuned_transformer(&torn_job, &settings).expect("resolve ok"),
-        None,
-        "a torn checkpoint must not be claimed — it cannot load"
-    );
-}
-
-/// sc-15036 — the claim gate and the route. `mage_finetuned_available` must admit plain txt2img and
-/// refuse every shape the fine-tuned lane cannot serve, mirroring the scheduler's `mage-flow` arm
-/// so the two agree; and `resolve_image_route` must actually reach `ImageRoute::MageFinetuned`
-/// rather than falling through to the stub (the fine-tune's id is in no `MODEL_TABLE`, so nothing
-/// else claims it).
-///
-/// Discriminating: one entry, one flip of one field per case.
-///
-/// macOS only, and that is a statement about the ENGINES, not about this lane's code. Reachability
-/// here comes from the linked registry, not from a static per-backend flag: `mlx-gen-mage` calls
-/// `register_imported_model` for `mage-flow`, and `candle-gen-mage` registers none at all, so on
-/// candle `prepare_mage_finetuned_transformer` resolves no descriptor and the route correctly never
-/// fires. Asserting the claim on candle would be asserting a declaration the engine does not back.
-/// If candle-gen-mage ever registers the imported model, widen this cfg back to both backends.
-#[cfg(target_os = "macos")]
-#[test]
-fn mage_finetuned_lane_claims_txt2img_and_is_reachable_from_the_router() {
-    let dir = tempfile::tempdir().unwrap();
-    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
-    let path_str = checkpoint.to_str().unwrap().to_owned();
-    let job = |extra: serde_json::Value| {
-        let mut value = json!({
-            "projectId": "p", "model": "finetune_9f3c0a11",
-            "modelManifestEntry": { "family": "mage-flow", "paths": { "model": path_str } }
-        });
-        value
-            .as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
-        request(value)
-    };
-
-    let t2i = job(json!({ "mode": "text_to_image" }));
-    assert!(
-        mage_finetuned_available(&t2i, &settings),
-        "plain txt2img is the shape this lane serves"
-    );
-    #[cfg(target_os = "macos")]
-    assert_eq!(
-        resolve_image_route(&t2i, &settings),
-        Some(ImageRoute::MageFinetuned),
-        "the MLX router must reach the fine-tuned lane"
-    );
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    assert_eq!(
-        resolve_candle_image_route(&t2i, &settings),
-        Some(CandleImageRoute::MageFinetuned),
-        "the Candle router must reach the fine-tuned lane"
-    );
-
-    for (label, extra) in [
-        (
-            "edit",
-            json!({ "mode": "edit_image", "sourceAssetId": "s" }),
-        ),
-        ("reference", json!({ "referenceAssetId": "a" })),
-        ("source", json!({ "sourceAssetId": "a" })),
-        (
-            "lora",
-            json!({ "loras": [{ "id": "l", "path": "/l.safetensors" }] }),
-        ),
-        (
-            "pose",
-            json!({ "advanced": { "poses": [{ "assetId": "a" }] } }),
-        ),
-        ("phases", json!({ "advanced": { "phases": [{}] } })),
-        (
-            "control image",
-            json!({ "advanced": { "controlImage": "control-map" } }),
-        ),
-        (
-            "control mode",
-            json!({ "advanced": { "controlMode": "pose" } }),
-        ),
-        ("mask", json!({ "maskAssetId": "m" })),
-        ("character", json!({ "characterId": "c" })),
-        ("look", json!({ "characterLookId": "l" })),
-    ] {
-        let shaped = job(extra);
-        assert!(
-            !mage_finetuned_available(&shaped, &settings),
-            "{label} must not be claimed by the fine-tuned lane — it would be silently dropped"
-        );
-        #[cfg(target_os = "macos")]
-        assert_ne!(
-            resolve_image_route(&shaped, &settings),
-            Some(ImageRoute::MageFinetuned),
-            "{label} must not route to the fine-tuned lane"
-        );
-        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        assert_ne!(
-            resolve_candle_image_route(&shaped, &settings),
-            Some(CandleImageRoute::MageFinetuned),
-            "{label} must not route to the Candle fine-tuned lane"
-        );
-    }
-}
-
-/// Route preparation owns the exact fine-tuned transformer config/weights seals across the async
-/// worker preamble. Replacing either file after selection must invalidate the retained seal rather
-/// than letting dispatch silently re-resolve and load different bytes.
-#[cfg(target_os = "macos")]
-#[test]
-fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
-    let dir = tempfile::tempdir().expect("data root");
-    let (settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
-    let selected = request(json!({
-        "projectId": "p",
-        "model": "finetune_9f3c0a11",
-        "modelManifestEntry": {
-            "family": "mage-flow",
-            "paths": { "model": checkpoint.display().to_string() }
-        }
-    }));
-    let prepared = prepare_image_route(&execution(&selected), &settings)
-        .expect("route preparation succeeds")
-        .expect("Mage fine-tuned route selected");
-    assert_eq!(prepared.kind(), ImageRoute::MageFinetuned);
-
-    std::thread::yield_now();
-    let weights =
-        checkpoint.join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE);
-    std::fs::write(&weights, b"replacement-transformer-is-different")
-        .expect("replace selected weights");
-
-    let PreparedImageRoute::MageFinetuned(transformer) = prepared else {
-        panic!("prepared route lost its Mage transformer")
-    };
-    let sealed_path = transformer.weights.loader_path().to_path_buf();
-    let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.directory));
-    let error = crate::paths::prepare_load_spec_with_file_pins(
-        &mut spec,
-        [transformer.config, transformer.weights],
-        "test Mage fine-tuned route",
-    )
-    .expect_err("dispatch rejects a retargeted prepared transformer");
-    assert_route_retarget_artifact_seal_mismatch(error, "test Mage fine-tuned route", &sealed_path);
-}
-
-/// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
-/// surface. Pin the actual per-image request builder so accepted LAN/API input cannot be recorded in
-/// asset provenance while disappearing before provider dispatch.
-#[cfg(native_lane)]
-#[test]
-fn mage_finetuned_generation_request_threads_negative_prompt() {
-    let cancel = CancelFlag::new();
-    let request = mage_finetuned_generation_request(
-        "portrait".to_owned(),
-        Some("blurry, watermark".to_owned()),
-        1024,
-        1024,
-        42,
-        28,
-        4.5,
-        gen_core::PreviewSink::default(),
-        &cancel,
-    );
-    assert_eq!(
-        request.negative_prompt.as_deref(),
-        Some("blurry, watermark")
-    );
-    assert_eq!(request.guidance, Some(4.5));
-    assert_eq!(request.seed, Some(42));
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn mage_finetuned_memory_shape_requires_exact_source_proof() {
-    let plain = LoadSpec::new(WeightsSource::Dir("finetuned-transformer".into()))
-        .with_resolved_route(MAGE_FINETUNED_MEMORY_ROUTE);
-    let deferred = mage_finetuned_memory_load_shape_with(plain.clone(), |candidate| {
-        candidate.load_shape == gen_core::LoadShape::DeferredMaterialization
-            && candidate.quantize.is_none()
-            && candidate.adapters.is_empty()
-    });
-    assert_eq!(
-        deferred.load_shape,
-        gen_core::LoadShape::DeferredMaterialization
-    );
-    assert_eq!(
-        deferred.load_shape_declaration_result,
-        gen_core::LoadShapeDeclarationResult::Applied,
-    );
-
-    for eager in [
-        plain.clone().with_quant(gen_core::Quant::Q4),
-        plain.clone().with_quant(gen_core::Quant::Q8),
-        plain.with_adapters(vec![gen_core::AdapterSpec::new(
-            "adapter.safetensors".into(),
-            1.0,
-            gen_core::AdapterKind::Lora,
-        )]),
-    ] {
-        let shaped = mage_finetuned_memory_load_shape_with(eager, |candidate| {
-            candidate.quantize.is_none() && candidate.adapters.is_empty()
-        });
-        assert_eq!(shaped.load_shape, gen_core::LoadShape::EagerMaterialization);
-        assert_eq!(
-            shaped.load_shape_declaration_result,
-            gen_core::LoadShapeDeclarationResult::NotEvaluated,
-            "unproven Transformer must stay Missing without suppressing provider-owned lower rungs",
-        );
-    }
-}
-
-#[test]
-fn mage_finetuned_stream_uses_shared_admission_scope_and_lifecycle() {
-    // Architecture tripwire retained: constructing this production stream loads a Mage provider;
-    // the non-runtime invariant is that the route reaches the shared request-scope lifecycle.
-    let source = include_str!("mage_finetuned.rs");
-    for marker in [
-        "start_cached_gen_stream_with_request_state(",
-        "crate::mlx_fit_gate::evaluate_request(",
-        "crate::memory_strategy::generate_with_scope(",
-        "apply_request_gpu_memory_limit",
-    ] {
-        assert!(
-            source
-                .lines()
-                .any(|line| { line.contains(marker) && !line.trim_start().starts_with("//") }),
-            "Mage fine-tuned route lost request-scoped memory seam {marker}",
-        );
-    }
-    assert!(source.contains("MAGE_FINETUNED_MEMORY_ROUTE: &str = \"mage_finetuned\""));
-}
-
-/// sc-15036 — the app must link the PINNED inference crate's `load_finetuned`, and that entrypoint
-/// must be the identity-guard-free one.
-///
-/// Compiling is not proof of either. This calls the real
-/// `runtime_macos::providers::mage::load_finetuned` at the pin, with a weights dir that is NOT a
-/// published snapshot root, and asserts the typed refusal is the FINE-TUNED entrypoint's own
-/// component-staging contract.
-///
-/// What it actually guards, stated precisely rather than overclaimed: the failure mode is a FUTURE
-/// PIN that re-points `load_finetuned` at the guarded path (an alias, or a "just add the
-/// fingerprint check back" edit) or drops the staging requirement for a flat-layout fallback.
-/// Either shows up here — the first as a fingerprint / "cannot open transformer checkpoint
-/// `<root>/transformer/...`" complaint (`load` reads `<weights>/transformer`, which this fixture
-/// deliberately does not have), the second as a missing-FILE error instead of a missing-COMPONENT
-/// one. I could not mutation-check it by swapping the call to `load`, because `load` is not
-/// re-exported from the crate root — only `load_finetuned` is — so that swap does not compile.
-///
-/// The evidence that the bypass is genuinely live at this pin is the real-weights run recorded on
-/// sc-15036: trained a full fine-tune, loaded it through this entrypoint at the merged inference
-/// revision, and rendered. This test is the permanent linkage guard for that fact.
-///
-/// Weights-free and device-free: the refusal happens before any Metal work, so this runs in the
-/// normal suite rather than behind `#[ignore]`.
-#[cfg(target_os = "macos")]
-#[test]
-fn the_pinned_runtime_exposes_the_identity_guard_free_finetuned_entrypoint() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_settings, checkpoint) = mage_finetuned_settings_with_checkpoint(dir.path());
-
-    let error = runtime_macos::converters::mage::load_finetuned(
-        runtime_macos::converters::mage::MageVariant::Base,
-        &LoadSpec::new(WeightsSource::Dir(checkpoint.clone())),
-    )
-    .err()
-    .map(|error| error.to_string())
-    .expect("no components are staged, so this must refuse");
-
-    assert!(
-        error.contains(runtime_macos::converters::mage::COMPONENT_TEXT_ENCODER),
-        "the refusal must name the component the caller has to stage, which is the fine-tuned \
-         entrypoint's own contract; got: {error}"
-    );
-    assert!(
-        !error.contains("fingerprint") && !error.contains("cannot open transformer checkpoint"),
-        "this must NOT be the published-checkpoint `load` path — a full fine-tune retrains the \
-         identity tensor, so that path can never serve one; got: {error}"
-    );
-}
-
 /// sc-8253 + sc-8278 identity A/B over the FLUX.2-klein angle set — the measurement both
 /// stories' acceptances hang on, and the only thing keeping either In Review.
 ///
@@ -24581,7 +23501,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "Flux2Edit",
         "QwenEdit",
         "ZimageEdit",
-        "MageEdit",
         // Qwen-Image 2.1 reference / local editing (sc-24110): the ordered condition images are
         // consumed by the SAME base — its own Qwen3-VL vision tower and VAE — with no second
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
@@ -24613,7 +23532,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // Plan-driven checkpoint (sc-20634): one plan-resolved primary file + the family's resident
         // base components, loaded by the registry-bound provider; no second network.
         "CheckpointPlan",
-        "MageFinetuned",
         "SdxlImported",
         "ZimageComfyui",
         "QwenImageComfyui",
@@ -24694,12 +23612,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "krea_imported.rs",
             include_str!("krea_imported.rs"),
             "prepare_cached_candle_base_floor(",
-        ),
-        (
-            "MageFinetuned",
-            "mage_finetuned.rs",
-            include_str!("mage_finetuned.rs"),
-            "admit_candle_load_spec_floor(",
         ),
         // The plan route pairs a plan-resolved primary File with the family's resident base
         // snapshot, exactly like `KreaImported` — so it must use the SAME prepared-pin floor over
@@ -25821,38 +24733,6 @@ fn checkpoint_plan_route_and_legacy_krea_lane_never_both_claim_one_entry() {
     );
     assert!(!sdxl_imported_available(&sdxl, &fx.settings));
 
-    // Mage needs a COMPLETE fine-tuned transformer dir to be claimable at all, so build the exact
-    // fixture its own lane test uses and only then add the plan marker: an entry that this lane
-    // would otherwise claim is the only fixture that can prove the guard, rather than proving the
-    // fixture was unclaimable for some unrelated reason.
-    let mage_dir = tempfile::tempdir().unwrap();
-    let (mage_settings, mage_checkpoint) = mage_finetuned_settings_with_checkpoint(mage_dir.path());
-    let mage_path = mage_checkpoint.to_str().unwrap().to_owned();
-    let mage_entry = |plan_backed: bool| {
-        let mut entry = json!({ "family": "mage-flow", "paths": { "model": mage_path } });
-        if plan_backed {
-            entry["importPlan"] = json!({ "checkpointId": checkpoint_id });
-        }
-        request(json!({
-            "projectId": "p",
-            "model": "finetune_9f3c0a11",
-            "mode": "text_to_image",
-            "modelManifestEntry": entry,
-        }))
-    };
-    assert!(
-        mage_finetuned_available(&mage_entry(false), &mage_settings),
-        "fixture check: without the plan marker this entry IS claimed by the Mage lane"
-    );
-    let mage = mage_entry(true);
-    assert!(
-        prepare_mage_finetuned_transformer(&mage, &mage_settings)
-            .unwrap()
-            .is_none(),
-        "the Mage fine-tuned lane must decline a plan-backed entry"
-    );
-    assert!(!mage_finetuned_available(&mage, &mage_settings));
-
     // `zimage_comfyui_available` is candle-only; its guard sits in the shared
     // `prepare_zimage_comfyui_sources`, pinned here as source text so the macOS lane still proves
     // the guard is live code rather than a comment (`cargo test` cannot link the candle cfg here).
@@ -26694,7 +25574,6 @@ fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_cod
     for family in [
         "\"krea_2\"",
         "\"sdxl\"",
-        "\"mage-flow\"",
         "\"z-image\"",
         "\"qwen-image\"",
         "\"flux2\"",
@@ -26710,242 +25589,6 @@ fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_cod
             "the migration table must name {family}, whose row has landed"
         );
     }
-}
-
-/// The tensor surface a Mage-Flow transformer directory is recognized by: exactly the published
-/// twelve `transformer_blocks`, each carrying the Mage-specific modulation and dual-stream MLP
-/// names. The exact block count is load-bearing in `detect_transformer_family` — it is what keeps
-/// the broader Qwen-Image arm from claiming a Mage DiT — so the fixture reproduces it rather than
-/// truncating.
-#[cfg(target_os = "macos")]
-fn mage_flow_entries() -> Vec<(String, &'static str)> {
-    let mut entries = Vec::new();
-    for block in 0..12 {
-        for leaf in [
-            "attn.add_q_proj.weight",
-            "img_mlp.net.0.proj.weight",
-            "txt_mlp.net.0.proj.weight",
-            "img_mod.1.weight",
-            "txt_mod.1.weight",
-        ] {
-            entries.push((format!("transformer_blocks.{block}.{leaf}"), "BF16"));
-        }
-    }
-    entries
-}
-
-/// sc-20644 review blocker 1, REPRODUCED against the Mage-Flow lane end to end.
-///
-/// The reviewer's exact case: a plan-backed `krea_2` entry carrying Hires.fix. The plan route
-/// declines the shape, which offers the request to every other lane, and
-/// `prepare_mage_finetuned_transformer` reached its plan-source resolver for it. That resolver
-/// opened the plan store and compared the PLAN's family (`krea_2`) against the ASKING lane's
-/// (`mage-flow`), raising a FATAL `[checkpoint-plan:family-mismatch]` — which
-/// `prepare_image_route` propagates with `?`, killing a job the Krea lane was about to serve.
-///
-/// Asserted at BOTH levels, because either alone is weaker than it looks: the Mage resolver must
-/// return `Ok(None)` (not raise), and the whole route preparation must reach `KreaImported`. The
-/// second is the one that would have caught this in the first place.
-///
-/// Failing mutation: delete the `checkpoint_plan_entry_routes_to` guard from
-/// `checkpoint_plan_bespoke_primary` — the Mage resolver raises and route preparation dies.
-#[cfg(target_os = "macos")]
-#[test]
-fn a_plan_backed_krea_hires_request_is_declined_by_the_mage_lane_not_fatal() {
-    let fx = CheckpointPlanFixture::new("mage-cross-family", true);
-    let checkpoint_id = fx.compile("kreamania.safetensors", &krea_native_entries());
-    let request = fx.plan_backed_request(
-        &checkpoint_id,
-        json!({ "hiresFix": { "enabled": true, "scale": 1.5 } }),
-    );
-    assert_eq!(
-        request
-            .model_manifest_entry
-            .get("family")
-            .and_then(Value::as_str),
-        Some("krea_2"),
-        "fixture check: the entry declares krea_2, which is what makes this a CROSS-family probe"
-    );
-    assert!(
-        !request_is_checkpoint_plan_backed(&request),
-        "fixture check: the plan route declines Hires.fix, which is what offers this request to          the Mage-Flow lane at all"
-    );
-
-    // The Mage-Flow lane declines rather than raising.
-    assert!(
-        matches!(
-            resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings),
-            Ok(None)
-        ),
-        "the Mage-Flow plan-source resolver must DECLINE a krea_2 request"
-    );
-    assert!(
-        matches!(
-            prepare_mage_finetuned_transformer(&request, &fx.settings),
-            Ok(None)
-        ),
-        "and so must the lane's whole preparation"
-    );
-
-    // End to end: the job is served by the lane that owns it, not killed in route preparation.
-    let prepared = prepare_image_route(&execution(&request), &fx.settings)
-        .expect("route preparation must not fail: this is the reviewer's reproduced crash")
-        .expect("a plan-backed Hires.fix request is served by the Krea lane");
-    assert_eq!(prepared.kind(), ImageRoute::KreaImported);
-}
-
-/// sc-20644 Mage-Flow row — a plan-backed Mage-Flow fine-tune loads from the plan's verified
-/// component DIRECTORY, and its request shapes are single-claimed.
-///
-/// Mage-Flow is the row that proves the seam is shape-general rather than file-shaped: its only
-/// registered dialect is `diffusers` → `TransformerDirectory`, so its plan's primary is a directory
-/// and it uses `checkpoint_plan_bespoke_primary_dir`. It is also the family whose adapter's portable
-/// `family` (`mage_flow`) differs from the spelling a compiled plan records and the adapter registry
-/// is keyed on (`mage-flow`); passing the wrong one answers "no adapter" for a family this backend
-/// binds, which is why `MAGE_FLOW_PLAN_FAMILY` is named and asserted here.
-///
-/// Failing mutations: spell `MAGE_FLOW_PLAN_FAMILY` as `mage_flow`; delete the plan-sourced resolver
-/// call in `prepare_mage_finetuned_transformer`; drop the `is_mage_flow_transformer_dir`
-/// completeness probe from the plan-sourced resolver.
-#[cfg(target_os = "macos")]
-#[test]
-fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
-    let fx = CheckpointPlanFixture::new("mage-plan-dir", true);
-    let entries = mage_flow_entries();
-    let borrowed: Vec<(&str, &str)> = entries
-        .iter()
-        .map(|(name, dtype)| (name.as_str(), *dtype))
-        .collect();
-    write_tiny_safetensors(
-        &fx.library_dir
-            .join("mage-tune")
-            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE),
-        &borrowed,
-        0x33,
-    );
-    std::fs::write(
-        fx.library_dir
-            .join("mage-tune")
-            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE),
-        br#"{"_class_name":"MageFlowTransformer2DModel"}"#,
-    )
-    .unwrap();
-    let compiled = fx
-        .store
-        .compile_linked(&fx.root_id, "mage-tune")
-        .expect("fixture check: a complete Mage-Flow transformer directory must compile");
-    let resolved = fx.store.resolve(&compiled.checkpoint_id).unwrap();
-    assert_eq!(
-        resolved.family(),
-        MAGE_FLOW_PLAN_FAMILY,
-        "the spelling a compiled plan records IS the one the lane passes to the adapter registry"
-    );
-
-    let request = request(json!({
-        "projectId": "p",
-        "model": "linked_mage_tune",
-        "prompt": "a fox",
-        "count": 1,
-        "modelManifestEntry": {
-            "id": "linked_mage_tune",
-            "catalogScope": "user",
-            "family": "mage-flow",
-            "importSourceShape": "transformer_directory",
-            "importPlan": { "checkpointId": compiled.checkpoint_id }
-        }
-    }));
-
-    // The plan's DIRECTORY reaches the lane, and the lane pins the two fixed files inside it —
-    // through the same helper the filesystem scan uses, so the two routes cannot pin different
-    // things.
-    let prepared = resolve_plan_backed_mage_finetuned_transformer(&request, &fx.settings)
-        .expect("a plan-backed Mage-Flow entry resolves its directory through the plan")
-        .expect("the row's plan-sourced resolver claims it");
-    assert_eq!(prepared.directory, fx.library_dir.join("mage-tune"));
-    assert_eq!(
-        prepared.weights.loader_path(),
-        fx.library_dir
-            .join("mage-tune")
-            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE)
-    );
-    assert_eq!(
-        prepared.config.loader_path(),
-        fx.library_dir
-            .join("mage-tune")
-            .join(sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE)
-    );
-
-    // Single claim, and the plan route's shared components come from the FAMILY's own resolver.
-    //
-    // This fixture deliberately does NOT install the Mage-Flow base tier, because that is what makes
-    // the next assertion meaningful: the plan route reaches
-    // `resolve_mage_finetuned_components` — the same function the bespoke lane calls — and surfaces
-    // ITS actionable message verbatim, rather than the generic "this runtime cannot supply that
-    // component for that family" it produced before this row. A missing component therefore fails
-    // during PLANNING, with one message, whichever route asked.
-    let plan_refusal = match prepare_checkpoint_plan_sources(&request, &fx.settings) {
-        Err(error) => error.to_string(),
-        Ok(_) => panic!(
-            "t2i on a plan-backed Mage entry is the plan route's, and its base tier is absent, so \
-             it must refuse rather than prepare"
-        ),
-    };
-    assert!(
-        plan_refusal.contains("install the Mage-Flow Base model (bf16) first")
-            && plan_refusal.contains("text_encoder"),
-        "the plan route must surface the family's own component diagnostic: {plan_refusal}"
-    );
-    assert!(
-        matches!(
-            prepare_mage_finetuned_transformer(&request, &fx.settings),
-            Ok(None)
-        ),
-        "and the bespoke lane must decline the request the plan route claimed"
-    );
-
-    // ---- the bespoke surface sc-20651 deletes, pinned BY NAME ------------------------------
-    //
-    // sc-20651 determination — the lane is RETAINED, for the Krea reason plus one of its own. The
-    // shared reason, in full on the Krea row: the deletion condition is "every legacy entry has a
-    // plan", and the selector and address divergences between the import gate and the migration's
-    // candidate gate put two shapes permanently outside it, on top of the retryable refusals (torn
-    // install, drifted bytes, unsupported quant). The Mage-specific reason: a Mage-Flow fine-tune
-    // lives at `<data>/models/finetunes/<loraId>`, OUTSIDE `CheckpointPlanStore::installs_root()`,
-    // so `compile_managed` cannot address it at all — and `resolve_mage_finetuned_components` is a
-    // registered row of the plan route's own `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS`, so it can
-    // never be deleted while the plan route serves this family.
-    // Architecture tripwire retained: the behavior above proves the plan directory selection; the
-    // source check uniquely prevents the stream from bypassing its shared admission lifecycle.
-    let source = include_str!("mage_finetuned.rs");
-    for symbol in [
-        "fn resolve_mage_finetuned_transformer(",
-        "request_is_checkpoint_plan_backed(request),",
-        "checkpoint_plan_bespoke_primary_dir(request, settings, MAGE_FLOW_PLAN_FAMILY)",
-        "is_mage_flow_transformer_dir(&path)",
-    ] {
-        assert!(
-            source.contains(symbol),
-            "the Mage-Flow bespoke surface sc-20651 DELETES must be live code: {symbol}"
-        );
-    }
-    // The must-OUTLIVE half, separately: `resolve_mage_finetuned_components` is a registered row of
-    // `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS`, so a red naming it is the opposite instruction
-    // to a red naming the scan above.
-    let must_outlive = "fn resolve_mage_finetuned_components(";
-    assert!(
-        source.contains(must_outlive),
-        "the Mage-Flow component resolver that must OUTLIVE the deletion is gone: {must_outlive}"
-    );
-    let plan_source_at = source
-        .find("resolve_plan_backed_mage_finetuned_transformer(request, settings)?")
-        .expect("the plan-sourced resolver is reached from the prepare wrapper");
-    let scan_at = source
-        .find("resolve_mage_finetuned_transformer(request, settings)\n}")
-        .expect("the filesystem scan is the fallback");
-    assert!(
-        plan_source_at < scan_at,
-        "the plan source must precede the filesystem scan: a linked entry has nothing to scan"
-    );
 }
 
 /// Populate the isolated Hugging Face cache with the model-agnostic CLIP tokenizer assets — at the
@@ -31008,11 +29651,6 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
     let plan_families: BTreeSet<&str> = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
         .iter()
         .map(|(family, _)| *family)
-        .chain(
-            CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
-                .iter()
-                .map(|(family, _)| *family),
-        )
         .collect();
     let guard_families: BTreeSet<&str> = PLAN_BACKED_RESIDENT_BASE_MODELS
         .iter()
@@ -31138,47 +29776,7 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
          {KREA_IMPORTED_BASE_TIER} — the repository the imported route's resolver reads"
     );
 
-    let mage = PLAN_BACKED_RESIDENT_BASE_MODELS
-        .iter()
-        .find(|row| row.family == "mage-flow")
-        .expect("mage-flow row");
-    assert_eq!(mage.base_model_id, MAGE_FINETUNED_BASE_MODEL);
-    assert_eq!(mage.tier, MAGE_FINETUNED_COMPONENT_TIER);
-
-    // And the SHAPE is not free-form: it says which of the base entry's repositories the family's
-    // route opens, which is exactly what the family's presence in one plan table or the other
-    // already declares. Krea's base directory contains the transformer config and shared
-    // components, while the separately bound import supplies the transformer weights.
-    // Mage resolves named components from a co-requisite repo. An over-wide closure stops
-    // the guard from serving those components because it verifies all pairs together.
-    for row in PLAN_BACKED_RESIDENT_BASE_MODELS {
-        let in_base_tiers = CHECKPOINT_PLAN_RESIDENT_BASE_TIERS
-            .iter()
-            .any(|(family, _)| *family == row.family);
-        let in_component_resolvers = CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS
-            .iter()
-            .any(|(family, _)| *family == row.family);
-        let expected = match (in_base_tiers, in_component_resolvers) {
-            (true, false) if row.family == "krea_2" => ResidentBaseShape::KreaImportedCompanions,
-            (true, false) => ResidentBaseShape::FullTier,
-            (false, true) => ResidentBaseShape::ComponentsOnly,
-            _ => panic!(
-                "family {:?} must have exactly one plan resolver",
-                row.family
-            ),
-        };
-        assert_eq!(
-            row.shape,
-            expected,
-            "family {:?} is registered in {}, so its resident base is {expected:?}",
-            row.family,
-            if in_base_tiers {
-                "CHECKPOINT_PLAN_RESIDENT_BASE_TIERS"
-            } else {
-                "CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS"
-            }
-        );
-    }
+    assert_eq!(krea.shape, ResidentBaseShape::KreaImportedCompanions);
 }
 
 /// sc-22667 (epic 22657 feature-end round, E4/E7) wiring of the Krea 2 Turbo lane in

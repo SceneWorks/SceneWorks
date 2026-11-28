@@ -352,10 +352,10 @@ test("backend scopes follow real routing even when manifest tuning blocks are ab
 // hardware, so that inventory claimed coverage no story would ever provide.
 test("ownership lookups resolve per backend and refuse to invent a twin", () => {
   // A dual-backend entry has two distinct owners, one per backend.
-  assert.equal(modelStory("boogu_image_turbo", "mlx"), 15475);
-  assert.equal(modelStory("boogu_image_turbo", "candle"), 15910);
-  assert.equal(familyStory("boogu_image_turbo", "mlx"), 15516);
-  assert.equal(familyStory("boogu_image_turbo", "candle"), 15827);
+  assert.equal(modelStory("ideogram_4_turbo", "mlx"), 15473);
+  assert.equal(modelStory("ideogram_4_turbo", "candle"), 15904);
+  assert.equal(familyStory("ideogram_4_turbo", "mlx"), 15515);
+  assert.equal(familyStory("ideogram_4_turbo", "candle"), 15825);
 
   // Bespoke routes are keyed the same way as registry ones.
   assert.equal(modelStory("instantid_realvisxl", "candle"), 15934);
@@ -364,8 +364,6 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   // SC-17422: these entries had real Candle routes but no manifest candle tuning block, so the old
   // lane oracle hid their Candle cells. Every one now has an independent Candle model owner.
   for (const formerlyHidden of [
-    "lens",
-    "boogu_image_edit",
     "flux2_klein_9b_kv",
     "flux2_klein_9b_true_v2",
   ]) {
@@ -426,11 +424,11 @@ test("the ownership tables resolve every story to one exact declared scope", () 
     new Set(scopedStoryIds).size,
     "every distinct story resolves once, including exact declared paired and composite claims",
   );
-  assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
-  assert.deepEqual(scope.get(15827), {
+  assert.deepEqual(scope.get(15473), { backend: "mlx", role: "model story", owner: "ideogram_4_turbo" });
+  assert.deepEqual(scope.get(15825), {
     backend: "candle",
     role: "family story",
-    owner: "family SC-15516",
+    owner: "family SC-15515",
   });
 
   // The per-cell guard below resolves a story id through this map and compares both the backend AND
@@ -550,18 +548,18 @@ test("paired FLUX3 and composite MOSS ownership coexist without widening either 
 test("a cell may never name a story scoped to the other backend", () => {
   assertCellOwnershipIsBackendScoped([
     {
-      id: "boogu_image_turbo:mlx",
-      modelId: "boogu_image_turbo",
+      id: "ideogram_4_turbo:mlx",
+      modelId: "ideogram_4_turbo",
       backend: "mlx",
-      owningModelStory: 15475,
-      owningFamilyStory: 15516,
+      owningModelStory: 15473,
+      owningFamilyStory: 15515,
     },
     {
-      id: "boogu_image_turbo:candle",
-      modelId: "boogu_image_turbo",
+      id: "ideogram_4_turbo:candle",
+      modelId: "ideogram_4_turbo",
       backend: "candle",
-      owningModelStory: 15910,
-      owningFamilyStory: 15827,
+      owningModelStory: 15904,
+      owningFamilyStory: 15825,
     },
   ]);
 
@@ -570,48 +568,48 @@ test("a cell may never name a story scoped to the other backend", () => {
     () =>
       assertCellOwnershipIsBackendScoped([
         {
-          id: "boogu_image_turbo:candle",
-          modelId: "boogu_image_turbo",
+          id: "ideogram_4_turbo:candle",
+          modelId: "ideogram_4_turbo",
           backend: "candle",
-          owningModelStory: 15475,
-          owningFamilyStory: 15827,
+          owningModelStory: 15473,
+          owningFamilyStory: 15825,
         },
       ]),
-    /owningModelStory SC-15475 is scoped to mlx, but the cell is candle/,
+    /owningModelStory SC-15473 is scoped to mlx, but the cell is candle/,
   );
   // ...and the mirror image, an MLX cell attributed to a Candle twin.
   assert.throws(
     () =>
       assertCellOwnershipIsBackendScoped([
         {
-          id: "boogu_image_turbo:mlx",
-          modelId: "boogu_image_turbo",
+          id: "ideogram_4_turbo:mlx",
+          modelId: "ideogram_4_turbo",
           backend: "mlx",
-          owningModelStory: 15475,
-          owningFamilyStory: 15827,
+          owningModelStory: 15473,
+          owningFamilyStory: 15825,
         },
       ]),
-    /owningFamilyStory SC-15827 is scoped to candle, but the cell is mlx/,
+    /owningFamilyStory SC-15825 is scoped to candle, but the cell is mlx/,
   );
   // An id from outside the tables is a defect too, not an unknown to be tolerated.
   assert.throws(
     () =>
       assertCellOwnershipIsBackendScoped([
-        { id: "x:candle", backend: "candle", owningModelStory: 99999, owningFamilyStory: 15827 },
+        { id: "x:candle", backend: "candle", owningModelStory: 99999, owningFamilyStory: 15825 },
       ]),
     /not a known backend-scoped ownership story/,
   );
   assert.throws(
     () =>
       assertCellOwnershipIsBackendScoped([
-        { id: "x:candle", backend: "candle", owningModelStory: null, owningFamilyStory: 15827 },
+        { id: "x:candle", backend: "candle", owningModelStory: null, owningFamilyStory: 15825 },
       ]),
     /not an ownership story id/,
   );
 });
 
 // The backend check alone shipped first and was NOT sufficient. Review of sc-15812 mutated the
-// generator's own table lookup so `boogu_image_turbo`'s candle cells named SC-15907 — `boogu_image`'s
+// generator's own table lookup so `ideogram_4_turbo`'s candle cells named SC-15901 — `ideogram_4`'s
 // Candle twin, correctly scoped to candle, belonging to a different model — and the generator exited 0
 // after writing 30 mis-attributed cells. Same failure class as the original defect (a cell credited to
 // a story that cannot close it), reached by assignment instead of by backend. The original defect was
@@ -622,14 +620,14 @@ test("a cell may never name another entry's story, even on the right backend", (
     () =>
       assertCellOwnershipIsBackendScoped([
         {
-          id: "boogu_image_turbo:candle",
-          modelId: "boogu_image_turbo",
+          id: "ideogram_4_turbo:candle",
+          modelId: "ideogram_4_turbo",
           backend: "candle",
-          owningModelStory: 15907,
-          owningFamilyStory: 15827,
+          owningModelStory: 15901,
+          owningFamilyStory: 15825,
         },
       ]),
-    /owningModelStory SC-15907 is the candle model story of boogu_image, but this cell needs the candle model story of boogu_image_turbo/,
+    /owningModelStory SC-15901 is the candle model story of ideogram_4, but this cell needs the candle model story of ideogram_4_turbo/,
   );
   // The same hole on the MLX side, and across families rather than within one: a sibling's story is
   // still a story that cannot close this cell.
@@ -637,27 +635,27 @@ test("a cell may never name another entry's story, even on the right backend", (
     () =>
       assertCellOwnershipIsBackendScoped([
         {
-          id: "boogu_image_turbo:mlx",
-          modelId: "boogu_image_turbo",
+          id: "ideogram_4_turbo:mlx",
+          modelId: "ideogram_4_turbo",
           backend: "mlx",
-          owningModelStory: 15474,
-          owningFamilyStory: 15516,
+          owningModelStory: 15472,
+          owningFamilyStory: 15515,
         },
       ]),
-    /owningModelStory SC-15474 is the mlx model story of boogu_image, but this cell needs the mlx model story of boogu_image_turbo/,
+    /owningModelStory SC-15472 is the mlx model story of ideogram_4, but this cell needs the mlx model story of ideogram_4_turbo/,
   );
   assert.throws(
     () =>
       assertCellOwnershipIsBackendScoped([
         {
-          id: "boogu_image_turbo:candle",
-          modelId: "boogu_image_turbo",
+          id: "ideogram_4_turbo:candle",
+          modelId: "ideogram_4_turbo",
           backend: "candle",
-          owningModelStory: 15910,
-          owningFamilyStory: 15813,
+          owningModelStory: 15904,
+          owningFamilyStory: 15821,
         },
       ]),
-    /owningFamilyStory SC-15813 is the candle family story of family SC-15509, but this cell needs the candle family story of family SC-15516/,
+    /owningFamilyStory SC-15821 is the candle family story of family SC-15513, but this cell needs the candle family story of family SC-15515/,
   );
   // A family story in the model slot is same-backend and same-family, and still wrong: it is the
   // family's story, so closing it would not close this model's Candle work.
@@ -665,14 +663,14 @@ test("a cell may never name another entry's story, even on the right backend", (
     () =>
       assertCellOwnershipIsBackendScoped([
         {
-          id: "boogu_image_turbo:candle",
-          modelId: "boogu_image_turbo",
+          id: "ideogram_4_turbo:candle",
+          modelId: "ideogram_4_turbo",
           backend: "candle",
-          owningModelStory: 15827,
-          owningFamilyStory: 15827,
+          owningModelStory: 15825,
+          owningFamilyStory: 15825,
         },
       ]),
-    /owningModelStory SC-15827 is the candle family story of family SC-15516, but this cell needs the candle model story of boogu_image_turbo/,
+    /owningModelStory SC-15825 is the candle family story of family SC-15515, but this cell needs the candle model story of ideogram_4_turbo/,
   );
 });
 
@@ -700,16 +698,16 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
 
   // A dual model with a missing Candle twin must stop generation, not quietly reuse the MLX story.
   assert.throws(
-    () => assertTwinCoverage(models, { ...MODEL_STORIES, lens: { mlx: 15462 } }),
-    /lens: advertises candle but has no Candle twin/,
+    () => assertTwinCoverage(models, { ...MODEL_STORIES, ideogram_4: { mlx: 15472 } }),
+    /ideogram_4: advertises candle but has no Candle twin/,
   );
   // And an empty Candle twin on an mlx-only entry is equally a defect: it could never be closed.
   assert.throws(
     () =>
       assertTwinCoverage(
-        models.map((model) => (model.id === "lens" ? { ...model, backends: ["mlx"] } : model)),
+        models.map((model) => (model.id === "ideogram_4" ? { ...model, backends: ["mlx"] } : model)),
       ),
-    /lens: advertises mlx only but carries Candle twin SC-17489/,
+    /ideogram_4: advertises mlx only but carries Candle twin SC-15901/,
   );
   const chromaMlxOnly = models.map((model) =>
     model.id.startsWith("chroma1") ? { ...model, backends: ["mlx"] } : model,
@@ -725,12 +723,12 @@ test("twin coverage reconciles against the catalog, not an absolute story count"
     /family SC-15520: owns no dual model but carries Candle twin SC-17410/,
   );
   assert.throws(
-    () => assertTwinCoverage(models, MODEL_STORIES, { ...FAMILY_STORIES, 15516: { mlx: 15516 } }),
-    /family SC-15516: owns dual models but has no Candle twin/,
+    () => assertTwinCoverage(models, MODEL_STORIES, { ...FAMILY_STORIES, 15515: { mlx: 15515 } }),
+    /family SC-15515: owns dual models but has no Candle twin/,
   );
   // Two dual models sharing one Candle twin would under-count the split silently.
   assert.throws(
-    () => assertTwinCoverage(models, { ...MODEL_STORIES, boogu_image: { mlx: 15474, candle: 15910 } }),
+    () => assertTwinCoverage(models, { ...MODEL_STORIES, ideogram_4: { mlx: 15472, candle: 15904 } }),
     /^Error: (\d+) dual models map onto only (?!\1\b)\d+ distinct Candle model twins$/,
   );
 });
@@ -776,29 +774,6 @@ test("every video survey assertion is pinned to source lines", async () => {
   for (const source of sources) {
     assert.match(source, /:\d/, `${source}: video survey evidence must cite exact source lines`);
   }
-});
-
-test("Mage Candle bounded decode is structurally exempt rather than advertised or left Missing", async () => {
-  const matrix = await buildMatrix({ publish: false });
-  const cells = matrix.cells.filter(
-    (cell) =>
-      cell.modelId.startsWith("mage_flow") &&
-      cell.backend === "candle" &&
-      cell.rung === "bounded_decode",
-  );
-
-  assert.equal(cells.length, 27, "fixture covers every Mage Candle tier and mode coordinate");
-  assert.ok(cells.every((cell) => cell.state === "Structurally N/A"));
-  assert.ok(
-    cells.every((cell) =>
-      cell.evidence.structural.some(
-        (item) =>
-          item.source.endsWith("candle-gen-mage/src/memory_strategy.rs") &&
-          /StructurallyNotApplicable/.test(item.reason),
-      ),
-    ),
-    "every exemption must carry the provider architecture evidence that justifies it",
-  );
 });
 
 const PREREQUISITES_URL = new URL("../config/rung4-contract-prerequisites.json", import.meta.url);
@@ -1617,8 +1592,8 @@ test("admitting video leaves the image lane's guards at full strength (sc-18815)
   // 3. Twin coverage still holds over the image families — the video exclusion is by MODALITY, so
   // dropping an image family's candle twin is still rejected.
   assert.throws(
-    () => assertTwinCoverage(matrix.models, MODEL_STORIES, { ...FAMILY_STORIES, 15516: { mlx: 15516 } }),
-    /family SC-15516: owns dual models but has no Candle twin/,
+    () => assertTwinCoverage(matrix.models, MODEL_STORIES, { ...FAMILY_STORIES, 15515: { mlx: 15515 } }),
+    /family SC-15515: owns dual models but has no Candle twin/,
   );
 });
 
@@ -2961,5 +2936,5 @@ test("approved MOSS composite ownership stays exact to both models, family and b
  assert.throws(()=>buildStoryBackendScope(models,wrongFamily),/outside its declared composite scope/);
  assert.throws(()=>buildStoryBackendScope({moss_image_base:{mlx:26323}},{26323:{mlx:26323}}),/incomplete declared composite scope/);
  assert.throws(()=>buildStoryBackendScope({moss_image_base:{mlx:7},moss_image_sft:{mlx:7}},{26323:{mlx:7}}),/exactly one owner and one backend/);
- assert.throws(()=>assertCellOwnershipIsBackendScoped([{id:"sibling",modelId:"boogu_image",backend:"mlx",owningModelStory:26323,owningFamilyStory:26323}],scope),/this cell needs/);
+ assert.throws(()=>assertCellOwnershipIsBackendScoped([{id:"sibling",modelId:"ideogram_4",backend:"mlx",owningModelStory:26323,owningFamilyStory:26323}],scope),/this cell needs/);
 });

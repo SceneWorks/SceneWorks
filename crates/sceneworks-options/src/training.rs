@@ -212,8 +212,6 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .compat("Built-in Prodigy preset carries 1.0; no native optimizer field consumes it"),
     advanced!("numFrames", Integer, Target("defaults.advanced.numFrames"), WhatToMake, "TrainingConfig.model_options.numFrames")
         .applies(TrainingTarget("defaults.advanced.numFrames")).compat("Legacy video preset field; carried in the plan"),
-    advanced!("baseModelRepo", Text, Target("defaults.advanced.baseModelRepo"), Context, "TrainingConfig.model_options.baseModelRepo")
-        .applies(TrainingKernel("lens_lora")).compat("Legacy Lens target metadata. Target identity supplies the plan base repository."),
     advanced!("backend", Text, Target("defaults.advanced.backend"), Context, "TrainingConfig.model_options.backend")
         .applies(TrainingKernel("sd3_lora")).internal(),
     advanced!("fullFinetuneConfig", Object("platform full-finetune requirements"), Target("defaults.advanced.fullFinetuneConfig"), Context, "training::validate_training_config_for_target")

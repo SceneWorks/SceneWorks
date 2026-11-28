@@ -403,6 +403,13 @@ pub(crate) async fn run_lora_import_job(
     }
     // Shared reconcile policy + canonicalization (krea2/krea-2/krea_2 → krea_2),
     // matching the API pre-flight so a manual family override agrees with detection.
+    for family in supplied_family.iter().chain(detected_family.iter()) {
+        if let Err(error) =
+            sceneworks_core::request_validation::reject_retired_image_identity("family", family)
+        {
+            return fail_job(api, &job.id, "LoRA import failed.", Some(error.detail)).await;
+        }
+    }
     let resolved_family = match reconcile_detected_family(supplied_family, detected_family) {
         Ok(family) => family,
         Err(mismatch) => {
@@ -1977,26 +1984,6 @@ pub(crate) async fn run_model_import_job(
                     )
                     .await;
                 }
-                if matches!(
-                    &detection,
-                    BaseWeightDetection::Recognized(verdict)
-                        if verdict.family.as_deref() == Some("mage-flow")
-                ) && !sceneworks_core::base_weights::is_mage_flow_transformer_dir(&staging_dir)
-                {
-                    return fail_job(
-                        api,
-                        &job.id,
-                        "Model import is not supported for this file.",
-                        Some(
-                            "Model import for the 'mage-flow' family requires a complete \
-                             transformer directory containing config.json and \
-                             diffusion_pytorch_model.safetensors; a bare weights file is refused \
-                             because the loader cannot derive its architecture."
-                                .to_owned(),
-                        ),
-                    )
-                    .await;
-                }
                 // H3 source normalization owns native single files and complete indexed shards.
                 if matches!(
                     &detection,
@@ -2028,14 +2015,6 @@ pub(crate) async fn run_model_import_job(
                 match detection {
                     BaseWeightDetection::Recognized(verdict) => {
                         let source = match verdict.component {
-                            ComponentRole::Transformer
-                                if verdict.family.as_deref() == Some("mage-flow")
-                                    && sceneworks_core::base_weights::is_mage_flow_transformer_dir(
-                                        &staging_dir,
-                                    ) =>
-                            {
-                                "transformer_directory"
-                            }
                             ComponentRole::Transformer
                                 if verdict.family.as_deref() == Some(MINIMAX_H3_IMPORT_FAMILY) =>
                             {
@@ -2105,6 +2084,19 @@ pub(crate) async fn run_model_import_job(
         return fail_job(api, &job.id, "Model import failed.", Some(reason)).await;
     }
     let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
+    for family in supplied_family.iter().chain(detected_family.iter()) {
+        if let Err(error) =
+            sceneworks_core::request_validation::reject_retired_image_identity("family", family)
+        {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import is not supported for this file.",
+                Some(error.detail),
+            )
+            .await;
+        }
+    }
     let resolved_family = match reconcile_detected_family(supplied_family, detected_family) {
         Ok(family) => family,
         Err(mismatch) => {

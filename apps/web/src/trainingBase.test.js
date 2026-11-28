@@ -9,10 +9,10 @@ function base(variants, installState = "installed") {
 const v = (variant, installState) => ({ variant, installState });
 
 describe("trainingBaseTier", () => {
-  it("prefers a dedicated `training` variant (lens, sc-8797) over the bf16 inference tier", () => {
-    // Lens ships q4/q8/bf16 MLX inference tiers AND a separate flat-diffusers training base.
-    const lens = base([v("q4", "installed"), v("q8", "missing"), v("bf16", "missing"), v("training", "missing")]);
-    expect(trainingBaseTier(lens)).toBe("training");
+  it("prefers a dedicated `training` variant over the bf16 inference tier", () => {
+    // A model can ship q4/q8/bf16 MLX inference tiers AND a separate flat-diffusers training base.
+    const model = base([v("q4", "installed"), v("q8", "missing"), v("bf16", "missing"), v("training", "missing")]);
+    expect(trainingBaseTier(model)).toBe("training");
   });
 
   it("falls back to the dense bf16 tier when there is no training variant (Krea 2 Raw, epic 9992)", () => {
@@ -40,19 +40,19 @@ describe("trainingBaseTier", () => {
 });
 
 describe("trainingBaseState", () => {
-  it("reports the TRAINING variant's own state — lens q4-installed but training-missing reads missing (the sc-8966 bug)", () => {
-    const lens = base(
+  it("reports the TRAINING variant's own state — generation q4-installed but training-missing reads missing (the sc-8966 bug)", () => {
+    const model = base(
       [v("q4", "installed"), v("q8", "missing"), v("bf16", "missing"), v("training", "missing")],
       // Top-level installState is "installed" (reflects the default q4 tier) — the OLD gate read this and
       // wrongly said "ready". The fix reads the training variant instead.
       "installed",
     );
-    expect(trainingBaseState(lens)).toBe("missing");
+    expect(trainingBaseState(model)).toBe("missing");
   });
 
   it("reports installed once the training base itself is present", () => {
-    const lens = base([v("q4", "installed"), v("training", "installed")], "installed");
-    expect(trainingBaseState(lens)).toBe("installed");
+    const model = base([v("q4", "installed"), v("training", "installed")], "installed");
+    expect(trainingBaseState(model)).toBe("installed");
   });
 
   it("reports the bf16 tier's state for a training-variant-less matrix base (Krea)", () => {

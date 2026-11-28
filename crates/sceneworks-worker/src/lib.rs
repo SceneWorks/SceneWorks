@@ -875,33 +875,11 @@ mod sdxl_base_q8_mlx_smoke;
 // asserts no `mid_block` factors were emitted (sc-2640: the SDXL LoKr surface is down/up attention only).
 #[cfg(all(test, target_os = "macos"))]
 mod illustrious_train_apply_mlx_smoke;
-// Real-weight MLX smoke for the Lens-Turbo Q4 worker lane (sc-8763, epic 8506 Group-B). Test-only +
-// macOS-only; drives `crate::inference_runtime::load("lens_turbo")` with a Q4 LoadSpec against the packed `q4/` turnkey
-// subdir. On-device evidence that the SceneWorks/lens-turbo-mlx pre-quantized q4 tier loads through the
-// worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
-// non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
-#[cfg(all(test, target_os = "macos"))]
-mod lens_turbo_q4_mlx_smoke;
-
-// Real-weight MLX smoke for the Mage-Flow q4 worker lane (sc-14980 / sc-14979). Mage is the first
-// family whose tier subdir is NOT engine-complete — `<snapshot>/q4/` is DiT-only, and the shared text
-// encoder + VAE arrive as per-tier co-requisites — so this is the on-device proof that the manifest's
-// per-tier downloads and the pinned engine agree. It fails loudly against an engine pinned before the
-// sc-14979 split, which is exactly the ordering hazard the pin bump closes.
-#[cfg(all(test, target_os = "macos"))]
-mod mage_flow_q8_mlx_smoke;
 // Real-weight MLX smoke for an imported bare-keyed Krea 2 Turbo transformer such as lodestones/Kroma
 // (sc-25855): the load the imported-Krea lane builds, against a checkpoint with no
 // `model.diffusion_model.` key prefix.
 #[cfg(all(test, target_os = "macos"))]
 mod krea_imported_bare_keys_mlx_smoke;
-// Real-weight MLX smoke for the recovered base Lens Q4 worker lane (sc-8767, epic 8506 Group-B).
-// Test-only + macOS-only; drives `crate::inference_runtime::load("lens")` with a Q4 LoadSpec against the packed `q4/`
-// turnkey subdir. On-device evidence that the SceneWorks/lens-mlx pre-quantized q4 tier loads through the
-// worker packed path (`mlx.standardTierLayout` → `standard_tier_subdir` resolves `q4/`) and renders
-// non-degenerate (both transformer + gpt-oss MoE TE are packed per-tier; NOT a dense-TE model).
-#[cfg(all(test, target_os = "macos"))]
-mod lens_base_q4_mlx_smoke;
 // Real-weight MLX smoke for the Chroma1-Base Q4 worker lane (sc-8777, epic 8506 Group-B). Test-only +
 // macOS-only; drives `crate::inference_runtime::load("chroma1_base")` with a Q4 LoadSpec against the packed `q4/` turnkey
 // subdir. On-device evidence that the SceneWorks/chroma1-base-mlx pre-quantized q4 tier loads through the

@@ -1000,6 +1000,11 @@ async fn vector_replay_raster_source(
         if parent.source_job_id.is_none() && parent.duplicate_of_job_id.is_none() {
             return Ok(None);
         }
+        sceneworks_core::request_validation::reject_retired_image_job(
+            &parent.job_type,
+            &parent.payload,
+        )
+        .map_err(JobsStoreError::RetiredModel)?;
         let raster = parent
             .payload
             .get("modelManifestEntries")
@@ -1035,6 +1040,11 @@ async fn vector_replay_source(
     .to_owned();
     store_call(state.clone(), move |store, _timeout| {
         let parent = store.get_job(&original_id)?;
+        sceneworks_core::request_validation::reject_retired_image_job(
+            &parent.job_type,
+            &parent.payload,
+        )
+        .map_err(JobsStoreError::RetiredModel)?;
         let binding = store.portable_model_binding(&original_id)?.ok_or_else(|| {
             JobsStoreError::InvalidStatus("vector workflow has no frozen source binding".into())
         })?;
@@ -1045,6 +1055,11 @@ async fn vector_replay_source(
             .and_then(Value::as_str)
             .map(|child_id| {
                 let job = store.get_job(child_id)?;
+                sceneworks_core::request_validation::reject_retired_image_job(
+                    &job.job_type,
+                    &job.payload,
+                )
+                .map_err(JobsStoreError::RetiredModel)?;
                 let binding = store.portable_model_binding(child_id)?.ok_or_else(|| {
                     JobsStoreError::InvalidStatus(
                         "vector raster child has no frozen source binding".into(),

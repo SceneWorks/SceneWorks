@@ -1458,7 +1458,7 @@ fn validate_training_target_config_resolved(
     let kernel = plan.target.kernel.as_str();
     if !matches!(
         kernel,
-        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "wan_lora" | "wan_moe_lora"
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "wan_lora" | "wan_moe_lora"
     ) {
         return Ok(engine_id);
     }
@@ -1476,11 +1476,7 @@ fn validate_training_target_config_resolved(
             "Candle trainer '{engine_id}' does not support resume."
         )));
     }
-    if matches!(
-        kernel,
-        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora"
-    ) && checkpointing
-    {
+    if matches!(kernel, "anima_lora" | "kolors_lora" | "sd3_lora") && checkpointing {
         return Err(WorkerError::InvalidPayload(format!(
             "Candle trainer '{engine_id}' does not support gradient checkpointing."
         )));
@@ -1494,11 +1490,6 @@ fn validate_training_target_config_resolved(
     if kernel == "anima_lora" && dtype != "bf16" {
         return Err(WorkerError::InvalidPayload(
             "Candle Anima training requires mixedPrecision=bf16.".to_owned(),
-        ));
-    }
-    if kernel == "mage_flow_lora" && network_type == "full" && dtype != "f32" {
-        return Err(WorkerError::InvalidPayload(
-            "Candle Mage full base fine-tuning requires mixedPrecision=f32.".to_owned(),
         ));
     }
     Ok(engine_id)
@@ -1789,7 +1780,7 @@ fn validate_new_family_request(
 ) -> WorkerResult<()> {
     if !matches!(
         plan.target.kernel.as_str(),
-        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "wan_lora" | "wan_moe_lora"
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "wan_lora" | "wan_moe_lora"
     ) {
         return Ok(());
     }
@@ -2005,7 +1996,7 @@ fn apply_body_losses_resolved(
 /// face-landmark losses, the body losses) hands the trainer as `perceptual_decoder_dir` — ONE resolution for all of
 /// them, so a family's decoder is wired once (sc-24830's [`X0DecoderSource`] mapping). `None` for
 /// a trainer that decodes through its own base-model VAE ([`X0DecoderSource::BaseModelVae`],
-/// Mage-Flow): its descriptor declares `techniques.builtin_x0_decoder`, so the engine floor does not
+/// which declares `techniques.builtin_x0_decoder`): the engine floor does not
 /// ask for a directory and the trainer never reads one. `technique` labels the refusal.
 #[cfg(native_lane)]
 fn perceptual_decoder_dir(
@@ -2585,10 +2576,6 @@ pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static 
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
         // LoRA/LoKr trainer under the same id as its generator (`"kolors"`), sc-4568.
         "kolors_lora" => (base_model == "kolors").then_some("kolors"),
-        // Lens trains the base (non-distilled) Lens DiT — the `SceneWorks/Lens` diffusers rehost
-        // since sc-8797 (microsoft/Lens is dead); the engine registers its LoRA/LoKr trainer
-        // under the base generator id `"lens"` (arch-identical to lens_turbo), sc-5148.
-        "lens_lora" => Some("lens"),
         // Krea trains the undistilled `krea/Krea-2-Raw` DiT; the engine registers its LoRA/LoKr
         // trainer under the base id `"krea_2_raw"` (arch-identical to krea_2_turbo), sc-7577/7578.
         "krea_lora" => Some("krea_2_raw"),
@@ -2625,25 +2612,6 @@ pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static 
         // only the Base trainer, so reject sibling and unknown identities here as a second gate.
         "anima_lora" => match base_model {
             "anima_base" => Some("anima_base"),
-            _ => None,
-        },
-        // Mage-Flow (epic 14034, sc-14055 LoRA/LoKr + sc-14056 full base fine-tune, mapped here in
-        // sc-15277): `mlx-gen-mage` registers ONE trainer, under the inference-generator id of the
-        // training base — `MODEL_ID = "mage_flow_base"` — serving `lora`, `lokr` AND the
-        // `networkType: "full"` base fine-tune off the same id (the network type travels in
-        // `TrainingConfig`, not in the trainer id).
-        //
-        // The base-model split is load-bearing rather than decorative. Mage registers SIX
-        // *generators* (Base/Turbo/RL and the three Edit variants) but only that one *trainer*, and
-        // `load_trainer` does no variant identity check — it loads whatever diffusers snapshot the
-        // plan's `baseModelPath` points at. So an unconditional `Some("mage_flow_base")` would take
-        // an Edit checkpoint and train it through the generation-only conditioning path, with no
-        // reference-image tokens: the Edit variants require Reference/MultiReference conditioning at
-        // inference, so the adapter would be fitted on a distribution the model never sees and would
-        // train silently WRONG rather than fail. Anything that is not the Base checkpoint therefore
-        // resolves to `None` and fails loudly. See `mage_flow_edit_base` in sc-15320.
-        "mage_flow_lora" => match base_model {
-            "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
         // Iris-3B generation (sc-25685 MLX / sc-25686 Candle): both backends register ONE trainer
@@ -6236,8 +6204,7 @@ mod tests {
                 ),
                 other => panic!("{key} {case}: expected a refusal, got {other:?}"),
             };
-        // E-LatentLPIPS is absent: no trainer that offers a full fine-tune (Mage) or an LTX-2.5
-        // workflow has E-LatentLPIPS weights, so it is refused earlier as unsupported there.
+        // LTX-2.5 does not advertise E-LatentLPIPS, so its support check refuses that loss first.
         for key in [
             "depthAnchoringWeight",
             "bodyProportionWeight",
@@ -6249,23 +6216,12 @@ mod tests {
         ] {
             let on = (key, json!(0.05));
             validate_training_target_config(&plan(
-                "mage_flow_lora",
-                "mage_flow_base",
+                "z_image_lora",
+                "z_image_turbo",
                 "lora",
                 std::slice::from_ref(&on),
             ))
-            .unwrap_or_else(|error| panic!("{key}: Mage LoRA admits it, got {error:?}"));
-            refused(
-                validate_training_target_config(&plan(
-                    "mage_flow_lora",
-                    "mage_flow_base",
-                    "full",
-                    std::slice::from_ref(&on),
-                )),
-                key,
-                "not a full fine-tune",
-                "mage full",
-            );
+            .unwrap_or_else(|error| panic!("{key}: Z-Image LoRA admits it, got {error:?}"));
             refused(
                 validate_training_target_config(&plan(
                     "ltx_mlx_lora",
@@ -6832,10 +6788,10 @@ mod tests {
             );
         }
 
-        // Full base fine-tune + either noise is refused (Mage is the full-tune-capable trainer).
+        // Iris full base fine-tune refuses adapter noise.
         for (key, on, _) in techniques.clone() {
             assert!(
-                err(plan("mage_flow_lora", "mage_flow_base", "full", key, on))
+                err(plan("iris_3b_generation", "iris_3b", "full", key, on))
                     .contains("networkType 'full'"),
                 "{key}"
             );
@@ -7149,12 +7105,8 @@ mod tests {
         }
 
         // Every LoRA trainer declares it on both backends (sc-24830): SDXL (TAESDXL), Z-Image
-        // (TAEF1) and Mage (its own VAE) are admitted on the active runtime.
-        for (kernel, base) in [
-            ("sdxl_lora", "sdxl"),
-            ("z_image_lora", "z_image_turbo"),
-            ("mage_flow_lora", "mage_flow_base"),
-        ] {
+        // (TAEF1) are admitted on the active runtime.
+        for (kernel, base) in [("sdxl_lora", "sdxl"), ("z_image_lora", "z_image_turbo")] {
             validate_training_target_config(&plan(kernel, base, &on))
                 .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
         }
@@ -7238,11 +7190,6 @@ mod tests {
                 "{kernel}"
             );
         }
-        // Mage-Flow decodes through its own VAE (`builtin_x0_decoder`): no decoder directory.
-        let mage = plan("mage_flow_lora", "mage_flow_base");
-        let mut config = map_training_config(&mage.config).expect("valid mapped training config");
-        apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
-        assert_eq!(config.perceptual_decoder_dir, None);
     }
 
     /// sc-25213 (d): the plan's `trainingAdapterVersion` maps to the right installed adapter file —
@@ -7405,38 +7352,6 @@ mod tests {
             }
             other => panic!("expected an unknown-version refusal, got {other:?}"),
         }
-    }
-
-    /// The worker's x0-decoder table and the engine descriptors agree on which trainers decode
-    /// through their own VAE: `x0_decoder_for_trainer(id) == BaseModelVae` exactly when the
-    /// active platform's descriptor declares `techniques.builtin_x0_decoder`. Mutation: map
-    /// `mage_flow_base` to a cataloged decoder (or drop `BaseModelVae`) ⇒ red.
-    #[cfg(native_lane)]
-    #[test]
-    fn base_model_vae_decoder_matches_builtin_x0_decoder_descriptors() {
-        use sceneworks_core::training::depth_anchoring::X0DecoderSource;
-        let descriptors: Vec<_> = crate::inference_runtime::media()
-            .trainers()
-            .map(|registration| (registration.descriptor)())
-            .collect();
-        assert!(
-            !descriptors.is_empty(),
-            "no trainers registered on this platform"
-        );
-        let mut builtin = 0;
-        for descriptor in descriptors {
-            let id = descriptor.id;
-            let base_vae = x0_decoder_for_trainer(id) == Some(X0DecoderSource::BaseModelVae);
-            assert_eq!(
-                base_vae, descriptor.techniques.builtin_x0_decoder,
-                "{id}: x0_decoder_for_trainer BaseModelVae vs descriptor builtin_x0_decoder"
-            );
-            builtin += usize::from(base_vae);
-        }
-        assert!(
-            builtin > 0,
-            "no trainer declares builtin_x0_decoder on this platform"
-        );
     }
 
     /// sc-2125: an enabled depth-anchoring plan maps onto the engine's typed config — schedule,
@@ -7763,11 +7678,7 @@ mod tests {
                 assert!(control.contains("not registered"), "{control}");
             }
         }
-        for (kernel, base) in [
-            ("sdxl_lora", "sdxl"),
-            ("z_image_lora", "z_image_turbo"),
-            ("mage_flow_lora", "mage_flow_base"),
-        ] {
+        for (kernel, base) in [("sdxl_lora", "sdxl"), ("z_image_lora", "z_image_turbo")] {
             for on in [&identity, &landmark] {
                 validate_training_target_config(&plan(kernel, base, on))
                     .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
@@ -9063,11 +8974,11 @@ mod tests {
         }
         // Trainers without a fixed BF16 source contract keep tracking train_dtype.
         assert!(matches!(
-            training_load_precision("lens", "f32"),
+            training_load_precision("z_image_turbo", "f32"),
             Precision::Fp32
         ));
         assert!(matches!(
-            training_load_precision("lens", "bf16"),
+            training_load_precision("z_image_turbo", "bf16"),
             Precision::Bf16
         ));
     }
@@ -9098,9 +9009,6 @@ mod tests {
             // the trainer registers under the generator id `"kolors"`.
             ("kolors_lora", "kolors", Some("kolors")),
             ("kolors_lora", "not_kolors", None),
-            // Lens gained a native mlx-gen trainer (sc-5148) and now routes here (sc-5180); the
-            // trainer registers under the base generator id `"lens"`.
-            ("lens_lora", "lens", Some("lens")),
             // Krea trains the undistilled Raw DiT; the engine trainer registers under the base id
             // `"krea_2_raw"` (sc-7577/7578).
             ("krea_lora", "krea_2_raw", Some("krea_2_raw")),
@@ -9114,13 +9022,6 @@ mod tests {
             ("anima_lora", "anima_aesthetic", None),
             ("anima_lora", "anima_turbo", None),
             ("anima_lora", "anima_unknown", None),
-            // Mage-Flow (sc-15277): the single `mlx-gen-mage` trainer registers under the
-            // inference-generator id of the training base. The same id serves lora/lokr/full.
-            ("mage_flow_lora", "mage_flow_base", Some("mage_flow_base")),
-            // …and every non-Base Mage checkpoint is refused rather than silently trained through
-            // the generation-only conditioning path (the Edit variants need reference tokens).
-            ("mage_flow_lora", "mage_flow_edit_base", None),
-            ("mage_flow_lora", "mage_flow_turbo", None),
             // Qwen Image 2.1 (sc-24159): the trainer registers under the base generator id.
             // The distinct 2512 `qwen_image` / Edit models never resolve to it.
             (
@@ -9187,9 +9088,6 @@ mod tests {
             ("anima_base_lora", "lokr", "anima_base"),
             ("kolors_lora", "lora", "kolors"),
             ("kolors_lora", "lokr", "kolors"),
-            ("mage_flow_base_lora", "lora", "mage_flow_base"),
-            ("mage_flow_base_lora", "lokr", "mage_flow_base"),
-            ("mage_flow_base_lora", "full", "mage_flow_base"),
             ("sd3_5_large_lora", "lora", "sd3_5_large"),
             ("sd3_5_large_lora", "lokr", "sd3_5_large"),
             ("sd3_5_medium_lora", "lora", "sd3_5_medium"),
@@ -9197,7 +9095,7 @@ mod tests {
             ("wan_lora", "lora", "wan2_2_ti2v_5b"),
             ("wan_i2v_14b_lora", "lora", "wan2_2_i2v_14b"),
         ];
-        assert_eq!(cells.len(), 13, "the reconciled matrix has exactly 13 gaps");
+        assert_eq!(cells.len(), 10, "ten reconciled retained route cells");
 
         let targets = builtin_training_targets();
         let registry = crate::inference_runtime::media();
@@ -9531,13 +9429,6 @@ mod tests {
                 json!(true),
             ),
             ("sd3_lora", "sd3_5_large", "lora", "sampleEvery", json!(1)),
-            (
-                "mage_flow_lora",
-                "mage_flow_base",
-                "lora",
-                "resume",
-                json!(true),
-            ),
             ("wan_lora", "wan_2_2", "lora", "sampleEvery", json!(1)),
             (
                 "wan_moe_lora",
@@ -9611,12 +9502,6 @@ mod tests {
                 "timestepType",
                 json!("logit_normal"),
             ),
-            (
-                "mage_flow_lora",
-                "mage_flow_base",
-                "timestepType",
-                json!("logit_normal"),
-            ),
             ("kolors_lora", "kolors", "timestepType", json!("linear")),
             ("wan_lora", "wan_2_2", "optimizer", json!("lion")),
             ("sd3_lora", "sd3_5_large", "timestepBias", json!("middle")),
@@ -9656,7 +9541,6 @@ mod tests {
             ("anima_lora", "anima_base"),
             ("kolors_lora", "kolors"),
             ("sd3_lora", "sd3_5_medium"),
-            ("mage_flow_lora", "mage_flow_base"),
             ("wan_lora", "wan_2_2"),
             ("wan_moe_lora", "wan_2_2_i2v_14b"),
         ] {
@@ -9672,22 +9556,6 @@ mod tests {
                 "{kernel}: {error}"
             );
         }
-
-        // Mage full legitimately carries rank=0. Its provider normalizes only for flow validation;
-        // the prepared request must preserve the complete-base optimizer surface unchanged.
-        let mut mage_full = plan_json(
-            dir.path(),
-            "mage_flow_lora",
-            "mage_flow_base",
-            "full",
-            &[&image],
-        );
-        mage_full["target"]["outputKind"] = json!("base_checkpoint");
-        mage_full["config"]["rank"] = json!(0);
-        mage_full["config"]["advanced"]["mixedPrecision"] = json!("f32");
-        let prepared = preflight_training_run(&settings, &parse(mage_full), false)
-            .expect("rank-zero Mage full request validates");
-        assert_eq!(prepared.request.config.rank, 0);
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -10284,103 +10152,6 @@ mod tests {
         }
     }
 
-    /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.
-    ///
-    /// `model_jobs` has its own coverage that `resolve_co_requisites_for_tier` honours `variant` and
-    /// `subdir`. What is untested there — and what broke when sc-14980 landed under this story — is
-    /// which tier *training* asks for. Three ways to get it wrong, all silent or misleading:
-    /// passing `None` (the resolver refuses with "refusing to guess"), passing whichever tier is
-    /// installed (a q4 tier would hand the gradient path PACKED weights, which `quantize` no-ops —
-    /// it trains WRONG and reports success), or keeping the old tier-agnostic call (which cannot
-    /// pick at all).
-    ///
-    /// So: stage ONLY q4 and require that training still fails, naming `bf16`. A resolver asking for
-    /// `None` produces the "refusing to guess" text instead; one asking for q4 would SUCCEED here,
-    /// which is the dangerous outcome this asserts against.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn training_components_demand_the_dense_tier_even_when_a_packed_tier_is_installed() {
-        // Pin the HF cache to the temp data dir so the staged components are the only ones visible.
-        let _env = crate::test_env::EnvVars::set(&[
-            ("HF_HOME", ""),
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-        ]);
-        let manifest = builtin_model_manifest_entry("mage_flow_base")
-            .expect("mage_flow_base has a builtin catalog entry");
-        // Stage exactly one tier's shared components into a data dir.
-        let stage = |settings: &Settings, tier: &str| {
-            for download in manifest
-                .get("downloads")
-                .and_then(Value::as_array)
-                .expect("downloads")
-            {
-                if download.get("coRequisite").and_then(Value::as_bool) != Some(true)
-                    || download.get("variant").and_then(Value::as_str) != Some(tier)
-                {
-                    continue;
-                }
-                let repo = download["repo"].as_str().expect("repo");
-                let revision = download["revision"].as_str().expect("revision");
-                let subdir = download["subdir"].as_str().expect("subdir");
-                let dir =
-                    sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
-                        .expect("repo cache path")
-                        .join("snapshots")
-                        .join(revision)
-                        .join(subdir);
-                std::fs::create_dir_all(&dir).expect("stage component dir");
-                std::fs::write(dir.join("model.safetensors"), b"stub")
-                    .expect("stage component file");
-            }
-        };
-
-        // POSITIVE: with the dense tier staged, training resolves each component to THAT tier's own
-        // component DIR, not the snapshot root. `subdir` is what makes this pass — a resolver
-        // ignoring it hands the engine a repo root holding q4/ q8/ bf16/ side by side.
-        let dense = tempfile::tempdir().expect("tempdir");
-        let dense_settings = test_settings(dense.path());
-        stage(&dense_settings, "bf16");
-        let components =
-            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings, None)
-                .expect("the bf16 shared components are staged");
-        let keys: Vec<&str> = components.keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["text_encoder", "vae"]);
-        for component in ["text_encoder", "vae"] {
-            let WeightsSource::Dir(dir) = &components[component] else {
-                panic!("{component} must stage as a directory");
-            };
-            assert!(
-                dir.ends_with(format!("bf16/{component}")),
-                "{component} must resolve to the DENSE tier's component dir, got {}",
-                dir.display()
-            );
-            assert!(dir.is_dir(), "{component} dir must exist");
-        }
-
-        // NEGATIVE: with only a PACKED tier installed, training refuses rather than falling back.
-        let temp = tempfile::tempdir().expect("tempdir");
-        let settings = test_settings(temp.path());
-        stage(&settings, "q4");
-
-        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings, None)
-            .expect_err(
-                "only the q4 shared components are installed, so a training run — which needs the \
-                 DENSE base — must be refused",
-            );
-        let message = error.to_string();
-        assert!(
-            message.contains("bf16"),
-            "training must ask for the bf16 tier BY NAME; asking for `None` yields the \
-             refusing-to-guess error instead. got: {message}"
-        );
-        assert!(
-            !message.contains("refusing to guess"),
-            "training resolves a concrete tier, so it must never hit the ambiguous-candidate \
-             branch: {message}"
-        );
-    }
-
     /// sc-14056 — the full-base-fine-tune signal and submitted checkpointing intent must both reach
     /// the engine config unchanged. Unsupported combinations are rejected by the shared preflight.
     ///
@@ -10399,8 +10170,8 @@ mod tests {
         let mapped = |network_type: &str| {
             let mut value = plan_json(
                 dir.path(),
-                "mage_flow_lora",
-                "mage_flow_base",
+                "iris_3b_generation",
+                "iris_3b",
                 network_type,
                 &[&image.display().to_string()],
             );
@@ -10467,16 +10238,16 @@ mod tests {
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
         let mut value = plan_json(
             dir.path(),
-            "mage_flow_lora",
-            "mage_flow_base",
+            "iris_3b_generation",
+            "iris_3b",
             "full",
             &[&image.display().to_string()],
         );
         value["target"]["outputKind"] = json!("base_checkpoint");
-        value["output"]["loraId"] = json!("finetune_mage");
+        value["output"]["loraId"] = json!("finetune_iris");
         let plan = parse(value);
         let output = TrainingOutput {
-            adapter_path: dir.path().join("models/finetunes/finetune_mage"),
+            adapter_path: dir.path().join("models/finetunes/finetune_iris"),
             steps: 1,
             final_loss: 0.25,
         };
@@ -10484,7 +10255,7 @@ mod tests {
 
         assert_eq!(result["outputKind"], json!("base_checkpoint"));
         assert_eq!(result["networkType"], json!("full"));
-        assert_eq!(result["outputId"], json!("finetune_mage"));
+        assert_eq!(result["outputId"], json!("finetune_iris"));
         assert_eq!(result["backend"], json!("candle"));
         // sc-2127: a single-resolution run records no bucket rows...
         assert!(!result.contains_key("resolutionBuckets"));
@@ -11086,123 +10857,6 @@ mod tests {
         );
     }
 
-    /// sc-5180 — the Lens training cutover's worker smoke: load the Lens trainer from the installed
-    /// `SceneWorks/Lens` snapshot (the training-base diffusers rehost; the original `microsoft/Lens`
-    /// is dead, sc-8797) and run two LoRA micro-steps on a one-image dataset. Proves the
-    /// worker LINKS `mlx-gen-lens` (the `load_trainer("lens", …)` trainer registration survives
-    /// linker GC — the dead-strip gotcha that bit Kolors) and a real step runs (finite loss) + writes
-    /// an adapter through the full worker path. The trainer loads the gpt-oss encoder Q8 (~12 GB) +
-    /// the DiT bf16 (res 64 keeps the per-step graph tiny — the encoder load is the heavy part).
-    /// Run on demand:
-    /// `cargo test -p sceneworks-worker --lib -- --ignored lens_real_weights_trains --nocapture`.
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore = "needs real SceneWorks/Lens weights + Metal device; loads the 20B gpt-oss encoder (Q8)"]
-    fn lens_real_weights_trains_a_lora_step() {
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME set"));
-        let snapshot = std::fs::read_dir(
-            home.join(".cache/huggingface/hub/models--SceneWorks--Lens/snapshots"),
-        )
-        .expect("lens snapshots dir")
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_dir() && path.join("transformer").is_dir())
-        .expect("a SceneWorks/Lens snapshot dir");
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let image_path = tmp.path().join("swatch.png");
-        image::RgbImage::from_fn(256, 256, |x, y| {
-            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
-        })
-        .save(&image_path)
-        .expect("write test image");
-        let output_dir = tmp.path().join("out");
-        std::fs::create_dir_all(&output_dir).unwrap();
-
-        let config = TrainingConfig {
-            rank: 4,
-            alpha: 4.0,
-            learning_rate: 1e-4,
-            steps: 2,
-            batch_size: 1,
-            gradient_accumulation: 1,
-            gradient_checkpointing: false,
-            // sc-14056: LoRA-path harness; the full base fine-tune is opt-in.
-            full_finetune: false,
-            train_dtype: "bf16".to_owned(),
-            resolution: 64,
-            save_every: 0,
-            seed: 42,
-            optimizer: "adamw".to_owned(),
-            weight_decay: 0.0,
-            lr_scheduler: LrSchedule::parse("constant"),
-            lr_warmup_steps: 0,
-            network_type: NetworkType::parse("lora"),
-            decompose_factor: -1,
-            lora_target_modules: Vec::new(),
-            timestep_type: "sigmoid".to_owned(),
-            timestep_bias: "balanced".to_owned(),
-            loss_type: "mse".to_owned(),
-            trigger_word: None,
-            sample_every: 0,
-            sample_prompts: Vec::new(),
-            sample_steps: 20,
-            sample_guidance_scale: 1.0,
-            resume: false,
-            control_type: None,
-            model_options: Default::default(),
-            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
-            ..Default::default()
-        };
-        let request = TrainingRequest {
-            items: vec![TrainingItem {
-                reference_image_paths: Vec::new(),
-                image_path,
-                caption: "a colorful test swatch".to_owned(),
-                control_image_path: None,
-                subject_mask_path: None,
-                model_options: Default::default(),
-            }],
-            config,
-            output_dir: output_dir.clone(),
-            file_name: "lens_smoke.safetensors".to_owned(),
-            trigger_words: Vec::new(),
-            cancel: CancelFlag::new(),
-        };
-
-        let mut trainer = crate::inference_runtime::load_trainer(
-            "lens",
-            &LoadSpec::new(WeightsSource::Dir(snapshot)),
-        )
-        .expect("lens trainer loads from the explicit runtime catalog");
-        trainer
-            .validate(&request)
-            .expect("trainer accepts the plan");
-        let mut last_loss = f32::NAN;
-        let output = trainer
-            .train(&request, &mut |progress| {
-                if let TrainingProgress::Training { loss, .. } = progress {
-                    last_loss = loss;
-                }
-            })
-            .expect("training runs a step");
-
-        eprintln!(
-            "[lens-train-smoke] steps={} final_loss={} last_step_loss={} adapter={}",
-            output.steps,
-            output.final_loss,
-            last_loss,
-            output.adapter_path.display()
-        );
-        assert!(output.steps >= 1, "expected at least one micro-step");
-        assert!(output.final_loss.is_finite(), "final loss must be finite");
-        assert!(last_loss.is_finite(), "a training-step loss was observed");
-        assert!(
-            output_dir.join("lens_smoke.safetensors").exists(),
-            "trained adapter was written"
-        );
-    }
-
     /// Real-weights production-scale smoke (sc-4881 / sc-4874+4886+4887, Part A4): load the
     /// z-image trainer from the installed `Tongyi-MAI/Z-Image-Turbo` snapshot and run two LoRA
     /// micro-steps **at resolution 1024 with `train_dtype="bf16"`** — the exact configuration
@@ -11734,20 +11388,6 @@ mod tests {
             true,
             "candle_wan_smoke.safetensors",
         );
-    }
-
-    /// sc-7817 — the candle Lens training smoke. Loads `load_trainer("lens", …)` from the installed
-    /// `SceneWorks/Lens` snapshot (`tokenizer/ text_encoder/ transformer/ vae/` — the training-base
-    /// diffusers rehost; the original `microsoft/Lens` is dead, sc-8797) and trains two LoRA
-    /// micro-steps at resolution 64 (the gpt-oss-20b encoder load dominates; the per-step DiT graph
-    /// stays tiny). Checkpointing on for the large 48-layer MMDiT. Run on demand (one smoke per GPU):
-    /// `cargo test -p sceneworks-worker --lib --features backend-candle -- --ignored candle_lens_real_weights --nocapture`.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    #[test]
-    #[ignore = "needs real SceneWorks/Lens weights + a CUDA device; loads the gpt-oss-20b encoder"]
-    fn candle_lens_real_weights_trains_a_lora_step() {
-        let snapshot = candle_hf_snapshot("models--SceneWorks--Lens", "transformer");
-        candle_real_weights_smoke("lens", &snapshot, 64, true, "candle_lens_smoke.safetensors");
     }
 
     /// sc-8614 — the candle Krea 2 training smoke. Loads `load_trainer("krea_2_raw", …)` from the

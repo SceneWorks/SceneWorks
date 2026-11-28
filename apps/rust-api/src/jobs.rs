@@ -517,6 +517,12 @@ async fn upgrade_historical_carrier(
     state: &AppState,
     original: &JobSnapshot,
 ) -> Result<bool, ApiError> {
+    if let Err(error) = sceneworks_core::request_validation::reject_retired_image_job(
+        &original.job_type,
+        &original.payload,
+    ) {
+        return fail_historical_carrier(state, original, error.detail).await;
+    }
     let mut current = original.payload.clone();
     let canonical = match original.job_type {
         JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
@@ -2520,6 +2526,8 @@ async fn canonicalize_image_model_payload_with_replay_changes(
         return Ok(None);
     };
     validate_model_id(&model_id)?;
+    sceneworks_core::request_validation::reject_retired_image_identity("model", &model_id)
+        .map_err(retired_model_error)?;
 
     // A retried/duplicated request for a trained checkpoint was aliased onto its engine model at
     // create time; re-resolve from the checkpoint the user picked so the alias is re-derived from
@@ -2876,6 +2884,17 @@ fn is_license_gated_fetching_job(job_type: &JobType) -> bool {
 }
 
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
+pub(crate) fn retired_model_error(
+    error: sceneworks_core::request_validation::ValidationRefusal,
+) -> ApiError {
+    ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        error.detail,
+        error.code,
+        *error.context,
+    )
+}
+
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
 /// `image_upscale`, `image_detail`, and `prompt_refine` consume `model`; the model-management jobs
 /// consume `modelId`, and `model_convert.outputDir` selects its final install location. Other raw
@@ -2890,6 +2909,8 @@ async fn validate_raw_job_payload(
     payload: &mut JsonObject,
     license_validation: FetchingLicenseValidation,
 ) -> Result<(), ApiError> {
+    sceneworks_core::request_validation::reject_retired_image_job(job_type, payload)
+        .map_err(retired_model_error)?;
     if matches!(
         job_type,
         JobType::ImageDetail
@@ -4074,8 +4095,6 @@ pub(crate) async fn register_completed_base_checkpoint(
 /// path component, and the output dir + manifest path are RECOMPUTED from it rather than read back
 /// from the mutable job payload. Two things differ, both because the artifact is a model:
 ///
-/// * the payload's declared `files` are ignored entirely — [`trusted_base_checkpoint_files`]
-///   validates the recomputed directory's SHAPE (both component files present) instead, which is
 ///   what `trusted_adapter_files`'s `is_file()` contract cannot express; and
 /// * `paths.model` is stamped with the recomputed absolute directory, so the catalog's install-state
 ///   derivation and the worker's render lane resolve the same path the API just validated.
@@ -4115,6 +4134,11 @@ pub(crate) async fn register_trained_base_checkpoint(
         .and_then(Value::as_str)
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| ApiError::internal("Training plan requires a base model identity"))?;
+    if sceneworks_core::model_family::retired_image_family(source_model_id).is_some()
+        || sceneworks_core::model_family::retired_image_entry(&manifest_entry).is_some()
+    {
+        return Ok(None);
+    }
     validate_lora_id_component(&model_id)?;
     let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
 
@@ -4181,122 +4205,7 @@ pub(crate) async fn register_trained_base_checkpoint(
         return Ok(Some((model_id, manifest_path)));
     }
 
-    let Some(files) = trusted_base_checkpoint_files(&output_dir) else {
-        return Err(ApiError::internal(format!(
-            "No complete fine-tuned base checkpoint found under {} (expected {} and {}); skipping \
-             model registration",
-            output_dir.display(),
-            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_CONFIG_FILE,
-            sceneworks_core::base_weights::MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE,
-        )));
-    };
-
-    // The catalog derives `installState` for a non-downloadable entry from the SceneWorks install
-    // marker in `paths.model` (`model_is_installed`), exactly as it does for an imported model. A
-    // fine-tune has no download to leave one, so write it here — without it the entry lands with
-    // `installState: "missing"` and `modelInstallComplete` drops it from every picker, i.e. the
-    // model would be registered and still not selectable.
-    tokio::fs::write(
-        output_dir.join(".sceneworks-download-complete.json"),
-        serde_json::to_vec_pretty(&json!({
-            "modelId": model_id,
-            "provider": "training",
-            "jobId": job.id,
-            "completedAt": now_rfc3339(),
-        }))
-        .map_err(|error| ApiError::internal(error.to_string()))?,
-    )
-    .await
-    .map_err(|error| {
-        ApiError::internal(format!(
-            "Could not mark the fine-tuned checkpoint at {} as installed: {error}",
-            output_dir.display()
-        ))
-    })?;
-    sceneworks_worker::write_produced_artifact_receipt(
-        &output_dir,
-        &job.id,
-        source_model_id,
-        &model_id,
-    )
-    .map_err(|error| ApiError::internal(format!("Could not attest trained checkpoint: {error}")))?;
-
-    let model_type = manifest_entry
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("image")
-        .to_owned();
-    let family = manifest_entry
-        .get("family")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-
-    let mut entry = manifest_entry;
-    entry.insert("id".to_owned(), Value::String(model_id.clone()));
-    entry.insert(
-        "source".to_owned(),
-        json!({ "provider": "training", "path": format!("models/finetunes/{model_id}") }),
-    );
-    entry.insert(
-        "files".to_owned(),
-        Value::Array(files.into_iter().map(Value::String).collect()),
-    );
-    entry.insert(
-        "paths".to_owned(),
-        json!({ "model": output_dir.display().to_string() }),
-    );
-    entry.insert(
-        "importSourceShape".to_owned(),
-        Value::String("transformer_directory".to_owned()),
-    );
-    entry.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
-    sceneworks_core::lora_family::apply_model_manifest_defaults(
-        &mut entry,
-        &model_type,
-        family.as_deref(),
-    );
-    // sc-15328 — a fine-tuned checkpoint must not ADVERTISE adapters it cannot render.
-    //
-    // `apply_model_manifest_defaults` synthesizes `loraCompatibility.families = [family]` from the
-    // family token alone, which is right for an imported sibling of a builtin but wrong here: the
-    // fine-tuned lane refuses adapters on every backend (`mlx_gen_mage::load_finetuned`, and the
-    // `!has_loras` term in `imported_image_request_family_eligible`). Left advertised, the API
-    // accepted the job and NO worker could claim it — it queued forever with no error.
-    //
-    // 🔴 This removal does NOT by itself produce the rejection sc-15328 claimed for it, and for two
-    // years it did not: `families_from_value_chain` (lib.rs) falls back to the top-level `family`
-    // key — which this entry still carries, and must, for routing — so `model_lora_families` kept
-    // returning `["mage-flow"]`, the "has no declared LoRA families" branch was never taken, and the
-    // lane went on hanging. Removing the key here is kept only so the STORED entry carries no false
-    // promise; the enforcement is `models::apply_imported_lora_advertisement`, which withdraws the
-    // advertisement on the catalog projection every read goes through (an explicit EMPTY families
-    // array, which is non-null and so actually defeats that fallback).
-    //
-    // Whether a fine-tune SHOULD accept adapters is a separate product question (sc-15334) — this
-    // only guarantees that what is advertised is what can actually run.
-    entry.remove("loraCompatibility");
-
-    let upsert_id = model_id.clone();
-    mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
-        // Replace any prior entry with this id (a re-run of the same job) so provenance refreshes
-        // without duplicating, preserving the original createdAt — the LoRA registrar's contract.
-        let created_at = entries
-            .iter()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
-            .and_then(|item| item.get("createdAt").cloned());
-        let mut entries = entries
-            .into_iter()
-            .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
-            .collect::<Vec<_>>();
-        let mut entry = entry;
-        if let Some(created_at) = created_at {
-            entry.insert("createdAt".to_owned(), created_at);
-        }
-        entries.push(Value::Object(entry));
-        Ok((entries, ()))
-    })
-    .await?;
-    Ok(Some((model_id, manifest_path)))
+    Ok(None)
 }
 
 /// The control-overlay analog of [`register_completed_training_lora`] (sc-10165, epic 10159 B4). A

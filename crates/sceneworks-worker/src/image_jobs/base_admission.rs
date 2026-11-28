@@ -311,16 +311,6 @@ pub(super) async fn admit_candle_base_floor_with_resident_overlay(
     }
 }
 
-/// Gate an imported/ComfyUI base whose user-owned paths have no stable catalog row.
-pub(super) async fn admit_candle_base_floor(
-    model: &str,
-    lane: &'static str,
-    settings: &Settings,
-    paths: &[&Path],
-) -> WorkerResult<()> {
-    admit_candle_base_floor_with_resident_overlay(model, lane, settings, paths, 0).await
-}
-
 /// A live-VRAM floor bound to a registered generator cache miss.
 ///
 /// The runtime handle is captured on the async route before the closure crosses to the dedicated
@@ -542,30 +532,6 @@ fn prepared_floor_weight_bytes(
             total.saturating_add(pin.target_fingerprint().size)
         });
     Ok(file_bytes.saturating_add(distinct_weight_bytes(companion_dirs)))
-}
-
-/// Imported SDXL already materializes a `LoadSpec` containing its external checkpoint,
-/// adapters, PiD weights, and caller-staged components. Price exactly those sources.
-pub(super) async fn admit_candle_load_spec_floor(
-    model: &str,
-    lane: &'static str,
-    settings: &Settings,
-    spec: &LoadSpec,
-) -> WorkerResult<()> {
-    let mut paths = vec![crate::weights_source::WeightsSourceExt::path(&spec.weights)];
-    paths.extend(spec.adapters.iter().map(|adapter| adapter.path.as_path()));
-    paths.extend(
-        spec.components
-            .values()
-            .map(crate::weights_source::WeightsSourceExt::path),
-    );
-    if let Some(pid) = &spec.pid {
-        paths.push(crate::weights_source::WeightsSourceExt::path(
-            &pid.checkpoint,
-        ));
-        paths.push(crate::weights_source::WeightsSourceExt::path(&pid.gemma));
-    }
-    admit_candle_base_floor(model, lane, settings, &paths).await
 }
 
 #[cfg(test)]

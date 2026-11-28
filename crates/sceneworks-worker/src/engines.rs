@@ -28,56 +28,7 @@ pub(crate) struct ModelRow {
 }
 
 pub(crate) const MODEL_TABLE: &[ModelRow] = &[
-    // Mage-Flow's six physical tiers carry the variant-specific transformer; the shared text
     // encoder and VAE are caller-staged from the manifest's per-tier co-requisites.
-    ModelRow {
-        sceneworks_id: "mage_flow_base",
-        engine_id: "mage_flow_base",
-        default_repo: "SceneWorks/Mage-Flow-Base",
-        default_steps: 30,
-        default_guidance: 5.0,
-        adapter_label: "mlx_mage",
-    },
-    ModelRow {
-        sceneworks_id: "mage_flow",
-        engine_id: "mage_flow",
-        default_repo: "SceneWorks/Mage-Flow",
-        default_steps: 20,
-        default_guidance: 5.0,
-        adapter_label: "mlx_mage",
-    },
-    ModelRow {
-        sceneworks_id: "mage_flow_turbo",
-        engine_id: "mage_flow_turbo",
-        default_repo: "SceneWorks/Mage-Flow-Turbo",
-        default_steps: 4,
-        default_guidance: 1.0,
-        adapter_label: "mlx_mage",
-    },
-    ModelRow {
-        sceneworks_id: "mage_flow_edit_base",
-        engine_id: "mage_flow_edit_base",
-        default_repo: "SceneWorks/Mage-Flow-Edit-Base",
-        default_steps: 30,
-        default_guidance: 5.0,
-        adapter_label: "mlx_mage",
-    },
-    ModelRow {
-        sceneworks_id: "mage_flow_edit",
-        engine_id: "mage_flow_edit",
-        default_repo: "SceneWorks/Mage-Flow-Edit",
-        default_steps: 30,
-        default_guidance: 5.0,
-        adapter_label: "mlx_mage",
-    },
-    ModelRow {
-        sceneworks_id: "mage_flow_edit_turbo",
-        engine_id: "mage_flow_edit_turbo",
-        default_repo: "SceneWorks/Mage-Flow-Edit-Turbo",
-        default_steps: 4,
-        default_guidance: 1.0,
-        adapter_label: "mlx_mage",
-    },
     ModelRow {
         sceneworks_id: "z_image_turbo",
         engine_id: "z_image_turbo",
@@ -609,35 +560,6 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
     },
-    // Microsoft Lens / Lens-Turbo (epic 3164 engine / sc-5105 cutover) — gpt-oss-20b MoE text
-    // encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE. Pure **T2I** (the descriptor advertises
-    // no conditioning — no img2img / ControlNet / IP), so both ids ride the base [`generate_stream`]
-    // path with quant (Q8 default) + LoRA/LoKr. Standard guidance family: `supports_guidance=true` +
-    // `supports_negative_prompt=true` (NOT [`uses_true_cfg`]), so the CFG scale flows through
-    // `guidance` and the negative prompt is forwarded. `mac_only` — this row is the MLX path; the
-    // off-Mac native candle lane is registered separately.
-    // The two SceneWorks ids map 1:1 to the engine registry ids of the same name and differ only in
-    // their step/guidance defaults: base `lens` is 20-step / CFG 5.0, distilled `lens_turbo` is
-    // 4-step / guidance 1.0 (≈ no CFG) — Python `MODEL_TARGETS` parity. Each variant resolves its own
-    // SceneWorks re-host: base `lens` → `SceneWorks/lens-mlx` (recovered/rebuilt from Comfy-Org/Lens,
-    // sc-8767; original microsoft/Lens source is dead), distilled `lens_turbo` → `SceneWorks/lens-turbo-mlx`.
-    // Both are pre-quantized per-tier turnkey snapshots (q4/q8/bf16, standardTierLayout).
-    ModelRow {
-        sceneworks_id: "lens",
-        engine_id: "lens",
-        default_repo: "SceneWorks/lens-mlx",
-        default_steps: 20,
-        default_guidance: 5.0,
-        adapter_label: "mlx_lens",
-    },
-    ModelRow {
-        sceneworks_id: "lens_turbo",
-        engine_id: "lens_turbo",
-        default_repo: "SceneWorks/lens-turbo-mlx",
-        default_steps: 4,
-        default_guidance: 1.0,
-        adapter_label: "mlx_lens",
-    },
     // Bernini still-image companion (epic 4699 / sc-5424) — the image-typed catalog id maps to the
     // SAME engine registry id (`bernini`) the video `bernini` id uses (`Modality::Both`), mirroring
     // the `z_image_edit → z_image_turbo` two-id/one-engine row above. The dedicated
@@ -656,44 +578,6 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_steps: 40,
         default_guidance: 4.0,
         adapter_label: "mlx_bernini",
-    },
-    // Boogu-Image-0.1 (epic 6387) — native MLX, ungated (Apache-2.0). ~10.3B Lumina-Image-2.0 /
-    // OmniGen2-lineage flow-matching DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE. Three variants,
-    // one engine crate (`mlx-gen-boogu`); each id maps 1:1 to its gen_core descriptor id. The turnkey
-    // `SceneWorks/boogu-image-mlx` ships pre-packed Q8 `base/ turbo/ edit/` subfolders (default) +
-    // `*-bf16/`; `resolve_boogu_model_dir` (image_jobs/base.rs) points the engine at the variant
-    // subfolder. The packed weights auto-detect their quant on load, so the worker's Q8 quant spec is
-    // a no-op there. Base = true-CFG T2I (50 steps / guidance 4.0).
-    ModelRow {
-        sceneworks_id: "boogu_image",
-        engine_id: "boogu_image",
-        default_repo: "SceneWorks/boogu-image-mlx",
-        default_steps: 50,
-        default_guidance: 4.0,
-        adapter_label: "mlx_boogu",
-    },
-    // Boogu Turbo — the DMD few-step, CFG-free distilled variant (`turbo/` checkpoint). 4 steps;
-    // guidance is INERT (the `boogu_image_turbo` descriptor advertises supports_guidance=false, so
-    // `resolve_guidance` returns None and never forwards a value).
-    ModelRow {
-        sceneworks_id: "boogu_image_turbo",
-        engine_id: "boogu_image_turbo",
-        default_repo: "SceneWorks/boogu-image-mlx",
-        default_steps: 4,
-        default_guidance: 0.0,
-        adapter_label: "mlx_boogu",
-    },
-    // Boogu Edit — instruction image-edit (`edit/` checkpoint). The source image is read by the
-    // Qwen3-VL vision tower + VAE-encoded into the DiT's spatial reference latent; the prompt is the
-    // edit instruction. true-CFG (50 steps / guidance 4.0). The worker's `resolve_boogu_edit` builds
-    // the source `Conditioning::Reference` (no mask path).
-    ModelRow {
-        sceneworks_id: "boogu_image_edit",
-        engine_id: "boogu_image_edit",
-        default_repo: "SceneWorks/boogu-image-mlx",
-        default_steps: 50,
-        default_guidance: 4.0,
-        adapter_label: "mlx_boogu",
     },
     // Krea 2 Turbo (epic 7565) — native MLX, CFG-free rectified-flow few-step T2I (Qwen3-VL-4B TE +
     // 28-block single-stream DiT + Qwen-Image VAE). 8 steps; guidance is INERT (the `krea_2_turbo`
@@ -876,7 +760,6 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "z_image_turbo",
     "sdxl",
     "kolors",
-    "lens",
     // SD3.5 LoRA-training bases (epic 7841 T3 sc-7884): the engine registers the LoRA/LoKr trainer
     // under the same id as the inference generator of the training base — Large (sc-7883) and the
     // MMDiT-X Medium (sc-7885). Both native backends register these ids.
@@ -894,7 +777,6 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
     "anima_turbo",
     // Mage-Flow Base is the sole Mage training base. One trainer id serves LoRA, LoKr, and full
     // fine-tuning; the network type remains part of TrainingConfig rather than registry identity.
-    "mage_flow_base",
 ];
 
 /// A [`ModelRow`] paired with the linked gen_core descriptor for its engine id — the merged
@@ -1222,7 +1104,7 @@ mod tests {
                 .any(|download| download["repo"] == row.default_repo));
             checked += 1;
         }
-        assert!(checked > 50);
+        assert!(checked >= 49, "only {checked} retained image rows joined");
     }
     use super::*;
     use sceneworks_core::contracts::WorkerCapability as Cap;
@@ -1257,7 +1139,6 @@ mod tests {
         for id in [
             "anima_base",
             "kolors",
-            "mage_flow_base",
             "sd3_5_large",
             "sd3_5_medium",
             "wan2_2_ti2v_5b",
@@ -1670,50 +1551,6 @@ mod tests {
 
     #[cfg(native_lane)]
     #[test]
-    fn mage_split_tiers_stage_every_provider_required_component() {
-        let manifest = parse_builtin_models();
-        for model in manifest["models"]
-            .as_array()
-            .expect("models array")
-            .iter()
-            .filter(|model| model["family"] == "mage-flow")
-        {
-            let id = model["id"].as_str().expect("Mage model id");
-            let descriptor = mlx_model(id)
-                .unwrap_or_else(|| panic!("{id}: Mage requires an active provider descriptor"))
-                .descriptor;
-            let required = descriptor
-                .required_components
-                .iter()
-                .copied()
-                .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(
-                required,
-                std::collections::BTreeSet::from(["text_encoder", "vae"]),
-                "{id}: split layout must advertise both shared components"
-            );
-
-            for tier in ["q4", "q8", "bf16"] {
-                let staged = model["downloads"]
-                    .as_array()
-                    .expect("Mage downloads")
-                    .iter()
-                    .filter(|download| {
-                        download["coRequisite"].as_bool() == Some(true)
-                            && download["variant"].as_str() == Some(tier)
-                    })
-                    .filter_map(|download| download["componentId"].as_str())
-                    .collect::<std::collections::BTreeSet<_>>();
-                assert_eq!(
-                    staged, required,
-                    "{id}/{tier}: manifest co-requisites must cover the provider load contract"
-                );
-            }
-        }
-    }
-
-    #[cfg(native_lane)]
-    #[test]
     fn manifest_menu_is_subset_of_descriptor() {
         // The active backend's registry: MLX on macOS, candle on the `backend-candle` build.
         let backend = if cfg!(target_os = "macos") {
@@ -1937,17 +1774,9 @@ mod tests {
             "flux2_dev" | "flux2_klein_9b" => s::FLUX2,
             "ideogram_4" | "ideogram_4_turbo" => s::IDEOGRAM,
             "anima_base" | "anima_aesthetic" | "anima_turbo" => s::ANIMA,
-            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => s::BOOGU,
             "krea_2_turbo" | "krea_2_raw" => s::KREA,
             // Mage's provider currently keeps SIZE_MULTIPLE private; the descriptor validates the
             // same VAE-derived ÷16 lattice, pinned here until the const is re-exported.
-            "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo" => 16,
-            "lens" | "lens_turbo" => s::LENS,
             "qwen_image" | "qwen_image_edit" => s::QWEN_IMAGE,
             // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
             // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
@@ -1994,19 +1823,11 @@ mod tests {
             "flux2_dev" | "flux2_klein_9b" => s::FLUX2,
             "ideogram_4" | "ideogram_4_turbo" => s::IDEOGRAM,
             "anima_base" | "anima_aesthetic" | "anima_turbo" => s::ANIMA,
-            "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" => s::BOOGU,
             "krea_2_turbo" | "krea_2_raw" => s::KREA,
             // Mage now has native MLX and Candle providers. Its Candle facade does not export a
             // stride constant through `runtime_cuda::memory_helpers::image_strides`, so keep the
             // shared ÷16 contract explicit here and checked against the all-target MODEL_TABLE
             // lattice.
-            "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo" => 16,
-            "lens" | "lens_turbo" => s::LENS,
             "qwen_image" | "qwen_image_edit" => s::QWEN_IMAGE,
             // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
             // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
@@ -2240,59 +2061,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mage_edit_exposes_output_max_size_without_exposing_vision_preprocess_size() {
-        for id in [
-            "mage_flow_edit_base",
-            "mage_flow_edit",
-            "mage_flow_edit_turbo",
-        ] {
-            let caps = &mlx_model(id)
-                .expect("Mage Edit engine registration")
-                .descriptor
-                .capabilities;
-            assert_eq!(caps.max_size, 2048, "{id}: longest output side");
-            assert!(
-                caps.conditioning
-                    .contains(&gen_core::ConditioningKind::Reference)
-                    && caps
-                        .conditioning
-                        .contains(&gen_core::ConditioningKind::MultiReference),
-                "{id}: source and ordered multi-reference conditioning"
-            );
-        }
-        // The Qwen3-VL 384px conditioning edge is intentionally an engine-internal preprocessing
-        // constant, not a manifest request limit or Studio control.
-        assert!(
-            !include_str!("../../../config/manifests/builtin.models.jsonc")
-                .contains("vl_cond_long_edge")
-        );
-    }
-
-    #[test]
-    fn mage_rows_match_pinned_variant_defaults() {
-        let expected = [
-            ("mage_flow_base", 30, 5.0),
-            ("mage_flow", 20, 5.0),
-            ("mage_flow_turbo", 4, 1.0),
-            ("mage_flow_edit_base", 30, 5.0),
-            ("mage_flow_edit", 30, 5.0),
-            ("mage_flow_edit_turbo", 4, 1.0),
-        ];
-        for (id, steps, guidance) in expected {
-            let row = MODEL_TABLE
-                .iter()
-                .find(|row| row.sceneworks_id == id)
-                .unwrap_or_else(|| panic!("{id}: MODEL_TABLE registration"));
-            assert_eq!(row.default_steps, steps, "{id}: pinned MageVariant default");
-            assert_eq!(
-                row.default_guidance, guidance,
-                "{id}: pinned MageVariant CFG default"
-            );
-        }
-    }
-
     /// sc-12612: the mutation guard for [`pinned_image_stride`] and the on-stride assert in
     /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`]. That loop can only go RED when
     /// a SHIPPED bucket drifts off-lattice; this pins the lattice VALUES themselves, so a wrong mapping
@@ -2321,11 +2089,7 @@ mod tests {
             ("flux2_klein_9b", 16),
             ("ideogram_4", 16),
             ("anima_base", 16),
-            ("boogu_image", 16),
             ("krea_2_turbo", 16),
-            ("mage_flow_base", 16),
-            ("mage_flow_edit_base", 16),
-            ("lens", 16),
             ("qwen_image", 16),
             // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
             ("qwen_image_2_1", 32),

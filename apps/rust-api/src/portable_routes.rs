@@ -1483,65 +1483,53 @@ mod tests {
 
     #[test]
     fn imported_checkpoint_freezes_selected_resident_base_components() {
-        for (family, expected_repo) in [
-            ("krea_2", "SceneWorks/krea-2-turbo-mlx"),
-            ("mage-flow", "SceneWorks/Mage-Flow-Components-mlx"),
-        ] {
-            let mut entry = serde_json::json!({
-                "id": "imported-checkpoint", "family": family,
-                "installedPath": "/registered/imported-checkpoint.safetensors"
-            });
-            if family == "krea_2" {
-                entry["downloads"] = serde_json::json!([{
-                    "provider": "huggingface", "repo": "SceneWorks/krea-realtime-14b-mlx",
-                    "coRequisite": true, "required": "soft", "platforms": ["macos"],
-                    "files": ["q4/vae.safetensors"],
-                }]);
-            }
-            let entries = [("modelManifestEntry".to_owned(), &entry)];
-            let payload = serde_json::json!({"model":"imported-checkpoint"});
-            let selected = selected_route_source_rows(
-                &JobType::ImageGenerate,
-                payload.as_object().unwrap(),
-                &entries,
-                "mlx",
-                "macos",
-            )
-            .unwrap();
-            let resident: Vec<_> = selected
-                .iter()
-                .filter(|row| row.component_id.starts_with("resident_base/downloads/"))
-                .collect();
-            assert!(
-                !resident.is_empty(),
-                "{family} must freeze its resident base"
-            );
-            assert!(resident.iter().all(|row| {
-                row.role == ArtifactMemberRole::RequiredComponent
-                    && row.model_slot == "modelManifestEntry"
-                    && row.selected_tier.as_deref() == Some("bf16")
-                    && matches!(&row.source, SelectedSourceLocation::ManifestDownload(download)
-                        if download["repo"] == expected_repo
-                            && download["revision"].as_str().is_some_and(|revision| revision.len() == 40)
-                            && download["coRequisite"] == true)
-            }));
-            if family == "krea_2" {
-                let SelectedSourceLocation::ManifestDownload(download) = &resident[0].source else {
-                    panic!("resident Krea source must be a manifest download");
-                };
-                assert_eq!(
-                    download["files"],
-                    serde_json::json!([
-                        "bf16/transformer/config.json",
-                        "bf16/text_encoder/*",
-                        "bf16/vae/*",
-                        "bf16/tokenizer/*",
-                        "bf16/scheduler/*",
-                        "bf16/model_index.json",
-                    ])
-                );
-            }
-        }
+        let entry = serde_json::json!({
+            "id": "imported-checkpoint", "family": "krea_2",
+            "installedPath": "/registered/imported-checkpoint.safetensors",
+            "downloads": [{
+                "provider": "huggingface", "repo": "SceneWorks/krea-realtime-14b-mlx",
+                "coRequisite": true, "required": "soft", "platforms": ["macos"],
+                "files": ["q4/vae.safetensors"],
+            }]
+        });
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = serde_json::json!({"model":"imported-checkpoint"});
+        let selected = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            &entries,
+            "mlx",
+            "macos",
+        )
+        .unwrap();
+        let resident: Vec<_> = selected
+            .iter()
+            .filter(|row| row.component_id.starts_with("resident_base/downloads/"))
+            .collect();
+        assert!(!resident.is_empty(), "Krea must freeze its resident base");
+        assert!(resident.iter().all(|row| {
+            row.role == ArtifactMemberRole::RequiredComponent
+                && row.model_slot == "modelManifestEntry"
+                && row.selected_tier.as_deref() == Some("bf16")
+                && matches!(&row.source, SelectedSourceLocation::ManifestDownload(download)
+                    if download["repo"] == "SceneWorks/krea-2-turbo-mlx"
+                        && download["revision"].as_str().is_some_and(|revision| revision.len() == 40)
+                        && download["coRequisite"] == true)
+        }));
+        let SelectedSourceLocation::ManifestDownload(download) = &resident[0].source else {
+            panic!("resident Krea source must be a manifest download");
+        };
+        assert_eq!(
+            download["files"],
+            serde_json::json!([
+                "bf16/transformer/config.json",
+                "bf16/text_encoder/*",
+                "bf16/vae/*",
+                "bf16/tokenizer/*",
+                "bf16/scheduler/*",
+                "bf16/model_index.json",
+            ])
+        );
     }
 
     #[test]

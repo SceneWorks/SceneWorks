@@ -1,6 +1,82 @@
 //! CANDLE runtime capture owner.
 use super::*;
 
+/// Whether this case is the `z_image_edit` route: the Turbo provider in `edit_image` mode. Every
+/// other provider this adapter implements is measured text-to-image regardless of the mode
+/// spelling, exactly as before; only the Turbo arm has a second mode it can actually execute.
+pub(super) fn is_z_image_edit(request: &Value) -> Result<bool, String> {
+    Ok(planned_provider(request)? == Z_IMAGE_TURBO_ID && planned_mode(request)? == "edit_image")
+}
+
+/// The `(env family, expected repository)` binding for Qwen-Image 2.1 at one tier (sc-24112): the
+/// split-repo shape [`ideogram_five_rung_family`] has, with the halves swapped — `q4`/`q8` are the
+/// SceneWorks re-host's tier subdirs and `bf16` is the upstream `Qwen/Qwen-Image-2.1` snapshot root.
+/// A function for the same parser reason Ideogram's is.
+pub(super) fn qwen_image_2_1_five_rung_family(
+    tier: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    if tier == "bf16" {
+        (
+            QWEN_IMAGE_2_1_ID,
+            QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT",
+            protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY,
+        )
+    } else {
+        (
+            QWEN_IMAGE_2_1_ID,
+            QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_ROOT",
+            protocol::QWEN_IMAGE_2_1_REPOSITORY,
+        )
+    }
+}
+
+/// The Qwen-Image 2.1 Turbo twin of [`qwen_image_2_1_five_rung_family`] (sc-25907): the same split
+/// over the distilled checkpoint's OWN repositories and `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` env
+/// families, so a Turbo plan can never be satisfied by base weights.
+pub(super) fn qwen_image_2_1_turbo_five_rung_family(
+    tier: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    if tier == "bf16" {
+        (
+            QWEN_IMAGE_2_1_TURBO_ID,
+            QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT",
+            protocol::QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY,
+        )
+    } else {
+        (
+            QWEN_IMAGE_2_1_TURBO_ID,
+            QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT",
+            protocol::QWEN_IMAGE_2_1_TURBO_REPOSITORY,
+        )
+    }
+}
+
 pub(super) fn certifying_wddm_idle_config() -> StableIdleConfig {
     // Five samples 200 ms apart must agree within 64 MiB before the lowest becomes the delta
     // baseline. The GPU need not be idle (owner rule): the pinned testkit records resident
@@ -497,17 +573,6 @@ pub(super) fn plain_execution_path(request: &Value) -> Result<&'static str, Stri
         // sc-22726: PuLID-FLUX is a bespoke route with its own arm; it is named here so the shared
         // refusal cannot claim this adapter does not implement it.
         "pulid_flux" => Ok(PULID_FLUX_EXECUTION_PATH),
-        // sc-22733: the six Mage-Flow routes, each its own registered engine provider. Spelled out
-        // one bare literal per arm, like the FLUX.1 rows above: `adapterCapturableProviders`
-        // INTERSECTS every dispatch gate carrying the refusal phrase and refuses any arm pattern
-        // that is not a literal or a single `&str` const, so a `provider if …` guard would make the
-        // derived report throw instead of listing these six as capturable.
-        "mage_flow" => mage_execution_path("mage_flow"),
-        "mage_flow_base" => mage_execution_path("mage_flow_base"),
-        "mage_flow_turbo" => mage_execution_path("mage_flow_turbo"),
-        "mage_flow_edit" => mage_execution_path("mage_flow_edit"),
-        "mage_flow_edit_base" => mage_execution_path("mage_flow_edit_base"),
-        "mage_flow_edit_turbo" => mage_execution_path("mage_flow_edit_turbo"),
         // sc-22730: the three SD3.5 base providers ride the same five-rung reference path.
         SD3_5_LARGE_ID => Ok(SD3_5_LARGE_PLAIN_EXECUTION_PATH),
         SD3_5_LARGE_TURBO_ID => Ok(SD3_5_LARGE_TURBO_PLAIN_EXECUTION_PATH),
@@ -530,8 +595,6 @@ pub(super) fn plain_execution_path(request: &Value) -> Result<&'static str, Stri
         KOLORS_ID => Ok(KOLORS_PLAIN_EXECUTION_PATH),
         IDEOGRAM_ID => Ok(IDEOGRAM_PLAIN_EXECUTION_PATH),
         IDEOGRAM_TURBO_ID => Ok(IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH),
-        LENS_ID => Ok(LENS_PLAIN_EXECUTION_PATH),
-        LENS_TURBO_ID => Ok(LENS_TURBO_PLAIN_EXECUTION_PATH),
         // sc-24112: Qwen-Image 2.1 rides the same five-rung reference path as the turnkey family.
         QWEN_IMAGE_2_1_ID => Ok(QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH),
         // sc-25907: and its distilled Turbo sibling, under its own sentence.
@@ -578,12 +641,6 @@ pub(super) fn still_calibration_label(request: &Value) -> Result<&'static str, S
         FLUX1_SCHNELL_ID => Ok(FLUX1_SCHNELL_STILL_CALIBRATION),
         PULID_FLUX_ID => Ok(PULID_FLUX_STILL_CALIBRATION),
         // One bare literal per arm — see the note in `plain_execution_path`.
-        "mage_flow" => mage_still_calibration("mage_flow"),
-        "mage_flow_base" => mage_still_calibration("mage_flow_base"),
-        "mage_flow_turbo" => mage_still_calibration("mage_flow_turbo"),
-        "mage_flow_edit" => mage_still_calibration("mage_flow_edit"),
-        "mage_flow_edit_base" => mage_still_calibration("mage_flow_edit_base"),
-        "mage_flow_edit_turbo" => mage_still_calibration("mage_flow_edit_turbo"),
         SD3_5_LARGE_ID => Ok(SD3_5_LARGE_STILL_CALIBRATION),
         SD3_5_LARGE_TURBO_ID => Ok(SD3_5_LARGE_TURBO_STILL_CALIBRATION),
         SD3_5_MEDIUM_ID => Ok(SD3_5_MEDIUM_STILL_CALIBRATION),
@@ -599,8 +656,6 @@ pub(super) fn still_calibration_label(request: &Value) -> Result<&'static str, S
         KOLORS_ID => Ok(KOLORS_STILL_CALIBRATION),
         IDEOGRAM_ID => Ok(IDEOGRAM_STILL_CALIBRATION),
         IDEOGRAM_TURBO_ID => Ok(IDEOGRAM_TURBO_STILL_CALIBRATION),
-        LENS_ID => Ok(LENS_STILL_CALIBRATION),
-        LENS_TURBO_ID => Ok(LENS_TURBO_STILL_CALIBRATION),
         QWEN_IMAGE_2_1_ID => Ok(QWEN_IMAGE_2_1_STILL_CALIBRATION),
         QWEN_IMAGE_2_1_TURBO_ID => Ok(QWEN_IMAGE_2_1_TURBO_STILL_CALIBRATION),
         // sc-22734: per-member label, so a refusal names the exact route it refused.
@@ -627,10 +682,6 @@ pub(super) fn planned_tier(request: &Value) -> Result<&str, String> {
 
 pub(super) fn validate_fixture_binds_tier_and_geometry(request: &Value) -> Result<(), String> {
     let provider = planned_provider(request)?;
-    // sc-22733: the Mage members get the same member/tier/edge/seed/step binding.
-    if let Some(arm) = mage_arm(request)? {
-        return validate_mage_fixture(request, arm, planned_tier(request)?);
-    }
     if matches!(provider, FLUX1_DEV_ID | FLUX1_SCHNELL_ID | PULID_FLUX_ID) {
         return validate_flux_one_fixture(request, provider, planned_tier(request)?);
     }

@@ -399,12 +399,9 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::ZImageIdentity,
             CandleImageLane::IdeogramEdit,
             CandleImageLane::IdeogramImg2Img,
-            CandleImageLane::BooguEdit,
-            CandleImageLane::MageEdit,
             CandleImageLane::Flux3Reference,
             CandleImageLane::QwenImage21Edit,
             CandleImageLane::MinimaxH3ImageEdit,
-            CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
             CandleImageLane::BerniniEdit,
             CandleImageLane::SdxlIpAdapter,
@@ -481,10 +478,6 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             reference("ideogram_4_turbo"),
             CandleImageLane::IdeogramImg2Img,
         ),
-        (edit("boogu_image_edit"), CandleImageLane::BooguEdit),
-        (edit("mage_flow_edit_base"), CandleImageLane::MageEdit),
-        (edit("mage_flow_edit"), CandleImageLane::MageEdit),
-        (edit("mage_flow_edit_turbo"), CandleImageLane::MageEdit),
         // sc-24110: Qwen-Image 2.1 reference / local editing. `qwen_image_2_1` is ALSO a candle
         // txt2img id, so both the edit shape and the Character-Studio reference shape must be
         // claimed by this bespoke lane before the generic gate can refuse them.
@@ -528,11 +521,6 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
                 "referenceAssetIds": ["ref_1", "ref_2"]
             }),
             CandleImageLane::QwenImage21Edit,
-        ),
-        (reference("boogu_image"), CandleImageLane::BooguImg2Img),
-        (
-            reference("boogu_image_turbo"),
-            CandleImageLane::BooguImg2Img,
         ),
         (edit("krea_2_raw"), CandleImageLane::KreaEdit),
         (edit("krea_2_turbo"), CandleImageLane::KreaEdit),
@@ -1819,125 +1807,6 @@ fn bernini_candle_txt2img_and_i2i_route_to_candle() {
 }
 
 #[test]
-fn boogu_text_to_image_and_edit_route_to_candle() {
-    // sc-7524 (epic 6831): the candle parity of `boogu_text_to_image_and_edit_route_to_mlx`. The
-    // three Boogu ids are in `CANDLE_ROUTED_MODELS`; Base + Turbo are pure txt2img (the generic gate),
-    // and `boogu_image_edit`'s `edit_image` shape routes via the bespoke `boogu_edit_candle_eligible`
-    // branch (the source `Reference` is resolved in-lane by `generate_candle_stream`, like Ideogram).
-    for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
-        // Plain txt2img → the generic gate (the edit checkpoint can also T2I, mirroring MLX).
-        assert!(
-            image_request_candle_eligible(model, &object(json!({ "prompt": "a red panda" }))),
-            "{model} plain txt2img must be candle-eligible"
-        );
-    }
-    // Edit (source instruction) is the Edit checkpoint's capability ONLY.
-    let edit_payload =
-        |model: &str| json!({ "model": model, "mode": "edit_image", "sourceAssetId": "asset_1" });
-    // `boogu_image_edit` + edit_image + source → the bespoke branch claims it for candle.
-    assert!(boogu_edit_candle_eligible(&object(edit_payload(
-        "boogu_image_edit"
-    ))));
-    assert!(image_job_is_candle_eligible(&image_edit_job(edit_payload(
-        "boogu_image_edit"
-    ))));
-    // The generic txt2img gate still rejects the edit_image family (the bespoke lane handles it).
-    assert!(!image_request_candle_eligible(
-        "boogu_image_edit",
-        &object(edit_payload("boogu_image_edit"))
-    ));
-    // Base / Turbo do NOT edit — an edit_image job on them is not candle-eligible (no edit lane; the
-    // generic gate rejects edit_image and the boogu edit branch is gated to `boogu_image_edit`).
-    assert!(!image_job_is_candle_eligible(&image_edit_job(
-        edit_payload("boogu_image")
-    )));
-    assert!(!image_job_is_candle_eligible(&image_edit_job(
-        edit_payload("boogu_image_turbo")
-    )));
-    // sc-7645: the multi-image picker sends plural `referenceAssetIds` (no `sourceAssetId`) — the
-    // bespoke branch still claims it for candle (the Boogu DiT packs up to 5 references).
-    assert!(boogu_edit_candle_eligible(&object(json!({
-        "model": "boogu_image_edit", "mode": "edit_image",
-        "referenceAssetIds": ["a", "b"]
-    }))));
-    // `edit_image` WITHOUT a source → nothing to edit → not this lane.
-    assert!(!boogu_edit_candle_eligible(&object(json!({
-        "model": "boogu_image_edit", "mode": "edit_image"
-    }))));
-    // An empty plural list with no `sourceAssetId` is also nothing to edit.
-    assert!(!boogu_edit_candle_eligible(&object(json!({
-        "model": "boogu_image_edit", "mode": "edit_image", "referenceAssetIds": []
-    }))));
-    // sc-9607/sc-9983: a Q8/Q4 tier-select now STAYS on candle (boogu is in CANDLE_QUANT_MODELS — the
-    // packed q4/q8 turnkeys load off-Mac, the `mlxQuantize` value picks the subdir). A LoRA still
-    // defers (boogu advertises no inference LoRA on candle).
-    for model in ["boogu_image", "boogu_image_turbo", "boogu_image_edit"] {
-        assert!(
-            image_request_candle_eligible(
-                model,
-                &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 8 } }))
-            ),
-            "{model} Q8 tier-select should stay on candle"
-        );
-        assert!(
-            image_request_candle_eligible(
-                model,
-                &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
-            ),
-            "{model} Q4 tier-select should stay on candle"
-        );
-        assert!(
-            !image_request_candle_eligible(
-                model,
-                &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
-            ),
-            "{model} with a LoRA must defer to torch (no candle inference LoRA)"
-        );
-    }
-}
-
-#[test]
-fn boogu_base_and_turbo_img2img_route_to_candle() {
-    // sc-11786 (epic 8588): a `boogu_image` / `boogu_image_turbo` job in a non-edit mode with a
-    // `referenceAssetId` is now the REGISTRY img2img path — the candle Base/Turbo generators advertise
-    // `Reference` and VAE-encode it into the reduced-schedule denoise. Branched before the txt2img gate
-    // (which rejects any `referenceAssetId`), disjoint from the `boogu_image_edit` instruction-edit lane.
-    for model in ["boogu_image", "boogu_image_turbo"] {
-        let img2img = json!({
-            "model": model,
-            "referenceAssetId": "asset_1",
-            "advanced": { "strength": 0.6 }
-        });
-        assert!(
-            image_job_is_candle_eligible(&image_generate_job(img2img.clone())),
-            "{model} img2img (referenceAssetId, non-edit) must be candle-eligible (sc-11786)"
-        );
-        // The eligibility predicate: a non-edit reference is img2img; an `edit_image` reference is NOT
-        // (that is the `boogu_image_edit` instruction-edit lane, a different engine id).
-        assert!(boogu_img2img_candle_eligible(&object(json!({
-            "model": model, "referenceAssetId": "asset_1"
-        }))));
-        assert!(!boogu_img2img_candle_eligible(&object(json!({
-            "model": model, "mode": "edit_image", "referenceAssetId": "asset_1"
-        }))));
-        // A blank/absent reference is plain txt2img, not img2img.
-        assert!(!boogu_img2img_candle_eligible(&object(json!({
-            "model": model, "referenceAssetId": "  "
-        }))));
-        assert!(!boogu_img2img_candle_eligible(&object(
-            json!({ "model": model })
-        )));
-    }
-    // Base/Turbo carry NO separate edit lane, so an `edit_image` job on them stays ineligible (the
-    // img2img branch is gated to a non-edit mode; the edit branch is gated to `boogu_image_edit`).
-    for model in ["boogu_image", "boogu_image_turbo"] {
-        assert!(!image_job_is_candle_eligible(&image_edit_job(json!({
-            "model": model, "mode": "edit_image", "sourceAssetId": "asset_1"
-        }))));
-    }
-}
-
-#[test]
 fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
     // explicit `advanced.mlxQuantize > 0` request away rather than silently running dense. Chroma's
@@ -2623,55 +2492,6 @@ fn sdxl_family_quant_and_lora_stay_on_candle() {
             ),
             "{model} with a LoRA should stay on candle (sc-10767)"
         );
-    }
-}
-
-#[test]
-fn lens_quant_and_lora_stay_on_the_candle_lane() {
-    // sc-5126: Lens / Lens-Turbo advertise Q4/Q8 + LoRA/LoKr, so — UNLIKE the sc-3675/sc-5096
-    // families — a quant request or a LoRA stays on candle; the lane maps both into the LoadSpec.
-    for model in ["lens", "lens_turbo"] {
-        assert!(
-            image_request_candle_eligible(
-                model,
-                &object(json!({ "advanced": { "mlxQuantize": 8 } }))
-            ),
-            "{model} Q8 request should stay on candle"
-        );
-        assert!(
-            image_request_candle_eligible(
-                model,
-                &object(json!({ "advanced": { "mlxQuantize": 4 } }))
-            ),
-            "{model} Q4 request should stay on candle"
-        );
-        assert!(
-            image_request_candle_eligible(
-                model,
-                &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
-            ),
-            "{model} with a LoRA should stay on candle"
-        );
-    }
-}
-
-#[test]
-fn lens_conditioning_shapes_fall_back_to_torch() {
-    // Lens is pure T2I (the port has no img2img/edit/reference/ControlNet), so every conditioning
-    // shape is refused and remains queued — quant/LoRA being allowed does not widen this.
-    let cases = [
-        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
-        json!({ "referenceAssetId": "a" }),
-        json!({ "maskAssetId": "m" }),
-        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
-    ];
-    for model in ["lens", "lens_turbo"] {
-        for case in &cases {
-            assert!(
-                !image_request_candle_eligible(model, &object(case.clone())),
-                "{model} conditioning shape must fall back to torch: {case}"
-            );
-        }
     }
 }
 
@@ -5324,18 +5144,20 @@ fn quant_message_split_did_not_move_the_routing_decision() {
     }
 }
 
-/// A user LoRA on a candle family with no adapter lane is its own cause — not a "conditioned
-/// shape". `boogu_image` is quant-capable but adapter-less (`CANDLE_QUANT_MODELS`, not the
-/// quant+LoRA set), so the adapter half of the gate alone refuses it.
+/// A user LoRA has its own refusal on SenseNova-U1, whose Candle lane supports packed tiers
+/// and has no inference adapter route.
 #[test]
 fn lora_on_a_candle_family_with_no_adapter_lane_is_named_separately() {
     let job = image_generate_job(json!({
         "projectId": "project_1",
-        "model": "boogu_image",
+        "model": "sensenova_u1_8b",
         "prompt": "a red fox",
         "mode": "text_to_image",
         "loras": [{ "id": "lora_1", "scale": 0.8 }]
     }));
+    let mut plain = job.clone();
+    plain.payload.remove("loras");
+    assert!(image_job_is_candle_eligible(&plain));
     assert!(
         !image_job_is_candle_eligible(&job),
         "routing is unchanged: an adapter-less family still refuses a LoRA"
@@ -5354,6 +5176,21 @@ fn lora_on_a_candle_family_with_no_adapter_lane_is_named_separately() {
         !message.contains("quant tier"),
         "the message must not blame a quant tier the payload never asked for: {message}"
     );
+}
+
+#[test]
+fn retired_image_models_have_no_backend_port_recommendation() {
+    for model in ["boogu_image", "lens_turbo", "mage_flow_edit"] {
+        let job = image_generate_job(json!({ "model": model, "prompt": "a red fox" }));
+        let expected = crate::model_family::retired_image_detail(model).unwrap();
+        for result in [candle_supported(&job), mac_rust_supported(&job)] {
+            let reason = result.expect_err("retired models cannot be routed");
+            assert_eq!(reason.model.as_deref(), Some(model));
+            assert_eq!(reason.feature, "retired model");
+            assert_eq!(reason.detail, expected);
+            assert!(reason.suggested_epic.is_none());
+        }
+    }
 }
 
 /// An edit/inpaint carrier on a family with no candle edit lane keeps a conditioning-flavored
@@ -5649,10 +5486,10 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
         }))
     ));
 
-    // `boogu_image` is the mirror family — quant-capable, adapter-less — so its peel is what pins
-    // the user-LoRA check's position between the carrier check and the pose check.
+    // SenseNova-U1 is quant-capable and has no adapter lane. It pins the LoRA check between the
+    // carrier and pose checks.
     let (feature, _) = candle_gap(
-        "boogu_image",
+        "sensenova_u1_8b",
         json!({
             "prompt": "p",
             "mode": "text_to_image",
@@ -5663,7 +5500,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
     );
     assert!(feature.contains("conditioning carrier"), "{feature}");
     let (feature, _) = candle_gap(
-        "boogu_image",
+        "sensenova_u1_8b",
         json!({
             "prompt": "p",
             "mode": "text_to_image",
@@ -5673,7 +5510,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
     );
     assert!(feature.contains("LoRA"), "{feature}");
     let (feature, _) = candle_gap(
-        "boogu_image",
+        "sensenova_u1_8b",
         json!({
             "prompt": "p",
             "mode": "text_to_image",

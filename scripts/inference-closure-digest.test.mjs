@@ -243,6 +243,56 @@ function digestsFor(revisions, revision = "r1") {
   });
 }
 
+test("a derivation reuses immutable manifest reads without changing any provider output", () => {
+  const revision = "1".repeat(40);
+  const nextRevision = "2".repeat(40);
+  const revisions = {
+    [revision]: workspace(),
+    [nextRevision]: workspace({
+      "crates/shared/Cargo.toml":
+        '[package]\nname = "shared"\n[dependencies]\nunused-elsewhere = { path = "../unused" }\n',
+    }),
+    main: workspace(),
+  };
+  const repo = "/fake";
+  const readBodies = fakeBodies(revisions);
+  const readGit = fakeGit(revisions);
+  const manifestReads = [];
+  const runGit = (target, args) => {
+    assert.equal(target, repo);
+    if (args[0] === "show" && args[1].endsWith("/Cargo.toml")) manifestReads.push(args[1]);
+    return readGit(target, args);
+  };
+
+  const compareWithUncached = (rev) => {
+    const options = { repo, revision: rev, readBodies, runGit };
+    const expected = new Map(Object.entries(PROVIDERS).map(([provider, crateDir]) => [
+      provider, providerClosureDigest({ ...options, provider, crateDir }),
+    ]));
+    const uncachedReads = manifestReads.splice(0);
+    const uniqueReads = [...new Set(uncachedReads)];
+    // The shared crate is reached by both providers and visited again at the patch fixpoint.
+    assert.equal(uncachedReads.filter((read) => read === rev + ":crates/shared/Cargo.toml").length, 3);
+    assert.ok(uncachedReads.length > uniqueReads.length);
+
+    const actual = digestsAtRevision({ ...options, providers: PROVIDERS });
+    assert.deepEqual(actual, expected);
+    assert.notEqual(actual.get("provider_a").digest, actual.get("provider_b").digest);
+    const expectedReads = rev === "main" ? uncachedReads : uniqueReads;
+    assert.deepEqual(manifestReads.splice(0).sort(), expectedReads.sort());
+    return actual;
+  };
+
+  const initial = compareWithUncached(revision);
+  assert.deepEqual(compareWithUncached(revision), initial);
+  const next = compareWithUncached(nextRevision);
+  for (const provider of Object.keys(PROVIDERS)) {
+    assert.notEqual(next.get(provider).digest, initial.get(provider).digest);
+    assert.ok(next.get(provider).crates.includes("crates/unused"));
+  }
+  compareWithUncached("main");
+});
+
 test("a provider's closure is its crate plus what it links, and nothing else", () => {
   const digests = digestsFor({ r1: workspace() });
   // `crates/vendor/patched` is linked, just not through a dependency edge — it replaces a package

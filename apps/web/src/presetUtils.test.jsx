@@ -159,8 +159,7 @@ describe("loraMatchesModel", () => {
 
   it("fails CLOSED when the API withdrew the model's LoRA advertisement", () => {
     // The API emits this shape for an imported/fine-tuned model no backend lane on this deployment
-    // can serve adapters for — a Mage-Flow full fine-tune (whose native single-file loaders reject
-    // inference adapters), or a model whose active registered provider serves the base assembly but
+    // can serve adapters for — an imported model whose active registered provider serves the base assembly but
     // advertises no adapter format (ComfyUI Qwen-Image). Imported Krea routes adapters on both
     // native backends. Submitting the withdrawn shape 400s, so offering it is a dead-end selection.
     //
@@ -168,8 +167,8 @@ describe("loraMatchesModel", () => {
     // asserted above (`noFamilyModel`), which is why the explicit `supported: false` signal exists.
     // These two cases differ only by that flag, so a regression that drops it is caught here.
     const withdrawnFineTune = {
-      id: "user_mage_flow_finetune",
-      family: "mage-flow",
+      id: "user_unsupported_adapter_model",
+      family: "test-family",
       loraCompatibility: { families: [], supported: false },
     };
     const withdrawn = {
@@ -177,7 +176,7 @@ describe("loraMatchesModel", () => {
       family: "qwen-image",
       loraCompatibility: { families: [], supported: false },
     };
-    expect(loraMatchesModel({ id: "l", family: "mage-flow" }, withdrawnFineTune)).toBe(false);
+    expect(loraMatchesModel({ id: "l", family: "test-family" }, withdrawnFineTune)).toBe(false);
     expect(loraMatchesModel(familylessLora, withdrawnFineTune)).toBe(false);
     expect(loraMatchesModel({ id: "l", family: "qwen-image" }, withdrawn)).toBe(false);
     expect(loraMatchesModel(familylessLora, withdrawn)).toBe(false);

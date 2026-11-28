@@ -53,10 +53,9 @@ function targetForPlatform(target, platform) {
   const next = structuredClone(target);
   // Cloned catalog metadata for the mocked studio context; this alias is not a payload builder.
   const trainingDefaults = next.defaults.advanced;
-  if (["kolors_lora", "sd3_lora", "mage_flow_lora", "anima_lora"].includes(target.kernel)) {
+  if (["kolors_lora", "sd3_lora", "anima_lora"].includes(target.kernel)) {
     trainingDefaults.gradientCheckpointing = false;
     trainingDefaults.sampleEvery = 0;
-    if (target.kernel === "mage_flow_lora") trainingDefaults.fullFinetuneConfig = { mixedPrecision: "f32", gradientCheckpointing: false };
   }
   if (["wan_lora", "wan_moe_lora"].includes(target.kernel)) trainingDefaults.sampleEvery = 0;
   if (target.kernel === "wan_moe_lora") trainingDefaults.gradientCheckpointing = true;

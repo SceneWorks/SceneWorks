@@ -99,18 +99,6 @@ fn legacy_source_shape_backfill_uses_the_exact_loader_structure() {
     let mut sdxl = legacy_user_entry("sdxl", &sdxl_file);
     stamp_legacy_import_source_shape(&mut sdxl, &data_dir, true);
     assert_eq!(sdxl["importSourceShape"], json!("fused_checkpoint"));
-
-    let mage_dir = models.join("imports/mage");
-    std::fs::create_dir_all(&mage_dir).unwrap();
-    std::fs::write(mage_dir.join("config.json"), b"{}").unwrap();
-    std::fs::write(
-        mage_dir.join("diffusion_pytorch_model.safetensors"),
-        b"weights",
-    )
-    .unwrap();
-    let mut mage = legacy_user_entry("mage-flow", &mage_dir);
-    stamp_legacy_import_source_shape(&mut mage, &data_dir, true);
-    assert_eq!(mage["importSourceShape"], json!("transformer_directory"));
 }
 
 #[test]

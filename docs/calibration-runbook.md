@@ -209,7 +209,7 @@ ids they cover today:
 | binary | providers covered | how it dispatches an unknown provider |
 | --- | --- | --- |
 | `memory-mlx-adapter` | `qwen_image`, `qwen_image_edit` (BOTH shipped edit catalog ids — `qwen_image_edit_2511` and `..._lightning` — resolved from `(provider, modelId)`; sc-22728), `z_image_turbo` (text-to-image, and in `edit_image` mode the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `krea_2_turbo`, `sdxl` (all five catalog routes, keyed on `(provider, modelId)` — sc-22729), `instantid` (sc-22729), `krea_2_turbo_control`, `flux2_dev`, `flux2_klein_9b` (sc-22727; serving BOTH the `flux2_klein_9b` and `flux2_klein_9b_kv` catalog models, told apart by `target.modelId`), `flux1_dev`, `flux1_schnell`, `pulid_flux` (the FLUX.1 family, sc-22726 — one arm, member resolved from `(provider, mode)`; PuLID is `character_image` only and carries the identity stack on `LoadSpec::identity`), `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens`, `lens_turbo` (the turnkey still family, sc-22732 — one arm over three engine crates, member resolved from `(provider, mode)`, every member plain text-to-image; each binds its own artifact family and Ideogram binds a SECOND one for bf16; the rows bind the per-(route, tier) identities of the sc-22732 inference head — see the note below), `sensenova_u1_8b`, `sensenova_u1_8b_fast` (the SenseNova-U1 family, sc-22734 — one arm serving SIX catalog ids on TWO engine ids, resolved from `(provider, modelId)` because each id ships its own independently pinned tiered rehost and mints its own per-route calibration fingerprint) (SDXL exposes Resident, Staged, native bounded decode, and bounded-transformer residency; bounded attention remains `Missing`. Decode requires an explicit published native tile/overlap pair; bounded-transformer requests also carry that pair. InstantID exposes only Resident and Staged. FLUX.2-dev is **resident rung only**; the klein manifest declares five rungs, but the shape this arm loads (`Resident` + `Eager`, sc-22727) implements resident + bounded decode/attention and leaves staged residency and rung 4 `Missing` — those two require the streamable shape. The FLUX.1 rows bind the per-(route, tier) identities of inference PR 943 — see the note below.) | `mlx.rs` `run` — `MLX five-rung calibration does not implement provider "<id>"`; `sdxl_arm` — `the MLX SDXL arm does not implement modelId "<id>" on provider "sdxl"`; `validate_z_image_batch` (`assess_batch`) — `…five-rung batch assessment does not implement provider "<id>"` (cited by function name; the line numbers this table used to carry went stale the first time the file grew); `sensenova_arm` — `the MLX SenseNova arm does not implement modelId {id:?} on provider {provider:?} (family: …)` |
-| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `sdxl` (sc-22729; five-rung reference path, all five catalog routes, no inline arm), `instantid` (sc-22729; a **bespoke** arm, bf16 only), `flux2_dev` and `flux2_klein_9b` (sc-22727; five-rung reference path, no inline arm; the klein id serves `flux2_klein_9b` and `flux2_klein_9b_kv`), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`), `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens`, `lens_turbo` (the turnkey still family, sc-22732; five-rung reference path, no inline arm. Kolors and both Lens routes take the packed tier's `LoadSpec::quant` EXPLICITLY because the worker's `candle_quant_for_resolved_tier` does not carve them out; the two Ideogram routes do NOT, because `candle-gen-ideogram`'s exact directory route refuses `quantize: Some(_)` and proves the tier off the packed headers — `TURNKEY_CANDLE_MEMBERS` states the decision per member. Kolors' `candle_kolors_ipadapter` and `candle_kolors_control` routes are deliberately NOT served: different providers, different overlays, different measurements.), `sensenova_u1_8b`, `sensenova_u1_8b_fast` (the SenseNova-U1 family, sc-22734 — the same six catalog ids on two engine ids, resolved from `(provider, modelId)`; the contract classifies `StagedResidency` and `BoundedDecode` as `StructurallyNotApplicable` on this lane, so its anchors plan the RESIDENT rung rather than the candle default) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"`; `sdxl_candle_arm` — `the Candle SDXL arm does not implement modelId "<id>"`; `sensenova_arm` — `the Candle SenseNova arm does not implement modelId {id:?} on provider {provider:?} (family: …)` |
+| `memory-candle-adapter` | `qwen_image`, `qwen_image_edit` (the BESPOKE edit provider, dispatched ahead of the five-rung path because it is not a registered generator; both edit catalog ids, sc-22728), `krea_2_turbo`, `z_image_turbo` (sc-15859; five-rung reference path only, no inline arm; in `edit_image` mode it is the `z_image_edit` catalog alias — sc-22724), `z_image` (the undistilled base, sc-22724), `sdxl` (sc-22729; five-rung reference path, all five catalog routes, no inline arm), `instantid` (sc-22729; a **bespoke** arm, bf16 only), `flux2_dev` and `flux2_klein_9b` (sc-22727; five-rung reference path, no inline arm; the klein id serves `flux2_klein_9b` and `flux2_klein_9b_kv`), `flux1_dev`, `flux1_schnell` (sc-22726; five-rung reference path, no inline arm), `pulid_flux` (sc-22726; a **bespoke** arm — `candle-gen-pulid` registers no `Generator` at all, so this one loads `PulidFlux::load_with_memory_context(&PulidFluxPaths, ctx)` exactly as `image_jobs/pulid_candle.rs` does, and dispatches above the shared plain-overlay gate because its overlay is `identity`), `kolors`, `ideogram_4`, `ideogram_4_turbo` (the turnkey still family, sc-22732; five-rung reference path, no inline arm. Kolors takes the packed tier's `LoadSpec::quant` EXPLICITLY because the worker's `candle_quant_for_resolved_tier` does not carve them out; the two Ideogram routes do NOT, because `candle-gen-ideogram`'s exact directory route refuses `quantize: Some(_)` and proves the tier off the packed headers — `TURNKEY_CANDLE_MEMBERS` states the decision per member. Kolors' `candle_kolors_ipadapter` and `candle_kolors_control` routes are deliberately NOT served: different providers, different overlays, different measurements.), `sensenova_u1_8b`, `sensenova_u1_8b_fast` (the SenseNova-U1 family, sc-22734 — the same six catalog ids on two engine ids, resolved from `(provider, modelId)`; the contract classifies `StagedResidency` and `BoundedDecode` as `StructurallyNotApplicable` on this lane, so its anchors plan the RESIDENT rung rather than the candle default) | `plain_execution_path` / `still_calibration_label` / `load_five_rung_generator` — `Candle five-rung calibration does not implement provider "<id>"`; `qwen_edit_arm` — `the Candle Qwen edit arm does not implement provider "<id>" for model "<id>"`; `sdxl_candle_arm` — `the Candle SDXL arm does not implement modelId "<id>"`; `sensenova_arm` — `the Candle SenseNova arm does not implement modelId {id:?} on provider {provider:?} (family: …)` |
 
 🔴 **The SDXL family is keyed on `(provider, modelId)`, not on the provider alone** (sc-22729). The
 worker routes five catalog models — `sdxl`, `realvisxl`, `realvisxl_lightning`,
@@ -285,29 +285,9 @@ The FLUX.1 MLX plan rows (sc-22726) name the per-(route, tier) production calibr
 that inference PR 943 (`story/sc-22726-flux-calibration-identity`) makes `mlx-gen-flux` and
 `mlx-gen-pulid` publish for every worker load shape; the arm binds them after the epic's pin bump.
 
-The turnkey still rows (sc-22732 — `kolors`, `ideogram_4`, `ideogram_4_turbo`, `lens`, `lens_turbo`
-on both lanes) do the same for inference PR `story/sc-22732-epic-22723-memory-anchor-measurability`,
-which gives all six engine crates a per-(route, artifact-proven tier) production identity for every
-worker load shape. Both arms carry the table weights-free (`turnkey_calibration_fingerprint`) and
-refuse a mismatched row before any environment or weight work. Two rows are easy to get wrong:
-`lens_turbo` bf16 on MLX is `lens-turbo-bf16-mlx-shared-ladder-v1`, NOT the legacy
-`lens-text-encoder-window-2026-07-31-v1` (that key names the SC-15800 narrowed text-encoder envelope,
-reachable only under `Sequential + DeferredMaterialization`, and the arm loads `Resident`); and the
-Candle Ideogram rows are `ideogram4-candle-request-scoped-staged-residency-v1-<route>-<tier>` — the
-`…-static-v1-<route>` literals the manifest used to declare existed in no engine, which is why
-`candle-gen-ideogram` had never published an identity a capture could bind.
-The 36 Mage-Flow plan rows (sc-22733) likewise name the per-(route, tier) identities inference PR 953
-(`story/sc-22733-epic-22723-memory-anchor-measurability`) makes both engines publish — MLX
-`mage-flow-<route>-<tier>-mlx-shared-ladder-v1` (bound by the engine only to a tier PROVEN off the
-component directories it opened), Candle `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3` — and
-both arms refuse a plan row naming anything else before the load. The retired single string
-`mage-flow-mlx-shared-ladder-2026-08-03-v1` survives nowhere in this repo except as the worker's
-`mlx_fit_gate` estimator handshake, which the epic's pin bump must move to the per-tier table. The
-rows also bind the shape the WORKER loads, per lane and tier: deferred on every MLX cell (typed
-rules, BTR declared on all three tiers), and on Candle deferred at bf16 only — the generated Candle
-BTR row lists `["bf16"]`, so the worker's declaration evaluator refuses q4/q8 and loads them eager.
-The worker's `memory_route_registry` Mage tests drive both evaluators over the real manifest entries
-and pin the plan rows to them.
+The turnkey still rows for Kolors and Ideogram carry the per-route, artifact-proven tier
+production identity in `turnkey_calibration_fingerprint`. The adapter refuses mismatched
+rows before resolving artifacts or opening weights.
 
 Both adapters now refuse an unimplemented provider **by name, before any environment or model work**,
 on **both** MLX actions — `run`, and `assess_batch`, where the check lives inside
@@ -701,38 +681,6 @@ SCENEWORKS_FLUX1_SCHNELL_REPOSITORY=SceneWorks/flux1-schnell-mlx  # fixed; valid
 SCENEWORKS_FLUX1_SCHNELL_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX1_SCHNELL_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # bf16 | q4 | q8
 
-# BOTH adapters — the six Mage-Flow variants (sc-22733). Each variant ships the DiT ALONE under
-# `<snapshot>/<tier>/transformer/`, so a Mage capture binds TWO artifact triples: the variant's own
-# tier root, and the SHARED text-encoder/VAE components snapshot below. Both engines resolve that
-# split through `LoadSpec::components` (mlx-gen-mage `resolve_component_dirs`, candle-gen-mage
-# `resolved_component_dirs`); neither rehost can satisfy the other's role, and the variant rehost has
-# no `text_encoder/` or `vae/` sibling for the loader's flat-layout fallback to find.
-SCENEWORKS_MAGE_FLOW_REPOSITORY=SceneWorks/Mage-Flow                    # fixed; MAGE_FLOW_REPOSITORY
-SCENEWORKS_MAGE_FLOW_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_ROOT=/abs/path/.../snapshots/<rev>/<tier>          # bf16 | q4 | q8
-SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY=SceneWorks/Mage-Flow-Base          # fixed; MAGE_FLOW_BASE_REPOSITORY
-SCENEWORKS_MAGE_FLOW_BASE_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
-SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY=SceneWorks/Mage-Flow-Turbo        # fixed; MAGE_FLOW_TURBO_REPOSITORY
-SCENEWORKS_MAGE_FLOW_TURBO_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>
-SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY=SceneWorks/Mage-Flow-Edit          # fixed; MAGE_FLOW_EDIT_REPOSITORY
-SCENEWORKS_MAGE_FLOW_EDIT_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_EDIT_ROOT=/abs/path/.../snapshots/<rev>/<tier>
-SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY=SceneWorks/Mage-Flow-Edit-Base       # MAGE_FLOW_EDIT_BASE_REPOSITORY
-SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT=/abs/path/.../snapshots/<rev>/<tier>
-SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY=SceneWorks/Mage-Flow-Edit-Turbo     # MAGE_FLOW_EDIT_TURBO_REPOSITORY
-SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>
-
-# BOTH adapters — the SHARED Mage text encoder + VAE, co-required by every Mage manifest entry at the
-# SAME revision. Unlike every root above, this one is the SNAPSHOT: the tier is the first path element
-# INSIDE it, and each arm joins `<tier>/text_encoder` and `<tier>/vae` itself.
-SCENEWORKS_MAGE_FLOW_COMPONENTS_REPOSITORY=SceneWorks/Mage-Flow-Components-mlx  # MAGE_COMPONENTS_REPOSITORY
-SCENEWORKS_MAGE_FLOW_COMPONENTS_REVISION=<exact artifact revision>
-SCENEWORKS_MAGE_FLOW_COMPONENTS_ROOT=/abs/path/.../snapshots/<rev>
-
 # BOTH adapters — the pulid_flux IDENTITY STACK (sc-22726). NOT a manifest download on either lane:
 # the worker fetches it on first use, so an anchor binds the operator's pre-staged copy through the
 # same env var both worker lanes already honour (image_jobs/pulid.rs `ensure_pulid_weights`,
@@ -788,19 +736,6 @@ SCENEWORKS_CHROMA1_FLASH_ROOT=/abs/path/.../snapshots/<rev>/<tier>
 SCENEWORKS_KOLORS_REPOSITORY=SceneWorks/kolors-mlx           # fixed; validated against KOLORS_REPOSITORY
 SCENEWORKS_KOLORS_REVISION=<exact artifact revision>
 SCENEWORKS_KOLORS_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8, derived from the plan target
-
-# BOTH adapters — lens (sc-22732). gpt-oss-20b MoE text encoder + FLUX.2 autoencoder, packed per
-# tier; base Lens is NOT dense-TE, so nothing extra is bound.
-SCENEWORKS_LENS_REPOSITORY=SceneWorks/lens-mlx               # fixed; validated against LENS_REPOSITORY
-SCENEWORKS_LENS_REVISION=<exact artifact revision>
-SCENEWORKS_LENS_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # bf16 | q4 | q8
-
-# BOTH adapters — lens_turbo (sc-22732). Its OWN rehost at its OWN revision, split from base Lens the
-# way flux1_schnell is split from flux1_dev: a turbo plan satisfied by base weights would re-label
-# the base model's peaks as the distilled model's.
-SCENEWORKS_LENS_TURBO_REPOSITORY=SceneWorks/lens-turbo-mlx   # fixed; validated against LENS_TURBO_REPOSITORY
-SCENEWORKS_LENS_TURBO_REVISION=<exact artifact revision>
-SCENEWORKS_LENS_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>  # bf16 | q4 | q8
 
 # BOTH adapters — ideogram_4 AND ideogram_4_turbo, PACKED tiers only (sc-22732). One repo at one
 # revision serves both members; the Qwen3-VL-8B text encoder is inside each tier subdir, and the
@@ -1953,7 +1888,7 @@ gh workflow run memory-catalog-campaign.yml -R SceneWorks/SceneWorks \
   is not a weights problem and gets no download. After the fetch the cell is classified **again**,
   by the same `classifyAnchor` that refused it.
 - **Nothing is invented.** Each anchor's repositories are the ones the classifier probes (the
-  LTX-2.5 snapshot, the per-(lane, tier) artifact, `upstream`, the SDXL and Mage-Flow components,
+  LTX-2.5 snapshot, the per-(lane, tier) artifact, `upstream`, the SDXL components,
   the member's side artifact), and each repository's revision and file globs come from the manifest
   download rows for that model, tier and platform. `--revision` is **always** the pinned revision —
   never `main`, which pinning a manifest download removes from the mirror anyway — so a repository

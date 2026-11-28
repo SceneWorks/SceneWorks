@@ -398,6 +398,11 @@ impl UnsupportedReason {
     }
 }
 
+fn retired_image_reason(model: &str) -> Option<UnsupportedReason> {
+    crate::model_family::retired_image_detail(model)
+        .map(|detail| UnsupportedReason::new(Some(model), "retired model", &detail, None))
+}
+
 /// macOS "can the Rust/MLX flow run this?" oracle (sc-3484). `Ok(())` = the in-process mlx
 /// worker — or an MLX-agnostic in-process path (downloads, ffmpeg, prompt refine) — runs it
 /// natively. `Err` names the exact native gap. This is the epic's
@@ -763,6 +768,9 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
+    if let Some(reason) = retired_image_reason(model) {
+        return reason;
+    }
     let refusals = candle_image_refusals(model, payload);
     let Some(&cause) = refusals.first() else {
         // No check in the candle image gate refuses this payload, so nothing here can name a gap.
@@ -1163,6 +1171,9 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
+    if let Some(reason) = retired_image_reason(model) {
+        return reason;
+    }
     if !MLX_ROUTED_MODELS.contains(&model) {
         // No whole-model legacy-only image family remains: every one was ported to MLX and moved
         // into `MLX_ROUTED_MODELS`, so anything reaching here is an unported model with no port

@@ -958,10 +958,7 @@ fn validate_advertised_numeric_limits(
         })?;
 
         match field.as_str() {
-            "rank" if !(target.kernel == "mage_flow_lora" && config_is_full_finetune(config)) => {
-                validate_advertised_numeric_range(field, values, u64::from(config.rank))?
-            }
-            "rank" => {}
+            "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
             // Legacy target limits intentionally describe integral alpha. MOSS has no
             // `alpha` numeric range so its finite fractional alpha passes through its
             // native f32 contract; another target must explicitly opt into fractions.
@@ -2196,20 +2193,11 @@ pub fn apply_candle_training_defaults(kernel: &str, config: &mut TrainingConfig)
     match kernel {
         // These Candle trainers are intentionally dense and do not render previews. MLX retains
         // its established checkpointing/preview defaults in the core catalog and macOS response.
-        "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "anima_lora" => {
+        "kolors_lora" | "sd3_lora" | "anima_lora" => {
             config
                 .advanced
                 .insert("gradientCheckpointing".to_owned(), json!(false));
             config.advanced.insert("sampleEvery".to_owned(), json!(0));
-            if kernel == "mage_flow_lora" {
-                config.advanced.insert(
-                    "fullFinetuneConfig".to_owned(),
-                    json!({
-                        "mixedPrecision": "f32",
-                        "gradientCheckpointing": false
-                    }),
-                );
-            }
         }
         // The Wan single-DiT and I2V trainers do not preview. Both A14B variants require
         // checkpointing on Candle; TI2V-5B remains a negative and honors its existing value.

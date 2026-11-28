@@ -502,13 +502,14 @@ fn owner(spec: &ModelSpec) -> Result<&'static str, String> {
         "image" | "video" => match product.family.as_str() {
             "flux" | "pulid" => "ENG-1a/APP-5",
             "chroma" | "flux2-dev" | "flux2-klein" | "lens" | "anima" | "sd3" | "sana"
-            | "boogu" | "qwen-image" | "qwen-image-2-1" | "z-image" | "kolors" | "sdxl"
-            | "instantid" => "ENG-2/ENG-5/APP-5",
+            | "qwen-image" | "qwen-image-2-1" | "z-image" | "kolors" | "sdxl" | "instantid" => {
+                "ENG-2/ENG-5/APP-5"
+            }
             "wan-video" | "scail2" | "svd" | "mochi" => "ENG-3/ENG-5/APP-6",
             "krea_2" => "ENG-4b/APP-5",
             "flux3" | "moss_image" | "iris" | "ideogram" | "supra2" => "ENG-5/APP-5",
-            "ltx-video" | "minimax-h3" | "minimax-h3-image" | "mage-flow" | "sensenova-u1"
-            | "bernini" | "krea-realtime" => "ENG-6/APP-5/APP-6",
+            "ltx-video" | "minimax-h3" | "minimax-h3-image" | "sensenova-u1" | "bernini"
+            | "krea-realtime" => "ENG-6/APP-5/APP-6",
             other => return Err(format!("no migration owner for {}/{other}", product.id)),
         },
         other => {
@@ -544,13 +545,14 @@ fn registry_owner(
             match family {
                 "flux" | "pulid" => "ENG-1a",
                 "chroma" | "flux2" | "lens" | "anima" | "sd3" | "stable-diffusion-3" | "sana"
-                | "boogu" | "qwen-image" | "qwen-image-2-1" | "z-image" | "kolors" | "sdxl"
-                | "instantid" => "ENG-2/ENG-5",
+                | "qwen-image" | "qwen-image-2-1" | "z-image" | "kolors" | "sdxl" | "instantid" => {
+                    "ENG-2/ENG-5"
+                }
                 "wan" | "scail2" | "svd" | "mochi" => "ENG-3/ENG-5",
                 "krea_2" => "ENG-4b",
                 "flux3" | "moss_image" | "iris" | "ideogram" | "supra2" => "ENG-5",
-                "ltx" | "minimax_h3" | "minimax_h3_image" | "mage_flow" | "sensenova-u1"
-                | "bernini" | "krea_realtime" | "seedvr2" => "ENG-6",
+                "ltx" | "minimax_h3" | "minimax_h3_image" | "sensenova-u1" | "bernini"
+                | "krea_realtime" | "seedvr2" => "ENG-6",
                 "starvector" => "ENG-7/APP-5",
                 other => return Err(format!("unowned native generator {provider}/{other}")),
             }

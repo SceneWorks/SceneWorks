@@ -13,8 +13,6 @@ pub(super) fn turnkey_arm(request: &Value) -> Result<TurnkeyArm, String> {
         (KOLORS_PROVIDER, "text_to_image") => Ok(KOLORS_ARM),
         (IDEOGRAM_PROVIDER, "text_to_image") => Ok(IDEOGRAM_ARM),
         (IDEOGRAM_TURBO_PROVIDER, "text_to_image") => Ok(IDEOGRAM_TURBO_ARM),
-        (LENS_PROVIDER, "text_to_image") => Ok(LENS_ARM),
-        (LENS_TURBO_PROVIDER, "text_to_image") => Ok(LENS_TURBO_ARM),
         (QWEN_IMAGE_2_1_PROVIDER, "text_to_image") => Ok(QWEN_IMAGE_2_1_ARM),
         (QWEN_IMAGE_2_1_TURBO_PROVIDER, "text_to_image") => Ok(QWEN_IMAGE_2_1_TURBO_ARM),
         (provider, mode) => Err(format!(
@@ -182,10 +180,6 @@ pub(super) fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Op
             runtime_macos::calibration::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
-        (LENS_PROVIDER, "q4") => {
-            runtime_macos::calibration::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
-                .to_owned()
-        }
         // sc-24112: `mlx-gen-qwen-image-2-1` publishes ONE derived identity for every tier (the
         // load shape is its separate typed axis), read off the engine constant.
         (QWEN_IMAGE_2_1_PROVIDER, _) => {
@@ -201,8 +195,6 @@ pub(super) fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Op
         (KOLORS_PROVIDER, tier) => format!("kolors-{tier}-mlx-shared-ladder-v1"),
         (IDEOGRAM_PROVIDER, tier) => format!("ideogram-4-{tier}-mlx-shared-ladder-v1"),
         (IDEOGRAM_TURBO_PROVIDER, tier) => format!("ideogram-4-turbo-{tier}-mlx-shared-ladder-v1"),
-        (LENS_PROVIDER, tier) => format!("lens-{tier}-mlx-shared-ladder-v1"),
-        (LENS_TURBO_PROVIDER, tier) => format!("lens-turbo-{tier}-mlx-shared-ladder-v1"),
         // A provider that is not a turnkey member is unnameable rather than collapsed onto one.
         _ => return None,
     })
@@ -217,16 +209,11 @@ pub(super) fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Op
 /// is the plan-identity conformance test in `turnkey_still_tests`.
 #[cfg(test)]
 pub(super) fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
-    fingerprint
-        .starts_with(runtime_macos::calibration::lens::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
-        || fingerprint.starts_with(
-            runtime_macos::calibration::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
-        )
-        || fingerprint.starts_with(
-            runtime_macos::calibration::ideogram::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
-        )
-        || fingerprint
-            == runtime_macos::calibration::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT
+    fingerprint.starts_with(
+        runtime_macos::calibration::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
+    ) || fingerprint.starts_with(
+        runtime_macos::calibration::ideogram::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
+    )
 }
 
 /// The admission context for the turnkey safety scenarios, in the shape the worker admits each
@@ -540,7 +527,7 @@ pub(super) fn run_turnkey_still(request: &Value) -> Result<Value, String> {
         )
     } else {
         concat!(
-            "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for ",
+            "the pinned Kolors and Ideogram crates open no memory-strategy request scope for ",
             "the resident anchor composition and expose no calibration fault-injection site, so the ",
             "scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator ",
             "cleanup bounds are attested in quality and diagnostics instead"

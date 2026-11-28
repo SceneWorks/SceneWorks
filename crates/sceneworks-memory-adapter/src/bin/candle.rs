@@ -20,10 +20,6 @@ use candle_runtime_family::*;
 mod candle_krea_control_family;
 use candle_krea_control_family::*;
 
-#[path = "candle_mage_family.rs"]
-mod candle_mage_family;
-use candle_mage_family::*;
-
 #[path = "candle_instantid_family.rs"]
 mod candle_instantid_family;
 use candle_instantid_family::*;
@@ -73,11 +69,11 @@ use runtime_cuda::calibration::pulid::PulidFluxRequest;
 // generator, so the capture calls the same constructor the worker does rather than the catalog.
 use runtime_cuda::calibration::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 use runtime_cuda::gen_core::{
-    adapter_stack_identity, AdapterKind, AdapterSpec, Capabilities, ComponentPrecisionFloor,
-    Conditioning, GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image,
-    LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope,
-    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    adapter_stack_identity, AdapterKind, AdapterSpec, ComponentPrecisionFloor, Conditioning,
+    GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image, LoadShape, LoadSpec,
+    MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode, MemoryNumericTier,
+    MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope, MemoryRunContext,
+    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, ModelDescriptor, OffloadPolicy, Precision, Progress, Quant,
     TransformerComponent, VideoMode, WeightsSource,
 };
@@ -485,12 +481,6 @@ const IDEOGRAM_TURBO_ID: &str = "ideogram_4_turbo";
 const IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH: &str =
     "the Candle Ideogram 4 Turbo base-only text-to-image path";
 const IDEOGRAM_TURBO_STILL_CALIBRATION: &str = "Candle Ideogram 4 Turbo calibration";
-const LENS_ID: &str = "lens";
-const LENS_PLAIN_EXECUTION_PATH: &str = "the Candle Lens base-only text-to-image path";
-const LENS_STILL_CALIBRATION: &str = "Candle Lens calibration";
-const LENS_TURBO_ID: &str = "lens_turbo";
-const LENS_TURBO_PLAIN_EXECUTION_PATH: &str = "the Candle Lens-Turbo base-only text-to-image path";
-const LENS_TURBO_STILL_CALIBRATION: &str = "Candle Lens-Turbo calibration";
 /// Qwen-Image 2.1 (sc-24112) on the turnkey still family's five-rung path. Registry id of
 /// `candle-gen-qwen-image-2-1` (`MODEL_ID`), which is also the catalog model id. Its bf16 tier is the
 /// upstream `Qwen/Qwen-Image-2.1` snapshot ROOT and its packed tiers the `q8/`/`q4/` subdirs of the
@@ -702,7 +692,7 @@ struct TurnkeyCandleMember {
     tier_quant_reaches_the_loader: bool,
 }
 
-const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 7] = [
+const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 5] = [
     TurnkeyCandleMember {
         provider_id: KOLORS_ID,
         tier_quant_reaches_the_loader: true,
@@ -714,14 +704,6 @@ const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 7] = [
     TurnkeyCandleMember {
         provider_id: IDEOGRAM_TURBO_ID,
         tier_quant_reaches_the_loader: false,
-    },
-    TurnkeyCandleMember {
-        provider_id: LENS_ID,
-        tier_quant_reaches_the_loader: true,
-    },
-    TurnkeyCandleMember {
-        provider_id: LENS_TURBO_ID,
-        tier_quant_reaches_the_loader: true,
     },
     // sc-24112: `candle-gen-qwen-image-2-1`'s `quant::resolve_requested_tier` treats
     // `LoadSpec::quantize` as a TIER SELECTOR and refuses a packed tier whose quant does not match
@@ -842,128 +824,6 @@ type LoadedFiveRungGenerator = (
     Box<dyn runtime_cuda::gen_core::Generator>,
     VramProbe,
 );
-
-// ---------------------------------------------------------------------------------------------
-// Mage-Flow (sc-22733) — six registered engine providers, on the shared five-rung reference path
-// ---------------------------------------------------------------------------------------------
-
-/// One fixed seed for every `candle:mage_flow*` fixture.
-const MAGE_SEED: u64 = 22733;
-
-/// One member of the Mage-Flow family. `candle-gen-mage` registers SIX generators (`lib.rs`
-/// `REGISTRATION`, `BASE_`, `TURBO_`, `EDIT_`, `EDIT_BASE_`, `EDIT_TURBO_`), one per catalog id, and
-/// the CUDA catalog registers all six (`candle-gen-catalog` `candle_gen_mage::register_providers`).
-/// Each publishes its OWN per-tier calibration identity (`memory_strategy.rs`
-/// `production_calibration_fingerprint`: `mage-flow-cuda-<provider>-<tier>-shared-ladder-v3`, from
-/// `resolved_quant(spec)`), so a member or a tier measured under another's key would be caught by
-/// the fingerprint comparison — the table below still binds member, artifact and fixture, and
-/// [`mage_calibration_fingerprint`] binds the identity, so both are caught BEFORE the load is paid
-/// for.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct MageArm {
-    provider: &'static str,
-    execution_path: &'static str,
-    still_calibration: &'static str,
-    fixture_prefix: &'static str,
-    repository: &'static str,
-    /// Three literals, not a composed prefix — see the note on the MLX arm's identical fields:
-    /// `measure-memory-catalog.mjs`'s test binds this table to `PROVIDER_FAMILIES` by searching
-    /// this source for each exact name.
-    repository_env: &'static str,
-    revision_env: &'static str,
-    root_env: &'static str,
-    edit: bool,
-    steps: u32,
-    guidance: f32,
-    evidence_story: &'static str,
-}
-
-const MAGE_ARMS: [MageArm; 6] = [
-    MageArm {
-        provider: "mage_flow",
-        execution_path: "the Candle Mage-Flow RL text-to-image path",
-        still_calibration: "Candle Mage-Flow calibration",
-        fixture_prefix: "mage-flow-candle",
-        repository: protocol::MAGE_FLOW_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_ROOT",
-        edit: false,
-        steps: 2,
-        guidance: 5.0,
-        evidence_story: "sc-22733",
-    },
-    MageArm {
-        provider: "mage_flow_base",
-        execution_path: "the Candle Mage-Flow-Base text-to-image path",
-        still_calibration: "Candle Mage-Flow-Base calibration",
-        fixture_prefix: "mage-flow-base-candle",
-        repository: protocol::MAGE_FLOW_BASE_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_BASE_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_BASE_ROOT",
-        edit: false,
-        steps: 2,
-        guidance: 5.0,
-        evidence_story: "sc-22733",
-    },
-    MageArm {
-        provider: "mage_flow_turbo",
-        execution_path: "the Candle Mage-Flow-Turbo distilled text-to-image path",
-        still_calibration: "Candle Mage-Flow-Turbo calibration",
-        fixture_prefix: "mage-flow-turbo-candle",
-        repository: protocol::MAGE_FLOW_TURBO_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_TURBO_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_TURBO_ROOT",
-        edit: false,
-        steps: 4,
-        guidance: 1.0,
-        evidence_story: "sc-22733",
-    },
-    MageArm {
-        provider: "mage_flow_edit",
-        execution_path: "the Candle Mage-Flow-Edit instruction-editing path",
-        still_calibration: "Candle Mage-Flow-Edit calibration",
-        fixture_prefix: "mage-flow-edit-candle",
-        repository: protocol::MAGE_FLOW_EDIT_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_ROOT",
-        edit: true,
-        steps: 2,
-        guidance: 5.0,
-        evidence_story: "sc-22733",
-    },
-    MageArm {
-        provider: "mage_flow_edit_base",
-        execution_path: "the Candle Mage-Flow-Edit-Base instruction-editing path",
-        still_calibration: "Candle Mage-Flow-Edit-Base calibration",
-        fixture_prefix: "mage-flow-edit-base-candle",
-        repository: protocol::MAGE_FLOW_EDIT_BASE_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT",
-        edit: true,
-        steps: 2,
-        guidance: 5.0,
-        evidence_story: "sc-22733",
-    },
-    MageArm {
-        provider: "mage_flow_edit_turbo",
-        execution_path: "the Candle Mage-Flow-Edit-Turbo distilled instruction-editing path",
-        still_calibration: "Candle Mage-Flow-Edit-Turbo calibration",
-        fixture_prefix: "mage-flow-edit-turbo-candle",
-        repository: protocol::MAGE_FLOW_EDIT_TURBO_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT",
-        edit: true,
-        steps: 4,
-        guidance: 1.0,
-        evidence_story: "sc-22733",
-    },
-];
 
 // ---------------------------------------------------------------------------------------------
 // The bespoke Candle PuLID-FLUX arm (sc-22726).
@@ -1454,10 +1314,6 @@ fn main() {
 #[cfg(test)]
 #[path = "candle_sdxl_family_tests.rs"]
 mod sdxl_family_tests;
-
-#[cfg(test)]
-#[path = "candle_mage_tests.rs"]
-mod mage_tests;
 
 #[cfg(test)]
 #[path = "candle_tests.rs"]

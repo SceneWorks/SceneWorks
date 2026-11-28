@@ -75,26 +75,6 @@ pub fn anima_tier_complete(dir: &Path) -> bool {
         && dir.join("vae/qwen_image_vae.safetensors").is_file()
 }
 
-/// Whether a Boogu tier `dir` is COMPLETE and loadable. Boogu ships no `model_index.json`, so the shared
-/// guard is a no-op; the loader crashes FIRST on a missing `mllm/tokenizer.json`, then on an absent
-/// `mllm`/`transformer`/`vae` weight. A tier is complete when the transformer (packed single-file OR
-/// sharded index) plus its `config.json`, the Qwen3-VL `mllm/` (weights + `tokenizer.json`), and the VAE
-/// weights are all present.
-pub fn boogu_tier_complete(dir: &Path) -> bool {
-    let transformer = dir.join("transformer");
-    let transformer_weights = transformer
-        .join("diffusion_pytorch_model.safetensors")
-        .is_file()
-        || transformer
-            .join("diffusion_pytorch_model.safetensors.index.json")
-            .is_file();
-    transformer_weights
-        && transformer.join("config.json").is_file()
-        && dir.join("mllm/tokenizer.json").is_file()
-        && dir_has_visible_file_ending(&dir.join("mllm"), ".safetensors")
-        && dir_has_visible_file_ending(&dir.join("vae"), ".safetensors")
-}
-
 /// Whether a SANA tier `dir` is COMPLETE and loadable. The `SceneWorks/Sana_*_mlx` turnkeys ship no
 /// `model_index.json`, so the standard-tier guard is a no-op for SANA specifically (flux/qwen/etc. DO
 /// ship one and stay protected by the `model_index.json` check); the SANA loader dies with a raw OS
@@ -570,14 +550,6 @@ mod tests {
         touch(&dir.join("vae/qwen_image_vae.safetensors"));
     }
 
-    fn seed_boogu(dir: &Path) {
-        touch(&dir.join("transformer/diffusion_pytorch_model.safetensors"));
-        touch(&dir.join("transformer/config.json"));
-        touch(&dir.join("mllm/model.safetensors"));
-        touch(&dir.join("mllm/tokenizer.json"));
-        touch(&dir.join("vae/diffusion_pytorch_model.safetensors"));
-    }
-
     fn seed_sana(dir: &Path) {
         touch(&dir.join("transformer/diffusion_pytorch_model.safetensors"));
         touch(&dir.join("vae/diffusion_pytorch_model.safetensors"));
@@ -662,42 +634,6 @@ mod tests {
         fs::remove_file(dir.join("diffusion_models/anima-base-v1.0.safetensors")).unwrap();
         touch(&dir.join("diffusion_models/._anima-base-v1.0.safetensors"));
         assert!(!anima_tier_complete(&dir));
-    }
-
-    #[test]
-    fn boogu_complete_true_each_component_load_bearing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("base");
-        seed_boogu(&dir);
-        assert!(boogu_tier_complete(&dir));
-
-        for component in [
-            "transformer/diffusion_pytorch_model.safetensors",
-            "transformer/config.json",
-            "mllm/model.safetensors",
-            "mllm/tokenizer.json",
-            "vae/diffusion_pytorch_model.safetensors",
-        ] {
-            let torn = tmp.path().join("torn");
-            seed_boogu(&torn);
-            fs::remove_file(torn.join(component)).unwrap();
-            assert!(
-                !boogu_tier_complete(&torn),
-                "removing {component} must read incomplete"
-            );
-            fs::remove_dir_all(&torn).ok();
-        }
-    }
-
-    #[test]
-    fn boogu_accepts_sharded_transformer_index() {
-        // A sharded transformer (index.json, no single-file weight) is loadable too.
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("base");
-        seed_boogu(&dir);
-        fs::remove_file(dir.join("transformer/diffusion_pytorch_model.safetensors")).unwrap();
-        touch(&dir.join("transformer/diffusion_pytorch_model.safetensors.index.json"));
-        assert!(boogu_tier_complete(&dir));
     }
 
     #[test]
@@ -1442,7 +1378,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let absent = tmp.path().join("nope");
         assert!(!anima_tier_complete(&absent));
-        assert!(!boogu_tier_complete(&absent));
         assert!(!sana_tier_complete(&absent));
         assert!(!wan_tier_complete(&absent));
         assert!(!sensenova_tier_complete(&absent));

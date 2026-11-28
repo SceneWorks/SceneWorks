@@ -1,4 +1,3 @@
-import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 /**
  * `node --test` coverage for `scripts/check-tier-integrity.mjs` (sc-15799).
  *
@@ -35,7 +34,6 @@ async function realInputs() {
   const [
     ledger,
     manifest,
-    mlxFitGate,
     routingCatalog,
     routingCandle,
     routingMlx,
@@ -45,7 +43,6 @@ async function realInputs() {
   ] = await Promise.all([
     readFile(path.join(ROOT, "config/tier-integrity.jsonc"), "utf8"),
     readFile(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
-    rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs")),
     readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"), "utf8"),
     readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/candle.rs"), "utf8"),
     readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/mlx.rs"), "utf8"),
@@ -55,12 +52,10 @@ async function realInputs() {
   ]);
   return {
     ledger: JSON.parse(stripJsoncComments(ledger)),
-    ledgerSource: ledger,
     manifest: projectBuiltinMemoryEvidence(
       JSON.parse(stripJsoncComments(manifest)),
       await readBuiltinMemoryEvidence(ROOT),
     ),
-    mlxFitGate,
     routingCatalog,
     routingCandle,
     routingMlx,
@@ -75,68 +70,6 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 test("the shipped ledger validates clean", async () => {
   const { errors } = validate(await realInputs());
   assert.deepEqual(errors, [], "the committed ledger must be conformant");
-});
-
-test("Lens q4/q8 use re-hosted packed turnkeys with no text-encoder exception", async () => {
-  const { ledger, ledgerSource, manifest, mlxFitGate } = await realInputs();
-  const resolution = "sc-16014-resolution: rehosted-q4-q8";
-  assert.ok(ledgerSource.includes(resolution));
-  assert.ok(mlxFitGate.includes(resolution));
-  assert.deepEqual(
-    ledger.exceptions.filter(
-      (row) => ["lens", "lens_turbo"].includes(row.model) && row.component === "textEncoder",
-    ),
-    [],
-  );
-  for (const modelId of ["lens", "lens_turbo"]) {
-    const model = manifest.models.find((entry) => entry.id === modelId);
-    const expectedRepo =
-      modelId === "lens" ? "SceneWorks/lens-mlx" : "SceneWorks/lens-turbo-mlx";
-    assert.equal(model.mlx.standardTierLayout, true);
-    assert.equal(model.mlx.denseTextEncoderTier, undefined);
-    assert.deepEqual(
-      model.downloads
-        .filter((download) => ["q4", "q8"].includes(download.variant))
-        .map(({ variant, repo }) => ({ variant, repo }))
-        .sort((left, right) => left.variant.localeCompare(right.variant)),
-      [
-        { variant: "q4", repo: expectedRepo },
-        { variant: "q8", repo: expectedRepo },
-      ],
-      `${modelId} must host both packed tiers instead of routing them through the bf16 encoder`,
-    );
-  }
-});
-
-test("the Lens resolution marker is required in both bound sources", async () => {
-  const inputs = await realInputs();
-  const resolution = "sc-16014-resolution: rehosted-q4-q8";
-  for (const field of ["ledgerSource", "mlxFitGate"]) {
-    const { errors } = validate({ ...inputs, [field]: "marker removed" });
-    assert.ok(
-      errors.some((error) => error.includes(resolution)),
-      `${field} lost the shared decision without tripping anti-drift: ${errors.join(" | ")}`,
-    );
-  }
-});
-
-test("a Lens text-encoder exception cannot be reintroduced after the q4/q8 rehost", async () => {
-  const inputs = await realInputs();
-  const ledger = clone(inputs.ledger);
-  ledger.exceptions.push({
-    model: "lens_turbo",
-    component: "textEncoder",
-    residentTier: "bf16",
-    appliesToTiers: ["q4", "q8"],
-    cause: "backend-capability",
-    reason: "A stale exception for the superseded MXFP4 source artifact.",
-    evidence: { state: "measured", costGb: 17.24, source: "superseded bf16 measurement" },
-  });
-  const { errors } = validate({ ...inputs, ledger });
-  assert.ok(
-    errors.some((error) => error.includes("still declares 1 Lens textEncoder exception row")),
-    `expected the resolved-row guard to fire, got: ${errors.join(" | ")}`,
-  );
 });
 
 test("the temporary unmeasured amnesty is empty", () => {
@@ -170,7 +103,7 @@ test("an existing model cannot add an unmeasured row", async () => {
   const inputs = await realInputs();
   const ledger = clone(inputs.ledger);
   ledger.exceptions.push({
-    model: "boogu_image",
+    model: "anima_base",
     component: "textEncoder",
     residentTier: "bf16",
     appliesToTiers: ["q4", "q8"],
@@ -318,24 +251,16 @@ test("every VAE row uses its structured, numeric-receipt-bound residency scope",
 test("decoder-only VAE costs cannot drift back to whole-file numbers", async () => {
   const inputs = await realInputs();
 
-  const lensMlx = inputs.ledger.exceptions.find(
-    (row) => row.model === "lens" && row.component === "vae" && row.backends.join() === "mlx",
+  const ledger = clone(inputs.ledger);
+  const decoder = ledger.exceptions.find(
+    (row) => row.component === "vae" && row.evidence.vaeScope === VAE_SCOPES.DECODER,
   );
-  const lensCandle = inputs.ledger.exceptions.find(
-    (row) => row.model === "lens" && row.component === "vae" && row.backends.join() === "candle",
-  );
-  assert.equal(lensMlx.evidence.costBytesByTier.q4, 84046371 * 4);
-  assert.equal(lensCandle.evidence.costBytesByTier.q4, 49620515 * 4);
-
-  const mageLedger = clone(inputs.ledger);
-  const mage = mageLedger.exceptions.find(
-    (row) => row.model === "mage_flow" && row.component === "vae",
-  );
-  mage.evidence.costBytesByTier.q4 = 172478148 * 2;
-  const { errors } = validate({ ...inputs, ledger: mageLedger });
+  const tier = Object.keys(decoder.evidence.costBytesByTier)[0];
+  decoder.evidence.costBytesByTier[tier] *= 2;
+  const { errors } = validate({ ...inputs, ledger });
   assert.ok(
     errors.some((error) => error.includes("does not reproduce the independent safetensors-header receipt")),
-    `expected Mage's old whole-file count to fail, got: ${errors.join(" | ")}`,
+    `expected the changed decoder byte count to fail, got: ${errors.join(" | ")}`,
   );
 });
 
@@ -349,23 +274,6 @@ test("branchTierByBaseTier must cover every hosted tier variant", async () => {
     errors.some((error) => error.includes('does not cover the hosted tier variant "q8"')),
     `expected the coverage check to fire, got: ${errors.join(" | ")}`,
   );
-});
-
-test("the mage norm_out.linear floor is declared for every mage entry that has the DiT", async () => {
-  const { ledger, manifest } = await realInputs();
-  const mageIds = manifest.models.filter((entry) => entry.id.startsWith("mage_flow")).map((e) => e.id);
-  const declared = new Set(
-    ledger.exceptions
-      .filter((row) => row.component === "transformerHead")
-      .map((row) => row.model),
-  );
-  for (const id of mageIds) {
-    assert.ok(
-      declared.has(id),
-      `${id} routes through the same MageTransformer, whose \`floor_bits(FINAL_MOD_BASE, bits)\` takes ` +
-        `no model argument — so its q8 head floor must be declared`,
-    );
-  }
 });
 
 test("krea_2_raw declares the same dense VAE as krea_2_turbo", async () => {

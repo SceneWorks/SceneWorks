@@ -3960,8 +3960,6 @@ mod krea_imported;
 #[cfg(native_lane)]
 mod krea_multiphase;
 #[cfg(native_lane)]
-mod mage_finetuned;
-#[cfg(native_lane)]
 mod sdxl_imported;
 #[cfg(target_os = "macos")]
 mod sensenova;
@@ -4048,9 +4046,8 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor_with_resident_overlay, admit_candle_load_spec_floor,
-    has_candle_tier_peak_row, prepare_cached_candle_base_floor,
-    safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
+    admit_candle_base, admit_candle_base_floor_with_resident_overlay, has_candle_tier_peak_row,
+    prepare_cached_candle_base_floor, safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —
@@ -4209,9 +4206,8 @@ pub(crate) use bernini::{
 #[allow(unused_imports)]
 // Retain the existing crate-visible interface on every original cfg lane.
 pub(crate) use checkpoint_plan::{
-    checkpoint_plan_bespoke_primary_dir, checkpoint_plan_bespoke_primary_pin,
-    checkpoint_plan_checkpoint_id, request_is_checkpoint_plan_backed, CheckpointPlanBespokeDir,
-    CheckpointPlanSelection,
+    checkpoint_plan_bespoke_primary_pin, checkpoint_plan_checkpoint_id,
+    request_is_checkpoint_plan_backed, CheckpointPlanSelection,
 };
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(unused_imports)]

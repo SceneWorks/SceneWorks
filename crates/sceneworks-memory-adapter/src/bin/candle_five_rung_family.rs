@@ -280,8 +280,6 @@ pub(super) fn five_rung_load_spec(
             KOLORS_ID
             | IDEOGRAM_ID
             | IDEOGRAM_TURBO_ID
-            | LENS_ID
-            | LENS_TURBO_ID
             | QWEN_IMAGE_2_1_ID
             | QWEN_IMAGE_2_1_TURBO_ID,
             Some(quant),
@@ -299,8 +297,6 @@ pub(super) fn five_rung_load_spec(
             KOLORS_ID
             | IDEOGRAM_ID
             | IDEOGRAM_TURBO_ID
-            | LENS_ID
-            | LENS_TURBO_ID
             | QWEN_IMAGE_2_1_ID
             | QWEN_IMAGE_2_1_TURBO_ID,
             None,
@@ -364,10 +360,6 @@ pub(super) fn five_rung_load_spec(
 }
 
 pub(super) fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, String> {
-    // sc-22733: Mage binds two artifact triples and stages two components; it has its own loader.
-    if let Some(arm) = mage_arm(request)? {
-        return load_mage_generator(request, arm);
-    }
     // Resolved BEFORE the family match: Ideogram's bf16 tier is a different repository, so the tier
     // is an input to the binding rather than something checked after it.
     let tier = planned_tier(request)?;
@@ -486,20 +478,6 @@ pub(super) fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRung
                     arm.expected_repository,
                 )
             }
-            // sc-22733. Each Mage variant binds TWO artifact triples (its own tiered rehost plus
-            // the shared text-encoder/VAE components snapshot) and stages two components, which
-            // the single-root tuple above cannot express — so the early return at the top of this
-            // function serves them and reaching here means that return was bypassed. Named rather
-            // than left to the catch-all for the same two reasons `pulid_flux` is: the refusal must
-            // say which loader owns the route, and `adapterCapturableProviders` INTERSECTS every
-            // dispatch gate carrying the refusal phrase, so an absent arm here would erase all six
-            // from the derived capturable set. Expression-bodied ON PURPOSE (see `pulid_flux`).
-            "mage_flow" => return Err(mage_registry_bypass("mage_flow")),
-            "mage_flow_base" => return Err(mage_registry_bypass("mage_flow_base")),
-            "mage_flow_turbo" => return Err(mage_registry_bypass("mage_flow_turbo")),
-            "mage_flow_edit" => return Err(mage_registry_bypass("mage_flow_edit")),
-            "mage_flow_edit_base" => return Err(mage_registry_bypass("mage_flow_edit_base")),
-            "mage_flow_edit_turbo" => return Err(mage_registry_bypass("mage_flow_edit_turbo")),
             // sc-22730. Each SD3.5 member binds its OWN tiered rehost, so a Medium plan can never
             // be satisfied by Large weights. The rehost is the SAME artifact family both lanes
             // load (`SceneWorks/sd3.5-<route>-mlx`, per-tier `q4/ q8/ bf16/` subdirs), so the env
@@ -611,22 +589,6 @@ pub(super) fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRung
                 IDEOGRAM_TURBO_ID,
                 IDEOGRAM_TURBO_PLAIN_EXECUTION_PATH,
                 tier,
-            ),
-            LENS_ID => (
-                LENS_ID,
-                LENS_PLAIN_EXECUTION_PATH,
-                "SCENEWORKS_LENS_REPOSITORY",
-                "SCENEWORKS_LENS_REVISION",
-                "SCENEWORKS_LENS_ROOT",
-                protocol::LENS_REPOSITORY,
-            ),
-            LENS_TURBO_ID => (
-                LENS_TURBO_ID,
-                LENS_TURBO_PLAIN_EXECUTION_PATH,
-                "SCENEWORKS_LENS_TURBO_REPOSITORY",
-                "SCENEWORKS_LENS_TURBO_REVISION",
-                "SCENEWORKS_LENS_TURBO_ROOT",
-                protocol::LENS_TURBO_REPOSITORY,
             ),
             // sc-24112: Qwen-Image 2.1 binds the re-host for q4/q8 and the upstream snapshot for
             // bf16, each through its own env family.
@@ -791,10 +753,7 @@ pub(super) fn run_five_rung_reference_loaded(
     // sc-22724: the mode the plan declared, as the worker would admit it. The `z_image_edit`
     // route carries one reference and is admitted under `MemoryMode::Edit` (the contract the
     // `z_image_edit` manifest entry declares for the Turbo provider).
-    // sc-22733: the three Mage instruction editors are admitted under `MemoryMode::Edit` too — the
-    // engine's own route gate requires it (`memory_strategy.rs` `route_is_supported`).
-    let mage = mage_arm(request)?;
-    let edit = is_z_image_edit(request)? || mage.is_some_and(|arm| arm.edit);
+    let edit = is_z_image_edit(request)?;
     let context = MemoryRunContext {
         selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
@@ -860,12 +819,7 @@ pub(super) fn run_five_rung_reference_loaded(
                 format!("configure {provider_id} fresh-reference transformer: {error}")
             })?;
     }
-    let mut generation = match mage {
-        Some(arm) => {
-            mage_generation_request(arm, &generator.descriptor().capabilities, width, height)
-        }
-        None => five_rung_provider_generation_request(provider_id, width, height, edit),
-    };
+    let mut generation = five_rung_provider_generation_request(provider_id, width, height, edit);
     if request.get("sdxlEndpoint").is_some() {
         // The issue's ordinary request uses the provider's default sampler and steps.
         generation.steps = Some(30);
@@ -1017,12 +971,6 @@ pub(super) fn run_five_rung_reference_loaded(
             "sc-22726 anchor capture measures exact per-phase memory and strategy identity for ",
             "the Candle FLUX.1-schnell lane; it intentionally remains gated because this run does ",
             "not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
-        )
-    } else if MAGE_ARMS.iter().any(|arm| arm.provider == provider_id) {
-        concat!(
-            "sc-22733 anchor capture measures exact per-phase memory and strategy identity for ",
-            "the Candle Mage-Flow lane; it intentionally remains gated because this run does not ",
-            "repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
         )
     } else if matches!(
         provider_id,
@@ -1228,12 +1176,9 @@ pub(super) fn five_rung_generation_request(
 /// their packaged records already carry; the FLUX.1 members (sc-22726) and the SD3.5 members
 /// (sc-22730) cite their own.
 pub(super) fn five_rung_evidence_story(provider_id: &str) -> &'static str {
-    if let Some(arm) = MAGE_ARMS.iter().find(|arm| arm.provider == provider_id) {
-        return arm.evidence_story;
-    }
     match provider_id {
         FLUX1_DEV_ID | FLUX1_SCHNELL_ID => "sc-22726",
-        KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID => "sc-22732",
+        KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID => "sc-22732",
         QWEN_IMAGE_2_1_ID => "sc-24112",
         QWEN_IMAGE_2_1_TURBO_ID => "sc-25907",
         SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID => "sc-22730",
@@ -1250,7 +1195,7 @@ pub(super) fn run_five_rung_reference(request: &Value) -> Result<Value, String> 
     protocol::validate_still_geometry(request, still_calibration_label(request)?)?;
     let (provider_id, execution_path, repository, revision, generator, mut vram) =
         load_five_rung_generator(request)?;
-    let mut fragment = run_five_rung_reference_loaded(
+    run_five_rung_reference_loaded(
         request,
         provider_id,
         execution_path,
@@ -1258,26 +1203,7 @@ pub(super) fn run_five_rung_reference(request: &Value) -> Result<Value, String> 
         &mut vram,
         &repository,
         &revision,
-    )?;
-    // sc-22733: a Mage load opens TWO artifact triples, and the shared loadability fingerprint
-    // names only the variant's. A load that took the DiT from the planned variant but the text
-    // encoder from another tier's components would otherwise leave no trace in the record.
-    if mage_arm(request)?.is_some() {
-        let tier = planned_tier(request)?;
-        let components_repository =
-            protocol::required_env("SCENEWORKS_MAGE_FLOW_COMPONENTS_REPOSITORY")?;
-        let components_revision =
-            protocol::required_env("SCENEWORKS_MAGE_FLOW_COMPONENTS_REVISION")?;
-        let variant = fragment
-            .pointer("/loadability/resolvedPathFingerprint")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "the five-rung fragment carries no loadability fingerprint".to_owned())?
-            .to_owned();
-        fragment["loadability"]["resolvedPathFingerprint"] = json!(format!(
-            "{variant}+{components_repository}@{components_revision}:{tier}"
-        ));
-    }
-    Ok(fragment)
+    )
 }
 
 pub(super) fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
@@ -1386,8 +1312,6 @@ pub(super) fn routes_to_five_rung_reference(request: &Value) -> Result<bool, Str
     let provider = planned_provider(request)?;
     // sc-22726: the FLUX.1 BASE providers have no inline arm either. PuLID is deliberately absent —
     // it is a bespoke route with its own arm, dispatched before this is ever consulted.
-    // sc-22733: the six Mage routes have no inline arm either — they ride the shared five-rung
-    // lifecycle behind their own loader (`load_mage_generator`) and their own request shape.
     // sc-22730: the three SD3.5 base providers have no inline arm either.
     Ok(is_five_rung_fixture
         || provider == QWEN_ID
@@ -1405,12 +1329,9 @@ pub(super) fn routes_to_five_rung_reference(request: &Value) -> Result<bool, Str
         || provider == KOLORS_ID
         || provider == IDEOGRAM_ID
         || provider == IDEOGRAM_TURBO_ID
-        || provider == LENS_ID
-        || provider == LENS_TURBO_ID
         // sc-24112: nor does Qwen-Image 2.1, and sc-25907: nor its Turbo sibling.
         || provider == QWEN_IMAGE_2_1_ID
         || provider == QWEN_IMAGE_2_1_TURBO_ID
-        || MAGE_ARMS.iter().any(|arm| arm.provider == provider)
         || provider == SD3_5_LARGE_ID
         || provider == SD3_5_LARGE_TURBO_ID
         || provider == SD3_5_MEDIUM_ID
@@ -1423,4 +1344,17 @@ pub(super) fn routes_to_five_rung_reference(request: &Value) -> Result<bool, Str
         // future Raw fixture spelled differently still routes to the arm that implements it
         // instead of falling into Turbo's `provider != KREA_ID` refusal.
         || provider == KREA_RAW_ID)
+}
+
+pub(super) fn pulid_reference_image() -> Result<Image, String> {
+    // A generated face already exercised by inference's sc-16956 PuLID render.
+    // A synthetic color gradient cannot pass the production face detector.
+    let decoded = image::load_from_memory(include_bytes!("../../fixtures/pulid-reference.png"))
+        .map_err(|error| format!("decode bundled PuLID reference face: {error}"))?
+        .into_rgb8();
+    Ok(Image {
+        width: decoded.width(),
+        height: decoded.height(),
+        pixels: decoded.into_raw(),
+    })
 }

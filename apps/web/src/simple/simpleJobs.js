@@ -91,8 +91,8 @@ const IMAGE_DEFAULTS = Object.freeze({
   flashAttn: true,
   promptEnhance: false,
   enhancePrompt: false,
-  precisionToggle: false,
-  bf16Precision: false,
+
+
   showTierPicker: false,
   showPidToggle: false,
   usePid: false,

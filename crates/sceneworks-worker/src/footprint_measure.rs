@@ -38,7 +38,6 @@
 //! cargo test -p sceneworks-worker --release footprint_sdxl_q8         -- --ignored --nocapture
 //! cargo test -p sceneworks-worker --release footprint_z_image_turbo_q4 -- --ignored --nocapture
 //! cargo test -p sceneworks-worker --release footprint_z_image_q4       -- --ignored --nocapture
-//! cargo test -p sceneworks-worker --release footprint_lens_turbo_q4    -- --ignored --nocapture
 //! ```
 //!
 //! CALIBRATION SET (prefer already-on-disk tiers; do NOT trigger a 30GB+ download sweep — sc-8516
@@ -676,10 +675,8 @@ const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";
 // tries both at load, but the tier-presence sentinel must name the file that actually exists.
 const SDXL_BF16_SENTINEL: &str = "unet/diffusion_pytorch_model.fp16.safetensors";
 // Lens turnkeys pack the DiT under transformer/diffusion_pytorch_model.safetensors …
-const LENS_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
 // … but the DENSE bf16 lens-turbo DiT is SHARDED (diffusion_pytorch_model-0000N-of-0000M.safetensors),
 // so its tier-presence sentinel is the shard index file that the plain name would otherwise miss.
-const LENS_SHARDED_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors.index.json";
 // … while Z-Image AND Qwen-Image turnkeys pack the DiT under transformer/model.safetensors.
 const ZIMAGE_SENTINEL: &str = "transformer/model.safetensors";
 
@@ -828,24 +825,6 @@ fn footprint_z_image_q4() {
     measure_footprint("z_image", "q4", "z_image", &dir, sdxl_request());
 }
 
-#[test]
-#[ignore = "footprint measurement; needs SceneWorks/lens-turbo-mlx q4 cached + an Apple-Silicon Mac"]
-fn footprint_lens_turbo_q4() {
-    let dir = resolve_tier_dir(
-        "FP_LENS_Q4_DIR",
-        "SceneWorks/lens-turbo-mlx",
-        "q4",
-        LENS_SENTINEL,
-    );
-    measure_footprint(
-        "lens_turbo",
-        "q4",
-        "lens_turbo",
-        &dir,
-        turbo_request(4, Some(1.0)),
-    );
-}
-
 // ── sc-10863 HEADROOM calibration set ─────────────────────────────────────────────────────────────
 // Four already-on-disk tiers spanning a small→large hold-all spread (illustrious q8 ~5 GiB → qwen-image
 // q8 ~36 GiB) drive the fit-gate `HEADROOM_GB` calibration: the gate predicts peak = Σon-disk-weights +
@@ -854,38 +833,6 @@ fn footprint_lens_turbo_q4() {
 // tiers above (default `LoadSpec` ⇒ `OffloadPolicy::Resident`, no fit-gate in the loop, no memory cap),
 // so the peak is the true hold-all ceiling over summed weights — not a Sequential-staged number.
 // illustrious q8 is covered by `footprint_illustrious_v{1,2}_q8` above; the other three are here.
-
-#[test]
-#[ignore = "footprint measurement; needs SceneWorks/lens-mlx q4 cached + an Apple-Silicon Mac"]
-fn footprint_lens_q4() {
-    // Base (non-turbo) lens: real CFG at 20 steps / guidance 5.0 (the `lens_base_q4_mlx_smoke` defaults).
-    let dir = resolve_tier_dir(
-        "FP_LENS_BASE_Q4_DIR",
-        "SceneWorks/lens-mlx",
-        "q4",
-        LENS_SENTINEL,
-    );
-    measure_footprint("lens", "q4", "lens", &dir, turbo_request(20, Some(5.0)));
-}
-
-#[test]
-#[ignore = "footprint measurement; needs SceneWorks/lens-turbo-mlx bf16 cached + an Apple-Silicon Mac"]
-fn footprint_lens_turbo_bf16() {
-    // Dense bf16 lens-turbo: SHARDED DiT ⇒ the shard-index sentinel. Turbo schedule (4 steps, CFG-scale 1).
-    let dir = resolve_tier_dir(
-        "FP_LENS_TURBO_BF16_DIR",
-        "SceneWorks/lens-turbo-mlx",
-        "bf16",
-        LENS_SHARDED_SENTINEL,
-    );
-    measure_footprint(
-        "lens_turbo",
-        "bf16",
-        "lens_turbo",
-        &dir,
-        turbo_request(4, Some(1.0)),
-    );
-}
 
 #[test]
 #[ignore = "footprint measurement; needs SceneWorks/qwen-image-mlx q8 cached + an Apple-Silicon Mac"]

@@ -238,7 +238,6 @@ apps/rust-api/src/tests/support.rs sceneworks_worker::Settings::hermetic_for_tes
 apps/rust-api/src/tests/training.rs sceneworks_worker::training_resume_stem
 apps/rust-api/src/training.rs sceneworks_worker::flux3_receipted_snapshot
 apps/rust-api/src/training.rs sceneworks_worker::flux3_runtime_bundle_check
-apps/rust-api/src/training.rs sceneworks_worker::full_finetune_memory_error
 apps/rust-api/src/training.rs sceneworks_worker::installed_aux_training_model_dir
 apps/rust-api/src/training.rs sceneworks_worker::iris_plan_memory_error
 apps/rust-api/src/training.rs sceneworks_worker::iris_task_objective

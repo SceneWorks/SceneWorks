@@ -1,11 +1,9 @@
 use super::*;
 
-const MEMBERS: [(&str, &str); 7] = [
+const MEMBERS: [(&str, &str); 5] = [
     (KOLORS_PROVIDER, "kolors"),
     (IDEOGRAM_PROVIDER, "ideogram-4"),
     (IDEOGRAM_TURBO_PROVIDER, "ideogram-4-turbo"),
-    (LENS_PROVIDER, "lens"),
-    (LENS_TURBO_PROVIDER, "lens-turbo"),
     (QWEN_IMAGE_2_1_PROVIDER, "qwen-image-2-1"),
     (QWEN_IMAGE_2_1_TURBO_PROVIDER, "qwen-image-2-1-turbo"),
 ];
@@ -104,13 +102,6 @@ fn each_member_binds_its_own_artifact_family_and_ideogram_splits_bf16() {
     };
     for tier in ["q4", "q8", "bf16"] {
         expect(KOLORS_ARM, tier, protocol::KOLORS_REPOSITORY, "KOLORS");
-        expect(LENS_ARM, tier, protocol::LENS_REPOSITORY, "LENS");
-        expect(
-            LENS_TURBO_ARM,
-            tier,
-            protocol::LENS_TURBO_REPOSITORY,
-            "LENS_TURBO",
-        );
     }
     for arm in [IDEOGRAM_ARM, IDEOGRAM_TURBO_ARM] {
         for tier in ["q4", "q8"] {
@@ -171,10 +162,6 @@ fn each_member_binds_its_own_artifact_family_and_ideogram_splits_bf16() {
     }
     // Base Lens and Lens-Turbo must never share a family: a turbo plan satisfied by base
     // weights would re-label the base model's peaks as the distilled model's.
-    assert_ne!(
-        LENS_ARM.family.expected_repository,
-        LENS_TURBO_ARM.family.expected_repository
-    );
 }
 
 /// The root must end in the PLANNED tier's directory, and the spec must open exactly that tier
@@ -353,11 +340,11 @@ fn the_turnkey_fixture_binds_member_tier_edge_seed_and_steps() {
         assert!(case(&format!("{slug}-mlx-q4-1024-seed22732-step4"), "q4").is_err());
     }
     // And one member's fixture never satisfies another member's plan.
-    let arm = turnkey_arm(&turnkey_planned(LENS_PROVIDER, "text_to_image", "q4")).unwrap();
-    let mut request = turnkey_planned(LENS_PROVIDER, "text_to_image", "q4");
-    request["planned"]["fixture"] = json!("lens-turbo-mlx-q4-1024-seed22732-step2");
+    let arm = turnkey_arm(&turnkey_planned(IDEOGRAM_PROVIDER, "text_to_image", "q4")).unwrap();
+    let mut request = turnkey_planned(IDEOGRAM_PROVIDER, "text_to_image", "q4");
+    request["planned"]["fixture"] = json!("ideogram-4-turbo-mlx-q4-1024-seed22732-step2");
     validate_turnkey_fixture(&request, arm, "q4")
-        .expect_err("Lens-Turbo's fixture must not satisfy a base Lens plan");
+        .expect_err("Ideogram Turbo's fixture must not satisfy a base Ideogram plan");
     // sc-25907: nor does either Qwen-Image 2.1 checkpoint's fixture satisfy the other's plan.
     for (provider, foreign) in [
         (
@@ -429,8 +416,6 @@ fn every_planned_turnkey_mlx_cell_is_served_by_an_arm() {
         "kolors",
         "ideogram_4",
         "ideogram_4_turbo",
-        "lens",
-        "lens_turbo",
         "qwen_image_2_1",
         "qwen_image_2_1_turbo",
     ]
@@ -530,11 +515,7 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
             identities[planned]
         );
     }
-    assert_eq!(
-        identities.len(),
-        15,
-        "fifteen distinct turnkey MLX identities"
-    );
+    assert_eq!(identities.len(), 9, "nine distinct turnkey MLX identities");
     assert_eq!(
         qwen_image_2_1.len(),
         3,
@@ -588,24 +569,9 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
         "kolors:q4:mlx"
     );
     assert_eq!(
-        identities["lens-mlx-shared-ladder-2026-08-03-v1"],
-        "lens:q4:mlx"
-    );
-    assert_eq!(
         runtime_macos::calibration::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "kolors-mlx-chatglm3-sdxl-unet-ladder-v1"
     );
-    assert_eq!(
-        runtime_macos::calibration::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
-        "lens-mlx-shared-ladder-2026-08-03-v1"
-    );
-    // The legacy dense Lens-Turbo key is a real engine constant and it is NOT a cell here.
-    assert_eq!(
-        runtime_macos::calibration::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT,
-        "lens-text-encoder-window-2026-07-31-v1"
-    );
-    assert!(!identities.contains_key("lens-text-encoder-window-2026-07-31-v1"));
-    // The thirteen new cells, spelled out: the strings the sc-22732 inference head mints.
     for (key, identity) in [
         ("kolors:q8:mlx", "kolors-q8-mlx-shared-ladder-v1"),
         ("kolors:bf16:mlx", "kolors-bf16-mlx-shared-ladder-v1"),
@@ -627,14 +593,6 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
             "ideogram_4_turbo:bf16:mlx",
             "ideogram-4-turbo-bf16-mlx-shared-ladder-v1",
         ),
-        ("lens:q8:mlx", "lens-q8-mlx-shared-ladder-v1"),
-        ("lens:bf16:mlx", "lens-bf16-mlx-shared-ladder-v1"),
-        ("lens_turbo:q4:mlx", "lens-turbo-q4-mlx-shared-ladder-v1"),
-        ("lens_turbo:q8:mlx", "lens-turbo-q8-mlx-shared-ladder-v1"),
-        (
-            "lens_turbo:bf16:mlx",
-            "lens-turbo-bf16-mlx-shared-ladder-v1",
-        ),
     ] {
         assert_eq!(identities[identity], key);
     }
@@ -645,11 +603,6 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
 #[test]
 fn a_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
     for (provider, slug, foreign) in [
-            (
-                LENS_TURBO_PROVIDER,
-                "lens-turbo",
-                "lens-text-encoder-window-2026-07-31-v1",
-            ),
             (
                 KOLORS_PROVIDER,
                 "kolors",

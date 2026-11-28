@@ -23,7 +23,6 @@ use super::super::NVFP4_TIER;
 #[cfg(not(target_os = "macos"))]
 use super::anima_dense_split_files_dir;
 use super::anima_tier_subdir;
-use super::boogu_model_subdir;
 use super::dense_tier_subdir;
 use super::ideogram_model_subdir;
 use super::is_anima_model;
@@ -988,26 +987,6 @@ fn effective_quant_label_never_aliases_nvfp4_to_bf16_or_q4() {
     }
 }
 
-/// sc-16025: provider-local floors are part of the effective numeric identity. The label stored
-/// on the asset/effective-settings record must not collapse Mage's mixed q4/q8 load to plain q4.
-#[cfg(native_lane)]
-#[test]
-fn mage_q4_label_includes_every_descriptor_declared_component_floor() {
-    let request = resolved_request(
-        json!({ "model": "mage_flow", "advanced": { "mlxQuantize": 4 } })
-            .as_object()
-            .unwrap(),
-    );
-    let q4_dir = PathBuf::from("/models/mage_flow/q4");
-    let (label, bits) = effective_quant_label_gated(&request, false, Some(&q4_dir));
-    assert_eq!(
-        label.as_deref(),
-        Some("q4+[textEncoder:q8,transformerHead:q8]")
-    );
-    assert_ne!(label.as_deref(), Some("q4"));
-    assert_eq!(bits, None, "a mixed-width profile has no single bit count");
-}
-
 /// sc-11042 / epic 11037 SC#5 — **the recorded label must describe the tier that RAN.**
 ///
 /// The regression this pins: `effective_quant_label` was host-aware but DISK-BLIND. It returned
@@ -1507,8 +1486,6 @@ fn shipped_standard_tier_membership_is_compiled_product_data() {
         "flux_schnell",
         "flux_dev",
         "pulid_flux_dev",
-        "lens",
-        "lens_turbo",
         "sana_1600m",
         "sana_sprint_1600m",
         "kolors",
@@ -1518,12 +1495,7 @@ fn shipped_standard_tier_membership_is_compiled_product_data() {
             "{id}"
         );
     }
-    for id in [
-        "ideogram_4",
-        "boogu_image",
-        "krea_2_turbo",
-        "qwen_image_2_1",
-    ] {
+    for id in ["ideogram_4", "krea_2_turbo", "qwen_image_2_1"] {
         assert!(
             !uses_standard_tier_layout(&manifest_request(id, json!({}))),
             "{id}"
@@ -1898,47 +1870,6 @@ fn non_sana_standard_turnkey_ignores_the_sana_completeness_branch() {
     assert_eq!(standard_tier_subdir(root, &request), root.join("q8"));
 }
 
-/// Seed a Boogu tier folder (`<variant>` / `<variant>-q4` / `<variant>-bf16`): packed transformer +
-/// its config, and (when `complete`) the Qwen3-VL `mllm/` with tokenizer and the VAE. No index.
-fn seed_boogu_tier(root: &Path, folder: &str, complete: bool) {
-    let dir = root.join(folder);
-    std::fs::create_dir_all(dir.join("transformer")).unwrap();
-    std::fs::write(
-        dir.join("transformer/diffusion_pytorch_model.safetensors"),
-        b"x",
-    )
-    .unwrap();
-    std::fs::write(dir.join("transformer/config.json"), b"{}").unwrap();
-    if complete {
-        std::fs::create_dir_all(dir.join("mllm")).unwrap();
-        std::fs::write(dir.join("mllm/model.safetensors"), b"x").unwrap();
-        std::fs::write(dir.join("mllm/tokenizer.json"), b"{}").unwrap();
-        std::fs::create_dir_all(dir.join("vae")).unwrap();
-        std::fs::write(dir.join("vae/diffusion_pytorch_model.safetensors"), b"x").unwrap();
-    }
-}
-
-/// A torn Boogu tier (transformer present, `mllm/tokenizer.json` + VAE absent) must fall through to a
-/// complete sibling rather than crash the loader on the first-read `mllm/tokenizer.json`.
-#[test]
-fn boogu_torn_tier_falls_through_to_a_complete_sibling() {
-    let request = resolved_request(
-        json!({ "model": "boogu_image", "advanced": {} })
-            .as_object()
-            .unwrap(),
-    );
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // `base` is the Q8 default folder (torn); `base-bf16` is complete.
-    seed_boogu_tier(root, "base", false);
-    seed_boogu_tier(root, "base-bf16", true);
-    assert_eq!(
-            boogu_model_subdir(root, &request),
-            root.join("base-bf16"),
-            "the torn Q8 `base/` must skip to the complete `base-bf16`, not crash on `mllm/tokenizer.json`"
-        );
-}
-
 /// `resolved_tier_is_complete` (the pre-flight completeness dispatcher behind the friendly
 /// `mlx_weights_gap` message) reports a torn SANA tier as incomplete and a whole one as complete.
 #[cfg(target_os = "macos")]
@@ -2039,7 +1970,7 @@ fn anima_torn_tier_falls_through_to_a_complete_sibling() {
 /// sc-10845 (epic 10721): [`krea_model_subdir`] — the last bespoke tier resolver — routes its DEFAULT
 /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))`, exactly
 /// like [`standard_tier_subdir`] / [`anima_tier_subdir`] / [`ideogram_model_subdir`] /
-/// [`boogu_model_subdir`], so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
+/// so a floored model's picker-less default clamps UP to `mlx.minQualityTier`
 /// (capped by installed) instead of blindly landing on the q8 default. No shipping Krea model declares
 /// a floor today, so every current model is byte-identical to the prior q8 default; this pins the
 /// generality. Mirrors [`standard_tier_subdir_clamps_default_to_the_floor`].
@@ -2105,43 +2036,6 @@ fn krea_default_tier_clamps_to_the_floor() {
         );
 }
 
-#[test]
-fn candle_lens_resolves_packed_turnkey_tier_subdir() {
-    let lens_request = |bits: serde_json::Value| {
-        resolved_request(
-            json!({ "model": "lens", "advanced": { "mlxQuantize": bits } })
-                .as_object()
-                .unwrap(),
-        )
-    };
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    // A Lens turnkey ships packed per-tier subdirs (transformer + gpt-oss-20b MoE TE + FLUX.2 VAE).
-    seed_tier(root, "q4", "diffusion_pytorch_model.safetensors");
-    seed_tier(root, "q8", "diffusion_pytorch_model.safetensors");
-    seed_tier(
-        root,
-        "bf16",
-        "diffusion_pytorch_model.safetensors.index.json",
-    );
-
-    // A/B tier toggle: default (q8, sc-10726) / mlxQuantize:8 (q8) / mlxQuantize:0 (bf16) each
-    // resolve to their tier subdir — the default now prefers the clean q8 tier (clamped to
-    // installed), matching `resolve_quant`'s Q8 default.
-    assert_eq!(
-        standard_tier_subdir(root, &lens_request(json!(null))),
-        root.join("q8")
-    );
-    assert_eq!(
-        standard_tier_subdir(root, &lens_request(json!(8))),
-        root.join("q8")
-    );
-    assert_eq!(
-        standard_tier_subdir(root, &lens_request(json!(0))),
-        root.join("bf16")
-    );
-}
-
 /// sc-9092 (epic 9083 gap #3, review fix): Ideogram + Boogu were left `macOnly:true` with only
 /// off-Mac diffusers download entries, which the PR deleted — so off-Mac they resolved to the MLX
 /// turnkey (`SceneWorks/{ideogram-4,boogu-image}-mlx`) whose download entries were macOS-only and
@@ -2151,7 +2045,7 @@ fn candle_lens_resolves_packed_turnkey_tier_subdir() {
 /// per-family subdir resolvers pick the shipped tier of a turnkey snapshot regardless of platform —
 /// the ideogram/boogu sibling of `candle_lens_resolves_packed_turnkey_tier_subdir` above.
 #[test]
-fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
+fn candle_ideogram_resolves_packed_turnkey_tier_subdir() {
     let model_request = |model: &str, bits: serde_json::Value| {
         resolved_request(
             json!({ "model": model, "advanced": { "mlxQuantize": bits } })
@@ -2185,30 +2079,9 @@ fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
             );
         }
     }
-
-    // Boogu turnkey (`SceneWorks/boogu-image-mlx`): Q8 `base/`/`turbo/`/`edit/` is the shipped
-    // (off-Mac) default. `boogu_model_subdir` probes `<variant>/transformer/diffusion_pytorch_model.safetensors`.
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        for variant in ["base", "turbo", "edit"] {
-            seed_tier(root, variant, "diffusion_pytorch_model.safetensors");
-        }
-        for (model, variant) in [
-            ("boogu_image", "base"),
-            ("boogu_image_turbo", "turbo"),
-            ("boogu_image_edit", "edit"),
-        ] {
-            // Default (no mlxQuantize) → the shipped Q8 `<variant>/` subfolder.
-            assert_eq!(
-                boogu_model_subdir(root, &model_request(model, json!(null))),
-                root.join(variant)
-            );
-        }
-    }
 }
 
-/// sc-10777 (epic 10721): [`ideogram_model_subdir`] / [`boogu_model_subdir`] route their DEFAULT tier
+/// sc-10777 (epic 10721): [`ideogram_model_subdir`] route their DEFAULT tier
 /// through the shared, floor-aware [`preferred_tier`]`(bits, `[`min_quality_floor`]`(request))` — the
 /// same clamp [`standard_tier_subdir`] / [`anima_tier_subdir`] use — so a floored model's picker-less
 /// default clamps UP to `mlx.minQualityTier` (capped by installed) instead of blindly landing on the
@@ -2217,7 +2090,7 @@ fn candle_ideogram_boogu_resolve_packed_turnkey_tier_subdir() {
 /// can't silently regress below its floor on the worker default path. Mirrors
 /// [`standard_tier_subdir_clamps_default_to_the_floor`].
 #[test]
-fn ideogram_boogu_default_tier_clamps_to_the_floor() {
+fn ideogram_default_tier_clamps_to_the_floor() {
     // A request for `model` with the given `bits` (null = no explicit pick) and an optional per-model
     // quality floor forwarded via `modelManifestEntry.mlx.minQualityTier`.
     let floored = |model: &str, bits: serde_json::Value, floor: Option<&str>| {
@@ -2234,60 +2107,6 @@ fn ideogram_boogu_default_tier_clamps_to_the_floor() {
         };
         resolved_request(payload.as_object().unwrap())
     };
-
-    // --- Boogu: a bf16 floor RAISES the picker-less default above the packed Q8 (the meaningful case,
-    // since Boogu's turnkey carries a bf16 tier above its Q8 default). ---
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        seed_tier(root, "base", "diffusion_pytorch_model.safetensors");
-        seed_tier(root, "base-q4", "diffusion_pytorch_model.safetensors");
-        // bf16 ships as the dense diffusers tree (SHARDED → only the `.index.json`), like the loader.
-        seed_tier(
-            root,
-            "base-bf16",
-            "diffusion_pytorch_model.safetensors.index.json",
-        );
-        // Floor bf16, no explicit pick → the dense `base-bf16` (raised above the Q8 default).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("bf16"))),
-            root.join("base-bf16"),
-            "floored Boogu default → the bf16 floor tier (raised above the packed Q8 default)"
-        );
-        // Floor q8 (at the default) → the packed Q8 `base/`, unchanged (the floor only ever RAISES).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(null), Some("q8"))),
-            root.join("base")
-        );
-        // An explicit below-floor q4 pick is HONORED even against a bf16 floor (the worker never
-        // overrides a deliberate quant choice — the web surfaces the advisory instead).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(4), Some("bf16"))),
-            root.join("base-q4")
-        );
-        // Non-floored default is unchanged — the packed Q8 default still stands (acceptance #3).
-        assert_eq!(
-            boogu_model_subdir(root, &floored("boogu_image", json!(null), None)),
-            root.join("base")
-        );
-    }
-    // Boogu floor capped by installed: bf16 floor but only the packed Q8 `base/` on disk → Q8.
-    {
-        let only_q8 = tempfile::tempdir().unwrap();
-        seed_tier(
-            only_q8.path(),
-            "base",
-            "diffusion_pytorch_model.safetensors",
-        );
-        assert_eq!(
-                boogu_model_subdir(
-                    only_q8.path(),
-                    &floored("boogu_image", json!(null), Some("bf16"))
-                ),
-                only_q8.path().join("base"),
-                "bf16 floor with only Q8 installed → Q8 (a floor tier not on disk falls to the best installed)"
-            );
-    }
 
     // --- Ideogram: the turnkey carries only `q4/`/`q8/` (bf16 is a separate repo) and the default
     // already prefers q8, so the floor routing is inert for every in-turnkey floor — but it must still

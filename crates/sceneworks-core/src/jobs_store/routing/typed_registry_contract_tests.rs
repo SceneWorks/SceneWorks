@@ -306,27 +306,6 @@ fn former_audit_regressions_follow_typed_image_and_video_owners() {
             json!({"mode":"text_to_image","referenceAssetId":"base"}),
             backend
         ));
-        assert!(image_claim(
-            "mage_flow_edit",
-            json!({"mode":"edit_image","sourceAssetId":"base","referenceAssetIds":["ref"]}),
-            backend
-        ));
-        let mage = builtin_model_spec("mage_flow_edit").unwrap();
-        for quant in ["q4", "q8"] {
-            assert!(
-                mage.routes[backend]
-                    .supported_quants
-                    .iter()
-                    .any(|q| q == quant),
-                "Mage Edit {backend}/{quant}"
-            );
-        }
-        for kind in ["reference", "multiReference"] {
-            assert!(mage.routes[backend]
-                .conditioning
-                .iter()
-                .any(|value| value == kind));
-        }
         for mode in ["extend_clip", "video_bridge", "replace_person"] {
             assert!(super::video_backend_mode_supported(backend, "ltx_2_3", mode).unwrap());
             assert!(super::video_backend_mode_supported(backend, "ltx_2_5", mode).unwrap());
@@ -395,16 +374,6 @@ fn former_audit_regressions_follow_typed_image_and_video_owners() {
             );
         }
     }
-    let mage_target = crate::training::builtin_training_targets()
-        .targets
-        .into_iter()
-        .find(|target| target.id == "mage_flow_base_lora")
-        .unwrap();
-    assert!(mage_target.limits["networkTypes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|kind| kind == "full"));
     let chatterbox = builtin_model_spec("chatterbox_tts").unwrap();
     let candle_audio = chatterbox.provider_routes["candle"]
         .iter()
@@ -450,14 +419,10 @@ fn imported_image_defaults_join_live_family_routes() {
         .iter()
         .copied()
         .collect();
-    assert_eq!(
-        supported,
-        ["flux2", "krea_2", "mage-flow", "moss-image", "sdxl"].into()
-    );
+    assert_eq!(supported, ["flux2", "krea_2", "moss-image", "sdxl"].into());
     for (family, expected_modes) in [
         ("krea_2", json!(["text_to_image", "edit_image"])),
         ("sdxl", json!(["text_to_image"])),
-        ("mage-flow", json!(["text_to_image"])),
         ("flux2", json!(["text_to_image"])),
         ("moss-image", json!(["text_to_image"])),
     ] {
@@ -1728,15 +1693,6 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
         "models/krea_2_turbo/precisionTier/int8-convrot".into(),
         CANDLE_ONLY,
     );
-    for tier in ["q4", "q8"] {
-        add(format!("models/mage_flow_edit/precisionTier/{tier}"), BOTH);
-    }
-    for shape in ["reference", "multiReference"] {
-        add(
-            format!("models/mage_flow_edit/conditioningShape/{shape}"),
-            BOTH,
-        );
-    }
     for model in ["sana_1600m", "sana_sprint_1600m"] {
         add(
             format!("models/{model}/operationAndMode/image_to_image"),
@@ -1744,7 +1700,6 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
         );
         add(format!("models/{model}/conditioningShape/reference"), BOTH);
     }
-    add("trainingKernels/mage_flow_base_lora/full".into(), BOTH);
     add("gpuJobTypes/image_upscale/engine:aura-sr".into(), NEITHER);
     for engine in ["real-esrgan", "seedvr2"] {
         add(format!("gpuJobTypes/image_upscale/engine:{engine}"), BOTH);
@@ -1881,12 +1836,7 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
             )
         })
     };
-    for (family, serves) in [
-        ("krea_2", BOTH),
-        ("sdxl", BOTH),
-        ("mage-flow", MLX_ONLY),
-        ("flux2", CANDLE_ONLY),
-    ] {
+    for (family, serves) in [("krea_2", BOTH), ("sdxl", BOTH), ("flux2", CANDLE_ONLY)] {
         let answer = |extra: serde_json::Value| {
             (
                 imported(family, "mlx", extra.clone()),

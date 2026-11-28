@@ -285,7 +285,7 @@ export function SimpleImageStudio() {
   }, [referenceRequest?.token]);
 
   // Reference-guided generation on the TEXT tab is a per-model capability (`ui.img2img`):
-  // Z-Image, Krea 2, SD3.5, SANA, Ideogram 4 and Boogu declare it, most models don't. On a
+  // Z-Image, Krea 2, SD3.5, SANA, and Ideogram 4 declare it, most models don't. On a
   // model without it the tile stays visible (the design's 2-up tile grid) but disabled and
   // says why, rather than accepting a reference the payload would then drop.
   const supportsImg2img = Boolean(selectedModel?.ui?.img2img);

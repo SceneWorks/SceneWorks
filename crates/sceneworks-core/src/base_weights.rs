@@ -320,12 +320,6 @@ pub enum BaseWeightDetection {
 /// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
 /// engine. Membership comes from build-validated product families with an exact imported-provider
 /// registration on either backend; [`import_supported`] still checks role and source encoding.
-/// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the other three —
-/// the single-file families `flux2`, `krea_2` and `sdxl` — a loadable Mage-Flow backbone is a
-/// diffusers **transformer component directory**
-/// ([`is_mage_flow_transformer_dir`]) — `config.json` plus its weight file — because the loader
-/// reads its architecture from that config rather than inferring it from a base tier. A bare
-/// `.safetensors` with no config sibling is therefore refused, which is what the arm below says.
 /// Source topology and provider registrations determine membership. Verified numeric encodings
 /// are admitted through the shared projection source plan; they do not introduce another family
 /// or change the Klein BFL architecture and companion requirements.
@@ -845,6 +839,13 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// Unknown scaling, containers without an importer and heterogeneous conventions without one
 /// truthful persisted codec identity remain explicit refusals.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
+    if let Some(detail) = verdict
+        .family
+        .as_deref()
+        .and_then(crate::model_family::retired_image_detail)
+    {
+        return Err(detail);
+    }
     if verdict.family.as_deref().is_some_and(|family| {
         image_import_encoding_supported(family, verdict.component, verdict.quant)
     }) {
@@ -906,12 +907,6 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import for the 'sdxl' family requires a fused checkpoint containing the UNet, \
              both text encoders, and VAE, not a {component} file."
         )),
-        (Some(crate::model_family::MAGE_FLOW), component, _) if component != ComponentRole::Transformer => {
-            Err(format!(
-                "Model import for the 'mage-flow' family requires a diffusion transformer, not a \
-                 {component} file."
-            ))
-        }
         (Some(crate::model_family::MINIMAX_H3), component, _) if component != ComponentRole::Transformer => {
             Err(format!(
                 "Model import for the 'minimax-h3' family requires the MiniMax-H3 diffusion \
@@ -927,11 +922,6 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         (Some(crate::model_family::SDXL), _, quant) => Err(format!(
             "Model import for the 'sdxl' family requires a complete fused checkpoint with a \
              verified shared source encoding, not {quant}."
-        )),
-        (Some(crate::model_family::MAGE_FLOW), _, quant) => Err(format!(
-            "Model import for the 'mage-flow' family requires its transformer config and a \
-             verified shared source encoding, not {quant}. Affine q4/q8 tiers are installed \
-             through the model catalog."
         )),
         (Some(crate::model_family::MINIMAX_H3), _, quant) => Err(format!(
             "Model import for the 'minimax-h3' family supports dense f16, bf16, f32 or \
@@ -2975,6 +2965,9 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("mage-flow"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Bf16);
+        assert!(import_supported(&verdict)
+            .unwrap_err()
+            .contains("no longer supported"));
 
         for missing_block in [0, 5, 11] {
             let marker = format!("transformer_blocks.{missing_block}.");
@@ -3616,7 +3609,6 @@ mod tests {
             ("sdxl", ComponentRole::Checkpoint),
             ("krea_2", ComponentRole::Transformer),
             ("flux2", ComponentRole::Transformer),
-            ("mage-flow", ComponentRole::Transformer),
         ] {
             for quant in [
                 QuantFormat::F16,
@@ -3733,47 +3725,6 @@ mod tests {
         assert!(import_detection_supported(&detection).is_ok());
     }
 
-    /// sc-15036 — Mage-Flow is the DIRECTORY-shaped member of the import gate. The triple gate
-    /// accepts a dense bf16 transformer (the shape a full base fine-tune writes) and refuses the
-    /// wrong component and the pre-quantized tiers, each with its own reason.
-    #[test]
-    fn import_supported_accepts_a_dense_mage_flow_transformer_and_names_every_refusal() {
-        assert!(import_supported(&verdict(
-            Some("mage-flow"),
-            ComponentRole::Transformer,
-            QuantFormat::Bf16
-        ))
-        .is_ok());
-
-        let wrong_component = import_supported(&verdict(
-            Some("mage-flow"),
-            ComponentRole::Vae,
-            QuantFormat::Bf16,
-        ))
-        .expect_err("a VAE is not a Mage-Flow backbone");
-        assert!(
-            wrong_component.contains("transformer"),
-            "reason: {wrong_component}"
-        );
-
-        for quant in [
-            QuantFormat::Fp8E4m3,
-            QuantFormat::ComfyQuantPacked,
-            QuantFormat::Gguf,
-        ] {
-            let refused = import_supported(&verdict(
-                Some("mage-flow"),
-                ComponentRole::Transformer,
-                quant,
-            ))
-            .expect_err("unverified source encodings must be refused");
-            assert!(
-                refused.contains(quant.as_str()),
-                "the refusal must name the encoding it saw: {refused}"
-            );
-        }
-    }
-
     /// sc-15036 — the directory-shape probe the import gate and the worker's render lane SHARE.
     /// Discriminating in three directions: both files present is accepted, and EITHER one missing
     /// is refused — a torn artifact must not register as a model that then fails at load.
@@ -3873,7 +3824,6 @@ mod tests {
         let expected = [
             ("krea_2", ComponentRole::Transformer),
             ("sdxl", ComponentRole::Checkpoint),
-            ("mage-flow", ComponentRole::Transformer),
             ("flux2", ComponentRole::Transformer),
             ("minimax-h3", ComponentRole::Transformer),
             ("moss-image", ComponentRole::Transformer),

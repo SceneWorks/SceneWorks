@@ -516,54 +516,6 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
-        "docs/calibration/sc-22738/lens-bf16-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-bf16-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-q4-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-q4-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-q8-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-q8-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-q8-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json"),
-    ),
-    (
         "docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json"),
     ),
@@ -608,38 +560,6 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q8-mlx-evidence.json"),
     ),
     (
-        "docs/calibration/sc-22738/mage-flow-base-bf16-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-bf16-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-base-q8-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q8-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-bf16-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-bf16-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json"),
-    ),
-    (
         "docs/calibration/sc-22738/mage-flow-edit-base-bf16-candle-evidence.json",
         include_str!(
             "../../../docs/calibration/sc-22738/mage-flow-edit-base-bf16-candle-evidence.json"
@@ -658,42 +578,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
-        "docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json"),
-    ),
-    (
         "docs/calibration/sc-22738/mage-flow-edit-base-q8-candle-evidence.json",
         include_str!(
             "../../../docs/calibration/sc-22738/mage-flow-edit-base-q8-candle-evidence.json"
         ),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-bf16-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-bf16-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-candle-evidence.json",
@@ -732,46 +620,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
-        "docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-q8-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-q8-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json"),
-    ),
-    (
         "docs/calibration/sc-22738/mage-flow-turbo-bf16-candle-evidence.json",
         include_str!(
             "../../../docs/calibration/sc-22738/mage-flow-turbo-bf16-candle-evidence.json"
         ),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-turbo-q8-candle-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q8-candle-evidence.json"),
-    ),
-    (
-        "docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json",
-        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json"),
     ),
     (
         "docs/calibration/sc-22738/minimax-h3-bf16-candle-evidence.json",

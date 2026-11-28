@@ -1,5 +1,4 @@
 use super::super::conditioning::character_image_likeness_requested;
-use super::super::conditioning::mage_edit_reference_ids;
 use super::super::load_spec::load_spec;
 use super::super::memory::candle_capability_reject_message;
 use super::super::memory::vram_reject_tail;
@@ -35,7 +34,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
             "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
         }));
         let route = resolve_candle_image_route_with_prepared_availability(
-            &request, None, &settings, false, false, false, false, false, false, false,
+            &request, None, &settings, false, false, false, false, false, false,
         )
         .unwrap();
         assert_eq!(route, CandleImageRoute::MossImageEdit);
@@ -45,7 +44,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
         let ordinary = bound_request(json!({"model":model,"mode":"text_to_image"}));
         assert_eq!(
             resolve_candle_image_route_with_prepared_availability(
-                &ordinary, None, &settings, false, false, false, false, false, false, false
+                &ordinary, None, &settings, false, false, false, false, false, false
             ),
             Some(CandleImageRoute::CandleTxt2Img)
         );
@@ -55,7 +54,7 @@ fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
         bound_request(json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"}));
     assert_eq!(
         resolve_candle_image_route_with_prepared_availability(
-            &request, None, &settings, false, false, false, false, false, false, false
+            &request, None, &settings, false, false, false, false, false, false
         ),
         None
     );
@@ -173,35 +172,6 @@ fn registered_zimage_identity_routes_scored_source_metadata() {
 }
 
 #[test]
-fn mage_edit_preserves_primary_then_ordered_extra_references() {
-    let request = bound_request(json!({
-        "mode": "edit_image",
-        "model": "mage_flow_edit_turbo",
-        "sourceAssetId": "primary",
-        "referenceAssetIds": ["second", "third"]
-    }));
-    assert_eq!(
-        mage_edit_reference_ids(&request),
-        ["primary", "second", "third"]
-    );
-    assert_eq!(
-        CandleImageRoute::MageEdit.adapter_label(&request),
-        "candle_mage",
-        "Mage edit assets and generation sets must retain the Candle family label"
-    );
-
-    let missing_primary = bound_request(json!({
-        "mode": "edit_image",
-        "model": "mage_flow_edit",
-        "referenceAssetIds": ["orphan"]
-    }));
-    assert!(
-        mage_edit_reference_ids(&missing_primary).is_empty(),
-        "Mage edit must not reinterpret an optional reference as its required primary source"
-    );
-}
-
-#[test]
 fn candle_image_adapter_labels_are_per_family() {
     assert_eq!(candle_adapter_label("z_image_turbo"), "candle_z_image");
     assert_eq!(candle_adapter_label("flux_schnell"), "candle_flux");
@@ -218,8 +188,7 @@ fn candle_image_adapter_labels_are_per_family() {
     assert_eq!(candle_adapter_label("chroma1_hd"), "candle_chroma");
     assert_eq!(candle_adapter_label("chroma1_base"), "candle_chroma");
     assert_eq!(candle_adapter_label("chroma1_flash"), "candle_chroma");
-    assert_eq!(candle_adapter_label("lens"), "candle_lens");
-    assert_eq!(candle_adapter_label("lens_turbo"), "candle_lens");
+
     assert_eq!(candle_adapter_label("kolors"), "candle_kolors");
     assert_eq!(candle_adapter_label("sensenova_u1_8b"), "candle_sensenova");
     assert_eq!(
@@ -228,20 +197,6 @@ fn candle_image_adapter_labels_are_per_family() {
     );
     assert_eq!(candle_adapter_label("ideogram_4"), "candle_ideogram");
     assert_eq!(candle_adapter_label("ideogram_4_turbo"), "candle_ideogram");
-    // Boogu (sc-7524): all three variants share the `candle_boogu` asset stamp.
-    assert_eq!(candle_adapter_label("boogu_image"), "candle_boogu");
-    assert_eq!(candle_adapter_label("boogu_image_turbo"), "candle_boogu");
-    assert_eq!(candle_adapter_label("boogu_image_edit"), "candle_boogu");
-    for model in [
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-    ] {
-        assert_eq!(candle_adapter_label(model), "candle_mage");
-    }
     // Krea 2 Turbo (sc-7581): the candle asset stamp.
     assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
     // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
@@ -275,16 +230,11 @@ fn candle_image_adapter_labels_are_per_family() {
         "chroma1_hd",
         "chroma1_base",
         "chroma1_flash",
-        "lens",
-        "lens_turbo",
         "kolors",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "ideogram_4",
         "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
         // SD3.5 (sc-7880): Large / Large Turbo / Medium carry the `candle_sd3` stamp.
         "sd3_5_large",
         "sd3_5_large_turbo",

@@ -962,20 +962,12 @@ pub struct PlanBackedResidentBase {
     pub shape: ResidentBaseShape,
 }
 
-pub const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[
-    PlanBackedResidentBase {
-        family: "krea_2",
-        base_model_id: "krea_2_turbo",
-        tier: "bf16",
-        shape: ResidentBaseShape::KreaImportedCompanions,
-    },
-    PlanBackedResidentBase {
-        family: "mage-flow",
-        base_model_id: "mage_flow_base",
-        tier: "bf16",
-        shape: ResidentBaseShape::ComponentsOnly,
-    },
-];
+pub const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[PlanBackedResidentBase {
+    family: "krea_2",
+    base_model_id: "krea_2_turbo",
+    tier: "bf16",
+    shape: ResidentBaseShape::KreaImportedCompanions,
+}];
 
 pub fn selected_resident_base_closure_for_row(
     base_entry: &Value,

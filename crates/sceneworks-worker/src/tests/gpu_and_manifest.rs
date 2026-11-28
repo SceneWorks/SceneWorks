@@ -473,22 +473,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("sensenova_u1_8b_infographic_v2_fast", true, false),
         // Infographic-V3 fast (epic 13095): rides the base `sensenova_u1_8b_fast` engine id → same flags.
         ("sensenova_u1_8b_infographic_v3_fast", true, false),
-        // Lens / Lens-Turbo (epic 3164 / sc-5105): the `mlx-gen-lens` descriptor advertises the
-        // norm-rescaled CFG path (`supports_guidance=true`) + a negative prompt
-        // (`supports_negative_prompt=true`) — a standard guidance family (NOT true-CFG), so the worker
-        // forwards the CFG scale via `guidance`. Turbo simply defaults guidance to 1.0 (≈ no CFG).
-        ("lens", true, true),
-        ("lens_turbo", true, true),
         // Bernini still-image companion (epic 4699 / sc-5424): the image-typed `bernini_image` id
         // maps to the SAME `bernini` engine the video id uses (`Modality::Both`). Standard guidance
         // family — `supports_guidance=true` (omega_txt) + `supports_negative_prompt=true`.
         ("bernini_image", true, true),
-        // Boogu-Image-0.1 (epic 6387 / sc-6399): Base + Edit are true-CFG (supports_guidance=true)
-        // with no user negative prompt (the CFG-negative is a fixed empty/drop instruction). Turbo is
-        // the DMD few-step, CFG-free distill (supports_guidance=false). None take a negative prompt.
-        ("boogu_image", true, true),
-        ("boogu_image_turbo", true, true),
-        ("boogu_image_edit", true, true),
         // Krea 2 Turbo (epic 7565 / sc-7572): TDM-distilled few-step, CFG-free
         // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
         // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
@@ -523,14 +511,6 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("anima_base", true, true),
         ("anima_aesthetic", true, true),
         ("anima_turbo", true, true),
-        // Mage-Flow Base/RL and Edit-Base/Edit retain classifier-free guidance and negative
-        // conditioning; the distilled generation/edit Turbo recipes are CFG-free.
-        ("mage_flow_base", true, true),
-        ("mage_flow", true, true),
-        ("mage_flow_turbo", true, true),
-        ("mage_flow_edit_base", true, true),
-        ("mage_flow_edit", true, true),
-        ("mage_flow_edit_turbo", true, true),
         // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
         ("iris_3b", true, true),
         // FLUX 3 Image Klein, distilled (sc-26234): a flow map — no CFG, no negative prompt.
@@ -949,82 +929,6 @@ fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
          DEFAULT tier against the LIGHTEST tier's number — a permissive under-prediction that can \
          admit a load which then OOMs (sc-13533). Measure the tier and add its row: {offenders:?}"
     );
-
-    // Pin the sc-13533 subjects on the value, not merely on the sweep above: both Boogu entries must
-    // still DERIVE q8 (the shipped `base/` / `turbo/` Q8 turnkey) and must carry a q8 row. Flipping
-    // `mlx.quantize` to dodge the lint, or dropping the row, both go RED here.
-    for id in ["boogu_image", "boogu_image_turbo"] {
-        let entry = builtin_model_entry(id);
-        assert_eq!(
-            default_tier_key(&entry),
-            "q8",
-            "{id} ships the Q8 turnkey as its only auto-downloaded tier, so a no-pick request must \
-             still derive q8 (sc-13533)"
-        );
-        assert!(
-            entry
-                .get("candle")
-                .and_then(|candle| candle.get("vramGbByTier"))
-                .and_then(|tiers| tiers.get("q8"))
-                .and_then(Value::as_f64)
-                .is_some(),
-            "{id} must carry a measured q8 `vramGbByTier` row — the tier it defaults to (sc-13533)"
-        );
-    }
-}
-
-/// sc-14053/sc-16025: every Mage variant is a Candle/CUDA model and retains the same conservative
-/// historical tier estimates, but those estimates are not published as physical measurements. Pin
-/// all six rows and prove the generic gate rejects an oversized tier while admitting the lower one
-/// on the same emulated card.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-#[test]
-fn mage_cuda_catalog_rows_are_unmeasured_but_drive_tier_specific_vram_rejection() {
-    use crate::vram_gate::{fit_decision, predicted_peak_gb, FitDecision, VramBudget};
-
-    let budget = Some(VramBudget {
-        total_gb: 18.0,
-        free_gb: 18.0,
-    });
-    for id in [
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-    ] {
-        let entry = builtin_model_entry(id);
-        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(false));
-        let object = entry.as_object().expect("manifest model object");
-        assert_eq!(
-            entry
-                .get("candle")
-                .and_then(|candle| candle.get("measured"))
-                .and_then(Value::as_bool),
-            Some(false),
-            "{id}: historical Mage estimates must not claim physical measurement"
-        );
-        let q4_peak = predicted_peak_gb(object, "q4").expect("q4 peak plus headroom");
-        assert!(
-            (q4_peak - 16.67).abs() < f64::EPSILON * 8.0,
-            "{id}: expected historical 14.67 GB q4 estimate plus headroom, got {q4_peak}"
-        );
-        let bf16_peak = predicted_peak_gb(object, "bf16").expect("bf16 peak plus headroom");
-        assert!(
-            (bf16_peak - 22.41).abs() < f64::EPSILON * 8.0,
-            "{id}: expected historical 20.41 GB bf16 estimate plus headroom, got {bf16_peak}"
-        );
-        assert_eq!(
-            fit_decision(Some(q4_peak), budget),
-            FitDecision::Fits,
-            "{id}: q4 must fit the emulated card"
-        );
-        assert!(matches!(
-            fit_decision(Some(bf16_peak), budget),
-            FitDecision::TooBig { .. }
-        ));
-    }
 }
 
 /// The tier key a no-pick request derives for `model` from `mlx.quantize` alone — a lane-independent

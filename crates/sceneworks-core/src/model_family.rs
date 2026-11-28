@@ -9,6 +9,7 @@ pub const CHROMA: &str = "chroma";
 pub const KREA_2: &str = "krea_2";
 pub const KREA_REALTIME: &str = "krea-realtime";
 pub const MAGE_FLOW: &str = "mage-flow";
+pub const BOOGU: &str = "boogu";
 pub const MOSS_IMAGE: &str = "moss-image";
 pub const MINIMAX_H3: &str = "minimax-h3";
 /// MiniMax-H3-Image (SW-7100): its own family. Its DiT reuses H3's layer names but drops the audio
@@ -36,6 +37,60 @@ pub const LENS: &str = "lens";
 pub const KOLORS: &str = "kolors";
 pub const SVD: &str = "svd";
 pub const BERNINI: &str = "bernini";
+
+/// Retired image identities are recognized only to refuse execution and new imports.
+pub fn retired_image_family(identity: &str) -> Option<&'static str> {
+    match identity
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        "boogu" | "boogu_image" | "boogu_image_turbo" | "boogu_image_edit" | "mlx_boogu"
+        | "candle_boogu" => Some("Boogu-Image"),
+        "lens" | "lens_turbo" | "lens_lora" | "lens_turbo_lora" | "candle_lens" | "mlx_lens" => {
+            Some("Lens")
+        }
+        "mageflow"
+        | "mage_flow"
+        | "mage_flow_base"
+        | "mage_flow_turbo"
+        | "mage_flow_edit"
+        | "mage_flow_edit_base"
+        | "mage_flow_edit_turbo"
+        | "mage_flow_lora"
+        | "mage_flow_base_lora"
+        | "mage_flow_edit_base_lora"
+        | "mlx_mage"
+        | "candle_mage"
+        | "mlx_mage_finetuned"
+        | "candle_mage_finetuned"
+        | "mage_finetuned" => Some("Mage-Flow"),
+        _ => None,
+    }
+}
+
+pub fn retired_image_detail(identity: &str) -> Option<String> {
+    let family = retired_image_family(identity)?;
+    Some(format!(
+        "'{identity}' uses {family}, which is no longer supported. Choose a supported model from the catalog."
+    ))
+}
+
+pub fn retired_image_entry(entry: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    [
+        "id",
+        "family",
+        "adapter",
+        "baseModel",
+        "engineModel",
+        "providerModel",
+        "sourceFamily",
+    ]
+    .into_iter()
+    .filter_map(|key| entry.get(key).and_then(serde_json::Value::as_str))
+    .find(|identity| retired_image_family(identity).is_some())
+}
 pub const SCAIL2: &str = "scail2";
 pub const SENSENOVA_U1: &str = "sensenova-u1";
 
@@ -51,6 +106,7 @@ pub fn exact_identity(value: &str) -> Option<&'static str> {
         "krea2" | "krea-2" => Some(KREA_2),
         "krea-realtime" => Some(KREA_REALTIME),
         "mageflow" | "mage-flow" => Some(MAGE_FLOW),
+        "boogu" | "boogu-image" => Some(BOOGU),
         "mossimage" | "moss-image" => Some(MOSS_IMAGE),
         "minimaxh3" | "minimax-h3" => Some(MINIMAX_H3),
         "minimaxh3image" | "minimax-h3-image" => Some(MINIMAX_H3_IMAGE),
@@ -105,6 +161,7 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
             Some(QWEN_IMAGE.to_owned())
         }
         "lenspipeline" => Some(LENS.to_owned()),
+        "booguimagepipeline" | "boogupipeline" => Some(BOOGU.to_owned()),
         // Directory detection additionally validates transformer/config.json before accepting this
         // family; this mapping is also used by callers that already hold a trusted class name.
         "mageflowpipeline" => Some(MAGE_FLOW.to_owned()),
@@ -158,6 +215,10 @@ pub(crate) fn checkpoint_descriptor_family(value: &str) -> Option<String> {
         ("wan", WAN_VIDEO),
         ("z_image", Z_IMAGE),
         ("z-image", Z_IMAGE),
+        ("booguimage", BOOGU),
+        ("boogu_image", BOOGU),
+        ("boogu-image", BOOGU),
+        ("lenstransformer", LENS),
         ("mageflow", MAGE_FLOW),
         ("mage_flow", MAGE_FLOW),
         ("mage-flow", MAGE_FLOW),

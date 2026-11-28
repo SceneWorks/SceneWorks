@@ -185,15 +185,6 @@ pub const TAESD3_MODEL: AuxTrainingModel = AuxTrainingModel {
     file: "diffusion_pytorch_model.safetensors",
 };
 
-/// TAEF2 — the tiny decoder for the FLUX.2 32-channel latent family (Lens).
-pub const TAEF2_MODEL: AuxTrainingModel = AuxTrainingModel {
-    id: "taef2",
-    label: "TAEF2 tiny decoder",
-    repo: "madebyollin/taef2",
-    revision: "bd244ebfe4398c84fbf312a2f1c868c676b500e3",
-    file: "taef2.safetensors",
-};
-
 /// TAEQI2.1 — the tiny decoder for the Qwen-Image 2.1 64-channel latent family (Qwen Image 2.1).
 pub const TAEQI2_1_MODEL: AuxTrainingModel = AuxTrainingModel {
     id: "taeqi2_1",
@@ -233,11 +224,10 @@ pub const TAELTX2_3_MODEL: AuxTrainingModel = AuxTrainingModel {
 };
 
 /// Every cataloged tiny x0 decoder (a parity test pins each to its `builtin.models.jsonc` entry).
-pub const X0_DECODER_MODELS: [AuxTrainingModel; 8] = [
+pub const X0_DECODER_MODELS: [AuxTrainingModel; 7] = [
     TAEF1_MODEL,
     TAESDXL_MODEL,
     TAESD3_MODEL,
-    TAEF2_MODEL,
     TAEQI2_1_MODEL,
     TAEW2_1_MODEL,
     TAEW2_2_MODEL,
@@ -284,19 +274,18 @@ pub enum X0DecoderSource {
     /// Manager; its snapshot directory is handed to the trainer).
     Catalog(&'static AuxTrainingModel),
     /// No tiny decoder matches the family, so the trainer decodes through its own full VAE (from the
-    /// base model it already loads — Mage-Flow's one-step Mage-VAE). Nothing extra to install.
+    /// base model it already loads). Nothing extra to install.
     BaseModelVae,
 }
 
 /// The x0 decoder for a native trainer's latent family (keyed by the engine trainer id, sc-24830).
 /// `None` for a trainer that cannot run a decoded-x0 perceptual loss (the Krea ControlNet branch).
 pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
-    use X0DecoderSource::{BaseModelVae, Catalog};
+    use X0DecoderSource::Catalog;
     Some(match trainer_id {
         "z_image_turbo" => Catalog(&TAEF1_MODEL),
         "sdxl" | "kolors" => Catalog(&TAESDXL_MODEL),
         "sd3_5_large" | "sd3_5_medium" => Catalog(&TAESD3_MODEL),
-        "lens" => Catalog(&TAEF2_MODEL),
         "qwen_image_2_1" => Catalog(&TAEQI2_1_MODEL),
         "krea_2_raw" | "anima_base" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => {
             Catalog(&TAEW2_1_MODEL)
@@ -305,7 +294,6 @@ pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
         // LTX-2.5 shares the LTX-2.3 latent space (upstream lists TAELTX2.3 for both); its
         // prepared bundles carry the clean video latent the reference decodes.
         "ltx_2_3" | "ltx_2_5" | "ltx_2_5_distilled" => Catalog(&TAELTX2_3_MODEL),
-        "mage_flow_base" => BaseModelVae,
         _ => return None,
     })
 }

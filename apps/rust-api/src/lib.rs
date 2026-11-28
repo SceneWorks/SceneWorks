@@ -188,11 +188,11 @@ use training::{
     repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_finetune_output_location, resolve_training_output_location,
     set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
-    strip_exif_training_dataset_items, trusted_adapter_files, trusted_base_checkpoint_files,
-    update_training_dataset, upload_ltx_prepared_bundle, upload_training_dataset_item,
-    upload_training_dataset_subject_mask, validate_lora_id_component,
-    write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
-    write_training_dataset_face_embeddings, write_training_dataset_subject_masks,
+    strip_exif_training_dataset_items, trusted_adapter_files, update_training_dataset,
+    upload_ltx_prepared_bundle, upload_training_dataset_item, upload_training_dataset_subject_mask,
+    validate_lora_id_component, write_training_dataset_analysis_embeddings,
+    write_training_dataset_caption_sidecars, write_training_dataset_face_embeddings,
+    write_training_dataset_subject_masks,
 };
 mod generation;
 use generation::{
@@ -2284,6 +2284,8 @@ fn validate_source_url(source_url: &str) -> Result<(), ApiError> {
 }
 
 fn validate_lora_family(models: &[Value], family: &str) -> Result<String, ApiError> {
+    sceneworks_core::request_validation::reject_retired_image_identity("family", family)
+        .map_err(crate::jobs::retired_model_error)?;
     let normalized = normalize_lora_family(family);
     if normalized.is_empty() {
         return Err(ApiError::bad_request(

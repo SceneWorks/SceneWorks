@@ -35,6 +35,36 @@ fn create_job(store: &JobsStore, job_type: JobType, payload: Value) -> JobSnapsh
 }
 
 #[test]
+fn retired_job_is_failed_on_restart_and_its_payload_is_preserved() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(directory.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let old = create_job(
+        &store,
+        JobType::ImageGenerate,
+        json!({"model":"my_old_checkpoint","prompt":"old prompt","modelManifestEntry":{"family":"mage-flow"}}),
+    );
+    let current = create_job(
+        &store,
+        JobType::ImageGenerate,
+        json!({"model":"z_image_turbo","prompt":"current prompt"}),
+    );
+    store.initialize().unwrap();
+    let job = store.get_job(&old.id).unwrap();
+    assert_eq!(job.status, JobStatus::Failed);
+    assert_eq!(job.payload, old.payload);
+    assert!(job
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Choose a supported model"));
+    assert_eq!(
+        store.get_job(&current.id).unwrap().status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
 fn removing_worker_upscale_capability_revokes_the_live_claim() {
     let directory = tempfile::tempdir().unwrap();
     let store = JobsStore::new(directory.path().join("jobs.db"));

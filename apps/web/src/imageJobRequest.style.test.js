@@ -66,8 +66,8 @@ function baseState(overrides = {}) {
     flashAttn: false,
     promptEnhance: false,
     enhancePrompt: false,
-    precisionToggle: false,
-    bf16Precision: false,
+
+
     showTierPicker: false,
     quantTier: "",
     showPidToggle: false,

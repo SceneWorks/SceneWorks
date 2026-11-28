@@ -5,8 +5,6 @@ use super::adapters::krea_streamed_blocks_adapter_evidence;
 #[cfg(not(target_os = "macos"))]
 use super::adapters::resolve_adapters;
 #[cfg(not(target_os = "macos"))]
-use super::artifact_resolution::ensure_boogu_tier_present;
-#[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::ensure_ideogram_tier_present;
 #[cfg(not(target_os = "macos"))]
 use super::artifact_resolution::ensure_krea_convrot_base_present;
@@ -27,8 +25,6 @@ use super::conditioning::candle_conditioned_edit_work;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::guard_qwen_image_2_1_lane_slots;
 #[cfg(not(target_os = "macos"))]
-use super::conditioning::is_mage_edit_model;
-#[cfg(not(target_os = "macos"))]
 use super::conditioning::is_minimax_h3_image_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_qwen_image_2_1_edit;
@@ -37,8 +33,6 @@ use super::conditioning::is_sensenova_candle_model;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::load_reference_image;
 #[cfg(not(target_os = "macos"))]
-use super::conditioning::resolve_boogu_edit;
-#[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_candle_kolors_edit_init;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_character_image_likeness_source;
@@ -46,8 +40,6 @@ use super::conditioning::resolve_character_image_likeness_source;
 use super::conditioning::resolve_ideogram_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_img2img_init_generic;
-#[cfg(not(target_os = "macos"))]
-use super::conditioning::resolve_mage_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_minimax_h3_image_edit;
 #[cfg(not(target_os = "macos"))]
@@ -419,15 +411,9 @@ pub(super) fn resolve_candle_lane_inputs(
     } else {
         (None, None)
     };
-    // Registry instruction edits: resolve Boogu's 1..5 sources or Mage's source-first ordered list.
-    // Each uses the `MultiReference`-capable path, not the single `edit_reference` img2img slot.
-    // The alpha plane of each `edit_refs` entry — only Qwen-Image 2.1 ever fills it (S4 contract).
+    // Ordered edit references and their per-image alpha planes.
     let mut edit_ref_alpha: Vec<Option<image::GrayImage>> = Vec::new();
-    let edit_refs: Vec<Image> = if request.model == "boogu_image_edit" {
-        resolve_boogu_edit(request, settings, project_path)?
-    } else if is_mage_edit_model(&request.model) {
-        resolve_mage_edit(request, settings, project_path)?
-    } else if is_qwen_image_2_1_edit(request) {
+    let edit_refs: Vec<Image> = if is_qwen_image_2_1_edit(request) {
         // Qwen-Image 2.1 reference / local editing (sc-24110) — the SAME resolver as the MLX lane,
         // because the Candle port registers the same engine id and declares the same
         // `Reference` + `ReferenceRgba` + `MultiReference` conditioning. One request contract, two
@@ -618,27 +604,7 @@ async fn generate_candle_registry_stream_using(
     // they fell through to `resolve_offload(fit_decision(..))`, a manifest estimate, and an
     // admitted STAGED peak could be executed as a RESIDENT load that the receipt never bounded.
     let receipt_priced_route = crate::candle_memory_strategy::is_receipt_priced(engine_id);
-    // Standard-tier weight resolution, SHARED with the MLX lane (sc-9092, epic 9083 gap #3). Every
-    // candle image family — Ideogram / Boogu / Krea / Lens included — now packed-loads the SAME
-    // SceneWorks MLX-packed per-tier turnkey the macOS path uses: as of the candle-gen rollout all 11
-    // packed-load-capable crates read a packed `q4/q8/bf16` (or the Ideogram/Boogu/Krea legacy-layout)
-    // turnkey subdir directly, so the four ad-hoc `candle_{ideogram,boogu,krea,lens}_repo` resolvers
-    // (which pointed candle at a SEPARATE bf16 diffusers rehost because it couldn't read the packed
-    // turnkeys) are retired. `resolve_weights_dir` applies the identical dispatch the MLX path uses —
-    // an explicit `modelPath` override (FLUX.2-klein `_true_v2` convert-at-install), then the Ideogram
-    // (`ideogram_model_subdir`) / Boogu (`boogu_model_subdir`) / Krea (`krea_model_subdir`) per-family
-    // subdir, then `standard_tier_subdir` (Lens + the STANDARD_TIER_MODELS registry) resolving the
-    // requested `advanced.mlxQuantize` → q4/q8/bf16 tier — so the candle lane needs no bespoke repo
-    // logic. `model` is already resolved via `mlx_model` above, so a `None` here means only the
-    // snapshot is absent (unfetched turnkey), which stays a loud load error.
-    //
-    // sc-9607 (epic 9083): off-Mac on-demand fetch of the non-default Ideogram/Boogu tiers before
-    // resolution — the catalog pulls only the shipped default (ideogram q4, boogu Q8), so a candle
-    // job that opts into another tier (`advanced.mlxQuantize`) needs its subdir pulled first. These
-    // were `#[cfg(target_os = "macos")]` (boogu) / absent (ideogram), so off-Mac previously fell back
-    // to the default tier; now Windows/Linux gets the same q4/q8/bf16 picker as macOS. No-op for the
-    // default tier / every other family / an unfetched turnkey (falls through to the load error below).
-    ensure_boogu_tier_present(api, settings, job, request).await?;
+    // Use the same tier resolution as MLX. Fetch the selected Ideogram tier first.
     ensure_ideogram_tier_present(api, settings, job, request).await?;
     // Krea 2 INT8-ConvRot tier (sc-9300, epic 9083): fetch the canonical bf16 base surface on demand
     // (the ConvRot catalog download pulls only the DiT single-file), then resolve the two LoadSpec

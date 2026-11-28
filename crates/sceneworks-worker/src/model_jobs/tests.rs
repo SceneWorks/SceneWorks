@@ -798,9 +798,16 @@ mod convert_registry_tests {
 
         for &converter in NATIVE_CONVERTERS {
             let job = convert_job(converter);
-            let resolved = resolve_convert_plan(&api, &settings, &job, checkpoint_dir, None, &Default::default())
-                .await
-                .expect("resolver runs without an infra error");
+            let resolved = resolve_convert_plan(
+                &api,
+                &settings,
+                &job,
+                checkpoint_dir,
+                None,
+                &Default::default(),
+            )
+            .await
+            .expect("resolver runs without an infra error");
             if let Err(err) = &resolved {
                 assert_ne!(
                     err.message, "Unknown MLX converter.",
@@ -813,9 +820,16 @@ mod convert_registry_tests {
         // A converter NOT in the registry is rejected as unknown — proving the check above is
         // meaningful and that the fallback still fires.
         let bogus = convert_job("definitely_not_a_real_converter");
-        let resolved = resolve_convert_plan(&api, &settings, &bogus, checkpoint_dir, None, &Default::default())
-            .await
-            .expect("resolver runs without an infra error");
+        let resolved = resolve_convert_plan(
+            &api,
+            &settings,
+            &bogus,
+            checkpoint_dir,
+            None,
+            &Default::default(),
+        )
+        .await
+        .expect("resolver runs without an infra error");
         match resolved {
             Err(err) => assert_eq!(err.message, "Unknown MLX converter."),
             Ok(_) => panic!("a bogus converter must not resolve to a plan"),
@@ -969,20 +983,6 @@ mod tier_builder {
             src.display(),
             out.display()
         );
-
-        // Boogu (sc-8513, epic 8506): `assemble_quantized_snapshot` builds the whole turnkey in one
-        // call — packs transformer/ + mllm/ and copies the dense mllm/tokenizer.json + vae/ as real
-        // files — so there are no symlinks to dereference. Q4/Q8 only (bf16 ships dense separately).
-        if converter == "boogu_assemble" {
-            assert!(
-                bits > 0,
-                "boogu assemble builds a packed Q tier (set SC8513_BITS=4 or 8)"
-            );
-            runtime_macos::converters::boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
-                .unwrap_or_else(|error| panic!("boogu assemble failed: {error}"));
-            eprintln!("[sc-8513] DONE {tier} at {}", out.display());
-            return;
-        }
 
         if bits <= 0 {
             // bf16: the dense backbone IS the tier — mirror transformer + the dense-reuse subdirs.
@@ -1908,135 +1908,7 @@ mod co_requisite_tests {
         ),
     ];
 
-    fn mage_descriptor(id: &'static str) -> gen_core::ModelDescriptor {
-        gen_core::ModelDescriptor {
-            id,
-            family: "mage-flow",
-            backend: "mlx",
-            modality: gen_core::Modality::Image,
-            capabilities: gen_core::Capabilities::default(),
-            encoder_contract: None,
-            denoiser_output_latent_space: None,
-            required_components: &["text_encoder", "vae"],
-            control_kinds: None,
-        }
-    }
-
     /// The six SHIPPED Mage rows, whose shared text encoder + VAE are per-tier co-requisites.
-    const MAGE_MODEL_IDS: &[&str] = &[
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-    ];
-
-    /// Stage the shared components mirror's `<tier>/text_encoder/` + `<tier>/vae/` for one tier.
-    fn stage_mage_components(data_dir: &Path, manifest: &Value, tier: &str) {
-        for download in manifest["downloads"].as_array().expect("downloads") {
-            if download.get("coRequisite").and_then(Value::as_bool) != Some(true) {
-                continue;
-            }
-            if download.get("variant").and_then(Value::as_str) != Some(tier) {
-                continue;
-            }
-            let repo = download["repo"].as_str().expect("repo");
-            let revision = download["revision"].as_str().expect("revision");
-            let subdir = download["subdir"].as_str().expect("subdir");
-            // One real file inside the component dir, so both the `files` glob check and the
-            // `subdir` is_dir() check see a populated tree.
-            stage_snapshot_file(
-                data_dir,
-                repo,
-                revision,
-                &format!("{subdir}/model.safetensors"),
-            );
-        }
-    }
-
-    /// sc-14980/sc-14979 — a per-tier co-requisite resolves to the tier's own component DIR.
-    ///
-    /// Discriminating in the way that matters: only the q4 tier is staged, and the assertion is that
-    /// each component path ends in `q4/<component>`. A resolver that ignored `subdir` would hand
-    /// back the snapshot ROOT (the engine would then look for `text_encoder/` at the top level and
-    /// fail), and one that ignored `variant` would pick whichever row came first.
-    #[test]
-    fn mage_per_tier_co_requisites_resolve_to_the_matching_tier_component_dir() {
-        for &model_id in MAGE_MODEL_IDS {
-            let _env = crate::test_env::isolate_hf_cache();
-            let data_dir = tempfile::tempdir().expect("temp data dir");
-            let manifest = builtin_manifest_entry(model_id);
-            stage_mage_components(data_dir.path(), &manifest, "q4");
-
-            let components = resolve_co_requisites_for_tier(
-                &mage_descriptor(model_id),
-                &manifest,
-                &settings_at(data_dir.path().to_path_buf()),
-                Some("q4"),
-            )
-            .unwrap_or_else(|error| panic!("{model_id}: q4 components are staged: {error:?}"));
-
-            let keys: Vec<&str> = components.keys().map(String::as_str).collect();
-            assert_eq!(keys, vec!["text_encoder", "vae"], "{model_id}");
-            for component in ["text_encoder", "vae"] {
-                let gen_core::WeightsSource::Dir(dir) = &components[component] else {
-                    panic!("{model_id}: {component} must stage as a directory");
-                };
-                assert!(
-                    dir.ends_with(format!("q4/{component}")),
-                    "{model_id}: {component} must resolve to the q4 component dir, got {}",
-                    dir.display()
-                );
-                assert!(dir.is_dir(), "{model_id}: {component} dir must exist");
-            }
-        }
-    }
-
-    /// Asking for a tier whose shared components are NOT installed fails BEFORE the engine load,
-    /// rather than silently handing back another tier's text encoder.
-    #[test]
-    fn mage_co_requisites_refuse_a_tier_that_is_not_installed() {
-        let _env = crate::test_env::isolate_hf_cache();
-        let data_dir = tempfile::tempdir().expect("temp data dir");
-        let manifest = builtin_manifest_entry("mage_flow_base");
-        stage_mage_components(data_dir.path(), &manifest, "q4");
-
-        let error = resolve_co_requisites_for_tier(
-            &mage_descriptor("mage_flow_base"),
-            &manifest,
-            &settings_at(data_dir.path().to_path_buf()),
-            Some("bf16"),
-        )
-        .expect_err("bf16 components are not staged, so resolution must fail");
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("not installed") || message.contains("missing"),
-            "the failure must be actionable, got {message}"
-        );
-    }
-
-    /// A per-tier component with NO tier in scope is refused rather than guessed. Picking the first
-    /// matching row would silently serve a bf16 text encoder to a q4 render.
-    #[test]
-    fn mage_co_requisites_refuse_to_guess_a_tier_when_none_is_resolved() {
-        let _env = crate::test_env::isolate_hf_cache();
-        let data_dir = tempfile::tempdir().expect("temp data dir");
-        let manifest = builtin_manifest_entry("mage_flow_base");
-        stage_mage_components(data_dir.path(), &manifest, "q4");
-
-        let error = resolve_co_requisites_for_tier(
-            &mage_descriptor("mage_flow_base"),
-            &manifest,
-            &settings_at(data_dir.path().to_path_buf()),
-            None,
-        )
-        .expect_err("three per-tier rows with no tier in scope must not be guessed");
-        assert!(
-            format!("{error:?}").contains("refusing to guess"),
-            "got {error:?}"
-        );
-    }
 
     #[test]
     fn moss_codec_co_requisite_resolves_from_every_live_moss_tts_entry() {

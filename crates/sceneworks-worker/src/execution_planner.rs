@@ -1260,9 +1260,7 @@ pub(crate) fn eng2_low_res_architecture_params(
         | "flux2_klein_4b"
         | "flux2_klein_9b"
         | "flux2_klein_9b_kv"
-        | "flux2_klein_9b_true_v2"
-        | "lens"
-        | "lens_turbo" => Some(Eng2LowResArchitectureParams {
+        | "flux2_klein_9b_true_v2" => Some(Eng2LowResArchitectureParams {
             latent_channels: 32,
             vae_spatial_scale: 8,
             patch_size: 2,
@@ -1272,8 +1270,8 @@ pub(crate) fn eng2_low_res_architecture_params(
             head_dim: 128,
         }),
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" | "anima" | "anima_base"
-        | "anima_aesthetic" | "anima_turbo" | "boogu_image" | "qwen_image" | "z_image"
-        | "z_image_turbo" | "z_image_edit" => Some(Eng2LowResArchitectureParams {
+        | "anima_aesthetic" | "anima_turbo" | "qwen_image" | "z_image" | "z_image_turbo"
+        | "z_image_edit" => Some(Eng2LowResArchitectureParams {
             latent_channels: 16,
             vae_spatial_scale: 8,
             patch_size: 2,
@@ -3889,8 +3887,6 @@ mod corpus_replay_tests {
             "chroma1_hd",
             "chroma1_base",
             "chroma1_flash",
-            "lens",
-            "lens_turbo",
             "anima",
             "anima_base",
             "anima_aesthetic",
@@ -3899,7 +3895,6 @@ mod corpus_replay_tests {
             "sd3_5_large_turbo",
             "sd3_5_medium",
             "sana_1600m",
-            "boogu_image",
             "qwen_image",
             "qwen_image_2_1",
             "qwen_image_2_1_turbo",
@@ -3958,7 +3953,7 @@ mod corpus_replay_tests {
         );
 
         // Verify architecture-specific latent space scaling:
-        // FLUX.2 / Lens (32-ch at /8) has 2x the 6-buffer ceiling of FLUX.1 / SD3.5 (16-ch at /8),
+        // FLUX.2 (32-ch at /8) has 2x the 6-buffer ceiling of FLUX.1 / SD3.5 (16-ch at /8),
         // while Kolors / SDXL (4-ch at /8) has 1/4 the 6-buffer ceiling of 16-ch at /8,
         // and SANA (32-ch at /32 DC-AE) has 1/8 the 6-buffer ceiling of 16-ch at /8.
         let flux2_delta =

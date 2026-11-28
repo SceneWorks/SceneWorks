@@ -1396,7 +1396,6 @@ pub(super) fn no_model_index_family_predicate(
     use sceneworks_core::mlx_tier_completeness as tc;
     match family {
         "anima" => Some(tc::anima_tier_complete),
-        "boogu" => Some(tc::boogu_tier_complete),
         "sana" => Some(tc::sana_tier_complete),
         "scail2" => Some(tc::scail2_tier_complete),
         // sc-14432: the SenseNova-U1 turnkeys ship a FLAT unified tier (backbone + config at the tier

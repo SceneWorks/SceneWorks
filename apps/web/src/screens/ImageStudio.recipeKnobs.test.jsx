@@ -1097,20 +1097,33 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
   });
 
-  it("restores a legacy Boogu bf16 recipe through its precision toggle, not a nonexistent tier matrix", async () => {
-    const boogu = { ...FLUX3, id: "boogu_image", family: "boogu", ui: { precisionToggle: true } };
-    const createImageJob = vi.fn(async () => ({ id: "job-boogu-bf16" }));
-    await render(baseContext({ imageModels: [boogu], models: [boogu], createImageJob,
-      studioLaunch: launch({ model: boogu.id, mode: "text_to_image", prompt: "a fox",
-        normalizedSettings: {}, rawAdapterSettings: { mlxQuantize: 0 } }) }));
-    await openSettingsTab("Model");
-    expect(checkbox("Full precision (bf16)")?.checked).toBe(true);
-    expect(container.textContent).not.toContain("Recipe Full precision (bf16) unavailable");
-    expect(buttonByText("Generate").disabled).toBe(false);
-    await click(buttonByText("Generate"));
-    expect(createImageJob).toHaveBeenCalledTimes(1);
-    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(0);
-  });
+  it.each(["boogu_image", "lens_turbo", "mage_flow_edit"])(
+    "keeps an unavailable recipe model %s blocked until an explicit replacement is selected",
+    async (retiredModel) => {
+      const createImageJob = vi.fn(async () => ({ id: "replacement-job" }));
+      await render(baseContext({ imageModels: [FLUX3], models: [FLUX3], createImageJob,
+        studioLaunch: launch({ model: retiredModel, mode: "text_to_image", prompt: "a fox",
+          normalizedSettings: {}, rawAdapterSettings: {} }) }));
+      await openSettingsTab("Model");
+      const picker = container.querySelector(".settings-field-model select");
+      expect(picker.value).toBe(retiredModel);
+      expect(container.textContent).toContain("This saved model is no longer available");
+      expect(buttonByText("Generate").disabled).toBe(true);
+      await act(async () => container.querySelector("form").dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      ));
+      expect(createImageJob).not.toHaveBeenCalled();
+      await act(async () => {
+        picker.value = FLUX3.id;
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(picker.value).toBe(FLUX3.id);
+      expect(container.textContent).not.toContain("This saved model is no longer available");
+      await click(buttonByText("Generate"));
+      expect(createImageJob).toHaveBeenCalledTimes(1);
+      expect(createImageJob.mock.calls[0][0].model).toBe(FLUX3.id);
+    },
+  );
 
   it("confirms the displayed recipe bits tier and reopens the same persisted format", async () => {
     const packed = { ...FLUX3, hasVariantMatrix: true, variants: [

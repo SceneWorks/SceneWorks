@@ -1740,18 +1740,15 @@ fn the_candle_flux_one_base_arm_reads_the_tier_off_the_transformer_config() {
 }
 
 // ------------------------------------------------------------------------------------------
-// sc-22732 — the turnkey still family on this lane: `kolors`, `ideogram_4`,
-// `ideogram_4_turbo`, `lens` and `lens_turbo`. All five ride the shared five-rung reference
-// path, so what is proven here is the plan binding: execution path, calibration label, fixture,
+// Kolors, Ideogram 4 and Qwen-Image 2.1 use the shared five-rung reference path across their
+// five still-image routes. Verify the plan's execution path, calibration label, fixture,
 // artifact family (including Ideogram's split bf16 repository) and quant rule.
 // ------------------------------------------------------------------------------------------
 
-const TURNKEY_MEMBERS: [(&str, &str); 7] = [
+const TURNKEY_MEMBERS: [(&str, &str); 5] = [
     (KOLORS_ID, "kolors"),
     (IDEOGRAM_ID, "ideogram-4"),
     (IDEOGRAM_TURBO_ID, "ideogram-4-turbo"),
-    (LENS_ID, "lens"),
-    (LENS_TURBO_ID, "lens-turbo"),
     (QWEN_IMAGE_2_1_ID, "qwen-image-2-1"),
     (QWEN_IMAGE_2_1_TURBO_ID, "qwen-image-2-1-turbo"),
 ];
@@ -1965,9 +1962,9 @@ fn the_candle_turnkey_fixture_binds_member_tier_edge_seed_and_steps() {
     }
     // One member's fixture never satisfies another member's plan.
     assert!(validate_fixture_binds_tier_and_geometry(&turnkey_request(
-        LENS_ID,
+        IDEOGRAM_ID,
         "q4",
-        "fresh-five-rung-lens-turbo-q4-1024-seed16402-step2"
+        "fresh-five-rung-ideogram-4-turbo-q4-1024-seed16402-step2"
     ))
     .is_err());
     // sc-25907: nor does either Qwen-Image 2.1 checkpoint's fixture satisfy the other's plan.
@@ -2041,8 +2038,6 @@ fn every_planned_turnkey_candle_cell_is_served_by_an_arm() {
         "kolors",
         "ideogram_4",
         "ideogram_4_turbo",
-        "lens",
-        "lens_turbo",
         "qwen_image_2_1",
         "qwen_image_2_1_turbo",
     ]
@@ -2069,8 +2064,6 @@ fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
         KOLORS_ID,
         IDEOGRAM_ID,
         IDEOGRAM_TURBO_ID,
-        LENS_ID,
-        LENS_TURBO_ID,
         QWEN_IMAGE_2_1_ID,
         QWEN_IMAGE_2_1_TURBO_ID,
     ] {
@@ -2088,8 +2081,6 @@ fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
             KOLORS_ID,
             IDEOGRAM_ID,
             IDEOGRAM_TURBO_ID,
-            LENS_ID,
-            LENS_TURBO_ID,
             QWEN_IMAGE_2_1_ID,
             QWEN_IMAGE_2_1_TURBO_ID,
         ] {
@@ -2126,12 +2117,9 @@ fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
 }
 
 /// Every turnkey Candle plan row names the production calibration identity its loaded
-/// generator publishes (the sc-22732 inference head's per-(route, tier) tables): the one
-/// measured key is preserved byte-for-byte at `lens_turbo` q4, no row names a weights-free
-/// conformance string or the old every-tier Kolors constant, and the fifteen identities are
-/// distinct. `every_planned_turnkey_candle_cell_is_served_by_an_arm` never looks at
-/// `calibrationFingerprint`, which is how the first draft of this plan shipped nine rows
-/// naming the `…-static-v1-<route>` literals no engine has ever published.
+/// generator publishes. Kolors and Ideogram identities are distinct per route and tier.
+/// Qwen-Image 2.1 uses one distinct identity per checkpoint. This check also rejects
+/// weights-free conformance fingerprints and the obsolete all-tier Kolors identity.
 #[test]
 fn every_planned_turnkey_candle_cell_names_the_identity_its_loaded_generator_publishes() {
     let plan: Value = serde_json::from_str(include_str!(
@@ -2182,8 +2170,8 @@ fn every_planned_turnkey_candle_cell_names_the_identity_its_loaded_generator_pub
     }
     assert_eq!(
         identities.len(),
-        15,
-        "fifteen distinct turnkey Candle identities"
+        9,
+        "nine distinct turnkey Candle identities"
     );
     assert_eq!(
         qwen_image_2_1.len(),
@@ -2203,12 +2191,6 @@ fn every_planned_turnkey_candle_cell_names_the_identity_its_loaded_generator_pub
         assert_eq!(planned, QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT, "{key}");
         assert!(!identities.contains_key(planned.as_str()), "{key}");
     }
-    // The preserved measured key, at exactly the cell `candle-gen-lens` documents as measured.
-    assert_eq!(
-        identities["lens-candle-cuda-shared-ladder-device-format-blocks-v1"],
-        "lens_turbo:q4:candle"
-    );
-    // The fourteen new cells, spelled out: the strings the sc-22732 inference head mints.
     for (key, identity) in [
         (
             "kolors:q4:candle",
@@ -2246,26 +2228,6 @@ fn every_planned_turnkey_candle_cell_names_the_identity_its_loaded_generator_pub
             "ideogram_4_turbo:bf16:candle",
             "ideogram4-candle-request-scoped-staged-residency-v1-turbo-bf16",
         ),
-        (
-            "lens:q4:candle",
-            "lens-base-q4-candle-cuda-shared-ladder-v1",
-        ),
-        (
-            "lens:q8:candle",
-            "lens-base-q8-candle-cuda-shared-ladder-v1",
-        ),
-        (
-            "lens:bf16:candle",
-            "lens-base-bf16-candle-cuda-shared-ladder-v1",
-        ),
-        (
-            "lens_turbo:q8:candle",
-            "lens-turbo-q8-candle-cuda-shared-ladder-v1",
-        ),
-        (
-            "lens_turbo:bf16:candle",
-            "lens-turbo-bf16-candle-cuda-shared-ladder-v1",
-        ),
     ] {
         assert_eq!(identities[identity], key);
     }
@@ -2285,11 +2247,6 @@ fn a_turnkey_plan_row_naming_a_foreign_identity_is_refused_before_the_load() {
             KOLORS_ID,
             "kolors",
             "kolors-candle-staged-chatglm-unet-f32-vae-v1",
-        ),
-        (
-            LENS_ID,
-            "lens",
-            "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
         ),
     ] {
         let mut request = turnkey_request(
@@ -2329,8 +2286,6 @@ fn the_turnkey_candle_members_fold_the_tier_quant_per_member() {
             (KOLORS_ID, true),
             (IDEOGRAM_ID, false),
             (IDEOGRAM_TURBO_ID, false),
-            (LENS_ID, true),
-            (LENS_TURBO_ID, true),
             (QWEN_IMAGE_2_1_ID, true),
             (QWEN_IMAGE_2_1_TURBO_ID, true),
         ]
@@ -2420,12 +2375,6 @@ fn the_turnkey_candle_spec_binds_the_tier_quant_per_member() {
             (IDEOGRAM_TURBO_ID, "bf16", None),
             (IDEOGRAM_TURBO_ID, "q4", None),
             (IDEOGRAM_TURBO_ID, "q8", None),
-            (LENS_ID, "bf16", None),
-            (LENS_ID, "q4", Some(Quant::Q4)),
-            (LENS_ID, "q8", Some(Quant::Q8)),
-            (LENS_TURBO_ID, "bf16", None),
-            (LENS_TURBO_ID, "q4", Some(Quant::Q4)),
-            (LENS_TURBO_ID, "q8", Some(Quant::Q8)),
             (QWEN_IMAGE_2_1_ID, "bf16", None),
             (QWEN_IMAGE_2_1_ID, "q4", Some(Quant::Q4)),
             (QWEN_IMAGE_2_1_ID, "q8", Some(Quant::Q8)),

@@ -4,6 +4,10 @@ mod adapter_test_support;
 #[cfg(not(target_os = "macos"))]
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
+#[path = "mlx_z_image_family.rs"]
+mod mlx_z_image_family;
+use mlx_z_image_family::*;
+
 #[path = "mlx_ltx_family.rs"]
 mod mlx_ltx_family;
 use mlx_ltx_family::*;
@@ -15,10 +19,6 @@ use mlx_minimax_family::*;
 #[path = "mlx_runtime_family.rs"]
 mod mlx_runtime_family;
 use mlx_runtime_family::*;
-
-#[path = "mlx_mage_family.rs"]
-mod mlx_mage_family;
-use mlx_mage_family::*;
 
 #[path = "mlx_qwen_family.rs"]
 mod mlx_qwen_family;
@@ -86,13 +86,13 @@ use runtime_macos::gen_core::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 #[cfg(test)]
 use runtime_macos::gen_core::AdapterKind;
 use runtime_macos::gen_core::{
-    Capabilities, ComponentPrecisionFloor, Conditioning, ControlKind, GenerationMemory,
-    GenerationOutput, GenerationRequest, Generator, IdentityWeights, Image, LoadPhase, LoadShape,
-    LoadSpec, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
-    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase,
-    MemoryProviderContract, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
-    MemorySelection, MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress,
-    Quant, SolverId, TransformerComponent, VideoMode, WeightsSource,
+    ComponentPrecisionFloor, Conditioning, ControlKind, GenerationMemory, GenerationOutput,
+    GenerationRequest, Generator, IdentityWeights, Image, LoadPhase, LoadShape, LoadSpec,
+    MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryProviderContract,
+    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant, SolverId,
+    TransformerComponent, VideoMode, WeightsSource,
 };
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Value};
@@ -1145,8 +1145,6 @@ struct TurnkeyArm {
 const KOLORS_PROVIDER: &str = "kolors";
 const IDEOGRAM_PROVIDER: &str = "ideogram_4";
 const IDEOGRAM_TURBO_PROVIDER: &str = "ideogram_4_turbo";
-const LENS_PROVIDER: &str = "lens";
-const LENS_TURBO_PROVIDER: &str = "lens_turbo";
 /// Qwen-Image 2.1 (sc-24112). The engine id equals the catalog model id
 /// (`crates/sceneworks-worker/src/engines.rs` MODEL_TABLE).
 const QWEN_IMAGE_2_1_PROVIDER: &str = "qwen_image_2_1";
@@ -1183,22 +1181,6 @@ const IDEOGRAM_BF16_FAMILY: TurnkeyFamily = TurnkeyFamily {
     revision_env: "SCENEWORKS_IDEOGRAM_BF16_REVISION",
     root_env: "SCENEWORKS_IDEOGRAM_BF16_ROOT",
     expected_repository: protocol::IDEOGRAM_BF16_REPOSITORY,
-    tiered: true,
-};
-
-const LENS_FAMILY: TurnkeyFamily = TurnkeyFamily {
-    repository_env: "SCENEWORKS_LENS_REPOSITORY",
-    revision_env: "SCENEWORKS_LENS_REVISION",
-    root_env: "SCENEWORKS_LENS_ROOT",
-    expected_repository: protocol::LENS_REPOSITORY,
-    tiered: true,
-};
-
-const LENS_TURBO_FAMILY: TurnkeyFamily = TurnkeyFamily {
-    repository_env: "SCENEWORKS_LENS_TURBO_REPOSITORY",
-    revision_env: "SCENEWORKS_LENS_TURBO_REVISION",
-    root_env: "SCENEWORKS_LENS_TURBO_ROOT",
-    expected_repository: protocol::LENS_TURBO_REPOSITORY,
     tiered: true,
 };
 
@@ -1273,28 +1255,6 @@ const IDEOGRAM_TURBO_ARM: TurnkeyArm = TurnkeyArm {
     family: IDEOGRAM_FAMILY,
     bf16_family: Some(IDEOGRAM_BF16_FAMILY),
     slug: "ideogram-4-turbo",
-};
-
-const LENS_ARM: TurnkeyArm = TurnkeyArm {
-    provider: LENS_PROVIDER,
-    mode: "text_to_image",
-    execution_path: "the MLX Lens base-only text-to-image path",
-    still_calibration: "MLX Lens calibration",
-    family: LENS_FAMILY,
-    bf16_family: None,
-    slug: "lens",
-};
-
-const LENS_TURBO_ARM: TurnkeyArm = TurnkeyArm {
-    provider: LENS_TURBO_PROVIDER,
-    mode: "text_to_image",
-    execution_path: "the MLX Lens-Turbo base-only text-to-image path",
-    still_calibration: "MLX Lens-Turbo calibration",
-    // Its OWN rehost at its OWN revision, split from base Lens the way `flux1_schnell` is split
-    // from `flux1_dev`, so a turbo plan can never be satisfied by base weights.
-    family: LENS_TURBO_FAMILY,
-    bf16_family: None,
-    slug: "lens-turbo",
 };
 
 /// Qwen-Image 2.1 (sc-24112): Ideogram's split-repo shape with the halves swapped — the packed
@@ -2013,205 +1973,6 @@ use protocol::QwenEditArtifactSource;
 use protocol::QwenEditArtifact;
 
 // ---------------------------------------------------------------------------------------------
-// Mage-Flow (sc-22733) — six registered engine providers on ONE arm
-// ---------------------------------------------------------------------------------------------
-
-/// The square edge every checked-in `mage_flow*:*:mlx` plan row declares, restated here so the
-/// tests can drive the arm at the geometry the campaign will.
-///
-/// It is NOT a production input: [`run_mage_provider`] takes width and height from the plan row
-/// (`protocol::target_geometry`) and never from a constant, so an anchor re-planned at another
-/// legal edge is measured at that edge rather than silently relabelled.
-///
-/// 768 is what the plan declares because `mlx-gen-mage`'s `config::MIN_SIZE` is 512 and both sides
-/// must be multiples of `SIZE_MULTIPLE` (16), so 768 is a legal native resolution — and it is the
-/// edge the family's retired SC-15509 identity was measured at (`model.rs`
-/// `production_calibration_fingerprint` doc: "At 768²/one step, …"), kept so the per-tier cells
-/// this arm measures are comparable with that record.
-/// `every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_before_the_load` binds
-/// this constant to all 18 plan rows, so the claim cannot go stale in prose.
-#[cfg(test)]
-const MAGE_EDGE: u32 = 768;
-/// The seed every checked-in `mage_flow*:*:mlx` plan row spells into its fixture
-/// (`<prefix>-<tier>-768-seed22733-step<n>`), bound to those rows by the same test.
-///
-/// Also not a production input: [`planned_mage_seed`] PARSES the seed out of the plan's own
-/// fixture name — the fixture is the single source — and only checks that the fixture's prefix
-/// names this member, this tier and the rendered edge, and that its step count is the arm's recipe.
-#[cfg(test)]
-const MAGE_SEED: u64 = 22733;
-/// Mage's quality claim is the same KIND as FLUX.2-dev's: the resident anchor selects no alternate
-/// code path, so the selected render and the unselected reference are the same computation on one
-/// loaded provider and must agree to within Metal allocator jitter. The envelope is restated under
-/// Mage names because the record embeds it as `maximumErrorThreshold`/`meanErrorThreshold` — a
-/// `mage_flow` receipt must not be traceable to a constant asserting a FLUX.2 provenance.
-const MAGE_MAX_THRESHOLD: f64 = 3.0 / 255.0;
-const MAGE_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
-
-/// One member of the Mage-Flow family this arm measures.
-///
-/// Unlike the Qwen edit family (one engine provider, two catalog ids), Mage is SIX registered
-/// engine providers — `mlx-gen-mage` `model::MODEL_IDS`, registered one `Generator` each in
-/// `lib.rs::register_providers` — each publishing its own per-tier production identity
-/// ([`mage_calibration_fingerprint`], bound by the engine only to a tier PROVEN off the component
-/// directories it opened), and whose catalog ids are identical to their provider ids
-/// (`crates/sceneworks-worker/src/engines.rs` `MODEL_TABLE`: `sceneworks_id == engine_id` on all
-/// six rows). The arm still resolves from `(provider, modelId)` and refuses any other pair by name:
-/// the two are separate namespaces, and a plan that crossed them would measure one checkpoint under
-/// another's anchor key.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct MageArm {
-    /// The engine provider id AND the catalog model id — asserted equal, never assumed.
-    provider: &'static str,
-    execution_path: &'static str,
-    /// The still-geometry refusal label (sc-18808).
-    still_calibration: &'static str,
-    /// The `<prefix>-<tier>-<edge>-seed<n>-step<n>` fixture spelling this member's plan rows must
-    /// use, so a Turbo capture can never be recorded under the Base id's fixture.
-    fixture_prefix: &'static str,
-    /// The variant's OWN tiered rehost. Each of the six ships only the DiT; the shared text encoder
-    /// and VAE come from [`protocol::MAGE_COMPONENTS_REPOSITORY`].
-    repository: &'static str,
-    /// The `SCENEWORKS_<env>_{REPOSITORY,REVISION,ROOT}` family naming that rehost. Spelled out as
-    /// three literals rather than composed from a prefix: `measure-memory-catalog.mjs`
-    /// `PROVIDER_FAMILIES` derives these exact names and exports them into this process, and its
-    /// test binds the two sides by searching THIS source for each literal — a `format!`-composed
-    /// name would leave a renamed family green here and fail mid-campaign, after the weights are
-    /// staged.
-    repository_env: &'static str,
-    revision_env: &'static str,
-    root_env: &'static str,
-    /// The instruction-editing checkpoints consume exactly one reference image
-    /// (`model.rs` `MageVariant::is_edit`, `edit_references`).
-    edit: bool,
-    /// The engine's own published default step count for this variant (`MageVariant::default_steps`)
-    /// for the distilled members, whose 4-step Decoupled-DMD schedule IS the recipe the product
-    /// issues; two steps for the undistilled members, the shape every other image arm here uses.
-    /// The conditioning/denoise edge is cut on the engine's `Loading(Renderer)` boundary, not on
-    /// the first `Progress::Step` (which fires only AFTER a full denoise step — sc-22738), so both
-    /// steps land in the denoise window.
-    steps: u32,
-    /// `MageVariant::default_cfg`: 1.0 on the distilled members, at which the reference builds no
-    /// unconditional branch at all, and 5.0 on the rest. Passed explicitly so a capture cannot
-    /// silently measure a CFG branch the product does not run (or omit one it does).
-    ///
-    /// It is the SCALE, never the decision: whether a `guidance` reaches the engine at all is read
-    /// off the loaded descriptor's `supports_guidance`, exactly as production reads it
-    /// (`image_jobs/sampling.rs` `resolve_guidance`). On a distilled member the engine advertises
-    /// `supports_guidance: false` and refuses ANY scale — including this 1.0 — so the value here is
-    /// simply never sent. See [`mage_request`].
-    guidance: f32,
-    /// The record's diagnostics source, `memory-mlx-adapter:<slug>-shared-ladder`.
-    slug: &'static str,
-}
-
-const MAGE_ARMS: [MageArm; 6] = [
-    MageArm {
-        provider: "mage_flow",
-        execution_path: "the pinned MLX Mage-Flow RL text-to-image path",
-        still_calibration: "MLX Mage-Flow calibration",
-        fixture_prefix: "mage-flow-mlx",
-        repository: protocol::MAGE_FLOW_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_ROOT",
-        edit: false,
-        steps: 2,
-        guidance: 5.0,
-        slug: "mage-flow",
-    },
-    MageArm {
-        provider: "mage_flow_base",
-        execution_path: "the pinned MLX Mage-Flow-Base text-to-image path",
-        still_calibration: "MLX Mage-Flow-Base calibration",
-        fixture_prefix: "mage-flow-base-mlx",
-        repository: protocol::MAGE_FLOW_BASE_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_BASE_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_BASE_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_BASE_ROOT",
-        edit: false,
-        steps: 2,
-        guidance: 5.0,
-        slug: "mage-flow-base",
-    },
-    MageArm {
-        provider: "mage_flow_turbo",
-        execution_path: "the pinned MLX Mage-Flow-Turbo distilled text-to-image path",
-        still_calibration: "MLX Mage-Flow-Turbo calibration",
-        fixture_prefix: "mage-flow-turbo-mlx",
-        repository: protocol::MAGE_FLOW_TURBO_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_TURBO_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_TURBO_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_TURBO_ROOT",
-        edit: false,
-        steps: 4,
-        guidance: 1.0,
-        slug: "mage-flow-turbo",
-    },
-    MageArm {
-        provider: "mage_flow_edit",
-        execution_path: "the pinned MLX Mage-Flow-Edit instruction-editing path",
-        still_calibration: "MLX Mage-Flow-Edit calibration",
-        fixture_prefix: "mage-flow-edit-mlx",
-        repository: protocol::MAGE_FLOW_EDIT_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_ROOT",
-        edit: true,
-        steps: 2,
-        guidance: 5.0,
-        slug: "mage-flow-edit",
-    },
-    MageArm {
-        provider: "mage_flow_edit_base",
-        execution_path: "the pinned MLX Mage-Flow-Edit-Base instruction-editing path",
-        still_calibration: "MLX Mage-Flow-Edit-Base calibration",
-        fixture_prefix: "mage-flow-edit-base-mlx",
-        repository: protocol::MAGE_FLOW_EDIT_BASE_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_BASE_ROOT",
-        edit: true,
-        steps: 2,
-        guidance: 5.0,
-        slug: "mage-flow-edit-base",
-    },
-    MageArm {
-        provider: "mage_flow_edit_turbo",
-        execution_path: "the pinned MLX Mage-Flow-Edit-Turbo distilled instruction-editing path",
-        still_calibration: "MLX Mage-Flow-Edit-Turbo calibration",
-        fixture_prefix: "mage-flow-edit-turbo-mlx",
-        repository: protocol::MAGE_FLOW_EDIT_TURBO_REPOSITORY,
-        repository_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REPOSITORY",
-        revision_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_REVISION",
-        root_env: "SCENEWORKS_MAGE_FLOW_EDIT_TURBO_ROOT",
-        edit: true,
-        steps: 4,
-        guidance: 1.0,
-        slug: "mage-flow-edit-turbo",
-    },
-];
-
-/// The prompt every Mage text-to-image capture renders, and the edit instruction every Mage edit
-/// capture applies. Fixed with the seed, the geometry and (on the edit members) the reference, so
-/// two captures of one anchor are the same request.
-const MAGE_PROMPT: &str = "a weathered brass astrolabe on a linen cloth, soft window light";
-const MAGE_EDIT_PROMPT: &str = "replace the background with a plain grey studio backdrop";
-
-use protocol::MageArtifactSource;
-
-/// The artifact one Mage capture loads: the canonical variant tier root, and the `LoadSpec` that
-/// opens it.
-#[derive(Debug)]
-struct MageArtifact {
-    root: PathBuf,
-    spec: LoadSpec,
-}
-
-#[cfg(test)]
-#[path = "mlx_mage_tests.rs"]
-mod mage_tests;
-
 /// The exact target geometry an `mlx:ltx_2_3` calibration case renders. `fps` is NOT part of it:
 /// `GeometryEnvelope` has no temporal-cadence axis, so the arm binds fps through the fixture name
 /// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
@@ -3566,18 +3327,11 @@ fn run_with(
         FLUX1_DEV_PROVIDER => run_flux_one(request),
         FLUX1_SCHNELL_PROVIDER => run_flux_one(request),
         PULID_FLUX_PROVIDER => run_flux_one(request),
-        // sc-22733: the Mage-Flow family. SIX registered engine providers on one arm — the three
         // text-to-image checkpoints and the three instruction editors of `mlx-gen-mage`
         // (`model::MODEL_IDS`) — each with its own tiered rehost, all sharing one text-encoder/VAE
         // components snapshot. The arm resolves which member from `(provider, modelId)`.
         // One arm per line, bare literals: see the FLUX.1 note above — the derived capturable set
         // in `stale-lane-report.mjs#adapterCapturableProviders` parses these arms.
-        "mage_flow" => run_mage_provider(request),
-        "mage_flow_base" => run_mage_provider(request),
-        "mage_flow_turbo" => run_mage_provider(request),
-        "mage_flow_edit" => run_mage_provider(request),
-        "mage_flow_edit_base" => run_mage_provider(request),
-        "mage_flow_edit_turbo" => run_mage_provider(request),
         // sc-22731: the SANA and Chroma1 families. Five registry ids on one arm — the two
         // `mlx-gen-sana` routes and the three `mlx-gen-chroma` ones. One arm per line, for the
         // same reason the FLUX.1 block above is: `stale-lane-report.mjs#adapterCapturableProviders`
@@ -3594,8 +3348,6 @@ fn run_with(
         KOLORS_PROVIDER => run_turnkey_still(request),
         IDEOGRAM_PROVIDER => run_turnkey_still(request),
         IDEOGRAM_TURBO_PROVIDER => run_turnkey_still(request),
-        LENS_PROVIDER => run_turnkey_still(request),
-        LENS_TURBO_PROVIDER => run_turnkey_still(request),
         // sc-24112: Qwen-Image 2.1 rides the same arm — a plain reference-free text-to-image load
         // off one tier root, with a split-repo bf16 leg the member carries like Ideogram's.
         QWEN_IMAGE_2_1_PROVIDER => run_turnkey_still(request),
@@ -3828,7 +3580,6 @@ fn mlx_source_for_tests() -> &'static str {
                 include_str!("mlx_ltx_family.rs"),
                 include_str!("mlx_minimax_family.rs"),
                 include_str!("mlx_runtime_family.rs"),
-                include_str!("mlx_mage_family.rs"),
                 include_str!("mlx_qwen_family.rs"),
                 include_str!("mlx_krea_control_family.rs"),
                 include_str!("mlx_flux_one_family.rs"),
@@ -3844,7 +3595,7 @@ fn mlx_source_for_tests() -> &'static str {
                 include_str!("mlx_sd3_family.rs"),
                 include_str!("mlx_krea_realtime_family.rs"),
                 include_str!("mlx_tests.rs"),
-                include_str!("mlx_mage_tests.rs"),
+                include_str!("mlx_z_image_family.rs"),
                 include_str!("mlx_z_image_reuse_tests.rs"),
                 include_str!("mlx_flux_one_tests.rs"),
                 include_str!("mlx_sd3_tests.rs"),
