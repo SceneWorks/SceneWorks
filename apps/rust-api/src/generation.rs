@@ -73,6 +73,7 @@ pub(crate) async fn create_generation_job_with_binding_once(
         sceneworks_core::request_validation::validate(kind, &payload, &facts)
             .map_err(ApiError::from)?;
     }
+    admit_lossy_attention_enqueue(&state, &job_type, &payload)?;
     validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
     // Freeze the admitted selection for retry/duplicate too, including requests that were not
     // themselves replays. A later same-id catalog rebind must not change their weights.
@@ -179,6 +180,58 @@ pub(crate) fn enqueue_backend(state: &AppState) -> &'static str {
     } else {
         "mlx"
     }
+}
+
+/// SW-6132: the lossy attention kernels (`advanced.lossyAttention`: INT8 QK / Sol-Attn) exist only
+/// in the candle (CUDA) runtime. On an MLX host no worker can ever claim such a job, so it is a
+/// typed 400 at enqueue rather than a job queued forever or rendered on the exact path.
+/// `active_backend` comes from [`enqueue_backend`].
+pub(crate) fn refuse_lossy_attention_off_candle(
+    active_backend: &str,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    if active_backend != "candle"
+        && sceneworks_core::options::lossy_attention::payload_requests_lossy_attention(payload)
+    {
+        let model = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("this model");
+        return Err(ApiError::from(
+            sceneworks_core::options::lossy_attention::mlx_refusal(model),
+        ));
+    }
+    Ok(())
+}
+
+/// The backend the lossy-attention guard judges against: [`enqueue_backend`]'s answer, read through
+/// the `Settings::host_os` seam (sc-19570; production fills it with `std::env::consts::OS`) so the
+/// MLX branch is exercised by tests on every host.
+pub(crate) fn lossy_attention_enqueue_backend(state: &AppState) -> &'static str {
+    if state.settings.host_os != "macos" || state.settings.candle_required {
+        "candle"
+    } else {
+        "mlx"
+    }
+}
+
+/// SW-6132: THE enqueue guard for `advanced.lossyAttention`, called by every path that writes a job
+/// (generation creates through [`create_generation_job_with_binding_once`], the generic
+/// `POST /api/v1/jobs`, retry and duplicate, the replayed vector raster child): no worker on an MLX
+/// host can claim the option, and a standalone engine-named job (upscale / restoration) is judged by
+/// its engine (`sceneworks_core::lossy_attention`). Model-catalog admission stays in the shared
+/// request validation.
+pub(crate) fn admit_lossy_attention_enqueue(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    refuse_lossy_attention_off_candle(lossy_attention_enqueue_backend(state), payload)?;
+    if sceneworks_core::lossy_attention::is_standalone_job(job_type) {
+        sceneworks_core::lossy_attention::standalone_lossy_attention(job_type, payload)
+            .map_err(ApiError::from)?;
+    }
+    Ok(())
 }
 
 /// Validate `advanced.decoder` against the descriptor-derived options on the exact post-preset model
@@ -412,6 +465,7 @@ pub(crate) async fn create_image_job(
         // for persistence. Read after the width/height/count defaults because the 4096-target
         // check needs the resolved geometry.
         {
+            admit_lossy_attention_enqueue(&state, &job_type, &job_payload)?;
             let resolved =
                 sceneworks_core::request_validation::resolve_request("image", &job_payload, entry)
                     .map_err(ApiError::from)?;
@@ -1100,6 +1154,7 @@ async fn enqueue_replayed_vector_raster_child(
         &frozen,
     )
     .await?;
+    admit_lossy_attention_enqueue(state, &source.job.job_type, &payload)?;
     let job = store_call(state.clone(), {
         let job_type = source.job.job_type.clone();
         let project_id = source.job.project_id.clone();
@@ -2731,6 +2786,7 @@ pub(crate) async fn create_video_job(
         sceneworks_core::request_validation::validate("video", &job_payload, entry)
             .map_err(ApiError::from)?;
     }
+    admit_lossy_attention_enqueue(&state, &job_type, &job_payload)?;
     let auto_duration_active =
         normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;
@@ -3921,5 +3977,28 @@ mod imported_minimax_h3_video_tests {
             error.to_string().contains("no backend implements it"),
             "the no-lane gate must be what refused it: {error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lossy_attention_enqueue_tests {
+    use super::refuse_lossy_attention_off_candle;
+    use serde_json::json;
+
+    /// SW-6132: an MLX host refuses a lossy attention opt-in at enqueue (no worker could claim it);
+    /// a candle host passes it on to the catalog-driven validation.
+    #[test]
+    fn only_the_candle_backend_enqueues_a_lossy_attention_opt_in() {
+        let lossy =
+            json!({ "model": "krea_2_turbo", "advanced": { "lossyAttention": { "int8": {} } } });
+        let plain = json!({ "model": "krea_2_turbo", "advanced": {} });
+        let empty = json!({ "model": "krea_2_turbo", "advanced": { "lossyAttention": {} } });
+        let lossy = lossy.as_object().unwrap();
+        assert!(refuse_lossy_attention_off_candle("candle", lossy).is_ok());
+        let refused = refuse_lossy_attention_off_candle("mlx", lossy).unwrap_err();
+        assert_eq!(refused.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(refused.detail.contains("CUDA"), "{}", refused.detail);
+        assert!(refuse_lossy_attention_off_candle("mlx", plain.as_object().unwrap()).is_ok());
+        assert!(refuse_lossy_attention_off_candle("mlx", empty.as_object().unwrap()).is_ok());
     }
 }

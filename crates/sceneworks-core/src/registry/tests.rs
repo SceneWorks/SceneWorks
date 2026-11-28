@@ -48,6 +48,9 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
             if let Some(pag) = spec.pag_value() {
                 once["pag"] = pag;
             }
+            if let Some(lossy) = spec.lossy_attention_value() {
+                once["lossyAttention"] = lossy;
+            }
             if let Some(features) = spec.features_value() {
                 once["features"] = features;
             }

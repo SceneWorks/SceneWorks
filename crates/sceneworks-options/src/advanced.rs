@@ -265,6 +265,22 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     // control there. No injected default (absent stays absent, so effective payloads and replay
     // identities are unchanged); the worker treats absent as on. MOSS-Image refuses it.
     opt!("flashAttn", Bool, Absent, All(&[VISUAL, Not(&MOSS)]), MachineBudget, "Shared candle FlashAttention-2 attention toggle (image and video)"),
+    // SW-6132: per-job opt-in for the two lossy CUDA attention kernels (INT8 QK, Sol-Attn), never a
+    // default. Offered only where the projected catalog entry advertises `lossyAttention` (derived
+    // from inference's SHARED_ATTENTION_ROUTING); MLX refuses it.
+    opt!("lossyAttention", Object("LossyAttentionOptIns {int8, sol}"), Absent, All(&[VISUAL, ModelField("lossyAttention")]), MachineBudget, "runtime_cuda::attention::LossyAttentionOptIns")
+        .limits(&["lossy_attention::parse_wire_value", "model.lossyAttention", "admit_lossy_attention"])
+        .compat("Lossy and experimental; CUDA (candle) only. Absent is the exact path."),
+    nested!("lossyAttention", "int8", Object("Int8AttentionConfig {pvPrecision, kCentering}"), Absent, ModelField("lossyAttention"), MachineBudget, "LossyAttentionOptIns.int8"),
+    nested!("lossyAttention.int8", "pvPrecision", OneOf("value_dtype | int8"), Literal("\"value_dtype\""), ModelField("lossyAttention"), MachineBudget, "Int8AttentionConfig.pv"),
+    nested!("lossyAttention.int8", "kCentering", OneOf("off | always | adaptive"), Literal("\"adaptive\""), ModelField("lossyAttention"), MachineBudget, "Int8AttentionConfig.k_centering"),
+    nested!("lossyAttention", "sol", Object("SolConfig {topkRatio | tau, sinkBlocks, sinkQ, tail, queryChunkBlocks}"), Absent, ModelField("lossyAttention"), MachineBudget, "LossyAttentionOptIns.sol"),
+    nested!("lossyAttention.sol", "topkRatio", Number, Absent, ModelField("lossyAttention"), MachineBudget, "SolConfig.selection TopK").limits(&["(0, 1]; exactly one of topkRatio and tau"]),
+    nested!("lossyAttention.sol", "tau", Number, Absent, ModelField("lossyAttention"), MachineBudget, "SolConfig.selection Tau").limits(&["finite; exactly one of topkRatio and tau"]),
+    nested!("lossyAttention.sol", "sinkBlocks", Numbers, Literal("[0, 0]"), ModelField("lossyAttention"), MachineBudget, "SolConfig.sink_blocks").limits(&["[start, end) u32 pair; end >= start; end <= i32::MAX"]),
+    nested!("lossyAttention.sol", "sinkQ", Numbers, Literal("[0, 0]"), ModelField("lossyAttention"), MachineBudget, "SolConfig.sink_q").limits(&["[start, end) u32 pair; end >= start; end <= i32::MAX"]),
+    nested!("lossyAttention.sol", "tail", Bool, Literal("true"), ModelField("lossyAttention"), MachineBudget, "SolConfig.tail"),
+    nested!("lossyAttention.sol", "queryChunkBlocks", Integer, Literal("0"), ModelField("lossyAttention"), MachineBudget, "SolConfig.query_chunk_blocks").limits(&["u32; 0 runs one window"]),
     opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]).compat("JSON integer or numeric string. Explicit null blocks portable bound-tier fallback; absent selection is resolved after verified source binding."),
     opt!("mlxQuantizeExplicit", Bool, Literal("false"), VISUAL, MachineBudget, "user tier selection provenance"),
     opt!("convRot", Bool, Literal("false"), IMAGE, MachineBudget, "ConvRot load recipe").limits(&["declared memory routes"]),
@@ -350,6 +366,8 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     context!("mossImageExecutionReport", Object("MossImageExecutionReport"), MOSS, "MOSS provider receipt").aliases(&["moss_image_execution_report"]),
     context!("mossImageEditExecutionReport", Object("MossImageEditExecutionReport"), MOSS, "MOSS edit receipt").aliases(&["moss_image_edit_execution_report"]),
     context!("pagExecutionReport", Object("PagExecutionReport"), IMAGE, "PAG provider execution receipt").aliases(&["pag_execution_report"]),
+    // SW-6132: the worker-owned lossy attention receipt (`rawAdapterSettings.attentionExecution`); a replay drops it.
+    context!("attentionExecution", Object("lossy attention execution receipt"), VISUAL, "worker attention path receipt"),
     context!("mossImageSampleIndex", Integer, MOSS, "native batch output ordinal"),
     context!("characterName", Text, IMAGE, "character job snapshot"),
     context!("characterType", Text, IMAGE, "character job snapshot"),

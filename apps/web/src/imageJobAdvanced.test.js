@@ -117,6 +117,15 @@ describe("buildImageJobAdvanced", () => {
     expect(buildImageJobAdvanced(offState({ flashAttn: false })).flashAttn).toBe(false);
   });
 
+  it("emits lossyAttention only as an explicit, resolved opt-in (SW-6132)", () => {
+    expect(buildImageJobAdvanced(offState())).not.toHaveProperty("lossyAttention");
+    expect(buildImageJobAdvanced(offState({ lossyAttention: null }))).not.toHaveProperty("lossyAttention");
+    expect(buildImageJobAdvanced(offState({ lossyAttention: { int8: {} } })).lossyAttention).toEqual({ int8: {} });
+    expect(
+      buildImageJobAdvanced(offState({ lossyAttention: { sol: { topkRatio: 0.5 } } })).lossyAttention,
+    ).toEqual({ sol: { topkRatio: 0.5 } });
+  });
+
   it("omits sampler/scheduler when default and includes them otherwise", () => {
     expect(buildImageJobAdvanced(offState())).not.toHaveProperty("sampler");
     const custom = buildImageJobAdvanced(offState({ sampler: "euler", scheduler: "karras" }));

@@ -299,6 +299,8 @@ pub struct ImageAdvanced {
     pub moss_image_edit: Option<Bound<crate::moss_image::EditOptions>>,
     pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
     pub pag: Option<Bound<sceneworks_options::pag::PagWireConfig>>,
+    /// SW-6132: the per-job lossy CUDA attention opt-in (`advanced.lossyAttention`).
+    pub lossy_attention: Option<Bound<sceneworks_options::lossy_attention::LossyAttentionWire>>,
     pub low_res_start: Option<Bound<sceneworks_options::low_res_start::LowResStartWireConfig>>,
 }
 
@@ -431,6 +433,7 @@ impl ImageAdvanced {
         put!(moss_image_edit, "mossImageEdit");
         put!(moss_image_advanced, "mossImageAdvanced");
         put!(pag, "pag");
+        put!(lossy_attention, "lossyAttention");
         put!(low_res_start, "lowResStart");
         wire
     }
@@ -510,6 +513,7 @@ impl ImageAdvanced {
             moss_image_edit: input.structured("advanced", "mossImageEdit")?,
             moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
             pag: input.structured("advanced", "pag")?,
+            lossy_attention: input.structured("advanced", "lossyAttention")?,
             low_res_start: input.structured("advanced", "lowResStart")?,
         })
     }
@@ -853,6 +857,18 @@ impl ImageRequest {
             value: Some(admitted_bits),
             origin,
         });
+    }
+
+    /// The resolved `advanced.lossyAttention` opt-in (SW-6132); `None` when absent or null.
+    pub fn lossy_attention(
+        &self,
+    ) -> Option<&sceneworks_options::lossy_attention::LossyAttentionWire> {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .lossy_attention
+            .as_ref()
+            .map(|bound| &bound.value)
     }
 
     /// Resolve typed `advanced.pag` from the bound execution options, validating against

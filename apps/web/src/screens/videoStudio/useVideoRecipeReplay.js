@@ -7,6 +7,7 @@ import { recipeReferenceResize } from "../../minimaxH3ReferenceResize.js";
 import { quantizeTier, sourcePrecisionLabel } from "../../quantTier.js";
 import { finiteRecipeNumber, recipeLoraSelection, recipeRequestedResolution } from "../../recipeFields.js";
 import { restoreVedaSettings } from "../../vedaControls.js";
+import { lossyAttentionFromRecipe } from "../../lossyAttention.js";
 
 // Extracted from VideoStudio along its existing concern boundary.
 export function useVideoRecipeReplay({
@@ -48,6 +49,7 @@ export function useVideoRecipeReplay({
   setPrecision,
   setEnhancePrompt,
   setFlashAttn,
+  setLossyAttention,
   setTextEncoderModel,
   model,
   setQuantization,
@@ -192,6 +194,8 @@ export function useVideoRecipeReplay({
     setEnhancePrompt(rawSettings.enhancePrompt === true);
     // SW-7276: only an explicit opt-out is recorded; absent means the default, on.
     setFlashAttn?.(rawSettings.flashAttn !== false);
+    // SW-6132: the lossy attention opt-in is recorded as requested; absent means off.
+    setLossyAttention?.(lossyAttentionFromRecipe(rawSettings.lossyAttention));
     setTextEncoderModel(
       rawSettings.textEncoderModel ??
         (rawSettings.useUncensoredEnhancer === true ? amoralTextEncoderId : null),

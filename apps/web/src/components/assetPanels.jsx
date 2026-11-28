@@ -41,6 +41,18 @@ import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
 import { depthAssetDetails, isDepthAsset } from "../depthJobs.js";
 
+// SW-6132: only an asset whose job opted in to lossy attention carries a receipt, so the note is a
+// lazy chunk fetched for those assets alone (never part of the initial bundle).
+const LazyAttentionExecutionNote = React.lazy(() => import("./AttentionExecutionNote.jsx"));
+function AttentionExecutionNote({ asset }) {
+  if (!asset?.recipe?.rawAdapterSettings?.attentionExecution) return null;
+  return (
+    <React.Suspense fallback={null}>
+      <LazyAttentionExecutionNote asset={asset} />
+    </React.Suspense>
+  );
+}
+
 // Zoom/pan model for the fullscreen image preview (sc-8728). Mirrors the Image
 // Editor canvas convention (`view = { scale, x, y }`, ImageEditor.jsx): `scale`
 // multiplies the image and `x`/`y` translate its top-left corner within the
@@ -1433,6 +1445,7 @@ function FullscreenPreviewComponent({
             <span>{asset.recipe?.model}</span>
           </div>
           <AssetVedaOutcome asset={asset} />
+          <AttentionExecutionNote asset={asset} />
           {hasUpscaleVariants ? (
             <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
               <button

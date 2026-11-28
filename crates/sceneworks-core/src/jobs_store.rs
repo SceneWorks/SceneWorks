@@ -118,10 +118,11 @@ pub use routing::catalog::{
     imported_entry_honors_legacy_quant, imported_entry_installed_path,
     imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
-    imported_pose_control_mode_is_supported_resolved, imported_provider_routes,
-    imported_video_adapter_surface_claimable, imported_video_lane_claims_with_lora,
-    imported_video_model_candle_support, imported_video_model_mac_support, is_builtin_image_model,
-    mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
+    imported_lossy_attention_capability, imported_pose_control_mode_is_supported_resolved,
+    imported_provider_routes, imported_video_adapter_surface_claimable,
+    imported_video_lane_claims_with_lora, imported_video_model_candle_support,
+    imported_video_model_mac_support, is_builtin_image_model, mac_capabilities,
+    model_candle_support, model_mac_support, training_kernel_is_candle_routed,
     video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
@@ -1206,6 +1207,13 @@ impl JobsStore {
             "veda_execution_json",
             "text",
         )?;
+        // SW-6132: the candle worker's per-job attention path receipt (`attentionExecution`).
+        ensure_column(
+            &transaction,
+            "generation_metrics",
+            "attention_execution_json",
+            "text",
+        )?;
         // Retention may remove the owning queue row, but Generation Stats is
         // historical product data rather than queue history. Materialize the
         // joined row before purging so aggregate charts remain complete.
@@ -1263,6 +1271,12 @@ impl JobsStore {
             &transaction,
             "generation_metrics_history",
             "veda_execution_json",
+            "text",
+        )?;
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "attention_execution_json",
             "text",
         )?;
         // Per-item job results (SW-7082), kept out of the replaced-per-POST `result_json`.
@@ -1332,14 +1346,14 @@ impl JobsStore {
                 // the columns makes the mapping independent of physical order in both tables.
                 "insert or replace into generation_metrics_history (
                      job_id, model, quant_label, quant_bits, source_codec,
-                     execution_representation, veda_execution_json, sampler, scheduler, scheduler_shift, steps,
+                     execution_representation, veda_execution_json, attention_execution_json, sampler, scheduler, scheduler_shift, steps,
                      image_count, guidance_scale, true_cfg_scale, guidance_method, use_pid,
                      pid_target, width, height, seed, loras_json, load_ms, sample_ms, decode_ms,
                      total_ms, peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
                      updated_at, j_type, j_status, j_project_id, j_created_at
                  )
                  select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
-                        m.execution_representation, m.veda_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
+                        m.execution_representation, m.veda_execution_json, m.attention_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
                         m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
                         m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
                         m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
@@ -2377,11 +2391,12 @@ impl JobsStore {
                 guidance_method, use_pid, pid_target, width, height, seed,
                 loras_json, load_ms, sample_ms, decode_ms, total_ms,
                 peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
-                image_count, source_codec, execution_representation, updated_at, veda_execution_json
+                image_count, source_codec, execution_representation, updated_at, veda_execution_json,
+                attention_execution_json
             ) values (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                ?28, ?29, ?30
+                ?28, ?29, ?30, ?31
             )
             on conflict(job_id) do update set
                 model = coalesce(excluded.model, generation_metrics.model),
@@ -2415,6 +2430,10 @@ impl JobsStore {
                     generation_metrics.execution_representation
                 ),
                 veda_execution_json = coalesce(excluded.veda_execution_json, generation_metrics.veda_execution_json),
+                attention_execution_json = coalesce(
+                    excluded.attention_execution_json,
+                    generation_metrics.attention_execution_json
+                ),
                 updated_at = excluded.updated_at
             ",
             params![
@@ -2448,6 +2467,7 @@ impl JobsStore {
                 metrics.execution_representation,
                 now,
                 optional_dumps(metrics.veda_execution.as_ref())?,
+                optional_dumps(metrics.attention_execution.as_ref())?,
             ],
         )?;
         Ok(())
@@ -2510,7 +2530,7 @@ impl JobsStore {
             // value shifted, breaking Generation Stats on every existing install.
             "select stats.* from (
                select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
-                      m.execution_representation, m.veda_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
+                      m.execution_representation, m.veda_execution_json, m.attention_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
                       m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
                       m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
                       m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
@@ -2520,7 +2540,7 @@ impl JobsStore {
                  from generation_metrics m join jobs j on j.id = m.job_id
                union all
                select job_id, model, quant_label, quant_bits, source_codec,
-                      execution_representation, veda_execution_json, sampler, scheduler, scheduler_shift,
+                      execution_representation, veda_execution_json, attention_execution_json, sampler, scheduler, scheduler_shift,
                       steps, image_count, guidance_scale, true_cfg_scale,
                       guidance_method, use_pid, pid_target, width, height, seed,
                       loras_json, load_ms, sample_ms, decode_ms, total_ms,
@@ -5862,6 +5882,18 @@ fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetric
         execution_representation: row.get("execution_representation")?,
         veda_execution: row
             .get::<_, Option<String>>("veda_execution_json")?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
+        attention_execution: row
+            .get::<_, Option<String>>("attention_execution_json")?
             .map(|value| {
                 serde_json::from_str(&value).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(

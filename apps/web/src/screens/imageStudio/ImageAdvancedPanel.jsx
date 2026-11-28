@@ -4,6 +4,7 @@ import { MossOrdinaryControls } from "./MossOrdinaryControls.jsx";
 import React from "react";
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { FlashAttentionToggle } from "../../components/FlashAttentionToggle.jsx";
+import { LossyAttentionControl } from "../../components/LossyAttentionControl.jsx";
 import { minStepsForModel } from "../../videoModelLimits.js";
 import { showTransparencyToggle, transparencyPromptSuggestion, TRANSPARENCY_PROMPT_HINT } from "../../qwenAlpha.js";
 import {
@@ -95,6 +96,9 @@ export function ImageAdvancedPanel({
   activeBackend,
   flashAttn,
   setFlashAttn,
+  lossyAttention,
+  setLossyAttention,
+  lossyAttentionError,
   promptEnhance,
   enhancePrompt,
   setEnhancePrompt,
@@ -566,6 +570,15 @@ export function ImageAdvancedPanel({
               ) : null}
               {!moss ? (
                 <FlashAttentionToggle backend={activeBackend} checked={flashAttn} onChange={setFlashAttn} />
+              ) : null}
+              {setLossyAttention ? (
+                <LossyAttentionControl
+                  backend={activeBackend}
+                  error={lossyAttentionError}
+                  model={selectedModel}
+                  onChange={setLossyAttention}
+                  value={lossyAttention}
+                />
               ) : null}
               {promptEnhance ? (
                 <label

@@ -53,6 +53,8 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "mossImageAdvanced",
     "h3ImageSampler",
     "pag",
+    // SW-6132: Supra-2's DiT runs its own attention (`SHARED_ATTENTION_ROUTING` Bespoke).
+    "lossyAttention",
     "lowResStart",
     "promptBatch",
     "mossOrdinarySettings",

@@ -55,6 +55,9 @@ export function buildImageJobAdvanced(state) {
     defaultTextEncoderId,
     // Flash attention (sc-3674).
     flashAttn,
+    // SW-6132: lossy CUDA attention opt-in (`{ int8 }` / `{ sol: { topkRatio } }`), already resolved
+    // by the studio (`null` / `undefined` when off, unsupported, or not on candle).
+    lossyAttention,
     // Caption upsampling (sc-6135).
     promptEnhance,
     enhancePrompt,
@@ -209,6 +212,8 @@ export function buildImageJobAdvanced(state) {
     // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
     // Only the candle (Windows/CUDA) SDXL backend reads it; every other backend ignores it.
     ...(moss || flashAttn ? {} : { flashAttn: false }),
+    // SW-6132: only an explicit opt-in rides the request; absent is the exact attention path.
+    ...(!moss && lossyAttention ? { lossyAttention } : {}),
     // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
     // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
     ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),

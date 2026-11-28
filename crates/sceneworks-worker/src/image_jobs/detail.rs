@@ -513,7 +513,7 @@ fn detail_result(
         "loras": [],
         "stylePreset": "",
         "sourceAssetId": source_asset_id,
-        "rawAdapterSettings": raw_adapter_settings,
+        "rawAdapterSettings": crate::inference_runtime::with_attention_execution(raw_adapter_settings),
         "parents": [source_asset_id],
         "extra": {
             "isDetailEnhanced": true,

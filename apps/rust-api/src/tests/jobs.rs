@@ -20788,3 +20788,137 @@ async fn flux3_catalog_tiers_are_canonical_for_both_checkpoints_and_unpinned_der
         );
     }
 }
+
+/// SW-6132 (Codex P2 on #3528): every enqueue path runs the one lossy-attention guard. On an MLX
+/// host no worker can claim `advanced.lossyAttention`, so a fresh create, a retry and a duplicate
+/// that add it are all refused with the same typed 400 rather than queued forever.
+#[tokio::test]
+async fn lossy_attention_is_refused_on_every_mlx_enqueue_path() {
+    let _hf_cache = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "macos").await;
+    let lossy = json!({ "lossyAttention": { "int8": {} } });
+    let video = |advanced: Value| {
+        json!({
+            "projectId": project_id,
+            "model": "wan_2_2",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums while the storm rolls in",
+            "advanced": advanced,
+        })
+    };
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        video(lossy.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "fresh create: {refused}");
+    assert!(
+        refused["detail"].as_str().unwrap().contains("CUDA"),
+        "{refused}"
+    );
+    let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", video(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id");
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "advanced": lossy } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+        assert_eq!(
+            body["field"], "advanced.lossyAttention",
+            "{operation}: {body}"
+        );
+        assert!(
+            body["detail"].as_str().unwrap().contains("CUDA"),
+            "{operation}: {body}"
+        );
+    }
+}
+
+/// SW-6132 (Codex P2 on #3528): the standalone engine-named job types go through the full
+/// `POST /api/v1/jobs` enqueue path and are admitted or refused by their ENGINE (SeedVR2 and Iris
+/// serve the kernels; Real-ESRGAN has no candle attention), never by a generation-model capability
+/// they do not have.
+#[tokio::test]
+async fn standalone_upscale_jobs_admit_lossy_attention_by_engine_through_create_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    // A CUDA (candle) host: the engine rule is what this test exercises; the MLX-host refusal is
+    // `lossy_attention_is_refused_on_every_mlx_enqueue_path`.
+    settings.host_os = "linux".to_owned();
+    let app = create_app(settings).unwrap();
+    let (_, project) = create_project(app.clone(), "Lossy attention standalone").await;
+    let int8 = json!({ "int8": {} });
+    let sol = json!({ "sol": { "topkRatio": 0.5 } });
+    let enqueue = |job_type: &str, payload: Value| json!({ "type": job_type, "requestedGpu": "auto", "projectId": project["id"], "payload": payload });
+    for (job_type, payload) in [
+        (
+            "image_upscale",
+            json!({ "sourceAssetId": "asset-1", "engine": "seedvr2", "advanced": { "lossyAttention": int8 } }),
+        ),
+        (
+            "image_upscale",
+            json!({ "sourceAssetId": "asset-1", "engine": "iris", "advanced": { "lossyAttention": sol } }),
+        ),
+        (
+            "video_upscale",
+            json!({ "sourceAssetId": "source-clip", "factor": 2, "advanced": { "lossyAttention": int8 } }),
+        ),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            enqueue(job_type, payload.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job_type} {payload}: {body}");
+        assert_eq!(
+            body["payload"]["advanced"]["lossyAttention"],
+            payload["advanced"]["lossyAttention"]
+        );
+    }
+    for (job_type, payload, field) in [
+        (
+            "image_upscale",
+            json!({ "sourceAssetId": "asset-1", "advanced": { "lossyAttention": int8 } }),
+            "advanced.lossyAttention",
+        ),
+        (
+            "image_upscale",
+            json!({ "sourceAssetId": "asset-1", "engine": "real-esrgan", "advanced": { "lossyAttention": sol } }),
+            "advanced.lossyAttention",
+        ),
+        (
+            "video_upscale",
+            json!({ "sourceAssetId": "source-clip", "factor": 2, "advanced": { "lossyAttention": { "sol": {} } } }),
+            "advanced.lossyAttention.sol.topkRatio",
+        ),
+        (
+            "dataset_upscale",
+            json!({ "projectId": project["id"], "datasetId": "dataset-1", "advanced": { "lossyAttention": int8 } }),
+            "advanced.lossyAttention",
+        ),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            enqueue(job_type, payload.clone()),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{job_type} {payload}: {body}"
+        );
+        assert_eq!(body["field"], field, "{job_type}: {body}");
+    }
+}

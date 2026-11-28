@@ -93,6 +93,8 @@ video_option_fields! {
     no_audio: bool => boolean("noAudio"),
     // SW-7276: shared candle FlashAttention-2 toggle; the worker reads the payload at dispatch.
     flash_attn: bool => boolean("flashAttn"),
+    // SW-6132: per-job lossy CUDA attention opt-in (INT8 / Sol-Attn); the worker sets it per job.
+    lossy_attention: sceneworks_options::lossy_attention::LossyAttentionWire => structured("lossyAttention"),
     lightning: bool => boolean("lightning"),
     video_cfg_guidance_scale: f64 => number("videoCfgGuidanceScale"),
     video_stg_guidance_scale: f64 => number("videoStgGuidanceScale"),

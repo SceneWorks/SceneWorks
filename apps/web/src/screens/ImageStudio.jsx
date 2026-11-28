@@ -184,6 +184,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
+import { lossyAttentionDefaults, resolveLossyAttention } from "../lossyAttention.js";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
 import { batchClipNotice, fitPromptToLimit, imagePromptCharLimit } from "../imagePromptLimit.js";
 import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
@@ -625,6 +626,12 @@ export function ImageStudio() {
   // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
   // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
   const [flashAttn, setFlashAttn] = useState(saved.flashAttn ?? true);
+  // SW-6132: per-job opt-in for the lossy CUDA attention kernels (INT8 QK / Sol-Attn). Off by
+  // default; offered only on candle for a model whose catalog entry advertises `lossyAttention`.
+  const [lossyAttention, setLossyAttention] = useState(() => ({
+    ...lossyAttentionDefaults(),
+    ...saved.lossyAttention,
+  }));
   // FLUX.2-dev "Enhance prompt" (sc-6135): the model's built-in Mistral3 caption upsampler rewrites
   // the prompt before encoding — text-only for txt2img, reference-aware for edit. Per-payload
   // (`advanced.enhancePrompt`); only flux2_dev acts on it. Sticky pref (persisted), default off.
@@ -1620,6 +1627,11 @@ export function ImageStudio() {
     model: selectedModel,
     options: h3ImageSampler,
   });
+  const { block: outgoingLossyAttention, error: lossyAttentionError } = resolveLossyAttention({
+    backend: activeBackend,
+    model: selectedModel,
+    options: lossyAttention,
+  });
   const pagCapability = supportsPag(selectedModel) ? selectedModel.pag : null;
   const { block: outgoingPag, error: pagError } = resolvePag({
     model: selectedModel,
@@ -2043,6 +2055,7 @@ export function ImageStudio() {
   setViewAngle,
   setEnhancePrompt,
   setFlashAttn,
+  setLossyAttention,
   setTextEncoderModel,
   setUsePid,
   setPidTarget,
@@ -2525,6 +2538,7 @@ export function ImageStudio() {
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
     flashAttn,
+    lossyAttention,
     enhancePrompt,
     bf16Precision,
     transparentBackground,
@@ -2571,6 +2585,7 @@ export function ImageStudio() {
     if (cfgIntervalError) return cfgIntervalError;
     if (h3ImageSamplerError) return h3ImageSamplerError;
     if (pagError) return pagError;
+    if (lossyAttentionError) return lossyAttentionError;
     if (lowResStartError) return lowResStartError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
@@ -2764,6 +2779,7 @@ export function ImageStudio() {
       textEncoderModel: selectedTextEncoderModel,
       defaultTextEncoderId,
       flashAttn,
+      lossyAttention: outgoingLossyAttention,
       promptEnhance,
       enhancePrompt,
       precisionToggle,
@@ -3773,6 +3789,9 @@ export function ImageStudio() {
             activeBackend={activeBackend}
             flashAttn={flashAttn}
             setFlashAttn={setFlashAttn}
+            lossyAttention={lossyAttention}
+            setLossyAttention={setLossyAttention}
+            lossyAttentionError={lossyAttentionError}
             promptEnhance={promptEnhance}
             enhancePrompt={enhancePrompt}
             setEnhancePrompt={setEnhancePrompt}

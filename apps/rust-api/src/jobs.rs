@@ -230,6 +230,8 @@ pub(crate) async fn create_job(
         sceneworks_core::request_validation::validate(kind, &payload.payload, &entry)
             .map_err(ApiError::from)?;
     }
+    // SW-6132: the shared lossy-attention enqueue guard (MLX host, standalone engines).
+    crate::generation::admit_lossy_attention_enqueue(&state, &payload.job_type, &payload.payload)?;
     if matches!(payload.job_type, JobType::ImageDetail) {
         validate_job_lora_compatibility(
             &state,
@@ -1855,6 +1857,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
         )
         .map_err(ApiError::from)?;
     }
+    // SW-6132: retry and duplicate are enqueue boundaries too; the merged payload passes the same
+    // lossy-attention guard as a fresh submission (MLX host, standalone engine).
+    crate::generation::admit_lossy_attention_enqueue(state, &job_type, &merged)?;
     let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
     if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {
         merged.insert(checkpoint_key.to_owned(), Value::Null);

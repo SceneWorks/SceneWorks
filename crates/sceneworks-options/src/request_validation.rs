@@ -144,6 +144,14 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
         {
             crate::pag::parse_pag_wire_value(raw_pag)?.to_policy_config()?;
         }
+        if let Some(raw_lossy) = payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get(crate::lossy_attention::LOSSY_ATTENTION_KEY))
+            .filter(|value| !value.is_null())
+        {
+            crate::lossy_attention::parse_wire_value(raw_lossy)?;
+        }
         if let Some(raw_low_res) = payload
             .get("advanced")
             .and_then(Value::as_object)
@@ -380,6 +388,13 @@ pub fn validate(
             .unwrap_or_default();
         crate::low_res_start::requested_low_res_start(model, payload, advanced, entry)?;
         crate::pag::requested_pag(model, advanced, entry)?;
+        // SW-6132: a generation job is admitted against its model's catalog capability. A
+        // standalone engine job (`videoUpscale`; image upscale has no kind) names an engine, not a
+        // generation model, and is admitted by `sceneworks_core::lossy_attention` (the engine-aware
+        // rule the core `validate` wrapper runs for it); its shape was checked above.
+        if !crate::lossy_attention::is_standalone_validation_kind(kind) {
+            crate::lossy_attention::requested_lossy_attention(model, advanced, entry)?;
+        }
         if matches!(kind, "image" | "video") {
             if let Some(steps) = crate::limits::requested_steps(advanced) {
                 check(

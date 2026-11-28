@@ -398,6 +398,33 @@ impl UnsupportedReason {
     }
 }
 
+/// SW-6132: an image or video job that opted in to a lossy attention kernel
+/// (`advanced.lossyAttention`) is a native MLX gap for every model: the INT8 QK and Sol-Attn kernels
+/// exist only in the candle (CUDA) runtime, and the MLX worker never claims such a job.
+pub(crate) fn lossy_attention_mlx_gap(job: &JobSnapshot) -> Option<UnsupportedReason> {
+    let visual = matches!(
+        job.job_type,
+        JobType::ImageGenerate
+            | JobType::ImageEdit
+            | JobType::ImageDetail
+            | JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    );
+    (visual && sceneworks_options::lossy_attention::payload_requests_lossy_attention(&job.payload))
+        .then(|| {
+            UnsupportedReason::new(
+                job.payload.get("model").and_then(Value::as_str),
+                "lossy attention (advanced.lossyAttention)",
+                "the INT8 QK and Sol-Attn attention kernels run only on the CUDA (candle) backend; \
+                 the MLX backend has neither, so the job is refused rather than rendered on the \
+                 exact attention path. Remove advanced.lossyAttention to run it on Mac.",
+                Some("SW-6132"),
+            )
+        })
+}
+
 /// macOS "can the Rust/MLX flow run this?" oracle (sc-3484). `Ok(())` = the in-process mlx
 /// worker — or an MLX-agnostic in-process path (downloads, ffmpeg, prompt refine) — runs it
 /// natively. `Err` names the exact native gap. This is the epic's
@@ -405,6 +432,9 @@ impl UnsupportedReason {
 /// `mlx_unsupported`, and the set of `Err`s IS the port-or-drop roadmap. Consistent with
 /// routing by construction — anything `job_is_any_mlx_eligible` accepts is `Ok`.
 pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
+    if let Some(gap) = lossy_attention_mlx_gap(job) {
+        return Err(gap);
+    }
     if job_is_any_mlx_eligible(job) {
         return Ok(());
     }

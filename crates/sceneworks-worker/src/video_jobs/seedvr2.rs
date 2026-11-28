@@ -1581,6 +1581,8 @@ pub(crate) async fn run_video_upscale_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // SW-6132: the job's lossy attention opt-in for SeedVR2, set (or refused) before it loads.
+    crate::inference_runtime::apply_standalone_lossy_attention(job)?;
     let req: sceneworks_core::contracts::VideoUpscaleRequest =
         serde_json::from_value(Value::Object(job.payload.clone())).map_err(|error| {
             WorkerError::InvalidPayload(format!("Invalid video_upscale payload: {error}"))
@@ -1853,7 +1855,7 @@ pub(crate) async fn run_video_upscale_job(
         "prompt": "",
         "negativePrompt": Value::Null,
         "loras": [],
-        "rawAdapterSettings": raw_settings,
+        "rawAdapterSettings": crate::inference_runtime::with_attention_execution(raw_settings),
         "sourceAssetId": req.source_asset_id,
         "parents": [req.source_asset_id],
         "extra": {

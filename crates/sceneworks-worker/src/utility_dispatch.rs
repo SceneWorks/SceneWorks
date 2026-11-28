@@ -412,9 +412,13 @@ async fn run_utility_job_inner(
             ),
         )
         .await;
+        // SW-6132: the job's attention path receipt (INT8 / Sol-Attn calls, refusals, adaptations)
+        // joins its generation metrics row; the scope's drop resets both switches.
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         if let Some(scope) = attention_scope {
-            scope.finish();
+            let attention_metrics = scope.finish();
+            crate::job_metrics::post_generation_metrics(api, &dispatch_job.id, &attention_metrics)
+                .await;
         }
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
         // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of

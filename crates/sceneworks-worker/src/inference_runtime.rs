@@ -372,7 +372,67 @@ pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegist
 
 pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
     refuse_unverified_portable_sources(spec)?;
+    admit_lossy_attention(id)?;
     media().load(id, spec)
+}
+
+/// SW-6132: apply (or refuse) a standalone job's `advanced.lossyAttention` through the shared
+/// `attention_path` helper. A build without the candle runtime has no lossy kernels, so any opt-in
+/// is a typed refusal there.
+#[cfg(native_lane)]
+pub(crate) fn apply_standalone_lossy_attention(
+    job: &sceneworks_core::contracts::JobSnapshot,
+) -> crate::WorkerResult<()> {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        crate::attention_path::apply_standalone_request(job)
+    }
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    {
+        if sceneworks_core::options::lossy_attention::payload_requests_lossy_attention(&job.payload)
+        {
+            let engine = job
+                .payload
+                .get("engine")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("this engine");
+            return Err(crate::WorkerError::InvalidPayload(
+                sceneworks_core::options::lossy_attention::mlx_refusal(engine).detail,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// SW-6132: `raw_settings` with this job's lossy attention receipt (`attentionExecution`) when it
+/// opted in; unchanged otherwise, and on a build without the candle runtime.
+#[cfg(native_lane)]
+pub(crate) fn with_attention_execution(raw_settings: serde_json::Value) -> serde_json::Value {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let mut raw_settings = raw_settings;
+        crate::attention_path::record_attention_execution(&mut raw_settings);
+        raw_settings
+    }
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    {
+        raw_settings
+    }
+}
+
+/// SW-6132: refuse the job's `advanced.lossyAttention` opt-in for an engine that cannot take it,
+/// before anything loads (a typed `Unsupported`). Inert when the job requested nothing, and on a
+/// build without the candle runtime (whose routes never see the option: the API refuses it).
+pub(crate) fn admit_lossy_attention(id: &str) -> gen_core::Result<()> {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        crate::attention_path::admit_engine(id)
+    }
+    #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+    {
+        let _ = id;
+        Ok(())
+    }
 }
 
 #[cfg(native_lane)]
@@ -394,6 +454,7 @@ pub(crate) fn load_transform(
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn gen_core::Transform>> {
     refuse_unverified_portable_sources(spec)?;
+    admit_lossy_attention(id)?;
     media().load_transform(id, spec)
 }
 
