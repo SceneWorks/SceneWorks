@@ -43,10 +43,8 @@ export function useShellHydration({
   // the full catalog too.
   const setupHydrationRoute = isDesktopShell && setupCompleted === false && authenticated;
   const simpleHydrationRoute = !setupHydrationRoute && uiMode === SIMPLE_MODE;
-  const routeCatalogScope = assetCatalogScopeForRoute(
-    setupHydrationRoute ? "Setup" : simpleHydrationRoute ? simpleActiveScreen : activeView,
-    { simple: simpleHydrationRoute },
-  );
+  const hydrationRouteName = setupHydrationRoute ? "Setup" : simpleHydrationRoute ? simpleActiveScreen : activeView;
+  const routeCatalogScope = assetCatalogScopeForRoute(hydrationRouteName, { simple: simpleHydrationRoute });
   const routeCatalogScopeRef = useRef(routeCatalogScope);
   useLayoutEffect(() => { routeCatalogScopeRef.current = routeCatalogScope; }, [routeCatalogScope]);
   // The change cursor of the committed catalog (`{ projectId, cursor, scope }`). It advances only
@@ -55,6 +53,9 @@ export function useShellHydration({
   // drops it, so the next load is a full read instead of a merge into nothing.
   const catalogCursorRef = useRef(null);
   const wideningProjectIdRef = useRef(null);
+  // The project whose widen last FAILED on the current route entry. A failure is not retried on
+  // the re-render its own error status causes; entering a route again clears it (effect below).
+  const wideningFailedForRef = useRef(null);
   // The scope of the catalog the shell last committed (`{ projectId, scope }`), as render state so
   // `assetCatalogComplete` below follows it. `scope` is null for a cursor-less (Queue) load.
   const [committedCatalogScope, setCommittedCatalogScope] = useState(null);
@@ -480,8 +481,18 @@ export function useShellHydration({
   // the full scope; the Library slice stays rendered until the wider catalog replaces it, the same
   // way a route's first load renders an empty catalog until it lands. Once widened, the cursor's
   // scope is "all" and this stays quiet for the rest of the project session.
+  //
+  // A failed widen leaves the Library slice and an "error" status, and the hydration ledger still
+  // counts "assets" as ready from the Library load — so nothing else would ever retry it. It is
+  // retried on the next route entry (leaving and coming back, or another full-catalog route), but
+  // not on the re-render its own error causes, which would spin. This reset is declared before the
+  // widening effect so a route entry clears the failure before that effect reads it.
+  useEffect(() => {
+    wideningFailedForRef.current = null;
+  }, [activeProject?.id, hydrationRouteName, simpleHydrationRoute]);
   useEffect(() => {
     const projectId = activeProject?.id;
+    const status = activeAssetLoadState.status;
     if (
       !ready ||
       !projectsLoaded ||
@@ -489,7 +500,7 @@ export function useShellHydration({
       queueAssetsRoute ||
       routeCatalogScope !== "all" ||
       !residentDomains.has("assets") ||
-      activeAssetLoadState.status !== "ready"
+      (status !== "ready" && status !== "error")
     ) {
       return;
     }
@@ -497,13 +508,21 @@ export function useShellHydration({
     if (held?.projectId !== projectId || held.scope !== "library" || wideningProjectIdRef.current === projectId) {
       return;
     }
+    if (wideningFailedForRef.current === projectId) {
+      return;
+    }
     // One widen in flight per project: the asset list is latest-result, so re-issuing it on a
     // re-render would abort the multi-second read it is waiting on.
     wideningProjectIdRef.current = projectId;
-    void refreshAssets(projectId).finally(() => {
-      if (wideningProjectIdRef.current === projectId) wideningProjectIdRef.current = null;
-    });
-  }, [ready, projectsLoaded, activeProject?.id, queueAssetsRoute, routeCatalogScope, residentDomains, activeAssetLoadState.status, refreshAssets]);
+    wideningFailedForRef.current = null;
+    void refreshAssets(projectId)
+      .then((result) => {
+        if (result?.ok === false && result.reason === "error") wideningFailedForRef.current = projectId;
+      })
+      .finally(() => {
+        if (wideningProjectIdRef.current === projectId) wideningProjectIdRef.current = null;
+      });
+  }, [ready, projectsLoaded, activeProject?.id, queueAssetsRoute, routeCatalogScope, hydrationRouteName, simpleHydrationRoute, residentDomains, activeAssetLoadState.status, refreshAssets]);
 
   // The default Library route paints from its project asset request first. Only
   // after that catalog settles do we hydrate the secondary detail-panel domains:

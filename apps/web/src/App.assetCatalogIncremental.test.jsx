@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { useAppContext } from "./context/AppContext.js";
-import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
+import { FakeEventSource, errorResponse, response, settle } from "./main.testSupport.jsx";
 import { writeWorkflowEmbedNoticeSeen } from "./workflowEmbed.js";
 
 // The Library catalog is a SUMMARY listing refreshed incrementally: one full read, then only
@@ -221,4 +221,48 @@ it("reports the catalog incomplete until a widening read lands", async () => {
   await settle();
   await vi.waitFor(() => expect(captures.current.assetCatalogComplete).toBe(true));
   expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]);
+});
+
+it("retries a failed widening on the next route entry, without spinning on its own error", async () => {
+  const library = fullAsset("library", "2026-10-24T00:00:02Z");
+  const portrait = { ...fullAsset("portrait", "2026-10-24T00:00:01Z"), origin: "character_studio" };
+  stubApi({
+    details: { library, portrait },
+    catalog: (params) => (params.get("scope") === "library"
+      ? { cursor: "epoch.2", reset: true, assets: [summaryOf(library)], removedIds: [] }
+      : { cursor: "epoch.3", reset: true, assets: [summaryOf(library), summaryOf(portrait)], removedIds: [] }),
+  });
+  // The FIRST full-catalog read fails; later ones succeed.
+  let failNextFull = true;
+  const stubbed = global.fetch;
+  global.fetch = vi.fn(async (url, options) => {
+    const parsed = new URL(url);
+    if (failNextFull && parsed.pathname.endsWith("/projects/project-1/assets") && parsed.searchParams.get("scope") === "all") {
+      failNextFull = false;
+      return errorResponse(500, "catalog read failed");
+    }
+    return stubbed(url, options);
+  });
+  const fullRequests = () => catalogRequests().filter((url) => url.searchParams.get("scope") === "all");
+
+  await act(async () => root.render(<App />));
+  await settle();
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  // The widen failed once and was NOT re-issued by the error status it produced.
+  await vi.waitFor(() => expect(fullRequests()).toHaveLength(1));
+  await settle();
+  expect(fullRequests()).toHaveLength(1);
+  expect(captures.current.assetCatalogComplete).toBe(false);
+  expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library"]);
+
+  // Leaving and re-entering a full-catalog route tries again (the ledger still says "ready").
+  await act(async () => captures.current.setActiveView("Library"));
+  await settle();
+  expect(fullRequests()).toHaveLength(1);
+  await act(async () => captures.current.setActiveView("Characters"));
+  await settle();
+  await vi.waitFor(() => expect(fullRequests()).toHaveLength(2));
+  await vi.waitFor(() => expect(captures.current.assets.map((asset) => asset.id)).toEqual(["library", "portrait"]));
+  expect(captures.current.assetCatalogComplete).toBe(true);
 });
