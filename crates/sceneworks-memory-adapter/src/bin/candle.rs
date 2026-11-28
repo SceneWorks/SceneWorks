@@ -69,11 +69,11 @@ use runtime_cuda::calibration::pulid::PulidFluxRequest;
 // generator, so the capture calls the same constructor the worker does rather than the catalog.
 use runtime_cuda::calibration::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 use runtime_cuda::gen_core::{
-    adapter_stack_identity, AdapterKind, AdapterSpec, Capabilities, ComponentPrecisionFloor,
-    Conditioning, GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image,
-    LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope,
-    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    adapter_stack_identity, AdapterKind, AdapterSpec, ComponentPrecisionFloor, Conditioning,
+    GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image, LoadShape, LoadSpec,
+    MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode, MemoryNumericTier,
+    MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope, MemoryRunContext,
+    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, ModelDescriptor, OffloadPolicy, Precision, Progress, Quant,
     TransformerComponent, VideoMode, WeightsSource,
 };

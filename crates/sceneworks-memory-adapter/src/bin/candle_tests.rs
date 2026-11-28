@@ -1740,13 +1740,12 @@ fn the_candle_flux_one_base_arm_reads_the_tier_off_the_transformer_config() {
 }
 
 // ------------------------------------------------------------------------------------------
-// sc-22732 — the turnkey still family on this lane: `kolors`, `ideogram_4`,
-// `ideogram_4_turbo`, `lens` and `lens_turbo`. All five ride the shared five-rung reference
-// path, so what is proven here is the plan binding: execution path, calibration label, fixture,
+// Kolors, Ideogram 4 and Qwen-Image 2.1 use the shared five-rung reference path across their
+// five still-image routes. Verify the plan's execution path, calibration label, fixture,
 // artifact family (including Ideogram's split bf16 repository) and quant rule.
 // ------------------------------------------------------------------------------------------
 
-const TURNKEY_MEMBERS: [(&str, &str); 7] = [
+const TURNKEY_MEMBERS: [(&str, &str); 5] = [
     (KOLORS_ID, "kolors"),
     (IDEOGRAM_ID, "ideogram-4"),
     (IDEOGRAM_TURBO_ID, "ideogram-4-turbo"),
@@ -2118,12 +2117,9 @@ fn the_turnkey_candle_identity_table_refuses_an_unshipped_coordinate() {
 }
 
 /// Every turnkey Candle plan row names the production calibration identity its loaded
-/// generator publishes (the sc-22732 inference head's per-(route, tier) tables): the one
-/// measured key is preserved byte-for-byte at `lens_turbo` q4, no row names a weights-free
-/// conformance string or the old every-tier Kolors constant, and the fifteen identities are
-/// distinct. `every_planned_turnkey_candle_cell_is_served_by_an_arm` never looks at
-/// `calibrationFingerprint`, which is how the first draft of this plan shipped nine rows
-/// naming the `…-static-v1-<route>` literals no engine has ever published.
+/// generator publishes. Kolors and Ideogram identities are distinct per route and tier.
+/// Qwen-Image 2.1 uses one distinct identity per checkpoint. This check also rejects
+/// weights-free conformance fingerprints and the obsolete all-tier Kolors identity.
 #[test]
 fn every_planned_turnkey_candle_cell_names_the_identity_its_loaded_generator_publishes() {
     let plan: Value = serde_json::from_str(include_str!(

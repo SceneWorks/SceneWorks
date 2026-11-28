@@ -1,5 +1,5 @@
 use super::*;
-use runtime_cuda::gen_core::{Error, Modality, PrecisionFloorComponent};
+use runtime_cuda::gen_core::{Capabilities, Error, Modality, PrecisionFloorComponent};
 use std::cell::Cell;
 
 /// A text-encoder-above-tier floor, the shape `candle-gen-mage` declares for q4.

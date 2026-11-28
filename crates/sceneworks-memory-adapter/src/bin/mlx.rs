@@ -86,13 +86,13 @@ use runtime_macos::gen_core::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 #[cfg(test)]
 use runtime_macos::gen_core::AdapterKind;
 use runtime_macos::gen_core::{
-    Capabilities, ComponentPrecisionFloor, Conditioning, ControlKind, GenerationMemory,
-    GenerationOutput, GenerationRequest, Generator, IdentityWeights, Image, LoadPhase, LoadShape,
-    LoadSpec, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
-    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase,
-    MemoryProviderContract, MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision,
-    MemorySelection, MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress,
-    Quant, SolverId, TransformerComponent, VideoMode, WeightsSource,
+    ComponentPrecisionFloor, Conditioning, ControlKind, GenerationMemory, GenerationOutput,
+    GenerationRequest, Generator, IdentityWeights, Image, LoadPhase, LoadShape, LoadSpec,
+    MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryProviderContract,
+    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    MemoryStrategyParameters, OffloadPolicy, Precision, Progress, Quant, SolverId,
+    TransformerComponent, VideoMode, WeightsSource,
 };
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Value};
