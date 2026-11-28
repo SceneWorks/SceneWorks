@@ -982,7 +982,8 @@ jobs:
           echo "SDKROOT=$sdkroot" >> "$GITHUB_ENV"
       - name: Select the warm dev-host build slot
         run: |
-          dev-host env --format github --project sceneworks --worktree "$GITHUB_WORKSPACE" \
+          dev_host="${DEV_HOST_BIN:-$HOME/.local/bin/dev-host}" # dev-host: allow-path documented installed CLI, independent of launchd PATH
+          "$dev_host" env --format github --project sceneworks --worktree "$GITHUB_WORKSPACE" \
             --session "actions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-nax" --warm >> "$GITHUB_ENV"
       - name: Fetch prebuilt MLX (sc-21382)
         # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs
