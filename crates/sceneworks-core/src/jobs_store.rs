@@ -4615,11 +4615,7 @@ impl JobsStore {
         source_job_id: &str,
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<JobSnapshot> {
-        use crate::execution_receipt::{
-            require_deterministic_scope, require_image_seed_binding,
-            require_provider_route_binding, ReplayUnavailable, TrustedExecutionReceipt,
-            SAME_DEVICE_PINNED_RUNTIME_SCOPE,
-        };
+        use crate::execution_receipt::ReplayUnavailable;
         let unavailable = |reason, field| {
             JobsStoreError::ReplayUnavailable(ReplayUnavailable::new(reason, field))
         };
@@ -4637,14 +4633,13 @@ impl JobsStore {
             params![source_job_id],
             |row| row.get(0),
         )?;
-        let encoded = encoded.ok_or_else(|| unavailable("receipt_missing", "executionReceipt"))?;
-        let receipt: TrustedExecutionReceipt = serde_json::from_str(&encoded)?;
-        if receipt.version != crate::execution_receipt::EXECUTION_RECEIPT_VERSION
-            || receipt.job_id != source.id
-            || receipt.job_type != source.job_type.as_str()
-        {
-            return Err(unavailable("receipt_changed", "executionReceipt"));
-        }
+        let RecordedExactReplay { receipt, route } = validate_recorded_exact_replay(
+            encoded.as_deref(),
+            &source.id,
+            &source.job_type,
+            &source.payload,
+        )
+        .map_err(JobsStoreError::ReplayUnavailable)?;
         let accepted_binding_sha256: Option<String> = transaction.query_row(
             "select execution_claim_binding_sha256 from jobs where id = ?1",
             params![source_job_id],
@@ -4655,34 +4650,16 @@ impl JobsStore {
         {
             return Err(unavailable("receipt_changed", "executionReceipt"));
         }
-        require_deterministic_scope(&receipt, SAME_DEVICE_PINNED_RUNTIME_SCOPE)
-            .map_err(JobsStoreError::ReplayUnavailable)?;
-        if receipt.inference_revision != crate::inference_provenance::INFERENCE_REVISION {
-            return Err(unavailable("runtime_revision_changed", "inferenceRevision"));
-        }
-        if !matches!(source.job_type, JobType::ImageGenerate | JobType::ImageEdit) {
-            return Err(unavailable("replay_adapter_unavailable", "jobType"));
-        }
-        require_image_seed_binding(&receipt, &source.payload)
-            .map_err(JobsStoreError::ReplayUnavailable)?;
         let portable_binding = Self::read_portable_binding(&transaction, source_job_id)?
             .ok_or_else(|| unavailable("source_binding_missing", "source"))?;
-        let route = receipt
-            .accepted_source_route
-            .as_ref()
-            .ok_or_else(|| unavailable("source_route_missing", "source"))?;
         let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
             serde_json::from_value(portable_binding.clone())?;
-        let selected_route = typed
-            .routes
-            .values()
-            .find(|candidate| {
-                serde_json::to_value(candidate).as_ref().ok() == Some(route)
-                    && candidate.backend == receipt.accepted_backend
-            })
-            .ok_or_else(|| unavailable("source_route_changed", "source"))?;
-        require_provider_route_binding(&receipt, selected_route)
-            .map_err(JobsStoreError::ReplayUnavailable)?;
+        if !typed.routes.values().any(|candidate| {
+            serde_json::to_value(candidate).as_ref().ok() == receipt.accepted_source_route.as_ref()
+                && candidate.backend == receipt.accepted_backend
+        }) {
+            return Err(unavailable("source_route_changed", "source"));
+        }
         if source.assigned_gpu.as_deref() != Some(receipt.accepted_device.as_str()) {
             return Err(unavailable("device_changed", "device"));
         }
@@ -4705,10 +4682,7 @@ impl JobsStore {
         if !worker_supports_job(&worker, &source) {
             return Err(unavailable("route_unavailable", "route"));
         }
-        let route_platform = route
-            .get("platform")
-            .and_then(Value::as_str)
-            .ok_or_else(|| unavailable("source_route_changed", "source"))?;
+        let route_platform = route.platform.as_str();
         if worker.platform.as_deref() != Some(route_platform) {
             return Err(unavailable("device_changed", "device"));
         }
@@ -5747,9 +5721,9 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         && matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit)
     {
         // Only publish recorded support, never the private receipt/source route.
-        // The POST repeats these checks and validates mutable worker/source facts.
+        // The POST uses the same validator, then checks live worker/source facts.
         let encoded: Option<String> = row.get("execution_receipt_json")?;
-        let support = recorded_exact_replay_support(
+        let support = validate_recorded_exact_replay(
             encoded.as_deref(),
             &row.get::<_, String>("id")?,
             &job_type,
@@ -5758,7 +5732,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
         extra.insert(
             "exactReplay".to_owned(),
             match support {
-                Ok(()) => serde_json::json!({"supported": true}),
+                Ok(_) => serde_json::json!({"supported": true}),
                 Err(reason) => serde_json::json!({"supported": false, "reason": reason.reason}),
             },
         );
@@ -5811,12 +5785,19 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     })
 }
 
-fn recorded_exact_replay_support(
+struct RecordedExactReplay {
+    receipt: crate::execution_receipt::TrustedExecutionReceipt,
+    route: crate::model_artifacts::portable_binding::PortableRouteBinding,
+}
+
+// Both queue snapshots and replay creation use this recorded eligibility policy.
+// The transaction additionally verifies stored bindings and live worker/source availability.
+fn validate_recorded_exact_replay(
     encoded: Option<&str>,
     job_id: &str,
     job_type: &JobType,
     payload: &Map<String, Value>,
-) -> Result<(), crate::execution_receipt::ReplayUnavailable> {
+) -> Result<RecordedExactReplay, crate::execution_receipt::ReplayUnavailable> {
     use crate::execution_receipt::{
         require_deterministic_scope, require_image_seed_binding, require_provider_route_binding,
         ReplayUnavailable, TrustedExecutionReceipt, EXECUTION_RECEIPT_VERSION,
@@ -5842,6 +5823,12 @@ fn recorded_exact_replay_support(
             "inferenceRevision",
         ));
     }
+    if !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        return Err(ReplayUnavailable::new(
+            "replay_adapter_unavailable",
+            "jobType",
+        ));
+    }
     require_image_seed_binding(&receipt, payload)?;
     let route = receipt
         .accepted_source_route
@@ -5852,7 +5839,7 @@ fn recorded_exact_replay_support(
     >(route.clone())
     .map_err(|_| ReplayUnavailable::new("source_route_changed", "source"))?;
     require_provider_route_binding(&receipt, &route)?;
-    Ok(())
+    Ok(RecordedExactReplay { receipt, route })
 }
 
 /// The durable, scalar header needed to rule out jobs that a worker cannot
