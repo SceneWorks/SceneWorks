@@ -2157,6 +2157,11 @@ fn civitai_lora_key(file: &Path, used: &mut std::collections::HashSet<String>) -
 /// Hash the exact resolved adapter bytes, using an existing install marker as a cheap cache when
 /// available. A missing/malformed marker or a hashing failure loses attribution only; it never
 /// turns a successful generation into an error.
+///
+/// The digest is never written back into the marker. The marker is part of the adapter's frozen
+/// byte closure when the route serves the original directory in place, so a write-back would change
+/// admitted bytes under every job queued behind this one; the seal memo (`attribution_sha256`)
+/// already keeps repeat jobs from re-reading the file.
 #[cfg(any(native_lane, test))]
 async fn trusted_lora_hash(
     api: &ApiClient,
@@ -2166,7 +2171,7 @@ async fn trusted_lora_hash(
     file: &Path,
 ) -> Option<String> {
     let marker_path = existing_lora_install_marker(lora, settings, file);
-    let mut marker = match marker_path.as_ref() {
+    let marker = match marker_path.as_ref() {
         Some(path) => tokio::fs::read(path)
             .await
             .ok()
@@ -2189,33 +2194,9 @@ async fn trusted_lora_hash(
             return None;
         }
     };
-    let identity_after = model_file_identity(file)?;
-    if identity_after != identity_before {
+    if model_file_identity(file)? != identity_before {
         tracing::warn!(path = %file.display(), "LoRA changed while attribution hash was being computed");
         return None;
-    }
-
-    if let (Some(marker_path), Some(object)) =
-        (marker_path, marker.as_mut().and_then(Value::as_object_mut))
-    {
-        object.insert(
-            "loraFileName".to_owned(),
-            Value::String(identity_after.name),
-        );
-        object.insert(
-            "loraFileBytes".to_owned(),
-            Value::Number(identity_after.bytes.into()),
-        );
-        object.insert(
-            "loraFileModifiedNanos".to_owned(),
-            Value::String(identity_after.modified_nanos),
-        );
-        object.insert("loraFileSha256".to_owned(), Value::String(hash.clone()));
-        if let Ok(bytes) = serde_json::to_vec_pretty(&marker) {
-            if let Err(error) = tokio::fs::write(&marker_path, bytes).await {
-                tracing::warn!(path = %marker_path.display(), %error, "could not cache LoRA attribution hash");
-            }
-        }
     }
     Some(hash)
 }
@@ -2273,8 +2254,13 @@ async fn attribution_sha256(
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
 }
 
-/// Read the digest retained by model import, or backfill one legacy marker once. Hashing failure is
-/// attribution failure, not generation failure: the image remains usable and merely lacks a card.
+/// Read the digest retained by model import, or take the seal-memoized digest of the checkpoint.
+/// Hashing failure is attribution failure, not generation failure: the image remains usable and
+/// merely lacks a card.
+///
+/// The digest is never written back into the install marker: the marker is a frozen file of the
+/// checkpoint's route closure when the original is served in place, and rewriting it would change
+/// admitted bytes under every queued job. The seal memo keeps repeat jobs from re-reading.
 async fn trusted_imported_model_hash(
     api: &ApiClient,
     settings: &Settings,
@@ -2285,9 +2271,8 @@ async fn trusted_imported_model_hash(
     let file = imported_checkpoint_file_for_share(adapter, request, settings)?;
     let marker_path = file.parent()?.join(INSTALL_MARKER);
     let bytes = tokio::fs::read(&marker_path).await.ok()?;
-    let mut marker = serde_json::from_slice::<Value>(&bytes).ok()?;
-    let object = marker.as_object_mut()?;
-    if let Some(hash) = cached_model_hash_for_file(&file, object) {
+    let marker = serde_json::from_slice::<Value>(&bytes).ok()?;
+    if let Some(hash) = cached_model_hash_for_file(&file, marker.as_object()?) {
         return Some(hash);
     }
 
@@ -2299,33 +2284,9 @@ async fn trusted_imported_model_hash(
             return None;
         }
     };
-    let identity_after = model_file_identity(&file)?;
-    if identity_after != identity_before {
+    if model_file_identity(&file)? != identity_before {
         tracing::warn!(path = %file.display(), "checkpoint changed while attribution hash was being computed");
         return None;
-    }
-    object.insert(
-        "modelFileName".to_owned(),
-        Value::String(identity_after.name),
-    );
-    object.insert(
-        "modelFileBytes".to_owned(),
-        Value::Number(identity_after.bytes.into()),
-    );
-    object.insert(
-        "modelFileModifiedNanos".to_owned(),
-        Value::String(identity_after.modified_nanos),
-    );
-    object.insert("modelFileSha256".to_owned(), Value::String(hash.clone()));
-    match serde_json::to_vec_pretty(&marker) {
-        Ok(bytes) => {
-            if let Err(error) = tokio::fs::write(&marker_path, bytes).await {
-                tracing::warn!(path = %marker_path.display(), %error, "could not cache checkpoint attribution hash");
-            }
-        }
-        Err(error) => {
-            tracing::warn!(path = %marker_path.display(), %error, "could not serialize checkpoint attribution marker");
-        }
     }
     Some(hash)
 }

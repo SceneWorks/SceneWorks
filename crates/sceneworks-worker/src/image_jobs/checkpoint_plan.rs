@@ -81,8 +81,9 @@ fn resolve_checkpoint_plan_with_progress(
     settings: &Settings,
 ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
     if let Some(verified) = &settings.verified_plan_layers {
-        // The guard already copied, hashed, froze and leased each source. The semantic plan and
-        // paths are typed in-process state, independent of the worker's local checkpoint ID.
+        // The guard already verified each layer against its frozen ledger (served in place, or
+        // from its leased copy) and holds the route lease. The semantic plan and paths are typed
+        // in-process state, independent of the worker's local checkpoint ID.
         return verified.resolve_checkpoint(checkpoint_id, &|| Ok(()));
     }
     store.resolve(checkpoint_id)

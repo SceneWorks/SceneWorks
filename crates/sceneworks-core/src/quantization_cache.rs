@@ -25,6 +25,10 @@ pub struct SavedQuantizations {
     source: PathBuf,
     owner: String,
     checkpoint: String,
+    /// A digest over the admitted bytes of the job's quantizable local sources, when it has any.
+    /// Loaders key a checkpoint tensor by its file path; folding the admitted bytes in keeps a
+    /// saved quantization from ever serving different bytes later found at that same path.
+    source_digest: Option<String>,
     hits: AtomicU64,
     writes: AtomicU64,
 }
@@ -57,9 +61,15 @@ impl SavedQuantizations {
             source,
             owner,
             checkpoint,
+            source_digest: None,
             hits: AtomicU64::new(0),
             writes: AtomicU64::new(0),
         }
+    }
+    /// Bind every saved weight to `digest`, a digest over the admitted local source bytes.
+    pub fn with_source_digest(mut self, digest: Option<String>) -> Self {
+        self.source_digest = digest;
+        self
     }
     pub fn counts(&self) -> (u64, u64) {
         (
@@ -68,18 +78,33 @@ impl SavedQuantizations {
         )
     }
 }
-fn artifact_plan(key: &QuantizationArtifactKey) -> gen_core::Result<(DerivedArtifactPlan, String)> {
+fn artifact_plan(
+    key: &QuantizationArtifactKey,
+    source_digest: Option<&str>,
+) -> gen_core::Result<(DerivedArtifactPlan, String)> {
     let extension = key.extension();
     if !matches!(extension, "ggml" | "safetensors") {
         return Err(error("unsupported packed artifact extension"));
     }
     let filename = format!("projection.{extension}");
+    let digest = match source_digest {
+        None => key.digest().to_owned(),
+        Some(source) => {
+            use sha2::{Digest, Sha256};
+            let mut bound = Sha256::new();
+            bound.update(b"sceneworks-saved-quantization-source-v1\0");
+            bound.update(key.digest().as_bytes());
+            bound.update(b"\0");
+            bound.update(source.as_bytes());
+            format!("{:x}", bound.finalize())
+        }
+    };
     // The store uses 40-hex revisions; retain the rest in the variant so all 256 key bits
     // still participate in the immutable artifact identity.
-    let variant = format!("{extension}-{}", &key.digest()[40..]);
+    let variant = format!("{extension}-{}", &digest[40..]);
     let identity = ArtifactIdentity::pinned(
         "sceneworks-weight-quantization/projection",
-        &key.digest()[..40],
+        &digest[..40],
         variant,
     )
     .map_err(error)?;
@@ -122,7 +147,7 @@ impl SavedQuantizations {
         };
         let resolver =
             ModelArtifactResolver::new(ArtifactSourceLibrary::new(source_root).map_err(error)?);
-        let (plan, filename) = artifact_plan(key)?;
+        let (plan, filename) = artifact_plan(key, self.source_digest.as_deref())?;
         let cache_key = plan.cache_key().map_err(error)?;
         let deadline = Instant::now() + wait_timeout;
         loop {
@@ -203,7 +228,7 @@ impl QuantizationArtifactCache for SavedQuantizations {
         let Some(store) = store else {
             return Ok(false);
         };
-        let (plan, _) = artifact_plan(key)?;
+        let (plan, _) = artifact_plan(key, self.source_digest.as_deref())?;
         let cache_key = plan.cache_key().map_err(error)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -351,7 +376,7 @@ mod tests {
         assert_eq!(std::fs::read(artifact.path()).unwrap(), b"packed");
         assert_eq!(cache.counts(), (0, 1));
 
-        let (plan, filename) = artifact_plan(&key).unwrap();
+        let (plan, filename) = artifact_plan(&key, None).unwrap();
         let metadata = ResolvedCacheStore::open(data.path())
             .unwrap()
             .lookup_complete(&plan.cache_key().unwrap())
@@ -369,6 +394,57 @@ mod tests {
         assert_eq!(files[0].size_bytes, Some(6), "size still feeds retention");
         assert_eq!(files[0].sha256, None, "no digest is computed or recorded");
     }
+    /// Loaders key a checkpoint tensor by its file path, and a local original is served in place
+    /// at a path that does not name its bytes. A saved weight bound to the admitted source digest
+    /// is reused for those bytes at that path and never for different bytes found there later.
+    ///
+    /// *Mutation that reds this:* ignore `source_digest` in `artifact_plan`.
+    #[test]
+    fn saved_weights_bound_to_a_source_digest_never_serve_other_bytes_at_the_same_path() {
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let cache = |digest: &str| {
+            SavedQuantizations::new(
+                data.path(),
+                source.path().to_owned(),
+                "model".into(),
+                "managed/model".into(),
+            )
+            .with_source_digest(Some(digest.to_owned()))
+        };
+        let key = QuantizationArtifactKey::new("path-identity-v1", &[4], b"/imports/m", "ggml");
+        let first = cache("sha256:aa");
+        drop(
+            first
+                .materialize(&key, &mut |path| {
+                    std::fs::write(path, b"packed-a")?;
+                    Ok(())
+                })
+                .unwrap(),
+        );
+        let same = cache("sha256:aa");
+        let reused = same
+            .materialize(&key, &mut |_| {
+                panic!("the same admitted bytes reuse their weight")
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(reused.path()).unwrap(), b"packed-a");
+        assert_eq!(same.counts(), (1, 0));
+        let replaced = cache("sha256:bb");
+        let repacked = replaced
+            .materialize(&key, &mut |path| {
+                std::fs::write(path, b"packed-b")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(repacked.path()).unwrap(), b"packed-b");
+        assert_eq!(
+            replaced.counts(),
+            (0, 1),
+            "other bytes at the path quantize again"
+        );
+    }
+
     #[test]
     fn unreadable_runtime_weights_can_be_invalidated_after_the_loader_releases_its_lease() {
         let data = tempfile::tempdir().unwrap();
