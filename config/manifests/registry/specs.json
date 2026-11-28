@@ -46497,7 +46497,7 @@
         "families": [],
         "types": []
       },
-      "name": "PiD 1.5 Decoder (FLUX.1 / Boogu / Chroma / Z-Image)",
+      "name": "PiD 1.5 Decoder (FLUX.1 / Chroma / Z-Image)",
       "nonCommercial": true,
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/pid-flux"
@@ -46517,8 +46517,8 @@
       },
       "type": "utility",
       "ui": {
-        "description": "Optional pixel-diffusion decoder that replaces the VAE for the FLUX.1 latent space (FLUX.1, Boogu-Image, Chroma, Z-Image), decoding straight to 4x-larger (2K/4K) pixels with detail synthesis. NON-COMMERCIAL: research/evaluation use only — the restriction applies to images decoded with PiD.",
-        "label": "PiD Decoder (FLUX.1 / Boogu / Chroma / Z-Image)",
+        "description": "Optional pixel-diffusion decoder that replaces the VAE for the FLUX.1 latent space (FLUX.1, Chroma, Z-Image), decoding straight to 4x-larger (2K/4K) pixels with detail synthesis. NON-COMMERCIAL: research/evaluation use only — the restriction applies to images decoded with PiD.",
+        "label": "PiD Decoder (FLUX.1 / Chroma / Z-Image)",
         "promptGuide": {
           "path": "/prompt-guides/pid.md",
           "sources": [
@@ -46575,7 +46575,7 @@
         "families": [],
         "types": []
       },
-      "name": "PiD 1.5 Decoder (FLUX.2 / Lens / Ideogram 4)",
+      "name": "PiD 1.5 Decoder (FLUX.2 / Ideogram 4)",
       "nonCommercial": true,
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/pid-flux2"
@@ -46595,8 +46595,8 @@
       },
       "type": "utility",
       "ui": {
-        "description": "Optional pixel-diffusion decoder that replaces the VAE for the FLUX.2 latent space (FLUX.2-dev, FLUX.2-klein, Lens, Ideogram 4), decoding straight to 4x-larger (2K/4K) pixels with detail synthesis. NON-COMMERCIAL: research/evaluation use only — the restriction applies to images decoded with PiD.",
-        "label": "PiD Decoder (FLUX.2 / Lens / Ideogram 4)",
+        "description": "Optional pixel-diffusion decoder that replaces the VAE for the FLUX.2 latent space (FLUX.2-dev, FLUX.2-klein, Ideogram 4), decoding straight to 4x-larger (2K/4K) pixels with detail synthesis. NON-COMMERCIAL: research/evaluation use only — the restriction applies to images decoded with PiD.",
+        "label": "PiD Decoder (FLUX.2 / Ideogram 4)",
         "promptGuide": {
           "path": "/prompt-guides/pid.md",
           "sources": [

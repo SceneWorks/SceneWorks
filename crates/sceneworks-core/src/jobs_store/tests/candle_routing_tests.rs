@@ -5144,18 +5144,20 @@ fn quant_message_split_did_not_move_the_routing_decision() {
     }
 }
 
-/// A user LoRA on a candle family with no adapter lane is its own cause — not a "conditioned
-/// shape". `boogu_image` is quant-capable but adapter-less (`CANDLE_QUANT_MODELS`, not the
-/// quant+LoRA set), so the adapter half of the gate alone refuses it.
+/// A user LoRA has its own refusal on SenseNova-U1, whose Candle lane supports packed tiers
+/// and has no inference adapter route.
 #[test]
 fn lora_on_a_candle_family_with_no_adapter_lane_is_named_separately() {
     let job = image_generate_job(json!({
         "projectId": "project_1",
-        "model": "boogu_image",
+        "model": "sensenova_u1_8b",
         "prompt": "a red fox",
         "mode": "text_to_image",
         "loras": [{ "id": "lora_1", "scale": 0.8 }]
     }));
+    let mut plain = job.clone();
+    plain.payload.remove("loras");
+    assert!(image_job_is_candle_eligible(&plain));
     assert!(
         !image_job_is_candle_eligible(&job),
         "routing is unchanged: an adapter-less family still refuses a LoRA"
@@ -5174,6 +5176,21 @@ fn lora_on_a_candle_family_with_no_adapter_lane_is_named_separately() {
         !message.contains("quant tier"),
         "the message must not blame a quant tier the payload never asked for: {message}"
     );
+}
+
+#[test]
+fn retired_image_models_have_no_backend_port_recommendation() {
+    for model in ["boogu_image", "lens_turbo", "mage_flow_edit"] {
+        let job = image_generate_job(json!({ "model": model, "prompt": "a red fox" }));
+        let expected = crate::model_family::retired_image_detail(model).unwrap();
+        for result in [candle_supported(&job), mac_rust_supported(&job)] {
+            let reason = result.expect_err("retired models cannot be routed");
+            assert_eq!(reason.model.as_deref(), Some(model));
+            assert_eq!(reason.feature, "retired model");
+            assert_eq!(reason.detail, expected);
+            assert!(reason.suggested_epic.is_none());
+        }
+    }
 }
 
 /// An edit/inpaint carrier on a family with no candle edit lane keeps a conditioning-flavored
@@ -5469,10 +5486,10 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
         }))
     ));
 
-    // `boogu_image` is the mirror family — quant-capable, adapter-less — so its peel is what pins
-    // the user-LoRA check's position between the carrier check and the pose check.
+    // SenseNova-U1 is quant-capable and has no adapter lane. It pins the LoRA check between the
+    // carrier and pose checks.
     let (feature, _) = candle_gap(
-        "boogu_image",
+        "sensenova_u1_8b",
         json!({
             "prompt": "p",
             "mode": "text_to_image",
@@ -5483,7 +5500,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
     );
     assert!(feature.contains("conditioning carrier"), "{feature}");
     let (feature, _) = candle_gap(
-        "boogu_image",
+        "sensenova_u1_8b",
         json!({
             "prompt": "p",
             "mode": "text_to_image",
@@ -5493,7 +5510,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
     );
     assert!(feature.contains("LoRA"), "{feature}");
     let (feature, _) = candle_gap(
-        "boogu_image",
+        "sensenova_u1_8b",
         json!({
             "prompt": "p",
             "mode": "text_to_image",
