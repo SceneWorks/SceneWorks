@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 it("offers exact replay for a completed image job and explains a typed refusal", async () => {
-  const job = { id: "render-one", type: "image_generate", status: "completed" };
+  const job = { id: "render-one", type: "image_generate", status: "completed", exactReplay: { supported: true } };
   const onExactReplay = vi.fn(async () => ({
     code: "replay_unavailable", context: { reason: "deterministic_replay_unavailable" },
   }));
@@ -30,6 +30,43 @@ it("offers exact replay for a completed image job and explains a typed refusal",
   expect(onExactReplay).toHaveBeenCalledWith(job);
   expect(element.querySelector('[role="alert"]').textContent)
     .toBe("The provider has not verified exact replay for this run.");
+});
+
+it.each([
+  [undefined, "Exact replay support is unavailable for this job. Use Duplicate to generate again."],
+  [{ supported: false, reason: "receipt_missing" }, "This job has no complete execution receipt."],
+  [{ supported: false, reason: "execution_unavailable" }, "This run did not record the execution details required for exact replay. Use Duplicate to generate again."],
+  [{ supported: false, reason: "deterministic_replay_unavailable" }, "The provider has not verified exact replay for this run."],
+])("disables replay when recorded support is unavailable (%j)", (exactReplay, explanation) => {
+  const onExactReplay = vi.fn();
+  const element = render(<ExactReplayAction job={{
+    id: "unsupported", type: "image_generate", status: "completed", exactReplay,
+  }} onExactReplay={onExactReplay} />);
+  const button = element.querySelector("button");
+  expect(button.disabled).toBe(true);
+  expect(button.title).toBe(explanation);
+  button.click();
+  expect(onExactReplay).not.toHaveBeenCalled();
+});
+
+it("queues supported replay once while pending and permits retry after a host refusal", async () => {
+  let finish;
+  const onExactReplay = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+  const element = render(<ExactReplayAction job={{
+    id: "supported", type: "image_edit", status: "completed", exactReplay: { supported: true },
+  }} onExactReplay={onExactReplay} />);
+  act(() => element.querySelector("button").click());
+  expect(element.querySelector("button").disabled).toBe(true);
+  expect(element.querySelector("button").textContent).toBe("Queuing replay…");
+  act(() => element.querySelector("button").click());
+  expect(onExactReplay).toHaveBeenCalledTimes(1);
+  await act(async () => finish({ code: "replay_unavailable", context: { reason: "device_unavailable" } }));
+  expect(element.querySelector('[role="alert"]').textContent).toBe("The original worker is unavailable.");
+  expect(element.querySelector("button").disabled).toBe(false);
+  onExactReplay.mockResolvedValueOnce({ id: "new-replay", status: "queued" });
+  await act(async () => element.querySelector("button").click());
+  expect(onExactReplay).toHaveBeenCalledTimes(2);
+  expect(element.querySelector('[role="alert"]')).toBeNull();
 });
 
 it("shows a persisted refusal without offering replay on a failed job", () => {

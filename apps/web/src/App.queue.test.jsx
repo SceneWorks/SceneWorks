@@ -1060,4 +1060,25 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("20.0 GiB");
   });
 
+  it("keeps replay actions and refusals inside their job cards and gates unsupported history", async () => {
+    root = createRoot(container);
+    const supported = { id: "can-replay", type: "image_generate", status: "completed", payload: {}, exactReplay: { supported: true } };
+    const unsupported = { ...supported, id: "cannot-replay", exactReplay: { supported: false, reason: "execution_unavailable" } };
+    const jobAction = vi.fn(async () => ({ code: "replay_unavailable", context: { reason: "device_unavailable" } }));
+    await act(async () => root.render(withAppContext({
+      filteredJobs: [supported, unsupported], gpuOptions: ["auto"], projects: [],
+      requestedGpu: "auto", projectFilter: "all", visibleWorkers: [], jobAction,
+    }, <QueueScreen />)));
+    const cards = [...container.querySelectorAll(".worker-progress-card")];
+    expect(cards).toHaveLength(2);
+    const [replay, disabledReplay] = cards.map((card) => [...card.querySelectorAll("button")].find((button) => button.textContent === "Exact replay"));
+    expect(replay.closest(".worker-progress-card__actions")).not.toBeNull();
+    expect(replay.disabled).toBe(false);
+    expect(disabledReplay.disabled).toBe(true);
+    expect(disabledReplay.title).toContain("Use Duplicate to generate again.");
+    await act(async () => replay.click());
+    expect(jobAction).toHaveBeenCalledWith(supported, "exact-replay");
+    expect(cards[0].querySelector('[role="alert"]').textContent).toBe("The original worker is unavailable.");
+    expect(cards[1].querySelector('[role="alert"]')).toBeNull();
+  });
 });

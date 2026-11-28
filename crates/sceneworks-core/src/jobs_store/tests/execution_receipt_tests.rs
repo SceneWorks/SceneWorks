@@ -202,6 +202,18 @@ fn legacy_completion_does_not_gain_exact_replay_from_retry_or_duplicate() {
         .completed_execution_receipt(&job.id)
         .unwrap()
         .is_none());
+    store
+        .open_connection()
+        .unwrap()
+        .execute(
+            "update jobs set type = 'image_generate' where id = ?1",
+            params![job.id],
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_job(&job.id).unwrap().extra["exactReplay"],
+        json!({"supported": false, "reason": "receipt_missing"}),
+    );
 }
 
 #[test]
@@ -320,7 +332,147 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
             ],
         )
         .unwrap();
+    let snapshot = store.get_job(&source.id).unwrap();
+    assert_eq!(snapshot.extra["exactReplay"], json!({"supported": true}));
+    let public_json = serde_json::to_string(&snapshot).unwrap();
+    assert!(!public_json.contains("acceptedSourceRoute"));
+    assert!(!public_json.contains(&expected.accepted_binding_sha256));
+    for (mutated, reason) in [
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.version = 0;
+                receipt
+            },
+            "receipt_changed",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.job_id = "another-job".into();
+                receipt
+            },
+            "receipt_changed",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.job_type = "image_edit".into();
+                receipt
+            },
+            "receipt_changed",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.execution = report(&source.id).execution;
+                receipt
+            },
+            "execution_unavailable",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.execution["identity"]["deterministic_replay"] =
+                    json!({"kind":"non_deterministic", "reason":"unverified"});
+                receipt
+            },
+            "deterministic_replay_unavailable",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.outputs[0].artifact_sha256.clear();
+                receipt
+            },
+            "output_hashes_unavailable",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.inference_revision = "old-runtime".into();
+                receipt
+            },
+            "runtime_revision_changed",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.execution["identity"]["randomness"]["draws"][0]["seed"] = json!(42);
+                receipt
+            },
+            "seed_draw_binding_changed",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.accepted_source_route = None;
+                receipt
+            },
+            "source_route_missing",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.accepted_source_route = Some(json!(true));
+                receipt
+            },
+            "source_route_changed",
+        ),
+        (
+            {
+                let mut receipt = expected.clone();
+                receipt.accepted_source_route.as_mut().unwrap()["expectedProvider"] = Value::Null;
+                receipt
+            },
+            "provider_route_unavailable",
+        ),
+    ] {
+        store
+            .open_connection()
+            .unwrap()
+            .execute(
+                "update jobs set execution_receipt_json = ?1 where id = ?2",
+                params![serde_json::to_string(&mutated).unwrap(), source.id],
+            )
+            .unwrap();
+        let listed = store.list_jobs(None, None, 100).unwrap();
+        let snapshot = listed.iter().find(|job| job.id == source.id).unwrap();
+        assert_eq!(
+            snapshot.extra["exactReplay"],
+            json!({"supported": false, "reason": reason})
+        );
+        assert!(matches!(
+            store.create_exact_replay_job(&source.id, 60),
+            Err(JobsStoreError::ReplayUnavailable(refusal)) if refusal.reason == reason
+        ));
+    }
+    store
+        .open_connection()
+        .unwrap()
+        .execute(
+            "update jobs set execution_receipt_json = ?1 where id = ?2",
+            params!["{broken receipt", source.id],
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_job(&source.id).unwrap().extra["exactReplay"],
+        json!({"supported": false, "reason": "receipt_changed"})
+    );
+    assert!(matches!(
+        store.create_exact_replay_job(&source.id, 60),
+        Err(JobsStoreError::ReplayUnavailable(refusal)) if refusal.reason == "receipt_changed"
+    ));
+    store
+        .open_connection()
+        .unwrap()
+        .execute(
+            "update jobs set execution_receipt_json = ?1 where id = ?2",
+            params![serde_json::to_string(&expected).unwrap(), source.id],
+        )
+        .unwrap();
     let replay = store.create_exact_replay_job(&source.id, 60).unwrap();
+    assert!(!replay.extra.contains_key("exactReplay"));
     assert_ne!(replay.id, source.id);
     assert_eq!(replay.status, JobStatus::Queued);
     assert_eq!(replay.requested_gpu, "mlx");
