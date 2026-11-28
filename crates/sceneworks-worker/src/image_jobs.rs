@@ -1110,13 +1110,16 @@ async fn run_image_generate_job_unexplained(
         .try_with(|capability| capability.is_some())
         .unwrap_or(false)
     {
-        let receipt_root = project_path.clone();
+        let receipt_store = ProjectStore::new(settings.data_dir.clone(), "worker");
+        let receipt_project_id = request.project_id.clone();
         let receipt_writes = asset_writes.clone();
         // Inline upscale adds an asset to each logical output while preserving its base index.
         let receipt_count = (plan.image_count / upscale_mult) as usize;
         Some(
             crate::load_progress::spawn_blocking(move || {
-                image_execution_receipt(&receipt_root, &receipt_writes, receipt_count)
+                image_execution_receipt(&receipt_writes, receipt_count, |id, relative| {
+                    Ok(receipt_store.generated_asset_sha256(&receipt_project_id, id, relative)?)
+                })
             })
             .await
             .map_err(|error| crate::task_join_error("completed image receipt", error))??,
@@ -1229,14 +1232,12 @@ pub(crate) fn extract_low_res_start_receipt_value(
 /// belongs to the asset's producing render; request settings and sidecars never
 /// stand in for engine observations.
 fn image_execution_receipt(
-    project_path: &Path,
     asset_writes: &[Value],
     image_count: usize,
+    hash_artifact: impl Fn(&str, &str) -> WorkerResult<String>,
 ) -> WorkerResult<sceneworks_core::execution_receipt::WorkerExecutionReceipt> {
     use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
-    use std::io::Read;
 
-    let project_root = project_path.canonicalize()?;
     let mut outputs = (0..image_count)
         .map(|output_index| OutputExecutionBinding {
             output_index,
@@ -1266,26 +1267,10 @@ fn image_execution_receipt(
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("completed image asset has no media path".into())
             })?;
-        let path = project_root.join(relative).canonicalize()?;
-        if !path.starts_with(&project_root) || !path.is_file() {
-            return Err(WorkerError::InvalidPayload(
-                "completed image asset escapes the project".into(),
-            ));
-        }
-        let mut file = std::fs::File::open(path)?;
-        let mut digest = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
         outputs[output_index].artifact_ids.push(id.to_owned());
         outputs[output_index]
             .artifact_sha256
-            .push(sceneworks_core::hashing::hex(&digest.finalize()));
+            .push(hash_artifact(id, relative)?);
         if let Some(report) = fact.get("workerExecutionReport") {
             let slot = &mut outputs[output_index].execution;
             if slot.as_ref().is_some_and(|previous| previous != report) {
@@ -1390,6 +1375,18 @@ fn image_execution_receipt(
 }
 
 #[cfg(test)]
+fn fixture_image_execution_receipt(
+    project_path: &Path,
+    facts: &[Value],
+    count: usize,
+) -> WorkerResult<sceneworks_core::execution_receipt::WorkerExecutionReceipt> {
+    image_execution_receipt(facts, count, |_, relative| {
+        let path = sceneworks_core::safe_path::resolve_local_file(project_path, relative)?;
+        Ok(sceneworks_core::hashing::sha256_file(&path)?)
+    })
+}
+
+#[cfg(test)]
 #[test]
 fn checkpoint_prompt_batch_total_preserves_recipe_count_and_completes_receipt() {
     let project = tempfile::tempdir().unwrap();
@@ -1451,7 +1448,7 @@ fn checkpoint_prompt_batch_total_preserves_recipe_count_and_completes_receipt() 
         assert_eq!(share.count, Some(2));
         facts.push(Value::Object(fact));
     }
-    let receipt = image_execution_receipt(project.path(), &facts, total as usize).unwrap();
+    let receipt = fixture_image_execution_receipt(project.path(), &facts, total as usize).unwrap();
     assert_eq!(receipt.outputs.len(), 4);
     assert_eq!(receipt.outputs[3].output_index, 3);
     let result = serde_json::json!({"expectedCount":total,"assetWrites":facts});
@@ -1460,6 +1457,65 @@ fn checkpoint_prompt_batch_total_preserves_recipe_count_and_completes_receipt() 
         result.as_object().unwrap(),
     )
     .unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn completed_image_receipt_includes_variation_discarded_during_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(temp.path().join("data"), "test");
+    let project = store.create_project("Discard during generation").unwrap();
+    let root = Path::new(&project.path);
+    std::fs::create_dir_all(root.join("assets/images/set")).unwrap();
+    let mut facts = Vec::new();
+    for index in 0..4 {
+        let id = format!("variation-{index}");
+        let relative = format!("assets/images/set/{id}.png");
+        std::fs::write(root.join(&relative), format!("rendered variation {index}")).unwrap();
+        let fact = serde_json::json!({
+            "assetId":id, "index":index, "mediaPath":relative, "mimeType":"image/png",
+            "displayName":id, "model":"test", "prompt":"test",
+            "createdAt":"2026-11-28T00:00:00Z"
+        });
+        facts.push(fact);
+        // Each subsequent progress report repeats all previously published variations.
+        for reported in &facts {
+            store
+                .persist_generated_asset(&project.id, "job", "set", reported)
+                .unwrap();
+        }
+        if index == 0 {
+            store.delete_asset(&project.id, &id).unwrap();
+        }
+    }
+    let receipt = image_execution_receipt(&facts, 4, |id, relative| {
+        Ok(store.generated_asset_sha256(&project.id, id, relative)?)
+    })
+    .unwrap();
+    assert_eq!(receipt.outputs.len(), 4);
+    for (index, output) in receipt.outputs.iter().enumerate() {
+        assert_eq!(output.artifact_ids, [format!("variation-{index}")]);
+        assert_eq!(
+            output.artifact_sha256,
+            [sceneworks_core::hashing::sha256_bytes(
+                format!("rendered variation {index}").as_bytes()
+            )]
+        );
+    }
+    sceneworks_core::execution_receipt::validate_worker_receipt(
+        &receipt,
+        serde_json::json!({"expectedCount":4,"assetWrites":facts})
+            .as_object()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        store.get_asset(&project.id, "variation-0").unwrap()["status"]["trashed"],
+        true
+    );
+    assert!(!root
+        .join("assets/images/set/variation-0.sceneworks.json")
+        .exists());
 }
 
 #[cfg(test)]
@@ -1477,7 +1533,7 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
     let facts = vec![serde_json::json!({
         "assetId":"asset-one", "index":0, "mediaPath":"assets/images/render.png"
     })];
-    let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+    let receipt = fixture_image_execution_receipt(project.path(), &facts, 1).unwrap();
     assert_eq!(receipt.outputs[0].artifact_ids, ["asset-one"]);
     assert_eq!(
         receipt.outputs[0].artifact_sha256[0],
@@ -1487,7 +1543,7 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
     let escaped = vec![serde_json::json!({
         "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
     })];
-    assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
+    assert!(fixture_image_execution_receipt(project.path(), &escaped, 1).is_err());
 
     // End-to-end receipt test using actual lane-produced lowResStartExecutionReport facts:
     let mut lane_facts = crate::JsonObject::new();
@@ -1542,9 +1598,12 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
             }),
         );
     }
-    let low_res_receipt =
-        image_execution_receipt(project.path(), &[serde_json::Value::Object(lane_facts)], 1)
-            .unwrap();
+    let low_res_receipt = fixture_image_execution_receipt(
+        project.path(),
+        &[serde_json::Value::Object(lane_facts)],
+        1,
+    )
+    .unwrap();
     let recorded_low_res = low_res_receipt
         .low_res_start
         .clone()
@@ -1614,7 +1673,7 @@ fn inline_upscale_receipt_orders_base_and_child_reports_with_both_png_hashes() {
         serde_json::json!({"assetId":"child","index":0,"mediaPath":"child.png","sourceAssetId":"base",
             "workerExecutionReport":base,"workerChildExecutionReport":child}),
     ];
-    let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+    let receipt = fixture_image_execution_receipt(project.path(), &facts, 1).unwrap();
     assert_eq!(receipt.outputs[0].artifact_ids, ["base", "child"]);
     assert_eq!(receipt.outputs[0].stages[0].stage, "base_render");
     assert_eq!(receipt.outputs[0].stages[1].stage, "child_transform");
@@ -1682,7 +1741,7 @@ fn image_receipt_binds_restored_and_hires_stages_to_final_outputs() {
         serde_json::json!({"assetId":"restored","index":1,"mediaPath":"restored.png","workerExecutionReport":report,"workerExecutionStages":restored_stages}),
         serde_json::json!({"assetId":"hires","index":2,"mediaPath":"hires.png","workerExecutionReport":report,"workerExecutionStages":hires_stages}),
     ];
-    let receipt = image_execution_receipt(project.path(), &facts, 3).unwrap();
+    let receipt = fixture_image_execution_receipt(project.path(), &facts, 3).unwrap();
     assert!(receipt.outputs[0].stages.is_empty());
     assert_eq!(receipt.outputs[1].stages[0].stage, "angle");
     assert_eq!(receipt.outputs[1].stages[1].stage, "restore_face");
@@ -1754,7 +1813,7 @@ fn image_receipt_appends_child_after_inline_base_stages() {
                 "sourceAssetId":"base","workerExecutionReport":base,
                 "workerChildExecutionReport":child}),
         ];
-        let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+        let receipt = fixture_image_execution_receipt(project.path(), &facts, 1).unwrap();
         assert_eq!(receipt.outputs[0].stages.len(), 3);
         assert_eq!(receipt.outputs[0].stages[2].stage, "child_transform");
         let result = serde_json::json!({"expectedCount":2,"assetWrites":facts});
@@ -1791,7 +1850,7 @@ fn completed_image_receipt_keeps_reports_with_their_outputs() {
         serde_json::json!({"assetId":"second", "index":1, "mediaPath":"second.png", "workerExecutionReport":reports[1]}),
         serde_json::json!({"assetId":"first", "index":0, "mediaPath":"first.png", "workerExecutionReport":reports[0]}),
     ];
-    let receipt = image_execution_receipt(project.path(), &facts, 2).unwrap();
+    let receipt = fixture_image_execution_receipt(project.path(), &facts, 2).unwrap();
     assert_eq!(receipt.outputs[0].artifact_ids, ["first"]);
     assert_eq!(receipt.outputs[1].artifact_ids, ["second"]);
     assert_eq!(receipt.outputs[0].execution, Some(reports[0].clone()));
@@ -1802,7 +1861,7 @@ fn completed_image_receipt_keeps_reports_with_their_outputs() {
         serde_json::json!({"assetId":"second", "index":1, "mediaPath":"second.png", "workerExecutionReport":batch_report}),
         serde_json::json!({"assetId":"first", "index":0, "mediaPath":"first.png", "workerExecutionReport":batch_report}),
     ];
-    let batch = image_execution_receipt(project.path(), &batch_facts, 2).unwrap();
+    let batch = fixture_image_execution_receipt(project.path(), &batch_facts, 2).unwrap();
     assert_eq!(batch.execution, batch_report);
     assert!(batch
         .outputs

@@ -1170,6 +1170,77 @@ fn build_image_sidecar_carries_face_likeness_when_present_and_omits_when_absent(
     );
 }
 
+#[test]
+fn generated_asset_replay_preserves_discarded_and_restored_outputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(temp.path().join("data"), "test");
+    let project = store.create_project("Discard during batch").unwrap();
+    let root = Path::new(&project.path);
+    let relative = "assets/images/set/first.png";
+    let media = root.join(relative);
+    std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+    std::fs::write(&media, b"first variation").unwrap();
+    let digest = crate::hashing::sha256_file(&media).unwrap();
+    let fact = json!({
+        "assetId":"first", "mediaPath":relative, "mimeType":"image/png",
+        "displayName":"First", "model":"test", "prompt":"test",
+        "createdAt":"2026-11-28T00:00:00Z"
+    });
+    // A final output may not have a sidecar until its terminal progress report.
+    assert_eq!(
+        store
+            .generated_asset_sha256(&project.id, "first", relative)
+            .unwrap(),
+        digest
+    );
+    store
+        .persist_generated_asset(&project.id, "job", "set", &fact)
+        .unwrap();
+    store.delete_asset(&project.id, "first").unwrap();
+    let trash = store.get_asset(&project.id, "first").unwrap();
+    assert_eq!(trash["status"]["trashed"], true);
+    assert!(!media.exists());
+    for restored in [false, true] {
+        if restored {
+            store
+                .update_asset_status(
+                    &project.id,
+                    "first",
+                    AssetStatusPatch {
+                        trashed: Some(false),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let replay = store
+            .persist_generated_asset(&project.id, "job", "set", &fact)
+            .unwrap();
+        assert_eq!(replay["status"]["trashed"], !restored);
+        assert_eq!(replay["file"]["path"], trash["file"]["path"]);
+        assert_eq!(
+            store
+                .generated_asset_sha256(&project.id, "first", relative)
+                .unwrap(),
+            digest
+        );
+        assert!(!media.with_extension("sceneworks.json").exists());
+        assert_eq!(
+            store.get_asset(&project.id, "first").unwrap()["status"]["trashed"],
+            !restored
+        );
+    }
+    assert!(store
+        .generated_asset_sha256(&project.id, "../first", relative)
+        .is_err());
+    assert!(store
+        .generated_asset_sha256(&project.id, "first", "../escape.png")
+        .is_err());
+    assert!(store
+        .generated_asset_sha256(&project.id, "missing", "assets/images/missing.png")
+        .is_err());
+}
+
 /// sc-5721 (CORE-002→F): `persist_generated_asset` joins the worker-supplied
 /// `mediaPath` into the project tree and `create_dir_all`/`write`s a sidecar there,
 /// so a traversal or absolute path must be rejected before any filesystem write —
