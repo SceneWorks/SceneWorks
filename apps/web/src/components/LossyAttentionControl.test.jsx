@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { LOSSY_ATTENTION_TOOLTIP, LossyAttentionControl } from "./LossyAttentionControl.jsx";
 import AttentionExecutionNote from "./AttentionExecutionNote.jsx";
-import { lossyAttentionDefaults, lossyAttentionFromRecipe } from "../lossyAttention.js";
+import { lossyAttentionDefaults, lossyAttentionFromRecipe, lossyAttentionPreference, resolveLossyAttention } from "../lossyAttention.js";
 
 const BOTH = { id: "krea2", lossyAttention: { int8: { served: true }, sol: { served: true } } };
 const INT8_ONLY = {
@@ -111,5 +111,17 @@ describe("LossyAttentionControl (SW-6132)", () => {
     // A sticky preference on MLX stays hidden.
     render({ backend: "mlx", value: { ...lossyAttentionDefaults(), enabled: true } });
     expect(container.querySelector(".lossy-attention-control")).toBeNull();
+  });
+
+  it("shows exactly what a reloaded two-kernel replay will send", () => {
+    const reloaded = lossyAttentionPreference(lossyAttentionFromRecipe({ int8: {}, sol: { tau: 1 } }));
+    for (const model of [BOTH, INT8_ONLY]) {
+      render({ model, value: reloaded });
+      const select = container.querySelector('select[aria-label="Lossy attention kernel"]');
+      expect(select.value).toBe("int8");
+      expect([...select.options].map((option) => option.value)).not.toContain("both");
+      expect(container.querySelector('input[aria-label="Sol-Attn top-k ratio"]')).toBeNull();
+      expect(Object.keys(resolveLossyAttention({ backend: "candle", model, options: reloaded }).block)).toEqual([select.value]);
+    }
   });
 });

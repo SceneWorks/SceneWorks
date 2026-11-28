@@ -3,8 +3,8 @@ import {
   DEFAULT_SOL_TOPK_RATIO,
   lossyAttentionAvailable,
   lossyAttentionDefaults,
+  effectiveLossyKernels,
   lossyAttentionReplayBlocked,
-  selectedLossyKernels,
   servedLossyKernels,
 } from "../lossyAttention.js";
 
@@ -50,8 +50,8 @@ export function LossyAttentionControl({ backend, model, value, onChange, error }
   // A replayed recipe keeps its own kernel choice (an unserved one surfaces as `error`); otherwise a
   // sticky choice from another model shows the first kernel this model serves.
   const replayedBoth = Boolean(recorded?.int8 && recorded?.sol);
-  const kernel = recorded || served.includes(state.kernel) ? state.kernel : served[0];
-  const kernels = selectedLossyKernels({ kernel });
+  // The same effective selection the request resolver sends (`effectiveLossyKernels`).
+  const { kernel, kernels } = effectiveLossyKernels(state, served);
   const update = (patch) => onChange({ ...state, kernel, ...patch });
   const options = [...served, ...(replayedBoth && served.length > 1 ? ["both"] : [])];
   const tau = recorded?.sol && "tau" in recorded.sol ? recorded.sol.tau : null;

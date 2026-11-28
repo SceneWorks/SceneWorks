@@ -66,6 +66,42 @@ export function selectedLossyKernels(state) {
 }
 
 /**
+ * The ONE effective selection, shared by the control's display and the request resolver, so what is
+ * shown is exactly what is sent (Codex P2 on #3538). A replayed recipe (`recorded`) keeps its own
+ * kernels — both when it used both; a kernel this model cannot take is the resolver's error. A
+ * preference (no `recorded`) is always a single kernel this model serves: its own when served,
+ * else the first served (INT8, the recommended one); a stray `"both"` is never a preference.
+ * Returns `{ kernels, kernel }`, `kernel` being the control's value (`"both"` for two).
+ */
+export function effectiveLossyKernels(state, served) {
+  const recorded = state.recorded && typeof state.recorded === "object" ? state.recorded : null;
+  if (recorded) {
+    const kernels = selectedLossyKernels(state);
+    return { kernels, kernel: kernels.length > 1 ? "both" : kernels[0] };
+  }
+  const kernel = LOSSY_KERNELS.includes(state.kernel) && served.includes(state.kernel) ? state.kernel : served[0];
+  return { kernels: kernel ? [kernel] : [], kernel };
+}
+
+/**
+ * The persisted studio setting as a PREFERENCE: no replayed `recorded` block, and a single kernel
+ * (`"both"` exists only while a two-kernel recipe is being replayed). Applied on load, so an older
+ * persisted value — `kernel: "both"`, a stale `recorded` — cannot act as a replay or send a kernel
+ * the control does not show.
+ */
+export function lossyAttentionPreference(saved) {
+  const defaults = lossyAttentionDefaults();
+  const state = { ...defaults, ...(saved && typeof saved === "object" ? saved : {}) };
+  return {
+    enabled: Boolean(state.enabled),
+    kernel: LOSSY_KERNELS.includes(state.kernel) ? state.kernel : defaults.kernel,
+    pvPrecision: state.pvPrecision === "int8" ? "int8" : "value_dtype",
+    topkRatio: validSolTopkRatio(state.topkRatio) ?? defaults.topkRatio,
+    recorded: null,
+  };
+}
+
+/**
  * Why a replayed recipe's lossy attention cannot run here: an MLX (non-CUDA) backend, or a model
  * (or no model) whose attention takes neither kernel. Turning the control off runs it exactly.
  */
@@ -100,8 +136,7 @@ export function resolveLossyAttention({ backend, model, options }) {
     return { block: null, error: recorded ? lossyAttentionReplayBlockedError(backend) : null };
   }
   const served = servedLossyKernels(model);
-  let kernels = selectedLossyKernels(state);
-  if (!recorded && !served.includes(kernels[0])) kernels = [served[0]];
+  const { kernels } = effectiveLossyKernels(state, served);
   const unserved = kernels.filter((kernel) => !served.includes(kernel));
   if (unserved.length) {
     return {

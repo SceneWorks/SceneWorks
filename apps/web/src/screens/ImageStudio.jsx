@@ -188,7 +188,7 @@ import { availableUpscaleEngines as upscaleEnginesForPlatform, upscaleEngineIsRe
 import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders } from "../irisRestore.js";
 
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
-import { lossyAttentionDefaults, resolveLossyAttention } from "../lossyAttention.js";
+import { lossyAttentionPreference, resolveLossyAttention } from "../lossyAttention.js";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
 import { batchClipNotice, fitPromptToLimit, imagePromptCharLimit } from "../imagePromptLimit.js";
 import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
@@ -631,13 +631,10 @@ export function ImageStudio() {
   const [flashAttn, setFlashAttn] = useState(saved.flashAttn ?? true);
   // SW-6132: per-job opt-in for the lossy CUDA attention kernels (INT8 QK / Sol-Attn). Off by
   // default; offered only on candle for a model whose catalog entry advertises `lossyAttention`.
-  // A persisted setting is a sticky preference, never a replayed recipe: its `recorded` block is
-  // dropped so it cannot block submission on a backend or model that does not offer the control.
-  const [lossyAttention, setLossyAttention] = useState(() => ({
-    ...lossyAttentionDefaults(),
-    ...saved.lossyAttention,
-    recorded: null,
-  }));
+  // A persisted setting is a sticky preference, never a replayed recipe (`lossyAttentionPreference`):
+  // its `recorded` block is dropped and an old `kernel: "both"` becomes one kernel, so it can neither
+  // block submission where the control is not offered nor send a kernel the control does not show.
+  const [lossyAttention, setLossyAttention] = useState(() => lossyAttentionPreference(saved.lossyAttention));
   // FLUX.2-dev "Enhance prompt" (sc-6135): the model's built-in Mistral3 caption upsampler rewrites
   // the prompt before encoding — text-only for txt2img, reference-aware for edit. Per-payload
   // (`advanced.enhancePrompt`); only flux2_dev acts on it. Sticky pref (persisted), default off.

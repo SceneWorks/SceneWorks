@@ -4,7 +4,9 @@ import {
   attentionExecutionSummary,
   lossyAttentionAvailable,
   lossyAttentionDefaults,
+  effectiveLossyKernels,
   lossyAttentionFromRecipe,
+  lossyAttentionPreference,
   resolveLossyAttention,
   servedLossyKernels,
 } from "./lossyAttention.js";
@@ -165,5 +167,44 @@ describe("lossy attention opt-in (SW-6132)", () => {
     expect(resolveLossyAttention({ backend: "candle", model: BOTH, options: replay }).block).toEqual({
       int8: { kCentering: "always" },
     });
+  });
+
+  // Codex P2 on #3538: what the control shows is exactly what is sent, across replay -> persist -> reload.
+  it("sends exactly the displayed kernels after a two-kernel replay is persisted and reloaded", () => {
+    const replay = lossyAttentionFromRecipe({ int8: { kCentering: "off" }, sol: { tau: 2 } });
+    // While replaying, both kernels are shown and sent.
+    expect(effectiveLossyKernels(replay, servedLossyKernels(BOTH))).toEqual({ kernels: ["int8", "sol"], kernel: "both" });
+    expect(Object.keys(resolveLossyAttention({ backend: "candle", model: BOTH, options: replay }).block)).toEqual(["int8", "sol"]);
+    // The studio persists that state; a reload turns it into a single-kernel preference.
+    const reloaded = lossyAttentionPreference(JSON.parse(JSON.stringify(replay)));
+    expect(reloaded).toMatchObject({ enabled: true, kernel: "int8", recorded: null });
+    const shown = effectiveLossyKernels(reloaded, servedLossyKernels(BOTH));
+    const sent = resolveLossyAttention({ backend: "candle", model: BOTH, options: reloaded });
+    expect(shown).toEqual({ kernels: ["int8"], kernel: "int8" });
+    expect(sent).toEqual({ block: { int8: {} }, error: null });
+    expect(Object.keys(sent.block)).toEqual(shown.kernels);
+  });
+
+  it("normalizes an old persisted kernel: both into one coherent, unblocked kernel", () => {
+    const persisted = lossyAttentionPreference({ enabled: true, kernel: "both", topkRatio: 0.3 });
+    expect(persisted.kernel).toBe("int8");
+    for (const model of [BOTH, INT8_ONLY]) {
+      const shown = effectiveLossyKernels(persisted, servedLossyKernels(model));
+      const sent = resolveLossyAttention({ backend: "candle", model, options: persisted });
+      expect(sent.error).toBeNull();
+      expect(Object.keys(sent.block)).toEqual(shown.kernels);
+      expect(shown.kernels).toEqual(["int8"]);
+    }
+    // Even an un-normalized "both" preference (no recorded recipe) is one served kernel, never two.
+    const raw = { ...lossyAttentionDefaults(), enabled: true, kernel: "both" };
+    expect(effectiveLossyKernels(raw, servedLossyKernels(INT8_ONLY))).toEqual({ kernels: ["int8"], kernel: "int8" });
+    expect(resolveLossyAttention({ backend: "candle", model: INT8_ONLY, options: raw })).toEqual({
+      block: { int8: {} },
+      error: null,
+    });
+    // A Sol-only preference stays Sol where it is served and falls back where it is not.
+    const sol = lossyAttentionPreference({ enabled: true, kernel: "sol", topkRatio: 0.25 });
+    expect(resolveLossyAttention({ backend: "candle", model: BOTH, options: sol }).block).toEqual({ sol: { topkRatio: 0.25 } });
+    expect(resolveLossyAttention({ backend: "candle", model: INT8_ONLY, options: sol }).block).toEqual({ int8: {} });
   });
 });
