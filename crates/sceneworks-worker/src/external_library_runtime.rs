@@ -5931,9 +5931,13 @@ mod tests {
                 Some(&route),
             )
             .unwrap();
-            assert_ne!(
-                guard.dispatch_payload()["plan"]["target"]["baseModelPath"],
-                payload["plan"]["target"]["baseModelPath"]
+            // The admitted tier verifies and the base is served from the verified original.
+            let served = guard.dispatch_payload()["plan"]["target"]["baseModelPath"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                std::fs::canonicalize(served).unwrap(),
+                std::fs::canonicalize(&model).unwrap()
             );
         }
     }
@@ -7183,6 +7187,9 @@ mod tests {
             .unwrap()
         };
 
+        // A just-written file's stamp is racy (the hash-once store re-hashes it until it is older
+        // than the timestamp granularity); an installed checkpoint is not just written.
+        settle_mtime(&install.join("imported.safetensors"));
         let original = std::fs::canonicalize(install.join("imported.safetensors")).unwrap();
         let first = attempt();
         let served = PathBuf::from(
@@ -7812,8 +7819,11 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(std::fs::read(dispatched).unwrap(), b"same adapter");
-        assert_ne!(dispatched, api_adapter.to_str().unwrap());
-        assert_ne!(dispatched, worker_adapter.to_str().unwrap());
+        // The same admitted bytes resolve in this worker's own catalog and are served there in
+        // place; the API host's path never reaches the loader.
+        let dispatched = std::fs::canonicalize(dispatched).unwrap();
+        assert_eq!(dispatched, std::fs::canonicalize(&worker_adapter).unwrap());
+        assert_ne!(dispatched, std::fs::canonicalize(&api_adapter).unwrap());
     }
 
     #[test]
