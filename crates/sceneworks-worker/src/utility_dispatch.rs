@@ -210,7 +210,8 @@ pub(crate) fn saved_quantizations(
             source,
             owner,
             checkpoint,
-        ),
+        )
+        .with_source_digest(guard.primary_source_digest().map(str::to_owned)),
     )
 }
 
