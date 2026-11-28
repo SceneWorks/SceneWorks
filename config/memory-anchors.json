@@ -11444,6 +11444,52 @@
       "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
     },
     {
+      "id": "wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+      "modelId": "wan_2_2_t2v_14b",
+      "modelFamily": "wan-video",
+      "route": "wan2_2_t2v_14b",
+      "provider": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_video",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json",
+        "sha256": "5f5246c2e66cd3acebd2f20c8dbd4dde8cf5b3f2af06b180e9b2700114c7d835",
+        "recordId": "imc-5d7b09000cf98eca0b0b",
+        "calibrationFingerprint": "sc-22736-wan2-2-t2v-a14b-candle-q4-v1",
+        "loaderClosureDigest": "7de3116697d1889d921455e545b984f89810ebb764e2638f10e3c96552c23686"
+      },
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 12015632384,
+        "denoise": 27417116672,
+        "decode": 27383562240
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 12015632384,
+        "denoise": 27417116672,
+        "decode": 27383562240
+      },
+      "overallAllocatorEnvelopeBytes": 27417116672,
+      "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+    },
+    {
       "id": "z_image:candle:bf16:base:base:z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-0b154783eee307ac1ad8",
       "modelId": "z_image",
       "modelFamily": "z-image",
@@ -13834,27 +13880,6 @@
         "envelopeBytes": null,
         "values": {
           "vramGbByTier": "38.56"
-        }
-      }
-    },
-    {
-      "id": "analytic:wan_2_2_t2v_14b:candle:q4",
-      "modelId": "wan_2_2_t2v_14b",
-      "modelFamily": "wan-video",
-      "route": "wan2_2_t2v_14b",
-      "backend": "candle",
-      "tier": "q4",
-      "basis": "manifest_tier_declaration",
-      "reason": "no retained render for this cell; the catalog manifest declares a measured per-tier envelope, which is a whole-render figure with no phase decomposition",
-      "evidence": {
-        "repo": null,
-        "revision": null,
-        "path": "config/manifests/registry/evidence.json#wan_2_2_t2v_14b/candle",
-        "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
-        "recordId": null,
-        "envelopeBytes": null,
-        "values": {
-          "vramGbByTier": "22.13"
         }
       }
     },

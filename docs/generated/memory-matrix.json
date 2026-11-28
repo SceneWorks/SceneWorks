@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:265903d777590cd25d41098f48dcc9e6b6c4e9257f5f89c14dfab5958b5f1733",
+    "sceneWorksRevision": "source-tree:ef72c107cc19c60a4fe3823fb44c119980f92aaf2143a900125c5e80375186a3",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,7 +85,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "1096845097ac63b44cd2906900fd5ad0e5f984f4bc7b4f8b28e66ab441a2bfe6"
+        "sha256": "cacd5d6879be29ae39c6cbe542109e36e7ba3e28d2a745abc12e205ab0c8dde0"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -93,7 +93,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "290dda0224242f0a57c43f72f36455ed33579b95ad76783429547d32aeee1f7d"
+        "sha256": "07c0e9acaf96bfb43b6d5aa23467e4952727a623d77f5d9061bb781fac603d3a"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -154,10 +154,10 @@
       "video": 11
     },
     "cells": 11150,
-    "publishedCells": 4036,
-    "elidedCells": 7114,
+    "publishedCells": 4038,
+    "elidedCells": 7112,
     "elidedByState": {
-      "Implemented": 1602,
+      "Implemented": 1600,
       "Missing": 5512
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -190,9 +190,9 @@
         "reason": "a utility-modality entry with its own engine memory-strategy contract (a composed, resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video matrix universe by modality, and anchored — planned, armed and closed over on both lanes"
       }
     ],
-    "anchors": 265,
-    "analyticOnlyCells": 124,
-    "anchoredCells": 4036,
+    "anchors": 266,
+    "analyticOnlyCells": 123,
+    "anchoredCells": 4038,
     "staleAnchors": 264,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -9735,6 +9735,24 @@
       },
       "source": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
       "current": false,
+      "currencyAttestation": null,
+      "cells": 2
+    },
+    {
+      "id": "wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+      "modelId": "wan_2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "provider": "wan2_2_t2v_14b",
+      "mode": "text_to_video",
+      "geometry": {
+        "width": 1280,
+        "height": 720,
+        "frames": 77,
+        "fps": null
+      },
+      "source": "docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json",
+      "current": true,
       "currencyAttestation": null,
       "cells": 2
     },
@@ -20512,11 +20530,12 @@
       "backend": "candle",
       "rung": "resident",
       "coordinates": 6,
-      "published": 0,
-      "elided": 6,
+      "published": 2,
+      "elided": 4,
       "implemented": 6,
       "states": {
-        "Implemented": 6
+        "Anchored/underived": 2,
+        "Implemented": 4
       }
     },
     {
@@ -233510,6 +233529,124 @@
       }
     },
     {
+      "id": "wan_2_2_t2v_14b:wan2_2_t2v_14b:candle:q4:text_to_video:lora:resident",
+      "modelId": "wan_2_2_t2v_14b",
+      "resolvedRoute": "wan2_2_t2v_14b",
+      "provider": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1280x720",
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x720",
+          "720x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "hardMaxDuration": 5,
+        "defaultFps": 16,
+        "fps": [
+          16
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "wan_2_2_t2v_14b:wan2_2_t2v_14b:candle:q4:text_to_video:none:resident",
+      "modelId": "wan_2_2_t2v_14b",
+      "resolvedRoute": "wan2_2_t2v_14b",
+      "provider": "wan2_2_t2v_14b",
+      "backend": "candle",
+      "tier": "q4",
+      "mode": "text_to_video",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "1280x720",
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x720",
+          "720x1280"
+        ],
+        "defaultDuration": 5,
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "hardMaxDuration": 5,
+        "defaultFps": 16,
+        "fps": [
+          16
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+        "tier": "q4",
+        "source": "config/memory-anchors.json#wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": false,
+        "underivedReason": "the source record states no (transformer variant, decoder) pipeline axes and the video law's per-token coefficients are keyed on them; this anchor validates its measured point and prices nothing beyond it"
+      },
+      "derivationDefined": true,
+      "state": "Anchored/underived",
+      "owningFamilyStory": 18826,
+      "owningModelStory": null,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#bespoke_advertised"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#wan_2_2_t2v_14b:candle:q4:base:base:sc-22736-wan2-2-t2v-a14b-candle-q4-v1:imc-5d7b09000cf98eca0b0b"
+          }
+        ]
+      }
+    },
+    {
       "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:lora:resident",
       "modelId": "wan_2_2",
       "resolvedRoute": "wan2_2_ti2v_5b",
@@ -257823,7 +257960,10 @@
       "wan_2_2:wan2_2_ti2v_5b:candle:q8:video_bridge:none:resident"
     ],
     "wan_2_2_i2v_14b": [],
-    "wan_2_2_t2v_14b": [],
+    "wan_2_2_t2v_14b": [
+      "wan_2_2_t2v_14b:wan2_2_t2v_14b:candle:q4:text_to_video:lora:resident",
+      "wan_2_2_t2v_14b:wan2_2_t2v_14b:candle:q4:text_to_video:none:resident"
+    ],
     "wan_2_2_vace_fun_14b": [],
     "z_image": [
       "z_image:z_image_control:candle:bf16:text_to_image:control:bounded_attention",

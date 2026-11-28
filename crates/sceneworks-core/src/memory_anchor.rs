@@ -1484,6 +1484,10 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/calibration/sw-f287/krea-2-turbo-bf16-candle-evidence.json"),
     ),
     (
+        "docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sw-f287/wan-2-2-t2v-14b-q4-candle-evidence.json"),
+    ),
+    (
         "docs/calibration/sw-f287/z-image-turbo-bf16-candle-evidence.json",
         include_str!("../../../docs/calibration/sw-f287/z-image-turbo-bf16-candle-evidence.json"),
     ),
