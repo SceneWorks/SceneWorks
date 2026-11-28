@@ -601,12 +601,26 @@ export function digestsAtRevision({ repo, revision, providers, readBodies, runGi
   const blobs = treeBlobs(repo, revision, { runGit });
   const lock = parseCargoLock(readFileAt(repo, revision, "Cargo.lock", runGit));
   const rootManifest = readFileAt(repo, revision, "Cargo.toml", runGit);
+  // The dependency walk revisits manifests across providers and patch fixpoint passes. Cache
+  // successful reads only at an immutable revision and only for this derivation.
+  const immutableRevision = /^[0-9a-f]{40}$/.test(revision);
+  const objectPrefix = `${revision}:`;
+  const sourceReads = new Map();
+  const runProviderGit = (target, args, ...options) => {
+    const [command, source] = args;
+    if (!immutableRevision || target !== repo || options.length || args.length !== 2
+      || command !== "show" || !source.startsWith(objectPrefix)) {
+      return runGit(target, args, ...options);
+    }
+    if (!sourceReads.has(source)) sourceReads.set(source, runGit(target, args));
+    return sourceReads.get(source);
+  };
   const out = new Map();
   for (const [provider, crateDir] of Object.entries(providers)) {
     out.set(
       provider,
       providerClosureDigest({
-        repo, revision, provider, crateDir, blobs, lock, rootManifest, readBodies, runGit,
+        repo, revision, provider, crateDir, blobs, lock, rootManifest, readBodies, runGit: runProviderGit,
       }),
     );
   }
