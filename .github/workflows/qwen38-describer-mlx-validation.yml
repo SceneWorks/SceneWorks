@@ -167,7 +167,7 @@ jobs:
         run: bash scripts/ci/qwen38-describer-mlx/run.sh
       - name: Keep the evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.job == 'expander' && (inputs.expander_model == 'abliterated' && format('h3-expander-abliterated-mlx-{0}', inputs.tier) || format('h3-expander-mlx-{0}', inputs.tier)) || format('qwen38-describer-mlx-{0}-{1}', inputs.tier, inputs.image_side) }}-draft-${{ inputs.block_draft || 'record' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
