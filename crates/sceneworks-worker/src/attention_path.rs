@@ -22,7 +22,8 @@
 //!    it loads or renders: `admit_lossy_attention` turns a provider or kernel that cannot take the
 //!    requested opt-in into a typed `Unsupported`, the job's refusal. The API refuses the same
 //!    requests earlier from the checked-in projection of the same table
-//!    ([`shared_attention_facts`], pinned to the linked `SHARED_ATTENTION_ROUTING` by a test here).
+//!    (`config/engine-capabilities/attention/shared-attention-routing.candle.json`, pinned to the
+//!    linked `SHARED_ATTENTION_ROUTING` by `shared_attention_facts_match_the_linked_routing_table`).
 //!
 //! The counters are recorded per job: the `attention_path` log event, the job's generation metrics
 //! (`attentionExecution`, returned by [`AttentionJobScope::finish`]) and, for a job that opted in
@@ -31,14 +32,13 @@
 use std::sync::Mutex;
 
 use runtime_cuda::attention::{
-    self, AttentionPathCounts, Int8AttentionConfig, KCentering, LossyAttentionOptIns, LossyServe,
-    PvPrecision, SharedAttentionRouting, SolConfig, SolSelection,
+    self, AttentionPathCounts, Int8AttentionConfig, KCentering, LossyAttentionOptIns, PvPrecision,
+    SolConfig, SolSelection,
 };
 use sceneworks_core::contracts::{GenerationMetrics, JobSnapshot, JobType};
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::options::lossy_attention::{
-    KCenteringWire, KernelServeWire, LossyAttentionWire, ProviderAttentionRouting, PvPrecisionWire,
-    SharedAttentionFacts, SolSelectionWire, ATTENTION_EXECUTION_KEY,
+    KCenteringWire, LossyAttentionWire, PvPrecisionWire, SolSelectionWire, ATTENTION_EXECUTION_KEY,
 };
 use sceneworks_core::video_request::VideoRequest;
 use serde_json::{json, Map, Value};
@@ -289,40 +289,6 @@ pub(crate) fn record_attention_execution_on_assets(asset_writes: &mut [Value]) {
     }
 }
 
-/// The linked `SHARED_ATTENTION_ROUTING` in the checked-in facts schema
-/// (`config/engine-capabilities/attention/shared-attention-routing.candle.json`).
-pub(crate) fn shared_attention_facts() -> SharedAttentionFacts {
-    let serve = |serve: LossyServe| match serve {
-        LossyServe::Served => KernelServeWire {
-            served: true,
-            reason: None,
-        },
-        LossyServe::Never(why) => KernelServeWire {
-            served: false,
-            reason: Some(why.to_owned()),
-        },
-    };
-    SharedAttentionFacts {
-        backend: "candle".to_owned(),
-        source: "runtime_cuda::attention::SHARED_ATTENTION_ROUTING".to_owned(),
-        providers: attention::SHARED_ATTENTION_ROUTING
-            .iter()
-            .map(|(id, routing)| {
-                let routing = match *routing {
-                    SharedAttentionRouting::SharedHelpers { int8, sol } => {
-                        ProviderAttentionRouting::SharedHelpers {
-                            int8: serve(int8),
-                            sol: serve(sol),
-                        }
-                    }
-                    SharedAttentionRouting::Bespoke => ProviderAttentionRouting::Bespoke,
-                };
-                ((*id).to_owned(), routing)
-            })
-            .collect(),
-    }
-}
-
 /// Owns the toggle for one job. See the module docs.
 pub(crate) struct AttentionJobScope {
     job_id: String,
@@ -374,7 +340,45 @@ pub(crate) static TOGGLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 mod tests {
     use super::TOGGLE_TEST_LOCK as TOGGLE;
     use super::*;
+    use runtime_cuda::attention::{LossyServe, SharedAttentionRouting};
+    use sceneworks_core::options::lossy_attention::{
+        KernelServeWire, ProviderAttentionRouting, SharedAttentionFacts,
+    };
     use serde_json::{json, Value};
+
+    /// The linked `SHARED_ATTENTION_ROUTING` in the checked-in facts schema
+    /// (`config/engine-capabilities/attention/shared-attention-routing.candle.json`).
+    fn shared_attention_facts() -> SharedAttentionFacts {
+        let serve = |serve: LossyServe| match serve {
+            LossyServe::Served => KernelServeWire {
+                served: true,
+                reason: None,
+            },
+            LossyServe::Never(why) => KernelServeWire {
+                served: false,
+                reason: Some(why.to_owned()),
+            },
+        };
+        SharedAttentionFacts {
+            backend: "candle".to_owned(),
+            source: "runtime_cuda::attention::SHARED_ATTENTION_ROUTING".to_owned(),
+            providers: attention::SHARED_ATTENTION_ROUTING
+                .iter()
+                .map(|(id, routing)| {
+                    let routing = match *routing {
+                        SharedAttentionRouting::SharedHelpers { int8, sol } => {
+                            ProviderAttentionRouting::SharedHelpers {
+                                int8: serve(int8),
+                                sol: serve(sol),
+                            }
+                        }
+                        SharedAttentionRouting::Bespoke => ProviderAttentionRouting::Bespoke,
+                    };
+                    ((*id).to_owned(), routing)
+                })
+                .collect(),
+        }
+    }
 
     fn image_request(value: Value) -> ImageRequest {
         let payload = value.as_object().expect("payload");
