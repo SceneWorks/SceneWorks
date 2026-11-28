@@ -463,8 +463,8 @@ pub(crate) struct AdapterIdentity {
 /// The digest comes from [`super::trusted_lora_hash`] — the same path workflow attribution uses:
 /// the install marker's cached `loraFileSha256` when it still describes this exact file (no
 /// re-hash), otherwise the seal-memoized SHA-256 (`attribution_sha256`) on a blocking task with the
-/// worker heartbeat kept alive (never on the async executor thread), cached back into the marker
-/// when the marker is writable. A hashing failure leaves `sha256`
+/// worker heartbeat kept alive (never on the async executor thread). The marker is never rewritten:
+/// it can be a frozen file of the adapter's route closure. A hashing failure leaves `sha256`
 /// `None` — attribution, not generation, fails.
 pub(crate) async fn adapter_identities(
     api: &crate::api_client::ApiClient,
