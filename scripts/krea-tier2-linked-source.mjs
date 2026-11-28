@@ -84,6 +84,16 @@ const REVIEWED_CANDIDATES = [
     "97b1c43b7486c202e8b9c713380e765ae8e07148dfddcdf14f9f277747b11072",
     "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
   ]],
+  // The runtime guard serves verified local sources (imported checkpoints, trained adapters,
+  // claimed components, plan layers) from their originals instead of a per-route copy, keys any
+  // remaining bundle by its copy layout, and binds saved quantizations to the admitted local
+  // bytes. The same frozen ledger is verified through the same hash-once store before any loader
+  // sees a path, so this records source review, not a new physical proof.
+  ["6ffb4ef8404571ca511f4d8681c239aa56a3456e", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    REPAIR_SHA256[1], REPAIR_SHA256[2],
+    "a5ce0fc14c82e819d6f7394e7567b2f764e835854cbc9e7af69c1835af7df047",
+  ]],
 ];
 
 async function readSource(root, file) {

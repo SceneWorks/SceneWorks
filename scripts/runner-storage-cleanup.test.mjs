@@ -7,7 +7,7 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { disposableTargets, mossOwner, retiredOwners, sweepMoss, runAttempt, prepareDevHost, main } from '../.github/actions/cleanup-runner-storage/index.mjs';
+import { disposableTargets, mossOwner, retiredOwners, sweepMoss, runAttempt, prepareDevHost, devHostFolder, main } from '../.github/actions/cleanup-runner-storage/index.mjs';
 
 const execute = promisify(execFile);
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '../.github/actions/cleanup-runner-storage');
@@ -222,9 +222,32 @@ test('Windows guards reject escaped paths, links, recent model writes and other 
   assert.match(blockers[1], /references/);
 });
 
+test('dev-host job folders are accepted in the root and per-host layouts only', () => {
+  const root = resolve(tmpdir(), 'dev-host-root');
+  assert.equal(devHostFolder(root, join(root, 't', '1234abcd')), root);
+  assert.equal(devHostFolder(root, join(root, 'hosts', 'MICHAEL-TRX50', 't', '1234abcd')), join(root, 'hosts', 'MICHAEL-TRX50'));
+  for (const work of [join(root, 'hosts', 't', '1234abcd'), join(root, 'other', 'host', 't', '1234abcd'), join(root, 'hosts', 'h', 'x', '1234abcd'),
+    join(root, 'hosts', 'h', 't', 'not-hex'), join(dirname(root), 't', '1234abcd'), join(root, 'hosts', 'h', 'sub', 't', '1234abcd')]) {
+    assert.equal(devHostFolder(root, work), null, work);
+  }
+});
+
+test('job-work cleanup accepts both dev-host layouts and refuses other parents', { skip: process.platform !== 'win32' }, async () => {
+  const data = { root: 'D:\\dev-host' };
+  const check = parent => powershell(`if (Test-DevHostJobParent '${parent}' $fixture.root) { 'yes' } else { 'no' }`, data);
+  assert.equal(await check('D:\\dev-host\\t'), 'yes');
+  assert.equal(await check('D:\\dev-host\\hosts\\MICHAEL-TRX50\\t'), 'yes');
+  assert.equal(await check('D:\\dev-host\\hosts\\t'), 'no');
+  assert.equal(await check('D:\\dev-host\\other\\h\\t'), 'no');
+  assert.equal(await check('D:\\dev-host\\hosts\\h\\x'), 'no');
+  assert.equal(await check('D:\\dev-host\\hosts\\h\\sub\\t'), 'no');
+  assert.equal(await check('D:\\elsewhere\\t'), 'no');
+});
+
 test('dev-host setup binds a fresh invocation, preserves Cargo consumers and keeps downloads on E', { skip: process.platform !== 'win32' }, async t => {
-  const managed = process.env.DEV_HOST_ROOT && join(process.env.DEV_HOST_ROOT, 't');
-  const base = managed && existsSync(managed) ? managed : process.env.RUNNER_TEMP || tmpdir();
+  // dev-host before 0.2.0 keeps job folders in <root>\\t; 0.2.0 and later in <root>\\hosts\\<host>\\t.
+  const managed = process.env.DEV_HOST_ROOT && [join(process.env.DEV_HOST_ROOT, 't'), join(process.env.DEV_HOST_ROOT, 'hosts', process.env.COMPUTERNAME ?? '', 't')].find(dir => existsSync(dir));
+  const base = managed || process.env.RUNNER_TEMP || tmpdir();
   if (!/^D:[\\/]/i.test(base)) { t.skip('A D: fixture directory is required for the Windows host storage policy'); return; }
   const root = await fixture(t, base), work = join(root, 't/1234abcd'), binary = join(root, 'dev-host.exe');
   await mkdir(work, { recursive: true }); await writeFile(binary, 'fixture');
@@ -245,6 +268,31 @@ test('dev-host setup binds a fresh invocation, preserves Cargo consumers and kee
   const slotExports = await prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: slotRun, nonce: 'managed-slot' });
   assert.equal(slotExports.CARGO_TARGET_DIR, target);
   assert.match(await readFile(env.GITHUB_ENV, 'utf8'), /CARGO_TARGET_DIR=/); // dev-host: allow-path asserts an environment export, not a filesystem path
+  // dev-host 0.2.0 and later keep job folders and build slots in hosts/<host>/.
+  // A rejected call has already claimed its job folder, so each call gets a fresh one.
+  const own = join(root, 'hosts/HOST'), hostedWork = join(own, 't/3456abcd'), rejectedWork = join(own, 't/6789abcd'), hostedTarget = join(own, 'build/managed-slot');
+  for (const dir of [hostedWork, rejectedWork, hostedTarget]) await mkdir(dir, { recursive: true });
+  const hostedRun = (cargo, tmp = hostedWork) => async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.3.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${cargo}\nTMPDIR=${tmp}\n` });
+  await assert.rejects(prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: hostedRun(target, rejectedWork), nonce: 'root-slot' }), /outside its managed build slots/);
+  const rootRun = async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.1.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${hostedTarget}\nTMPDIR=${join(root, 't/5678abcd')}\n` });
+  await mkdir(join(root, 't/5678abcd'), { recursive: true });
+  await assert.rejects(prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: rootRun, nonce: 'hosted-slot-for-root-work' }), /outside its managed build slots/);
+  const hostedExports = await prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: hostedRun(hostedTarget), nonce: 'hosted-slot' });
+  assert.equal(hostedExports.DEV_HOST_JOB_ROOT, hostedWork);
+  assert.equal(hostedExports.CARGO_TARGET_DIR, hostedTarget);
+  const strayWork = join(root, 'other/HOST/t/4567abcd'); await mkdir(strayWork, { recursive: true });
+  await assert.rejects(prepareDevHost(env, { run: async (_b, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.3.1' : args[0] === 'check' ? 'ok' : `TMPDIR=${strayWork}\n` }), nonce: 'stray' }), /unexpected job temp directory/);
+});
+
+test('post-job cleanup checks each job folder against its own t/ parent in both layouts', { skip: process.platform !== 'win32' }, async t => {
+  const root = await fixture(t);
+  for (const work of [join(root, 't', '1234abcd'), join(root, 'hosts', 'HOST', 't', '2345abcd')]) {
+    await mkdir(work, { recursive: true });
+    const calls = [];
+    await main({ RUNNER_ENVIRONMENT: 'self-hosted', GITHUB_WORKSPACE: root, STATE_registered: 'true', STATE_dev_host_root: work, DEV_HOST_ROOT: root, DEV_HOST_WORK_UPLOADS_COMPLETE: 'true' },
+      { storage: async (...args) => { calls.push(args); return { status: 'skipped' }; } });
+    assert.deepEqual(calls.filter(call => call[0] === 'job-work'), [['job-work', work, dirname(work)]]);
+  }
 });
 
 test('failed or unconfirmed publication preserves owned job work', { skip: process.platform !== 'win32' }, async t => {

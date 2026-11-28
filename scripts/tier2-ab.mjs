@@ -217,8 +217,10 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
     if (windowsKrea) {
       const devHost = absolute("DEV_HOST_ROOT");
       managedJobRoot = absolute("DEV_HOST_JOB_ROOT");
-      const leaf = paths.relative(paths.join(devHost, "t"), managedJobRoot);
-      fact(/^D:[\\/]/i.test(devHost) && /^[a-f0-9]{8}$/.test(leaf), "Windows Krea requires a registered D: dev-host job root");
+      // dev-host before 0.2.0 puts job folders in <root>/t; 0.2.0 and later in <root>/hosts/<host>/t.
+      const parent = paths.dirname(managedJobRoot), own = paths.dirname(parent);
+      const layout = paths.basename(parent) === "t" && (paths.relative(devHost, own) === "" || paths.relative(paths.join(devHost, "hosts"), paths.dirname(own)) === "");
+      fact(/^D:[\\/]/i.test(devHost) && layout && /^[a-f0-9]{8}$/.test(paths.basename(managedJobRoot)), "Windows Krea requires a registered D: dev-host job root");
       fact(paths.relative(managedJobRoot, work) === "tier2-ab", "Windows Krea work must be the tier2-ab child of DEV_HOST_JOB_ROOT");
     } else {
       fact(env.RUNNER_TEMP && paths.isAbsolute(env.RUNNER_TEMP), "RUNNER_TEMP required in Actions");

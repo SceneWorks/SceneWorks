@@ -215,12 +215,15 @@ test("Krea dispatch is opt-in, selects two fixed public routes, and requires exa
   assert.throws(() => dispatchOptions(inputs({}, { download_missing: true }), HEAD), /leaves it off/);
   assert.doesNotThrow(() => dispatchOptions(inputs({ preflight_only: false }, { download_missing: true }), HEAD));
   const env = { TIER2_AB_SUITE: KREA_SUITE, TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: KREA_BASE_APP, TIER2_AB_HEAD_SHA: HEAD, TIER2_AB_INFERENCE_SHA: PIN, TIER2_AB_BASE_DIR: "/base", TIER2_AB_HEAD_DIR: "/head", TIER2_AB_WORK: "/work" };
-  const cfg = resolveConfig(env, { platform: "darwin" });
+  // Simulate the Mac host's home too: the host default (os.homedir()) is not a POSIX path on a
+  // Windows dev box, and the default Mac hubs are built from it.
+  const darwin = { platform: "darwin", home: "/Users/runner" };
+  const cfg = resolveConfig(env, darwin);
   assert.deepEqual(cfg.routes, [RAW, HIRES]);
   assert.deepEqual(cfg.hubs, ["/work/scratch/krea-hf/hub"]);
   assert.equal(cfg.repairDir, "/tier2-ab-krea-repair");
-  assert.throws(() => resolveConfig({ ...env, TIER2_AB_BASE_SHA: "3".repeat(40) }, { platform: "darwin" }), /baseline app is frozen/);
-  assert.throws(() => resolveConfig({ ...env, TIER2_AB_HUBS: "/other" }, { platform: "darwin" }), /attempt-owned/);
+  assert.throws(() => resolveConfig({ ...env, TIER2_AB_BASE_SHA: "3".repeat(40) }, darwin), /baseline app is frozen/);
+  assert.throws(() => resolveConfig({ ...env, TIER2_AB_HUBS: "/other" }, darwin), /attempt-owned/);
 });
 
 test("Windows Actions Krea uses the registered job child and canonical HF cache", () => {
@@ -239,6 +242,12 @@ test("Windows Actions Krea uses the registered job child and canonical HF cache"
   assert.deepEqual(config().hubs, [`${jobs}\\tier2-ab\\scratch\\krea-hf\\hub`]);
   assert.throws(() => config({ TIER2_AB_WORK: `${env.RUNNER_TEMP}\\tier2-ab` }), /DEV_HOST_JOB_ROOT/);
   assert.throws(() => config({ DEV_HOST_JOB_ROOT: "D:\\dev-host\\foreign\\abcd1234" }), /registered D:/);
+  // dev-host 0.2.0 and later put job folders in hosts\<host>\t.
+  const hosted = "D:\\dev-host\\hosts\\MICHAEL-TRX50\\t\\abcd1234";
+  assert.equal(config({ DEV_HOST_JOB_ROOT: hosted, TIER2_AB_WORK: `${hosted}\\tier2-ab` }).managedJobRoot, hosted);
+  for (const stray of ["D:\\dev-host\\hosts\\t\\abcd1234", "D:\\dev-host\\other\\h\\t\\abcd1234", "D:\\dev-host\\hosts\\h\\x\\abcd1234"]) {
+    assert.throws(() => config({ DEV_HOST_JOB_ROOT: stray, TIER2_AB_WORK: `${stray}\\tier2-ab` }), /registered D:/);
+  }
   assert.throws(() => config({ HF_HUB_CACHE: "E:\\huggingface\\other" }), /canonical E:/);
   assert.doesNotThrow(() => config({ TIER2_AB_SUITE: "", TIER2_AB_WORK: `${env.RUNNER_TEMP}\\tier2-ab`, DEV_HOST_JOB_ROOT: "" }));
 });
