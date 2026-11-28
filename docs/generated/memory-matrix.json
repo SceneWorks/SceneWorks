@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:747043ab78f7bdbcaa32597b7848aa90b178e529707b002cac9251ee33021c4d",
+    "sceneWorksRevision": "source-tree:2830ace2e4af3c44b9514a631f8f5e209141f382574dd3624c4cf55ccf816ef0",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,7 +85,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "6cad8df68b0268c26b0c40a2d2cdcff2fea93bef6329bd36bf9c11ff662aa326"
+        "sha256": "3097950cc1aa7e1e36d9fcc663fd3bc8f210927fdab4e4a487f5cab69fbdb7d6"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -93,7 +93,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "07c0e9acaf96bfb43b6d5aa23467e4952727a623d77f5d9061bb781fac603d3a"
+        "sha256": "b1278d29a59646d5d2381ed3234dbd425164f8fe661fd3017ce2754468689a9a"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -193,7 +193,7 @@
     "anchors": 266,
     "analyticOnlyCells": 123,
     "anchoredCells": 4038,
-    "staleAnchors": 261,
+    "staleAnchors": 260,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -6823,7 +6823,7 @@
       "cells": 22
     },
     {
-      "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+      "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
       "modelId": "krea_2_turbo",
       "backend": "mlx",
       "tier": "q4",
@@ -6835,8 +6835,8 @@
         "frames": 1,
         "fps": null
       },
-      "source": "docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json",
-      "current": false,
+      "source": "docs/calibration/sw-f287/krea-2-turbo-q4-mlx-evidence.json",
+      "current": true,
       "currencyAttestation": null,
       "cells": 23
     },
@@ -100829,10 +100829,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -100850,7 +100850,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -100896,10 +100896,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -100917,7 +100917,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -100960,10 +100960,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -100981,7 +100981,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -101021,10 +101021,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -101042,7 +101042,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -101088,10 +101088,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -101109,7 +101109,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -101982,10 +101982,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -102003,7 +102003,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -102056,10 +102056,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -102077,7 +102077,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -102142,10 +102142,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -102163,7 +102163,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -102203,10 +102203,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -102224,7 +102224,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -102270,10 +102270,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -102291,7 +102291,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105440,10 +105440,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105461,7 +105461,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105501,10 +105501,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105522,7 +105522,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105568,10 +105568,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105589,7 +105589,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105646,10 +105646,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105667,7 +105667,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105720,10 +105720,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105741,7 +105741,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105806,10 +105806,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105827,7 +105827,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105867,10 +105867,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105888,7 +105888,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -105934,10 +105934,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -105955,7 +105955,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -106012,10 +106012,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -106033,7 +106033,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -106086,10 +106086,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -106107,7 +106107,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -106172,10 +106172,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -106193,7 +106193,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -106233,10 +106233,10 @@
       "strategyParameters": {},
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -106254,7 +106254,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
@@ -106300,10 +106300,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
+        "id": "krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
         "tier": "q4",
-        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7",
-        "current": false,
+        "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -106321,7 +106321,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-8bcf5e9fcda82036aec7"
+            "source": "config/memory-anchors.json#krea_2_turbo:mlx:q4:base:base:krea-2-turbo-q4-mlx-shared-ladder-v1:imc-9184d2790e209fb8abf5"
           }
         ]
       }
