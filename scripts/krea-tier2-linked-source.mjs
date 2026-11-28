@@ -81,10 +81,10 @@ const REVIEWED_CANDIDATES = [
   // remaining bundle by its copy layout, and binds saved quantizations to the admitted local
   // bytes. The same frozen ledger is verified through the same hash-once store before any loader
   // sees a path, so this records source review, not a new physical proof.
-  ["b8e7a4a5211a76d283986a3f161bb30f93cba838", [
+  ["6ffb4ef8404571ca511f4d8681c239aa56a3456e", [
     "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
     REPAIR_SHA256[1], REPAIR_SHA256[2],
-    "a4a25f37a290d44347bfdb06be45f10c38276e15b3344383ada55bfd859266be",
+    "a5ce0fc14c82e819d6f7394e7567b2f764e835854cbc9e7af69c1835af7df047",
   ]],
 ];
 
