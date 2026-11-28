@@ -454,8 +454,8 @@ export function QueueScreen() {
                     } : undefined,
                   })}
                   hideOpenQueue
+                  extraActions={<ExactReplayAction key={job.id} job={enrichedJob} onExactReplay={(j) => jobAction(j, "exact-replay")} />}
                 />
-                <ExactReplayAction job={enrichedJob} onExactReplay={(j) => jobAction(j, "exact-replay")} />
               </div>
             );
           })

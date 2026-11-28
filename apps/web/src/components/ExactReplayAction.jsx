@@ -2,7 +2,20 @@ import { useState } from "react";
 import { isLowResStartActive } from "../workflowShare.js";
 
 const reasonText = (reason) => ({
+  support_unknown: "Exact replay support is unavailable for this job. Use Duplicate to generate again.",
   receipt_missing: "This job has no complete execution receipt.",
+  execution_unavailable: "This run did not record the execution details required for exact replay. Use Duplicate to generate again.",
+  invalid_execution_identity: "This run's recorded execution details are incomplete.",
+  receipt_changed: "This job's execution receipt no longer matches the original run.",
+  composite_replay_unavailable: "Exact replay is unavailable for runs with multiple execution stages.",
+  replay_scope_changed: "The provider cannot reproduce this run on the required device and runtime.",
+  output_hashes_unavailable: "This run has no verified output fingerprints for exact replay.",
+  source_not_complete: "This job has not finished saving its outputs. Try again after it completes.",
+  replay_adapter_unavailable: "Exact replay is unavailable for this job type.",
+  provider_route_unavailable: "This run has no verified provider route for exact replay.",
+  provider_route_changed: "The original model provider route changed.",
+  missing_randomness: "This run did not record the random draws required for exact replay.",
+  options_not_allowed: "Exact replay requires the original options without changes.",
   deterministic_replay_unavailable: "The provider has not verified exact replay for this run.",
   runtime_revision_changed: "The inference runtime changed since this run.",
   device_unavailable: "The original worker is unavailable.",
@@ -121,20 +134,34 @@ export function checkExactReplayHostSupport(payload, context = {}) {
 
 export default function ExactReplayAction({ job, onExactReplay }) {
   const [refusal, setRefusal] = useState("");
+  const [pending, setPending] = useState(false);
   const canReplay = onExactReplay && job.status === "completed" &&
     ["image_generate", "image_edit"].includes(job.type);
   const reason = refusal || (job.result?.replayUnavailable?.code === "replay_unavailable"
     ? job.result.replayUnavailable.reason : "");
+  // Older servers have no support summary. Fail closed instead of offering an
+  // action whose recorded prerequisites are unknown; POST still checks live host facts.
+  const unavailable = canReplay && job.exactReplay?.supported !== true
+    ? job.exactReplay?.reason || "support_unknown" : "";
   return <>
     {reason ? <p role="alert" className="worker-progress-card__message error">{reasonText(reason)}</p> : null}
     {canReplay ? <button
       className="secondary-action"
+      disabled={pending || Boolean(unavailable)}
+      aria-description={unavailable ? reasonText(unavailable) : undefined}
+      title={unavailable ? reasonText(unavailable) : "Replay the recorded execution on its original device and runtime"}
       onClick={async () => {
+        if (pending || unavailable) return;
         setRefusal("");
-        const outcome = await onExactReplay(job);
-        if (outcome?.code === "replay_unavailable") setRefusal(outcome.context?.reason ?? outcome.reason);
+        setPending(true);
+        try {
+          const outcome = await onExactReplay(job);
+          if (outcome?.code === "replay_unavailable") setRefusal(outcome.context?.reason ?? outcome.reason ?? "unknown");
+        } finally {
+          setPending(false);
+        }
       }}
       type="button"
-    >Exact replay</button> : null}
+    >{pending ? "Queuing replay…" : "Exact replay"}</button> : null}
   </>;
 }
