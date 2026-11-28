@@ -7956,7 +7956,6 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
     assert_eq!(count, 1, "only the supported imported Pose request queues");
 }
 
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn retired_image_models_stay_unavailable_at_image_enqueue() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
