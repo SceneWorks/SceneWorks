@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:089071f227e6ee4e19bada9f538301db13ebb16cfe3105a55b32574d999be683",
+    "sceneWorksRevision": "source-tree:c09b5d7aeef39b8c9080eec53f873c2827025723634e0dbe6b938b31e3199c6c",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -85,7 +85,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "2180589d86589ff7a5e29b2533df5c142a406d50f28a21694e5f66d566c661ad"
+        "sha256": "1096845097ac63b44cd2906900fd5ad0e5f984f4bc7b4f8b28e66ab441a2bfe6"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -93,7 +93,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "e87c9388764a7875ca26705d75ca3a3772a88d412d7ecb1e58039f887e1ad6c3"
+        "sha256": "35515c7bea9de7c1a6389c0c6005454549986e3ac43ed89a14752ededa6e3d5c"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -193,7 +193,7 @@
     "anchors": 265,
     "analyticOnlyCells": 124,
     "anchoredCells": 4036,
-    "staleAnchors": 265,
+    "staleAnchors": 264,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -5771,7 +5771,7 @@
       "cells": 13
     },
     {
-      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
       "modelId": "flux_dev",
       "backend": "mlx",
       "tier": "q4",
@@ -5783,8 +5783,8 @@
         "frames": 1,
         "fps": null
       },
-      "source": "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
-      "current": false,
+      "source": "docs/calibration/sw-f287/flux-dev-q4-mlx-evidence.json",
+      "current": true,
       "currencyAttestation": null,
       "cells": 13
     },
@@ -25683,10 +25683,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -25704,7 +25704,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -25733,10 +25733,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -25754,7 +25754,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -25783,10 +25783,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -25804,7 +25804,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -25833,10 +25833,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -25854,7 +25854,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31345,10 +31345,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31366,7 +31366,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31395,10 +31395,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31416,7 +31416,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31445,10 +31445,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31466,7 +31466,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31495,10 +31495,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31516,7 +31516,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31560,10 +31560,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31581,7 +31581,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31621,10 +31621,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31642,7 +31642,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31694,10 +31694,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31715,7 +31715,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31744,10 +31744,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31765,7 +31765,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }
@@ -31794,10 +31794,10 @@
       },
       "implementation": "implemented",
       "anchor": {
-        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+        "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
         "tier": "q4",
-        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
-        "current": false,
+        "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
+        "current": true,
         "currencyAttestation": null,
         "derivable": false,
         "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
@@ -31815,7 +31815,7 @@
         "structural": [],
         "anchor": [
           {
-            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d"
+            "source": "config/memory-anchors.json#flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0"
           }
         ]
       }

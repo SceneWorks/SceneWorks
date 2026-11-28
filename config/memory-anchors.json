@@ -1859,7 +1859,7 @@
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
-      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-4cd8238201e0179ab82d",
+      "id": "flux_dev:mlx:q4:base:base:flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1:imc-46107e77f4f356743da0",
       "modelId": "flux_dev",
       "modelFamily": "flux",
       "route": "flux1_dev",
@@ -1879,11 +1879,11 @@
         "attentionChunked": false
       },
       "source": {
-        "path": "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
-        "sha256": "48857f0cdfe6734692bbb78448583b8823d198c633bd2ae9cdceebf8c05c43af",
-        "recordId": "imc-4cd8238201e0179ab82d",
+        "path": "docs/calibration/sw-f287/flux-dev-q4-mlx-evidence.json",
+        "sha256": "890683403a940a316586be20a99ffabe2f5818c51b8fd7ec8d27dd9e56d20bd5",
+        "recordId": "imc-46107e77f4f356743da0",
         "calibrationFingerprint": "flux1-dev-q4-mlx-shared-ladder-2026-08-03-v1",
-        "loaderClosureDigest": "d7c4be259300301df9135f56ca83a70d5e31de752718418914de607ff00be6ae"
+        "loaderClosureDigest": "90028ff3933a87c6729591c82d23a6623ef831cfdf0335b90da8d0213a685408"
       },
       "geometry": {
         "width": 1024,
@@ -1892,16 +1892,16 @@
         "fps": null
       },
       "phaseActivePeakBytes": {
-        "conditioning": 1051956,
-        "denoise": 11460184788,
-        "decode": 24904956136
+        "conditioning": 10935953824,
+        "denoise": 11510359354,
+        "decode": 24972213846
       },
       "phaseAllocatorEnvelopeBytes": {
-        "conditioning": 1054052,
-        "denoise": 16655857464,
-        "decode": 67111725924
+        "conditioning": 12260033602,
+        "denoise": 16450760516,
+        "decode": 67355896740
       },
-      "overallAllocatorEnvelopeBytes": 67111725924,
+      "overallAllocatorEnvelopeBytes": 67355896740,
       "underivedReason": "the anchor render engaged bounded rungs (or deferred materialization), so it does not measure the widest composition the MLX image law upper-bounds the ladder from; this anchor validates its measured point and prices nothing beyond it"
     },
     {
