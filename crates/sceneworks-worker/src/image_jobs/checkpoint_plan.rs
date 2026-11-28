@@ -660,14 +660,6 @@ pub(crate) fn request_is_checkpoint_plan_backed(request: &ImageRequest) -> bool 
         && checkpoint_plan_serves_request_shape(request)
 }
 
-pub(crate) fn request_is_checkpoint_plan_backed_resolved(
-    execution: &super::conditioning::ResolvedImageExecution,
-) -> bool {
-    checkpoint_plan_checkpoint_id(&execution.model_manifest_entry).is_some()
-        && checkpoint_plan_binds_request_operation(execution)
-        && checkpoint_plan_serves_request_shape_resolved(execution)
-}
-
 /// The request shapes the route's own generation body implements today.
 ///
 /// Distinct from [`checkpoint_plan_binds_request_operation`], which asks the REGISTRY whether a
@@ -1923,76 +1915,6 @@ pub(crate) fn checkpoint_plan_bespoke_primary_pin(
              resolves a {source:?} primary to {} files; this family's lane loads exactly one",
             many.len()
         ))),
-    }
-}
-
-/// The DIRECTORY form of [`checkpoint_plan_bespoke_primary_pin`], for a family whose loader opens a
-/// component directory rather than one file (Mage-Flow's `diffusers` dialect).
-///
-/// Same authority and the same refusals; the only difference is which artifact the lane is handed.
-/// The directory's own layers — the transformer weight file and its `config.json` sidecar — are
-/// consumed by the selection, so a torn artifact is caught here rather than mid-load, and the lane
-/// re-pins the fixed filenames it loads from inside the verified directory.
-pub(crate) fn checkpoint_plan_bespoke_primary_dir(
-    request: &ImageRequest,
-    settings: &Settings,
-    family: &str,
-) -> WorkerResult<Option<CheckpointPlanBespokeDir>> {
-    let Some((checkpoint_id, source, primary)) =
-        checkpoint_plan_bespoke_primary(request, settings, family)?
-    else {
-        return Ok(None);
-    };
-    match primary.weights {
-        WeightsSource::Dir(directory) => Ok(Some(CheckpointPlanBespokeDir {
-            directory,
-            pins: primary.pins,
-        })),
-        WeightsSource::File(_) => Err(WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:unsupported-operation] checkpoint {checkpoint_id:?} ({family} family) \
-             resolves to a {source:?} source, but this family's loader opens a component directory"
-        ))),
-    }
-}
-
-/// A plan-sourced component directory and the pins covering every plan layer inside it.
-///
-/// The pins matter as much as the path. A LINKED library root is an APPROVED root of the checkpoint
-/// plan store, not an app-managed root, so the lane must NOT re-pin the files it loads through
-/// `paths::pin_app_managed_model_file` — that confinement rejects every linked checkpoint by
-/// construction, which is the wrong answer rather than a safe one. The plan store is the authority
-/// that already proved these bytes: it resolved the approved root, re-checked every layer's digest,
-/// and pinned each one here.
-pub(crate) struct CheckpointPlanBespokeDir {
-    pub(crate) directory: PathBuf,
-    pub(crate) pins: Vec<gen_core::PinnedWeightsFile>,
-}
-
-impl CheckpointPlanBespokeDir {
-    /// The pin for the layer whose file name is `file_name`, or a typed refusal naming what the
-    /// directory does carry. Never falls back to pinning the path itself: a file the plan did not
-    /// record is a file the store never verified.
-    pub(crate) fn pin_named(&self, file_name: &str) -> WorkerResult<gen_core::PinnedWeightsFile> {
-        self.pins
-            .iter()
-            .find(|pin| {
-                pin.loader_path().file_name().and_then(|name| name.to_str()) == Some(file_name)
-            })
-            .cloned()
-            .ok_or_else(|| {
-                let present: Vec<String> = self
-                    .pins
-                    .iter()
-                    .filter_map(|pin| pin.loader_path().file_name())
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .collect();
-                WorkerError::InvalidPayload(format!(
-                    "[checkpoint-plan:missing-component] the compiled checkpoint's component \
-                     directory {} carries no verified {file_name:?} layer; it carries [{}]",
-                    self.directory.display(),
-                    present.join(", ")
-                ))
-            })
     }
 }
 

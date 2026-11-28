@@ -152,6 +152,8 @@ use super::conditioning::guard_qwen_image_2_1_lane_slots;
 #[cfg(target_os = "macos")]
 use super::conditioning::identity_strength;
 #[cfg(native_lane)]
+use super::conditioning::is_minimax_h3_image_edit;
+#[cfg(native_lane)]
 use super::conditioning::is_qwen_image_2_1_edit;
 #[cfg(target_os = "macos")]
 use super::conditioning::load_reference_alpha;
@@ -663,8 +665,6 @@ use super::sampling::resolve_guidance;
 use super::sampling::resolve_negative_prompt;
 #[cfg(native_lane)]
 use super::sampling::resolve_steps;
-#[cfg(target_os = "macos")]
-use super::sampling::resolve_true_cfg;
 #[cfg(native_lane)]
 use super::sampling::resolved_option_or_manifest_f32;
 #[cfg(native_lane)]
@@ -16040,11 +16040,6 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
             "candle_krea_imported",
         ),
         (
-            CandleImageRoute::MageFinetuned,
-            "finetune_mage",
-            "candle_mage_finetuned",
-        ),
-        (
             CandleImageRoute::SdxlImported,
             "external_sdxl",
             "candle_sdxl_imported",
@@ -23538,7 +23533,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // Plan-driven checkpoint (sc-20634): one plan-resolved primary file + the family's resident
         // base components, loaded by the registry-bound provider; no second network.
         "CheckpointPlan",
-        "MageFinetuned",
         "SdxlImported",
         "ZimageComfyui",
         "QwenImageComfyui",
