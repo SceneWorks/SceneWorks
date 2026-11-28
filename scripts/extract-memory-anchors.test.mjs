@@ -964,12 +964,8 @@ test("a candle lane whose engine has no staged composition is anchored by its re
   assert.equal(onExemptLane.length, 36, "three tiers on each of those twelve lanes");
 });
 
-// sc-22734 review. The `regime?.staged === !stagedExempt` inversion in `isDerivable` is NOT a
-// SenseNova rule: it governs every candle lane whose manifest declares a `staged_residency`
-// structural exemption, and the shipped manifest declares six such lanes that have nothing to do
-// with SenseNova (the Boogu trio and the Anima trio). The case above only ever drove SenseNova ids,
-// so a change that scoped the inversion to the SenseNova family — or an exemption silently
-// appearing on, or vanishing from, one of these six — stayed green. This one names them.
+// The staged-residency inversion in isDerivable applies to every structurally exempt Candle
+// lane. This test covers the retained Anima and Iris lanes alongside the SenseNova-only test.
 test("the staged-residency inversion governs every exempt candle lane, not only the SenseNova family", async () => {
   const realManifest = await effectiveManifest();
   const lanes = stagedResidencyExemptLanes(realManifest);
@@ -987,12 +983,8 @@ test("the staged-residency inversion governs every exempt candle lane, not only 
     expectedCandle,
   );
 
-  // The six lanes the review named: they carry the exemption today and are the ones the
-  // SenseNova-only coverage left unspoken.
+  // These shipped non-SenseNova lanes pin the exemption coverage to actual providers.
   const NON_SENSENOVA_EXEMPT = [
-    "boogu_image",
-    "boogu_image_turbo",
-    "boogu_image_edit",
     "anima_base",
     "anima_aesthetic",
     "anima_turbo",
@@ -1032,7 +1024,7 @@ test("the staged-residency inversion governs every exempt candle lane, not only 
     sourcePath: "docs/generated/example.json",
   });
 
-  // The inversion, on each of the six: the RESIDENT render is the admissible anchor, and a staged
+  // For each exempt lane, a resident render is the admissible anchor, and a staged
   // corpus on a lane that declares staging structurally impossible is refused rather than
   // preferred — which is the same claim the SenseNova case makes, on lanes it never drove.
   for (const modelId of NON_SENSENOVA_EXEMPT) {

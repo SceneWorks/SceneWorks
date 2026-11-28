@@ -222,9 +222,10 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // their selected file lists are unchanged.
 // MiniMax-H3's Candle-native GGML tiers add SceneWorks/minimax-h3-candle @0ea7911b…: 166 keys;
 // every other row is unchanged.
+// SW-F384 removes eleven unused source listings. All 155 retained rows are unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "804efda080c3c94e22ea11db86767755852da2530dfab25482e680f8e2734e45";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "dfb8995b6df02c70071f2307fc63c1b3a36a1d0ee0787e9d5fbbeea7aaa9f8dd";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

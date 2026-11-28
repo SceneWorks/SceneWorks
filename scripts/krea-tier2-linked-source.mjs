@@ -76,6 +76,14 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
   ]],
+  // SW-7300 removes the Mage test case from portable routes and the Mage resident-base row.
+  // The Krea companion assertions and resident family, model, tier, and shape are the same.
+  ["310b9b6d2a43d9389d8e3267495dd97bb47d294d", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    "beda363a2e2f974bd07dd2853b9365254187508306c48d86d65b450be0fe5619",
+    "97b1c43b7486c202e8b9c713380e765ae8e07148dfddcdf14f9f277747b11072",
+    "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
+  ]],
 ];
 
 async function readSource(root, file) {

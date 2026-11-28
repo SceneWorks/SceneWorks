@@ -257,8 +257,9 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // SW-F369 adds ostris' MiniMax-H3-Image training adapter listing (162 keys).
   // SW-7203 adds the two Qwen3.8-27B block-draft listings and SW-7202 re-pins three tier listings (164 keys).
   // MiniMax-H3's Candle-native GGML tiers add the SceneWorks/minimax-h3-candle listing (166 keys).
+  // The provider retirement removes eleven listings without changing the frozen Q4 authorities.
   assert.equal(current.downloadEvidenceSha256,
-    "804efda080c3c94e22ea11db86767755852da2530dfab25482e680f8e2734e45");
+    "dfb8995b6df02c70071f2307fc63c1b3a36a1d0ee0787e9d5fbbeea7aaa9f8dd");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
