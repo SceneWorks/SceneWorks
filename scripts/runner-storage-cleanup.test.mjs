@@ -7,7 +7,7 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { disposableTargets, mossOwner, retiredOwners, sweepMoss, runAttempt, prepareDevHost, main } from '../.github/actions/cleanup-runner-storage/index.mjs';
+import { disposableTargets, mossOwner, retiredOwners, sweepMoss, runAttempt, prepareDevHost, devHostFolder, main } from '../.github/actions/cleanup-runner-storage/index.mjs';
 
 const execute = promisify(execFile);
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '../.github/actions/cleanup-runner-storage');
@@ -222,6 +222,27 @@ test('Windows guards reject escaped paths, links, recent model writes and other 
   assert.match(blockers[1], /references/);
 });
 
+test('dev-host job folders are accepted in the root and per-host layouts only', () => {
+  const root = resolve(tmpdir(), 'dev-host-root');
+  assert.equal(devHostFolder(root, join(root, 't', '1234abcd')), root);
+  assert.equal(devHostFolder(root, join(root, 'hosts', 'MICHAEL-TRX50', 't', '1234abcd')), join(root, 'hosts', 'MICHAEL-TRX50'));
+  for (const work of [join(root, 'hosts', 't', '1234abcd'), join(root, 'other', 'host', 't', '1234abcd'), join(root, 'hosts', 'h', 'x', '1234abcd'),
+    join(root, 'hosts', 'h', 't', 'not-hex'), join(dirname(root), 't', '1234abcd'), join(root, 'hosts', 'h', 'sub', 't', '1234abcd')]) {
+    assert.equal(devHostFolder(root, work), null, work);
+  }
+});
+
+test('job-work cleanup accepts both dev-host layouts and refuses other parents', { skip: process.platform !== 'win32' }, async () => {
+  const data = { root: 'D:\\dev-host' };
+  const check = parent => powershell(`if (Test-DevHostJobParent '${parent}' $fixture.root) { 'yes' } else { 'no' }`, data);
+  assert.equal(await check('D:\\dev-host\\t'), 'yes');
+  assert.equal(await check('D:\\dev-host\\hosts\\MICHAEL-TRX50\\t'), 'yes');
+  assert.equal(await check('D:\\dev-host\\hosts\\t'), 'no');
+  assert.equal(await check('D:\\dev-host\\other\\h\\t'), 'no');
+  assert.equal(await check('D:\\dev-host\\hosts\\h\\x'), 'no');
+  assert.equal(await check('D:\\elsewhere\\t'), 'no');
+});
+
 test('dev-host setup binds a fresh invocation, preserves Cargo consumers and keeps downloads on E', { skip: process.platform !== 'win32' }, async t => {
   const managed = process.env.DEV_HOST_ROOT && join(process.env.DEV_HOST_ROOT, 't');
   const base = managed && existsSync(managed) ? managed : process.env.RUNNER_TEMP || tmpdir();
@@ -245,6 +266,16 @@ test('dev-host setup binds a fresh invocation, preserves Cargo consumers and kee
   const slotExports = await prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: slotRun, nonce: 'managed-slot' });
   assert.equal(slotExports.CARGO_TARGET_DIR, target);
   assert.match(await readFile(env.GITHUB_ENV, 'utf8'), /CARGO_TARGET_DIR=/); // dev-host: allow-path asserts an environment export, not a filesystem path
+  // dev-host 0.2.0 and later keep job folders and build slots in hosts/<host>/.
+  const own = join(root, 'hosts/HOST'), hostedWork = join(own, 't/3456abcd'), hostedTarget = join(own, 'build/managed-slot');
+  await mkdir(hostedWork, { recursive: true }); await mkdir(hostedTarget, { recursive: true });
+  const hostedRun = cargo => async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.3.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${cargo}\nTMPDIR=${hostedWork}\n` });
+  await assert.rejects(prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: hostedRun(target), nonce: 'root-slot' }), /outside its managed build slots/);
+  const hostedExports = await prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: hostedRun(hostedTarget), nonce: 'hosted-slot' });
+  assert.equal(hostedExports.DEV_HOST_JOB_ROOT, hostedWork);
+  assert.equal(hostedExports.CARGO_TARGET_DIR, hostedTarget);
+  const strayWork = join(root, 'other/HOST/t/4567abcd'); await mkdir(strayWork, { recursive: true });
+  await assert.rejects(prepareDevHost(env, { run: async (_b, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.3.1' : args[0] === 'check' ? 'ok' : `TMPDIR=${strayWork}\n` }), nonce: 'stray' }), /unexpected job temp directory/);
 });
 
 test('failed or unconfirmed publication preserves owned job work', { skip: process.platform !== 'win32' }, async t => {

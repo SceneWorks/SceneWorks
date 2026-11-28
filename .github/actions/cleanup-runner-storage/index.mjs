@@ -41,6 +41,16 @@ export function disposableTargets(workspace, env) {
 async function json(path) { return JSON.parse(await readFile(path, 'utf8')); }
 async function exists(path) { try { await lstat(path); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } }
 
+// dev-host before 0.2.0 kept job temp folders (t/) and build slots (build/) at the root;
+// 0.2.0 and later keep them in the host's own folder, hosts/<host>/. Answers the folder that
+// holds the t/ entry `work`, or null when `work` is not an 8-hex entry of either layout.
+export function devHostFolder(root, work) {
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  const parent = dirname(work), own = dirname(parent);
+  if (!same(basename(parent), 't') || !/^[a-f0-9]{8}$/.test(basename(work))) return null;
+  return same(own, root) || same(dirname(own), resolve(root, 'hosts')) ? own : null;
+}
+
 export async function prepareDevHost(env, { run = execute, nonce = randomUUID() } = {}) {
   if (!env.DEV_HOST_ROOT || !/^\d+$/.test(env.GITHUB_RUN_ID ?? '') || !/^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? '') || !env.GITHUB_JOB || !env.RUNNER_NAME) throw Error('Missing dev-host root or Actions job identity');
   const root = await realpath(env.DEV_HOST_ROOT);
@@ -59,7 +69,8 @@ export async function prepareDevHost(env, { run = execute, nonce = randomUUID() 
   const { stdout } = await run(binary, ['env', '--format', 'github', '--project', env.GITHUB_REPOSITORY.split('/').pop(), '--worktree', env.GITHUB_WORKSPACE, '--session', session], options);
   const values = Object.fromEntries(stdout.trim().split(/\r?\n/).map(line => { const i = line.indexOf('='); return [line.slice(0, i), line.slice(i + 1)]; }));
   const work = await realpath(values.TMPDIR);
-  if (dirname(work).toLowerCase() !== resolve(root, 't').toLowerCase() || !/^[a-f0-9]{8}$/.test(basename(work))) throw Error('dev-host returned an unexpected job temp directory');
+  const own = devHostFolder(root, work);
+  if (!own) throw Error('dev-host returned an unexpected job temp directory');
   if ((await readdir(work)).length) throw Error('dev-host temp entry already contains work; refusing to claim it');
   const owner = { repository: env.GITHUB_REPOSITORY, run: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT, job: env.GITHUB_JOB, runner: env.RUNNER_NAME, nonce };
   await writeFile(resolve(work, '.actions-owner.json'), JSON.stringify(owner), { flag: 'wx' });
@@ -67,8 +78,8 @@ export async function prepareDevHost(env, { run = execute, nonce = randomUUID() 
   // Existing workflows still own their build output consumers; do not silently redirect Cargo.
   if (env['INPUT_CARGO-SLOT'] === 'true') {
     const target = await realpath(values.CARGO_TARGET_DIR);
-    if (!inside(target, resolve(root, 'build'))) throw Error('dev-host returned a Cargo target outside its managed build slots');
-    exports.CARGO_TARGET_DIR = target; // dev-host: allow-path validated result of dev-host env beneath DEV_HOST_ROOT/build
+    if (!inside(target, resolve(own, 'build'))) throw Error('dev-host returned a Cargo target outside its managed build slots');
+    exports.CARGO_TARGET_DIR = target; // dev-host: allow-path validated result of dev-host env beneath the host's build folder
   }
   await appendFile(env.GITHUB_ENV, Object.entries(exports).map(([k, v]) => `${k}=${v}\n`).join(''));
   await appendFile(env.GITHUB_STATE, `dev_host_root=${work}\ndev_host_nonce=${nonce}\n`);
@@ -179,7 +190,7 @@ export async function main(env = process.env, { storage = native, prepare = prep
   }
   if (env.INPUT_MOSS === 'true' && env.GITHUB_REPOSITORY === 'SceneWorks/SceneWorks') await sweepMoss(workspace, env);
   if (env.STATE_dev_host_root && await exists(env.STATE_dev_host_root)) {
-    if (env.DEV_HOST_WORK_UPLOADS_COMPLETE === 'true') await storage('job-work', env.STATE_dev_host_root, resolve(env.DEV_HOST_ROOT, 't'));
+    if (env.DEV_HOST_WORK_UPLOADS_COMPLETE === 'true') await storage('job-work', env.STATE_dev_host_root, dirname(env.STATE_dev_host_root));
     else console.log(JSON.stringify({ status: 'skipped', path: env.STATE_dev_host_root, reason: 'Evidence publication not confirmed; retained for recovery and scheduled dev-host retention' }));
   }
 }

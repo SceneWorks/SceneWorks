@@ -164,6 +164,14 @@ function Get-StorageBlocker([string]$Path, [string]$Mode, $Processes, $OwnWorker
     return $null
 }
 
+# dev-host before 0.2.0 keeps job folders in <root>\t; 0.2.0 and later in <root>\hosts\<host>\t.
+function Test-DevHostJobParent([string]$Parent, [string]$Root) {
+    $parentFull = [IO.Path]::GetFullPath($Parent).TrimEnd('\')
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $own = [IO.Path]::GetDirectoryName($parentFull)
+    [IO.Path]::GetFileName($parentFull) -eq 't' -and ($own -eq $rootFull -or [IO.Path]::GetDirectoryName($own) -eq (Join-Path $rootFull 'hosts'))
+}
+
 function Remove-StorageLeaf([string]$Path, [string]$Parent, [string]$Mode, [bool]$DryRun, $Processes, $OwnWorker) {
     $pathFull = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $parentFull = [IO.Path]::GetFullPath($Parent).TrimEnd('\')
@@ -237,8 +245,7 @@ try {
     }
     if ($request.mode -eq 'job-work') {
         if (-not $env:DEV_HOST_ROOT -or -not $env:STATE_dev_host_root) { throw 'Missing registered job storage' }
-        $expectedParent = [IO.Path]::GetFullPath((Join-Path $env:DEV_HOST_ROOT 't')).TrimEnd('\')
-        if ($parentFull -ne $expectedParent -or $pathFull -ne $env:STATE_dev_host_root -or $pathFull -notmatch '^[Dd]:\\') { throw 'Job work is outside its registered dev-host namespace' }
+        if (-not (Test-DevHostJobParent $parentFull $env:DEV_HOST_ROOT) -or $pathFull -ne $env:STATE_dev_host_root -or $pathFull -notmatch '^[Dd]:\\') { throw 'Job work is outside its registered dev-host namespace' }
     } elseif ($request.mode -eq 'cargo') {
         if ($parentFull -notin $cargoParents -and -not $ownedMoss) { throw 'Cargo target is outside the job-owned storage namespace' }
         # Ordinary workspaces may never contain tracked files under a target directory.
