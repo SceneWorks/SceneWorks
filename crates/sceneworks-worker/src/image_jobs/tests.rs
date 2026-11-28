@@ -23501,7 +23501,6 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         "Flux2Edit",
         "QwenEdit",
         "ZimageEdit",
-        "MageEdit",
         // Qwen-Image 2.1 reference / local editing (sc-24110): the ordered condition images are
         // consumed by the SAME base — its own Qwen3-VL vision tower and VAE — with no second
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model

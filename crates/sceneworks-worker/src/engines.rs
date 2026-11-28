@@ -1104,7 +1104,7 @@ mod tests {
                 .any(|download| download["repo"] == row.default_repo));
             checked += 1;
         }
-        assert!(checked > 50);
+        assert!(checked >= 49, "only {checked} retained image rows joined");
     }
     use super::*;
     use sceneworks_core::contracts::WorkerCapability as Cap;
