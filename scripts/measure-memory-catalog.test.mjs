@@ -167,6 +167,8 @@ import {
   contaminatedHostHalt,
   CO_TENANT_ATTEMPTS, CO_TENANT_MAX_SHIFT_MIB, CO_TENANT_SETTLE_MS, coTenantGpu, coTenantShift, sampleCardBaseline, settledCardBaseline,
   coTenantActivity, monitorCoTenants, parsePmon,
+  CO_TENANT_RESERVE_MIB, CO_TENANT_UNKNOWN_REQUIREMENT_MAX_USED_MIB, CO_TENANT_ADMISSION_WAIT_MS, cardCensus, captureRequirement,
+  coTenantAdmission, admitCard, coTenantCensusRecord, recordCoTenantCensus, coTenantIsActive, mibReading,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -5995,6 +5997,14 @@ test("co-tenant bracket: the after window waits for the exited adapter's memory 
   assert.ok(now >= CO_TENANT_SETTLE_MS);
 });
 
+// SW-6138: the card the owner actually had open -- the installed desktop app holding an idle compute
+// context (pmon `-`, no memory) beside a 96 GiB card that is otherwise free.
+const IDLE_APP_CENSUS = Object.freeze({
+  observedAt: "2026-11-28T09:00:00.000Z", gpu: "1", totalMiB: 97887, usedMiB: 480, freeMiB: 97407, utilizationPercent: 0,
+  coTenants: [{ pid: 55100, type: "C", name: "C:\\Users\\Michael\\AppData\\Local\\Programs\\SceneWorks\\sceneworks-api.exe", usedMiB: null, sm: "-", mem: "-", active: false }],
+  residentFb: new Map([[55100, 0]]),
+});
+
 async function bracketedCapture(windows, activity = []) {
   const checkout = await stubCheckout();
   const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
@@ -6008,6 +6018,7 @@ async function bracketedCapture(windows, activity = []) {
     // The settle wait has its own test; here each attempt's after window is one sample.
     settledCardBaseline: (gpu, _before, { sample, env }) => sample(gpu, { env }),
     monitorCoTenants: () => ({ stop: async () => activity.shift() ?? [] }),
+    admitCard: async () => ({ admitted: true, reasons: [], requiredMiB: 4096, census: IDLE_APP_CENSUS }),
     sampleCardBaseline: async () => { const min = windows[sampled.length]; sampled.push(min); return { samples: [min], min, max: min }; },
   });
   return { result: await measureAnchor(row, context), context, sampled };
@@ -6019,7 +6030,7 @@ const PMON = (rows) => "# gpu         pid   type     sm    mem    enc    dec    
 
 test("co-tenant activity: pmon columns are read from its header, and an empty card has no rows", () => {
   const rows = parsePmon(PMON(["24360     C      0      0      -      -      -      -      -      -    sceneworks-api.", "11288   C+G     12      3      -      -      -      -      -      -    dwm.exe"]));
-  assert.deepEqual(rows[0], { pid: 24360, type: "C", sm: "0", mem: "0", command: "sceneworks-api." });
+  assert.deepEqual(rows[0], { pid: 24360, type: "C", sm: "0", mem: "0", fb: "-", command: "sceneworks-api." });
   assert.equal(rows[1].sm, "12");
   assert.deepEqual(parsePmon(PMON(["    -     -      -      -      -      -      -      -      -      -    -"])), []);
   assert.equal(parsePmon("garbage"), null);
@@ -6032,7 +6043,8 @@ test("co-tenant activity: a resident model that sits idle is fine; activity, a n
   assert.deepEqual(at("31337     C     97     40      -      -      -      -      -      -    memory-candle-a"), [], "our own adapter is not a co-tenant");
   assert.deepEqual(at("11288   C+G     12      3      -      -      -      -      -      -    dwm.exe"), [], "desktop composition is not judged");
   assert.match(at("24360     C     35      8      -      -      -      -      -      -    sceneworks-api.")[0], /co-tenant 24360 .* was active during the capture \(sm 35%, mem 8%\)/);
-  assert.match(at("24360     C      -      -      -      -      -      -      -      -    sceneworks-api.")[0], /activity unreadable/);
+  // SW-6138: pmon `-` is an idle context it took no sample of -- the open desktop app -- not blindness.
+  assert.deepEqual(at("24360     C      -      -      -      -      -      -      -      -    sceneworks-api."), []);
   assert.match(at("9001     C      0      0      -      -      -      -      -      -    python.exe")[0], /compute process 9001 \(python\.exe\) appeared during the capture/);
   assert.match(coTenantActivity(null, resident)[0], /unreadable/);
 });
@@ -6049,6 +6061,125 @@ test("co-tenant activity: the monitor polls for the whole capture and reports wh
   const reasons = await monitor.stop();
   assert.equal(reasons.length, 1, "a transient seen once is remembered after it ends");
   assert.match(reasons[0], /sm 50%/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// SW-6138: admission by FIT. Owner rule: "You don't need a completely pristine GPU, you just need
+// it to fit."
+// ---------------------------------------------------------------------------------------------
+
+const census = (overrides = {}) => ({ ...IDLE_APP_CENSUS, ...overrides });
+const GiB = 2 ** 30;
+
+test("fit admission: an idle 0-MiB co-tenant (the open desktop app) admits a capture that fits", () => {
+  const decision = coTenantAdmission(census(), { bytes: 40 * GiB, source: "packaged anchor envelope" });
+  assert.deepEqual(decision.reasons, []);
+  assert.equal(decision.admitted, true);
+  assert.equal(decision.requiredMiB, 40 * 1024 + CO_TENANT_RESERVE_MIB);
+  // `-` and 0 are both idle; only a number above zero is activity.
+  assert.equal(coTenantIsActive({ sm: "-", mem: "-" }), false);
+  assert.equal(coTenantIsActive({ sm: "0", mem: "0" }), false);
+  assert.equal(coTenantIsActive({ sm: "7", mem: "0" }), true);
+});
+
+test("fit admission: an ACTIVE co-tenant refuses, naming it, however much memory is free", () => {
+  const busy = census({ coTenants: [{ ...IDLE_APP_CENSUS.coTenants[0], sm: "35", mem: "8", active: true }] });
+  const decision = coTenantAdmission(busy, { bytes: 1 * GiB, source: "x" });
+  assert.equal(decision.admitted, false);
+  assert.match(decision.reasons.join("; "), /co-tenant 55100 \(.*sceneworks-api\.exe\) is computing \(sm 35%, mem 8%\)/);
+  const hot = coTenantAdmission(census({ utilizationPercent: 90 }), { bytes: 1 * GiB, source: "x" });
+  assert.match(hot.reasons.join("; "), /card busy: utilization 90%/);
+});
+
+test("fit admission: a co-tenant whose memory leaves too little free refuses with the arithmetic", () => {
+  // An idle app holding a 70 GiB model: idle, but the 40 GiB cell does not fit beside it.
+  const holding = census({ usedMiB: 72_000, freeMiB: 25_887, coTenants: [{ ...IDLE_APP_CENSUS.coTenants[0], usedMiB: 71_500 }] });
+  const decision = coTenantAdmission(holding, { bytes: 40 * GiB, source: "packaged flux2_klein_9b:bf16:candle anchor envelope" });
+  assert.equal(decision.admitted, false);
+  assert.match(decision.reasons[0], new RegExp(`does not fit: free 25887 MiB < required ${40 * 1024 + CO_TENANT_RESERVE_MIB} MiB \\(packaged flux2_klein_9b:bf16:candle anchor envelope \\+ ${CO_TENANT_RESERVE_MIB} MiB reserve\\)`));
+  // The same co-tenant beside a cell that DOES fit is admitted: idle memory is just memory.
+  assert.equal(coTenantAdmission(holding, { bytes: 10 * GiB, source: "x" }).admitted, true);
+  // With no requirement estimate, fit cannot be computed, so only a near-empty card admits.
+  assert.equal(coTenantAdmission(census(), { bytes: null, source: "none" }).admitted, true);
+  assert.match(coTenantAdmission(holding, { bytes: null, source: "none" }).reasons[0], new RegExp(`no requirement estimate .* > ${CO_TENANT_UNKNOWN_REQUIREMENT_MAX_USED_MIB} MiB`));
+});
+
+test("fit admission: the reserve is the Candle lane's dedicated-VRAM slack, read as GiB", async () => {
+  const rust = await readFile(path.join(ROOT, "crates/sceneworks-core/src/memory_anchor.rs"), "utf8");
+  const gb = Number(/pub const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = ([0-9.]+);/.exec(rust)[1]);
+  assert.equal(CO_TENANT_RESERVE_MIB, Math.ceil(gb * 1024));
+});
+
+test("fit admission: the requirement is the cell's own packaged envelope, then the manifest's figures", () => {
+  const store = { anchors: [
+    { modelId: "krea_2_turbo", tier: "bf16", backend: "candle", overallAllocatorEnvelopeBytes: 30 * GiB },
+    { modelId: "krea_2_turbo", tier: "bf16", backend: "candle", overallAllocatorEnvelopeBytes: 34 * GiB },
+    { modelId: "krea_2_turbo", tier: "bf16", backend: "mlx", overallAllocatorEnvelopeBytes: 90 * GiB },
+  ] };
+  const models = [{ id: "wan_2_2_t2v_14b", candle: { minMemoryGb: 24, vramGbByTier: { q4: 22.13 } } }, { id: "lonely", candle: { minMemoryGb: 12 } }];
+  assert.deepEqual(captureRequirement({ key: "krea_2_turbo:bf16:candle" }, { store, models }), { bytes: 34 * GiB, source: "packaged krea_2_turbo:bf16:candle anchor envelope" });
+  assert.deepEqual(captureRequirement({ key: "wan_2_2_t2v_14b:q4:candle" }, { store, models }), { bytes: 22_130_000_000, source: "manifest candle.vramGbByTier.q4" });
+  assert.deepEqual(captureRequirement({ key: "lonely:q8:candle" }, { store, models }), { bytes: 12e9, source: "manifest candle.minMemoryGb" });
+  assert.equal(captureRequirement({ key: "absent:q4:candle" }, { store, models }).bytes, null);
+});
+
+test("fit admission: the census reads memory, activity and full names from nvidia-smi", async () => {
+  const runCommand = async (_command, argv) => {
+    if (argv[0] === "pmon") return { stdout: PMON(["55100     C      -      -      -      -      -      -      0      0    sceneworks-api.", "11288   C+G      -      -      -      -      -      -      -      -    dwm.exe"]) };
+    if (argv.includes("--query-gpu=memory.total,memory.used,memory.free,utilization.gpu")) return { stdout: "97887, 480, 97407, 0\n" };
+    if (argv.includes("--query-compute-apps=pid,process_name,used_memory")) return { stdout: "55100, C:\\Apps\\SceneWorks\\sceneworks-api.exe, [N/A]\n" };
+    if (argv.includes("--query-compute-apps=pid,used_memory")) return { stdout: "55100, [N/A]\n" };
+    throw new Error(`unexpected ${argv.join(" ")}`);
+  };
+  const observed = await cardCensus("1", { runCommand, clock: () => new Date("2026-11-28T09:00:00Z") });
+  assert.equal(observed.freeMiB, 97407);
+  assert.deepEqual(observed.coTenants, [{ pid: 55100, type: "C", name: "C:\\Apps\\SceneWorks\\sceneworks-api.exe", usedMiB: 0, sm: "-", mem: "-", active: false }]);
+  assert.equal(observed.residentFb.get(55100), 0);
+  assert.equal(mibReading("[N/A]"), null);
+  assert.equal(mibReading("1024 MiB"), 1024);
+  await assert.rejects(cardCensus("1", { runCommand: async () => ({ stdout: "[N/A]" }) }), /unreadable memory census/);
+});
+
+test("fit admission: a busy card is waited on, bounded, then admitted or refused by name", async () => {
+  let now = 0;
+  const said = [];
+  const sequence = [census({ coTenants: [{ ...IDLE_APP_CENSUS.coTenants[0], sm: "60", mem: "9", active: true }] }), census()];
+  const admitted = await admitCard("1", { bytes: GiB, source: "x" }, {
+    census: async () => sequence.shift(), clock: () => now, sleep: async (ms) => { now += ms; }, say: (line) => said.push(line),
+  });
+  assert.equal(admitted.admitted, true);
+  assert.match(said[0], /waiting for GPU 1 to admit the capture .*is computing/);
+  now = 0;
+  const refused = await admitCard("1", { bytes: 200 * GiB, source: "x" }, {
+    census: async () => census(), clock: () => now, sleep: async (ms) => { now += ms; }, say: () => {},
+  });
+  assert.equal(refused.admitted, false, "a cell that can never fit is refused, not waited on forever");
+  assert.ok(now >= CO_TENANT_ADMISSION_WAIT_MS);
+});
+
+test("fit admission: the census written on a record validates against the calibration schema", async () => {
+  const record = coTenantCensusRecord({ census: IDLE_APP_CENSUS }, { bytes: 34 * GiB, source: "packaged anchor envelope" });
+  assert.equal(record.coTenants[0].pid, 55100);
+  assert.equal(record.reserveBytes, CO_TENANT_RESERVE_MIB * 2 ** 20);
+  const schema = JSON.parse(await readFile(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"));
+  assert.ok(schema.$defs.record.properties.coTenantCensus, "the record admits the census");
+  const def = schema.$defs.coTenantCensus;
+  for (const key of def.required) assert.ok(Object.hasOwn(record, key), key);
+  for (const key of Object.keys(record)) assert.ok(Object.hasOwn(def.properties, key), `${key} is declared`);
+  const dir = await mkdtemp(path.join(tmpdir(), "catalog-census-"));
+  const bundle = path.join(dir, "bundle.json");
+  await writeFile(bundle, JSON.stringify({ records: [{ id: "a" }, { id: "b" }] }));
+  await recordCoTenantCensus(bundle, record);
+  const written = JSON.parse(await readFile(bundle, "utf8"));
+  assert.deepEqual(written.records.map((entry) => entry.coTenantCensus.coTenants[0].pid), [55100, 55100]);
+});
+
+test("co-tenant activity: a resident co-tenant whose memory moves during the capture is flagged", () => {
+  const resident = [55100];
+  const at = (fb) => coTenantActivity(parsePmon(PMON([`55100     C      -      -      -      -      -      -  ${fb}      0    sceneworks-api.`])), resident, new Map([[55100, 0]]));
+  assert.deepEqual(at("0"), []);
+  assert.deepEqual(at(String(CO_TENANT_MAX_SHIFT_MIB)), []);
+  assert.match(at("12000")[0], /co-tenant 55100 .* memory moved 0 -> 12000 MiB during the capture/);
 });
 
 test("co-tenant bracket: activity during the capture discards the attempt even when the windows match", async () => {
@@ -8501,19 +8632,22 @@ test("the GPU preflight passes a WDDM desktop census: graphics contexts are not 
   assert.match(stdout, /pid 13116, type C\+G, C:\\Windows\\explorer\.exe/);
   assert.match(stdout, /pid 24484, type G, /);
   assert.doesNotMatch(stdout, /::error/);
-  assert.match(stdout, /no foreign compute process/);
+  assert.match(stdout, /admitted by fit/);
 });
 
-test("the GPU preflight refuses a foreign PURE-COMPUTE process, naming only that one", async () => {
+// SW-6138 (owner rule: "you don't need a completely pristine GPU, you just need it to fit"): a
+// foreign compute co-tenant is recorded, never refused here; admission is per anchor, by fit.
+test("the GPU preflight records an idle foreign compute co-tenant and starts the walk", async () => {
   const host = await fakeGpuHost({
     pmon: [WDDM_DESKTOP_PMON, "    1       6308     C   1024      -     0     0     -     -   sceneworks-api."].join("\n"),
     apps: [WDDM_DESKTOP_APPS, "6308, C:\\Users\\Michael\\AppData\\Local\\Programs\\SceneWorks\\sceneworks-api.exe, [N/A]"].join("\n"),
   });
   const { code, stdout } = await runGpuPreflight(host);
-  assert.equal(code, 1);
-  assert.match(stdout, /::error title=Profiled GPU is not idle::pid 6308 \(C:\\Users\\Michael.*sceneworks-api\.exe, 1024 MiB\)/);
-  // The twenty desktop contexts beside it are NOT errors — that was the false positive.
-  assert.equal(stdout.match(/::error/g).length, 1);
+  assert.equal(code, 0, stdout);
+  assert.match(stdout, /::notice title=Idle GPU co-tenant::pid 6308 \(C:\\Users\\Michael.*sceneworks-api\.exe, 1024 MiB\)/);
+  assert.match(stdout, /pid 6308, type C, .*sceneworks-api\.exe, 1024 MiB, sm 0, mem 0/);
+  assert.doesNotMatch(stdout, /::error/);
+  assert.match(stdout, /admitted by fit/);
 });
 
 test("the GPU preflight reaps OUR orphaned adapter and then starts the walk", async () => {
@@ -8528,7 +8662,7 @@ test("the GPU preflight reaps OUR orphaned adapter and then starts the walk", as
   assert.equal(code, 0, stdout);
   assert.match(stdout, /::warning title=Reaping an orphaned adapter::pid 6308 \(type C, .*memory-candle-adapter\.exe, 12345 MiB\)/);
   assert.match(await readFile(host.killedLog, "utf8"), /Stop-Process -Id 6308 -Force/);
-  assert.match(stdout, /no foreign compute process/);
+  assert.match(stdout, /admitted by fit/);
 });
 
 test("the GPU preflight classifies [Insufficient Permissions] rows by TYPE, never by name", async () => {
@@ -8548,10 +8682,12 @@ test("the GPU preflight classifies [Insufficient Permissions] rows by TYPE, neve
     ].join("\n"),
   });
   const { code, stdout } = await runGpuPreflight(host);
-  assert.equal(code, 1);
+  // SW-6138: an ACTIVE co-tenant is warned about, not refused; each anchor waits on it (bounded).
+  assert.equal(code, 0, stdout);
   assert.match(stdout, /pid 3168, type C\+G, \[Insufficient Permissions\]/);
-  assert.match(stdout, /::error title=Profiled GPU is not idle::pid 6732 \(\[Insufficient Permissions\], 512 MiB\)/);
-  assert.equal(stdout.match(/::error/g).length, 1);
+  assert.match(stdout, /::warning title=Active GPU co-tenant::pid 6732 \(\[Insufficient Permissions\], 512 MiB\) is computing .*sm 3%, mem 1%/);
+  assert.equal(stdout.match(/::warning title=Active GPU co-tenant/g).length, 1);
+  assert.doesNotMatch(stdout, /::error/);
 
   // The same three rows with NO compute row among them pass, unreadable names and all.
   const graphicsOnly = await fakeGpuHost({

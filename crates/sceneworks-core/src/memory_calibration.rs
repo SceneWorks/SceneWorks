@@ -258,6 +258,11 @@ pub struct EvidenceRecord {
     pub diagnostics: Option<Diagnostics>,
     pub derivation: Option<EvidenceDerivation>,
     pub source_provenance: Option<SourceProvenance>,
+    /// SW-6138: the shared-card admission census a Candle capture ran under
+    /// (`packages/schemas/memory-calibration.schema.json` `$defs.coTenantCensus`). Audit evidence
+    /// only: it is outside the record identity and no admission consumer reads it.
+    #[serde(default)]
+    pub co_tenant_census: Option<Value>,
     pub calibration_fingerprint: String,
     pub captured_at: String,
     pub harness_version: String,

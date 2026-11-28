@@ -27,9 +27,14 @@
 #   2. Kill the ones that are OURS BY NAME — `memory-candle-adapter*` / `memory-mlx-adapter*`. Only
 #      those, and only by name: this box is shared with other self-hosted lanes and killing a pid
 #      merely because it is inconvenient would take a colleague's build down with it.
-#   3. Census again. Any PURE-COMPUTE (`C`) row left is somebody else's, so FAIL FAST with a
-#      `::error` naming the pid, the process and its memory — before the walk spends 60 cells
-#      learning the same thing. Graphics and `C+G` desktop contexts are reported and ignored.
+#   3. Census again. Any PURE-COMPUTE (`C`) row left is somebody else's co-tenant. SW-6138 (owner
+#      rule: "you don't need a completely pristine GPU, you just need it to fit"): a co-tenant is
+#      NOT a refusal here. An idle one (pmon sm/mem `-` or 0, e.g. the open desktop app) is
+#      reported as a `::notice`; an active one as a `::warning`. Admission is per anchor, by FIT,
+#      in `scripts/measure-memory-catalog.mjs` (`admitCard`): the card's free memory must cover the
+#      cell's requirement plus the reserve, no co-tenant may be computing, and every co-tenant is
+#      recorded on the record as `coTenantCensus`. Only OUR adapter surviving the reap fails here.
+#      Graphics and `C+G` desktop contexts are reported and ignored.
 #
 # WHY THIS IS NOT A GATE. It gates no code, no merge and no measurement: it is the same claim the
 # engine's stable-idle guard makes (a peak sampled beside a foreign process is not this model's
@@ -72,7 +77,7 @@ apps_census() {
     --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null || true
 }
 
-# `pid<TAB>type<TAB>memory` per process, from the same `pmon` invocation the engine's stable-idle
+# `pid<TAB>type<TAB>memory<TAB>sm<TAB>mem` per process, from the same `pmon` invocation the engine's stable-idle
 # guard uses. Column positions come from pmon's own `# gpu pid type fb ...` header rather than
 # being assumed: driver versions differ on whether `ccpm` sits between `fb` and `sm`.
 pmon_census() {
@@ -87,13 +92,17 @@ pmon_census() {
         pi = ("pid" in col) ? col["pid"] : 2
         ti = ("type" in col) ? col["type"] : 3
         fi = ("fb" in col) ? col["fb"] : 0
+        si = ("sm" in col) ? col["sm"] : 0
+        mi = ("mem" in col) ? col["mem"] : 0
         if ($pi !~ /^[0-9]+$/) { next }
         if (want != "" && $gi != want) {
           printf "MISMATCH\t%s\t%s\n", $gi, $pi
           next
         }
         mem = (fi > 0 && fi <= NF && $fi ~ /^[0-9]+$/) ? ($fi " MiB") : "[N/A]"
-        printf "%s\t%s\t%s\n", $pi, $ti, mem
+        sm = (si > 0 && si <= NF) ? $si : "-"
+        mu = (mi > 0 && mi <= NF) ? $mi : "-"
+        printf "%s\t%s\t%s\t%s\t%s\n", $pi, $ti, mem, sm, mu
       }
     ' || true
 }
@@ -114,13 +123,13 @@ apps_row() {
   '
 }
 
-# One census: `pid<TAB>type<TAB>name<TAB>memory` per row, types straight from pmon and names from
+# One census: `pid<TAB>type<TAB>name<TAB>memory<TAB>sm<TAB>mem` per row, types straight from pmon and names from
 # the apps census wherever it has one (pmon truncates `command` to a bare, clipped basename).
 census() {
-  local apps pmon pid type mem name enriched
+  local apps pmon pid type mem sm mu name enriched
   apps="$(apps_census)"
   pmon="$(pmon_census)"
-  while IFS=$'\t' read -r pid type mem; do
+  while IFS=$'\t' read -r pid type mem sm mu; do
     [[ -z "$pid" ]] && continue
     if [[ "$pid" == "MISMATCH" ]]; then
       echo "::warning title=Census returned another GPU::nvidia-smi pmon reported physical GPU ${type} (pid ${mem}) for a census scoped to GPU ${expected_gpu}; that row is ignored" >&2
@@ -134,16 +143,16 @@ census() {
       local apps_mem="${enriched#*$'\t'}"
       [[ -n "$apps_mem" && "$apps_mem" != "[N/A]" ]] && mem="$apps_mem"
     fi
-    printf '%s\t%s\t%s\t%s\n' "$pid" "$type" "$name" "$mem"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$type" "$name" "$mem" "${sm:--}" "${mu:--}"
   done <<< "$pmon"
 }
 
 # The census as a job-log block, dropping the blank line an empty census leaves behind.
 report() {
-  local pid type name mem
-  while IFS=$'\t' read -r pid type name mem; do
+  local pid type name mem sm mu
+  while IFS=$'\t' read -r pid type name mem sm mu; do
     [[ -z "$pid" ]] && continue
-    printf '  pid %s, type %s, %s, %s\n' "$pid" "$type" "$name" "$mem"
+    printf '  pid %s, type %s, %s, %s, sm %s, mem %s\n' "$pid" "$type" "$name" "$mem" "${sm:--}" "${mu:--}"
   done
 }
 
@@ -170,7 +179,7 @@ echo "processes on GPU ${CUDA_VISIBLE_DEVICES:-<all>} before the walk (type C is
 report <<< "$before"
 
 reaped=0
-while IFS=$'\t' read -r pid type name memory; do
+while IFS=$'\t' read -r pid type name memory _sm _mu; do
   [[ -z "$pid" ]] && continue
   # The binaries this campaign itself launches, matched on the process-name field `nvidia-smi`
   # prints (a full path on Windows, hence the `*` on both ends). Spelled as literal `case`
@@ -204,37 +213,39 @@ if [[ -n "$(echo "$remaining" | tr -d '[:space:]')" ]]; then
   report <<< "$remaining"
 fi
 
-# Only what the engine would refuse. `pure_compute_pids` counts type `C`, passes over `C+G` and
-# `G`, and errors on anything else; an unrecognised type is warned about here rather than refused,
-# because a census oddity is not evidence of a busy GPU and stopping the walk on one would be the
-# false positive this script exists to stop making.
-foreign=0
-while IFS=$'\t' read -r pid type name memory; do
+# SW-6138: a foreign compute co-tenant is recorded, never refused here -- admission is per anchor,
+# by FIT (`admitCard` in scripts/measure-memory-catalog.mjs). Only our own adapter surviving the
+# reap stops the walk. An unrecognised type is warned about, as before.
+survivors=0
+while IFS=$'\t' read -r pid type name memory sm mu; do
   [[ -z "$pid" ]] && continue
   case "$type" in
     C)
       case "$name" in
         *memory-candle-adapter* | *memory-mlx-adapter*)
           echo "::error title=Our own adapter survived the reap::pid ${pid} (${name}, ${memory}) is one of this campaign's binaries and is STILL resident after the reap; the walk is not started."
+          survivors=$(( survivors + 1 ))
           ;;
         *)
-          echo "::error title=Profiled GPU is not idle::pid ${pid} (${name}, ${memory}) is a pure-compute process on GPU ${CUDA_VISIBLE_DEVICES:-<all>}. Every capture's stable-idle baseline would be contaminated and every anchor would be refused, so the walk is not started. This process is not one of this campaign's binaries -- find out whose it is before killing it."
+          if [[ "$sm" =~ ^[0-9]+$ && "$sm" -gt 0 ]] || [[ "$mu" =~ ^[0-9]+$ && "$mu" -gt 0 ]]; then
+            echo "::warning title=Active GPU co-tenant::pid ${pid} (${name}, ${memory}) is computing on GPU ${CUDA_VISIBLE_DEVICES:-<all>} (sm ${sm}%, mem ${mu}%). Each anchor waits for it to go idle (bounded) and is refused by name if it does not; it is never killed."
+          else
+            echo "::notice title=Idle GPU co-tenant::pid ${pid} (${name}, ${memory}) holds a compute context on GPU ${CUDA_VISIBLE_DEVICES:-<all>} with no measurable activity; anchors are admitted beside it when they fit, and it is recorded on every record."
+          fi
           ;;
       esac
-      foreign=$(( foreign + 1 ))
       ;;
     "C+G" | G)
-      # A WDDM desktop context. It holds a device context and no compute work; the engine's stable
-      # baseline absorbs its fixed residency.
+      # A WDDM desktop context. It holds a device context and no compute work.
       ;;
     *)
-      echo "::warning title=Unrecognised GPU process type::pid ${pid} (${name}, ${memory}) has nvidia-smi process type '${type}', which the engine's stable-idle guard does not recognise; it is not counted as contamination here"
+      echo "::warning title=Unrecognised GPU process type::pid ${pid} (${name}, ${memory}) has nvidia-smi process type '${type}'; it is reported, not refused"
       ;;
   esac
 done <<< "$remaining"
 
-if (( foreign > 0 )); then
+if (( survivors > 0 )); then
   exit 1
 fi
 
-echo "profiled GPU carries no foreign compute process; starting the walk"
+echo "profiled GPU carries none of this campaign's own processes; anchors are admitted by fit"

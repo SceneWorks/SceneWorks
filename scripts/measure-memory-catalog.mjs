@@ -4745,19 +4745,40 @@ export function parsePmon(text) {
     .filter((fields) => /^\d+$/.test(fields[at("pid")] ?? ""))
     .map((fields) => ({
       pid: Number(fields[at("pid")]), type: fields[at("type")], sm: fields[at("sm")], mem: fields[at("mem")],
+      ...(at("fb") >= 0 ? { fb: fields[at("fb")] } : {}),
       command: at("command") >= 0 ? fields.slice(at("command")).join(" ") : "",
     }));
+}
+
+/**
+ * What a co-tenant is doing, from one pmon row. pmon prints `-` for a process it took no
+ * utilization sample of -- an idle context -- so `-` is idle, NOT unreadable (SW-6138, owner rule:
+ * "you don't need a completely pristine GPU, you just need it to fit"). A number above zero is
+ * activity.
+ */
+export function coTenantIsActive(row) {
+  const busy = (value) => /^\d+$/.test(String(value ?? "")) && Number(value) > 0;
+  return busy(row.sm) || busy(row.mem);
+}
+
+/** A pmon `fb` (MiB) or apps `used_memory` reading as a number, or `null` where the driver has none. */
+export function mibReading(value) {
+  const match = /^(\d+)(?:\s*MiB)?$/.exec(String(value ?? "").trim());
+  return match ? Number(match[1]) : null;
 }
 
 /**
  * Codex review (PR #3435): equal before/after windows cannot certify a capture -- a resident
  * co-tenant can allocate and free VRAM in the middle of it, and the device-wide peak then holds its
  * memory. So while the capture runs, every pure-compute ("C") process other than our adapter must be
- * one that was already resident and must show NO activity (`sm` and `mem` both 0). A new compute
- * process, any activity, or activity pmon cannot report ("-") means the peak cannot be attributed to
- * the adapter: the attempt is discarded and retried. Graphics/C+G desktop clients are not judged.
+ * one that was already resident, must not be computing, and must keep the memory it held at
+ * admission (`residentFb`, MiB, where the driver reports one). An IDLE resident co-tenant -- the
+ * desktop app holding a context, pmon `-` or 0 -- is recorded and admitted (SW-6138). A new compute
+ * process, measurable activity, a co-tenant whose memory moves, or unreadable pmon output means the
+ * peak cannot be attributed to the adapter: the attempt is discarded and retried. Graphics/C+G
+ * desktop clients are not judged.
  */
-export function coTenantActivity(rows, resident) {
+export function coTenantActivity(rows, resident, residentFb = new Map(), limit = CO_TENANT_MAX_SHIFT_MIB) {
   if (rows === null) return ["nvidia-smi pmon output unreadable; the peak cannot be attributed to the adapter"];
   const reasons = [];
   for (const row of rows) {
@@ -4766,18 +4787,20 @@ export function coTenantActivity(rows, resident) {
       reasons.push(`compute process ${row.pid} (${row.command || "unnamed"}) appeared during the capture`);
       continue;
     }
-    const sm = Number(row.sm), mem = Number(row.mem);
-    if (!Number.isFinite(sm) || !Number.isFinite(mem)) {
-      reasons.push(`co-tenant ${row.pid} activity unreadable (sm ${row.sm}, mem ${row.mem}); the peak cannot be attributed`);
-    } else if (sm > 0 || mem > 0) {
-      reasons.push(`co-tenant ${row.pid} (${row.command || "unnamed"}) was active during the capture (sm ${sm}%, mem ${mem}%)`);
+    if (coTenantIsActive(row)) {
+      reasons.push(`co-tenant ${row.pid} (${row.command || "unnamed"}) was active during the capture (sm ${row.sm}%, mem ${row.mem}%)`);
+    }
+    const admitted = residentFb.get(row.pid);
+    const now = mibReading(row.fb);
+    if (admitted != null && now != null && Math.abs(now - admitted) > limit) {
+      reasons.push(`co-tenant ${row.pid} (${row.command || "unnamed"}) memory moved ${admitted} -> ${now} MiB during the capture`);
     }
   }
   return reasons;
 }
 
 /** Poll per-process activity for the whole capture; `stop()` returns the distinct reasons seen. */
-export function monitorCoTenants(gpu, resident, { env = process.env, runCommand = run, pollMs = CO_TENANT_POLL_MS } = {}) {
+export function monitorCoTenants(gpu, resident, { env = process.env, runCommand = run, pollMs = CO_TENANT_POLL_MS, residentFb = new Map() } = {}) {
   const reasons = new Set();
   let running = true;
   let wake = null;
@@ -4785,7 +4808,7 @@ export function monitorCoTenants(gpu, resident, { env = process.env, runCommand 
     while (running) {
       try {
         const { stdout } = await runCommand("nvidia-smi", ["pmon", "-i", gpu, "-c", "1", "-s", "um"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
-        for (const reason of coTenantActivity(parsePmon(stdout), resident)) reasons.add(reason);
+        for (const reason of coTenantActivity(parsePmon(stdout), resident, residentFb)) reasons.add(reason);
       } catch (error) {
         reasons.add(`nvidia-smi pmon failed during the capture: ${error.message}`);
       }
@@ -4807,6 +4830,178 @@ export function coTenantShift(before, after, limit = CO_TENANT_MAX_SHIFT_MIB) {
   const named = (list) => (list ?? []).join(",") || "none";
   if (named(before.compute) !== named(after.compute)) reasons.push(`pure-compute co-tenants changed (${named(before.compute)} -> ${named(after.compute)})`);
   return reasons.length ? reasons.join("; ") : null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// SW-6138: admission by FIT, not by an empty card
+// ---------------------------------------------------------------------------------------------
+//
+// Owner rule (2026-11-28): "You don't need a completely pristine GPU, you just need it to fit."
+// A Candle capture is admitted onto a shared card when the card's FREE memory covers the anchor's
+// requirement plus the Candle lane's dedicated-VRAM reserve, and no co-tenant is computing. An idle
+// co-tenant -- a compute context with no measurable SM/memory activity (pmon `-` or 0), such as the
+// open desktop app -- never blocks; it is recorded in the capture evidence (`coTenantCensus`) so a
+// measurement taken beside it is auditable. This is the same rule the CI lease applies
+// (`scripts/ci/windows_cuda_execution.py` `shared_decision`, rule b8b59242). The during-capture
+// bracket (`coTenantShift`, `coTenantActivity`) still discards an attempt in which a co-tenant
+// computed, appeared, or moved its memory.
+
+/**
+ * The Candle lane's dedicated-VRAM allocator/context reserve in MiB:
+ * `sceneworks_core::memory_anchor::DEDICATED_VRAM_ALLOCATOR_SLACK_GB` (2.0), read as GiB so the
+ * reserve never rounds down. Bound to the Rust declaration by a test.
+ */
+export const CO_TENANT_RESERVE_MIB = 2048;
+/**
+ * With no requirement estimate for a cell, fit cannot be computed, so the card must be close to
+ * empty: at most this much of it in use. Matches `observedOperatingConditions.foreignProcessLimitBytes`.
+ */
+export const CO_TENANT_UNKNOWN_REQUIREMENT_MAX_USED_MIB = 1024;
+/** The same busy-device ceiling the CI lease uses (`SHARED_MAX_UTILIZATION_PERCENT`). */
+export const CO_TENANT_MAX_UTILIZATION_PERCENT = 30;
+/** How long a cell waits for an active co-tenant to go idle, or for memory to free, before refusing. */
+export const CO_TENANT_ADMISSION_WAIT_MS = 15 * 60_000;
+export const CO_TENANT_ADMISSION_POLL_MS = 30_000;
+
+/**
+ * One census of the card: its total/used/free memory and utilization, and every pure-compute
+ * co-tenant with its pid, full name, memory and pmon activity. Graphics/C+G desktop contexts are
+ * not co-tenants here (they hold no compute work); our own adapter is excluded by name.
+ */
+export async function cardCensus(gpu, { env = process.env, runCommand = run, clock = () => new Date() } = {}) {
+  const { stdout: device } = await runCommand("nvidia-smi", ["-i", gpu, "--query-gpu=memory.total,memory.used,memory.free,utilization.gpu", "--format=csv,noheader,nounits"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+  const [totalMiB, usedMiB, freeMiB, utilizationPercent] = String(device).trim().split(",").map((field) => Number(field.trim()));
+  if (![totalMiB, usedMiB, freeMiB].every(Number.isInteger) || totalMiB <= 0) {
+    throw new Error(`unreadable memory census for GPU ${gpu}: ${String(device).trim()}`);
+  }
+  const { stdout: pmon } = await runCommand("nvidia-smi", ["pmon", "-i", gpu, "-c", "1", "-s", "um"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+  const rows = parsePmon(pmon);
+  if (rows === null) throw new Error(`unreadable nvidia-smi pmon census for GPU ${gpu}`);
+  const names = await gpuComputeProcesses({ runCommand, env: { ...env, CUDA_VISIBLE_DEVICES: gpu } });
+  const appsMemory = new Map();
+  try {
+    const { stdout } = await runCommand("nvidia-smi", ["-i", gpu, "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"], { env, timeoutMs: NVIDIA_SMI_TIMEOUT_MS });
+    for (const line of String(stdout).split("\n")) {
+      const [pid, used] = line.split(",").map((field) => field.trim());
+      if (/^\d+$/.test(pid ?? "")) appsMemory.set(Number(pid), mibReading(used));
+    }
+  } catch { /* per-process memory is optional evidence; the card's free memory decides fit */ }
+  const coTenants = rows
+    .filter((row) => row.type === "C" && !row.command.startsWith(ADAPTER_COMMAND_PREFIX))
+    .map((row) => {
+      const fbMiB = mibReading(row.fb);
+      const named = names.get(row.pid);
+      return {
+        pid: row.pid,
+        type: row.type,
+        name: named ? named.replace(/ \([^)]*\)$/, "") : (row.command || "unnamed"),
+        usedMiB: appsMemory.get(row.pid) ?? fbMiB,
+        sm: row.sm,
+        mem: row.mem,
+        active: coTenantIsActive(row),
+      };
+    });
+  return {
+    observedAt: clock().toISOString(),
+    gpu,
+    totalMiB,
+    usedMiB,
+    freeMiB,
+    utilizationPercent: Number.isFinite(utilizationPercent) ? utilizationPercent : null,
+    coTenants,
+    residentFb: new Map(rows.filter((row) => row.type === "C" && mibReading(row.fb) != null).map((row) => [row.pid, mibReading(row.fb)])),
+  };
+}
+
+/**
+ * What the cell needs on the card, in bytes, and where the figure comes from: the largest packaged
+ * anchor envelope for this exact (model, tier, backend) cell -- a measurement at the plan's own
+ * geometry -- else the manifest's measured per-tier VRAM, else its minimum memory. `null` when none
+ * exists (a never-measured cell of a model with no published figure).
+ */
+export function captureRequirement(row, { store, models }) {
+  const parts = anchorParts(row.key);
+  const anchors = [...(store?.anchors ?? []), ...(store?.regimeAnchors ?? [])]
+    .filter((anchor) => anchor.modelId === parts.modelId && anchor.tier === parts.tier && anchor.backend === parts.backend);
+  const envelope = Math.max(0, ...anchors.map((anchor) => anchor.overallAllocatorEnvelopeBytes ?? 0));
+  if (envelope > 0) return { bytes: envelope, source: `packaged ${row.key} anchor envelope` };
+  const lane = (models ?? []).find((entry) => entry.id === parts.modelId)?.[parts.backend];
+  const tierGb = lane?.vramGbByTier?.[parts.tier];
+  if (Number.isFinite(tierGb) && tierGb > 0) return { bytes: Math.round(tierGb * 1e9), source: `manifest ${parts.backend}.vramGbByTier.${parts.tier}` };
+  if (Number.isFinite(lane?.minMemoryGb) && lane.minMemoryGb > 0) return { bytes: Math.round(lane.minMemoryGb * 1e9), source: `manifest ${parts.backend}.minMemoryGb` };
+  return { bytes: null, source: "no packaged anchor or manifest memory figure" };
+}
+
+/** The pure admission rule over one census: `{ admitted, reasons, requiredMiB }`. */
+export function coTenantAdmission(census, requirement, { reserveMiB = CO_TENANT_RESERVE_MIB } = {}) {
+  const reasons = [];
+  for (const tenant of census.coTenants) {
+    if (tenant.active) reasons.push(`co-tenant ${tenant.pid} (${tenant.name}) is computing (sm ${tenant.sm}%, mem ${tenant.mem}%)`);
+  }
+  if (census.utilizationPercent != null && census.utilizationPercent > CO_TENANT_MAX_UTILIZATION_PERCENT) {
+    reasons.push(`card busy: utilization ${census.utilizationPercent}% > ${CO_TENANT_MAX_UTILIZATION_PERCENT}%`);
+  }
+  let requiredMiB = null;
+  if (requirement?.bytes) {
+    requiredMiB = Math.ceil(requirement.bytes / 2 ** 20) + reserveMiB;
+    if (census.freeMiB < requiredMiB) {
+      reasons.push(`does not fit: free ${census.freeMiB} MiB < required ${requiredMiB} MiB (${requirement.source} + ${reserveMiB} MiB reserve)`);
+    }
+  } else if (census.usedMiB > CO_TENANT_UNKNOWN_REQUIREMENT_MAX_USED_MIB) {
+    reasons.push(`no requirement estimate (${requirement?.source ?? "none"}), so the card must be near empty: ${census.usedMiB} MiB used > ${CO_TENANT_UNKNOWN_REQUIREMENT_MAX_USED_MIB} MiB`);
+  }
+  return { admitted: reasons.length === 0, reasons, requiredMiB };
+}
+
+/**
+ * Census and decide until the card admits the cell or `waitMs` runs out. A wait prints when it
+ * starts and on every poll, naming why, so an active co-tenant is never a silent stall.
+ */
+export async function admitCard(gpu, requirement, { census = cardCensus, env, clock = Date.now, sleep = (ms) => new Promise((done) => setTimeout(done, ms)), waitMs = CO_TENANT_ADMISSION_WAIT_MS, pollMs = CO_TENANT_ADMISSION_POLL_MS, say = (line) => process.stdout.write(`${line}\n`) } = {}) {
+  const started = clock();
+  for (;;) {
+    const observed = await census(gpu, { env });
+    const decision = coTenantAdmission(observed, requirement);
+    if (decision.admitted) return { ...decision, census: observed };
+    const waited = clock() - started;
+    if (waited >= waitMs) return { ...decision, census: observed };
+    say(`    waiting for GPU ${gpu} to admit the capture (${Math.round(waited / 1000)}s): ${decision.reasons.join("; ")}`);
+    await sleep(pollMs);
+  }
+}
+
+/** The census as it is recorded on every captured record (`coTenantCensus`, schema v1). */
+export function coTenantCensusRecord(admission, requirement) {
+  const { census } = admission;
+  return {
+    schemaVersion: 1,
+    gpu: census.gpu,
+    observedAt: census.observedAt,
+    totalBytes: census.totalMiB * 2 ** 20,
+    usedBytes: census.usedMiB * 2 ** 20,
+    freeBytes: census.freeMiB * 2 ** 20,
+    utilizationPercent: census.utilizationPercent,
+    requirementBytes: requirement?.bytes ?? null,
+    requirementSource: requirement?.source ?? "none",
+    reserveBytes: CO_TENANT_RESERVE_MIB * 2 ** 20,
+    admission: "fits",
+    coTenants: census.coTenants.map((tenant) => ({
+      pid: tenant.pid,
+      name: tenant.name,
+      type: tenant.type,
+      usedBytes: tenant.usedMiB == null ? null : tenant.usedMiB * 2 ** 20,
+      sm: tenant.sm,
+      mem: tenant.mem,
+      active: tenant.active,
+    })),
+  };
+}
+
+/** Write the admission census onto every record of a captured bundle, before it is checked. */
+export async function recordCoTenantCensus(bundlePath, censusRecord) {
+  const bundle = JSON.parse(await readFile(bundlePath, "utf8"));
+  for (const record of bundle.records ?? []) record.coTenantCensus = censusRecord;
+  await writeFile(bundlePath, `${JSON.stringify(bundle, null, 2)}\n`);
 }
 
 export async function measureAnchor(row, context) {
@@ -4973,10 +5168,28 @@ export async function measureAnchor(row, context) {
   const timeoutMs = probeTimeoutMs(budgetMinutes, guarded);
   const cardGpu = (context.coTenantGpu ?? coTenantGpu)(row, env);
   let coTenantRefusal = null;
+  // SW-6138: admit by FIT. The cell waits (bounded) for an active co-tenant to go idle or for memory
+  // to free, then refuses by name; an idle co-tenant is recorded and never blocks.
+  let admission = null;
+  let requirement = null;
+  if (cardGpu !== null) {
+    // An unreadable store or manifest leaves the requirement unknown, which the rule handles
+    // conservatively (near-empty card only); it never turns into an admission.
+    requirement = captureRequirement(row, {
+      store: await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8").then(JSON.parse).catch(() => null),
+      models: context.models ?? await readManifestModels(root).catch(() => []),
+    });
+    admission = await (context.admitCard ?? admitCard)(cardGpu, requirement, { env });
+    const tenants = admission.census.coTenants.map((tenant) => `${tenant.pid} ${tenant.name} ${tenant.usedMiB ?? "N/A"} MiB sm ${tenant.sm} mem ${tenant.mem}`).join("; ") || "none";
+    log.write(`card admission GPU ${cardGpu}: free ${admission.census.freeMiB}/${admission.census.totalMiB} MiB, required ${admission.requiredMiB ?? "unknown"} MiB (${requirement.source}), co-tenants: ${tenants}${admission.admitted ? " -> admitted" : ` -> REFUSED: ${admission.reasons.join("; ")}`}\n`);
+    if (!admission.admitted) {
+      return finish("capture_failed", `GPU ${cardGpu} did not admit the capture within ${Math.round(CO_TENANT_ADMISSION_WAIT_MS / 60_000)} min: ${admission.reasons.join("; ")}`.slice(0, FAILURE_REASON_LIMIT));
+    }
+  }
   try {
     for (let attempt = 1; ; attempt += 1) {
     const before = cardGpu === null ? null : await (context.sampleCardBaseline ?? sampleCardBaseline)(cardGpu, { env });
-    const monitor = cardGpu === null ? null : (context.monitorCoTenants ?? monitorCoTenants)(cardGpu, before.compute ?? [], { env });
+    const monitor = cardGpu === null ? null : (context.monitorCoTenants ?? monitorCoTenants)(cardGpu, before.compute ?? [], { env, residentFb: admission?.census.residentFb ?? new Map() });
     let activity = [];
     try {
     await withMetalExecutionLease(budgetMinutes * 60, async () => {
@@ -5163,6 +5376,9 @@ export async function measureAnchor(row, context) {
   if (coTenantRefusal) {
     return finish("capture_failed", `co-tenant changed the card in all ${CO_TENANT_ATTEMPTS} attempts, so the peak would be contaminated: ${coTenantRefusal}`.slice(0, FAILURE_REASON_LIMIT));
   }
+  // SW-6138: every record carries the census it was admitted under, so a peak measured beside an
+  // idle app is auditable from the committed evidence alone.
+  if (admission) await recordCoTenantCensus(captureOutput, coTenantCensusRecord(admission, requirement));
   // 2. check the raw bundle before touching the tree.
   const sourceRoot = row.sourceCapture ? ["--source-root", rawLogDir] : [];
   try {
