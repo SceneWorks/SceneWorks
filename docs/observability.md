@@ -14,6 +14,20 @@ to a per-process file under the platform log dir (`apps/desktop/src/setup.rs::lo
 | `api.log` | `sceneworks-api` | API events incl. `gpu_route_decision`, plus axum/startup output |
 | `worker.log` | Python torch worker | `emit_worker_event` JSON (load/lora/inference + `backend`) |
 | `mlx-worker.log` | Rust MLX GPU worker | `claim_lock_contention`, `image_inference_*`, supervisor events |
+| `candle-worker.log` | Rust candle GPU worker (Windows/Linux) | supervisor + per-GPU worker events |
+| `desktop.log` | desktop shell | the shell's own `tracing` output |
+
+Every file is size-rotated by the desktop (`sceneworks_core::log_rotation`): at 50 MiB the live
+file moves to `<name>.1.log` (older generations shift to `.2`/`.3`; the 4th is deleted), so each
+log uses at most ~200 MiB. A file already over budget when the app starts (written before
+rotation existed) is rotated out on first write, keeping only its most recent 50 MiB. On Windows,
+if another program holds the live file open without delete sharing, the recent tail is copied
+into `<name>.1.log` and the live file is truncated in place instead of renamed.
+
+`api.log` carries one `api_request_duration` line per API request, except for high-frequency
+worker background routes (`jobs/claim`, `workers/:worker_id/portable-source-challenges`,
+`jobs/:job_id/progress`): those log only when the request fails (non-2xx) or takes ≥ 1 s, at
+`warn`. A successful worker `heartbeat` is never logged; a failed one is.
 
 - **macOS:** `~/Library/Logs/SceneWorks/`
 - **Windows:** `%LOCALAPPDATA%\SceneWorks\logs\`

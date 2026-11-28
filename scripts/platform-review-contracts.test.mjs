@@ -1473,7 +1473,7 @@ function assertSdxlEndpointProbeGuards(adapter) {
   assert.match(idle, /Duration::from_millis\(200\)\.min\(timeout\.saturating_sub\(elapsed\(\)\)\)/);
   assert.match(idle, /samples=\{samples:\?\}/);
   const context = body("sdxl_endpoint_context_uuid");
-  assert.match(context, /candle_gen::default_device\(\)/);
+  assert.match(context, /runtime_cuda::media::default_device\(\)/);
   assert.match(context, /\.as_cuda_device\(\)/);
   assert.match(context, /\.cuda_stream\(\)[\s\S]*?\.context\(\)[\s\S]*?\.uuid\(\)/);
   for (const name of ["run_sdxl_endpoint", "probe_sdxl_endpoint"]) {
@@ -5100,12 +5100,12 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   const generationRequest = rustFunctionSource(adapter, "ltx_canary_generation_request_for");
   assert.match(
     generationRequest,
-    /video_mode: profile\.video_mode\(\)\.map\(str::to_owned\)/,
+    /video_mode: profile\.video_mode\(\)\.map\(VideoMode::from_name\)/,
     "the canary must skip the downstream audio decoder and vocoder",
   );
   const admissionBridge = ["ltx_canary_request_for_provider_admission", "restore_ltx_canary_no_audio_after_configuration", "scoped_generate_ltx_no_audio_canary"].map((name) => rustFunctionSource(adapter, name)).join("\n");
   assert.match(admissionBridge, /request\.video_mode = None;/);
-  assert.match(admissionBridge, /request\.video_mode = Some\("no_audio"\.to_owned\(\)\);/);
+  assert.match(admissionBridge, /request\.video_mode = Some\(VideoMode::NoAudio\);/);
   assert.match(admissionBridge, /scoped_generate_observed_after_configuration\(/);
   const genericScope = rustFunctionSource(adapter, "scoped_generate_observed");
   assert.match(genericScope, /None,/,

@@ -2208,7 +2208,7 @@ async fn attribution_sha256(
     let file = file.to_path_buf();
     let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
         gen_core::ArtifactSeal::pin(&file)
-            .map(|seal| seal.content_sha256_hex())
+            .and_then(|seal| seal.require_content_sha256_hex())
             .map_err(|error| WorkerError::Io(std::io::Error::other(error.to_string())))
     });
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await

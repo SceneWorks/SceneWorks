@@ -1,6 +1,8 @@
 //! rust-api test suite, split by domain from the former single `tests.rs`
 //! (sc-11217, F-030). Shared fixtures/helpers live in `support`.
 
+mod asset_list_bench;
+mod asset_listing;
 mod auth;
 mod browser_fixture;
 pub(crate) mod catalog;
@@ -51,6 +53,7 @@ mod moss_training_native;
 mod projects;
 mod prompt_batches;
 mod provenance;
+mod queue_publisher;
 mod recipe_presets;
 mod routes;
 mod security;

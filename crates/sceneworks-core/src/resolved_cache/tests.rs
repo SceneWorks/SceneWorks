@@ -2607,6 +2607,49 @@ fn a_produced_bundle_holding_an_undeclared_file_is_never_published() {
     );
 }
 
+/// Size-only publication skips hashing, not structure: an undeclared or missing output still
+/// refuses, and a well-formed bundle publishes complete with sizes and no digests.
+#[test]
+fn a_size_only_produced_bundle_keeps_every_structural_refusal_and_hashes_nothing() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+    std::fs::write(staging.join("stowaway.bin"), b"extra").unwrap();
+    let error = reservation
+        .publish_produced_size_only(&plan)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("staged an undeclared file"), "{error}");
+
+    let reservation = derived_reservation(&store, &input, &plan);
+    let error = reservation
+        .publish_produced_size_only(&plan)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("is missing"), "{error}");
+    assert_eq!(
+        store.lookup_complete(&plan.cache_key().unwrap()).unwrap(),
+        None
+    );
+
+    let reservation = derived_reservation(&store, &input, &plan);
+    std::fs::write(reservation.staging_path().join("index.json"), b"{}").unwrap();
+    let (published, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+        reservation.publish_produced_size_only(&plan)
+    });
+    let published = published.unwrap();
+    assert_eq!(hashes, 0);
+    assert_eq!(published.state, ResolvedCacheEntryState::Complete);
+    let file = &published.artifact.closure.members[0].files[0];
+    assert_eq!((file.size_bytes, file.sha256.as_deref()), (Some(2), None));
+}
+
 #[cfg(unix)]
 #[test]
 fn a_produced_bundle_whose_declared_output_is_a_symlink_is_never_published() {
@@ -2846,10 +2889,8 @@ fn a_produced_derivative_is_hashed_once_as_it_is_written_through_its_first_load(
         );
         let sealed = format!(
             "sha256:{}",
-            seal.content_sha256()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
+            seal.require_content_sha256_hex()
+                .expect("attested seal carries content sha256")
         );
         assert_eq!(file.sha256.as_deref(), Some(sealed.as_str()));
     }

@@ -598,7 +598,7 @@ async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions
 }
 
 /// A model whose host rows put primaries in TWO repositories reclaims every tier on a whole-model
-/// delete: the CUDA `minimax_h3` serves q4/q8 from the rehost and its dense bf16 tier as upstream
+/// delete: the CUDA `minimax_h3` serves q4/q8 from the Candle-native GGML rehost and its dense bf16 tier as upstream
 /// `transformer/`. The upstream repository's shared component floor (co-requisites of both cards)
 /// and the sibling's own partition survive. Driven by the REGISTERED rows as a Linux host's catalog
 /// serves them, so a macOS run covers the off-macOS layout.
@@ -622,7 +622,7 @@ async fn whole_model_delete_reclaims_a_primary_outside_the_default_repository() 
     let base = linux_row("minimax_h3");
     let catalog = vec![base.clone(), linux_row("minimax_h3_ref")];
     let rehost =
-        fixture_repo_cache_path(data_dir, "SceneWorks/minimax-h3-mlx").join("snapshots/rev");
+        fixture_repo_cache_path(data_dir, "SceneWorks/minimax-h3-candle").join("snapshots/rev");
     let upstream = fixture_repo_cache_path(data_dir, "MiniMaxAI/MiniMax-H3").join("snapshots/rev");
     let seeded = [
         rehost.join("q4/transformer/config.json"),

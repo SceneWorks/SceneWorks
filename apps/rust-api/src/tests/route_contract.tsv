@@ -323,6 +323,7 @@ POST	/api/v1/jobs	token
 POST	/api/v1/jobs/claim	token
 POST	/api/v1/jobs/clear	token
 POST	/api/v1/jobs/cancel-pending	token
+POST	/api/v1/jobs/cancel	token
 POST	/api/v1/jobs/prioritize	token
 GET	/api/v1/jobs/events	event-ticket
 HEAD	/api/v1/jobs/events	event-ticket

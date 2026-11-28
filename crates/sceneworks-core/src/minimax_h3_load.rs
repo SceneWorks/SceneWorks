@@ -185,7 +185,10 @@ impl H3SourceAuthority {
             if let Some(carried) = relinked
                 .get(seal.canonical_target_path())
                 .filter(|carried| carried.loader_path() == seal.loader_path())
-                .filter(|carried| carried.content_sha256() == seal.content_sha256())
+                .filter(|carried| {
+                    seal.content_sha256().is_some()
+                        && carried.content_sha256() == seal.content_sha256()
+                })
                 .filter(|carried| carried.ensure_unchanged().is_ok())
             {
                 *seal = carried.clone();
@@ -203,7 +206,9 @@ impl H3SourceAuthority {
                 observe_artifact_seal_progress,
             )
             .map_err(|error| error.to_string())?;
-            if repinned.content_sha256() != seal.content_sha256() {
+            if repinned.content_sha256().is_none()
+                || repinned.content_sha256() != seal.content_sha256()
+            {
                 return Err(format!(
                     "imported H3 file changed while its task paths were staged: {}",
                     seal.loader_path().display()
@@ -484,7 +489,7 @@ impl PreparedH3Load {
                 .map(|pin| {
                     json!({
                         "path": pin.loader_path(),
-                        "sha256": crate::hashing::hex(pin.content_sha256()),
+                        "sha256": crate::hashing::hex(&pin.content_or_identity_digest()),
                     })
                 })
                 .collect(),
@@ -599,7 +604,9 @@ mod tests {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, b"normalized dit bytes").unwrap();
         let mut authority = authority_over(&file);
-        let digest = *authority.seals[0].content_sha256();
+        let digest = *authority.seals[0]
+            .require_content_sha256()
+            .expect("pinned file carries content sha256");
 
         let staged = temp.path().join("staged");
         std::fs::create_dir_all(staged.join("a")).unwrap();
@@ -614,7 +621,7 @@ mod tests {
         carried
             .ensure_unchanged()
             .expect("the seal carried across both links is live");
-        assert_eq!(carried.content_sha256(), &digest);
+        assert_eq!(carried.content_sha256(), Some(&digest));
 
         authority.reseal_after_link_staging(|| Ok(())).unwrap();
         assert_eq!(
@@ -735,7 +742,8 @@ mod tests {
             .iter()
             .find(|pin| pin.loader_path() == companion_file.as_path())
             .expect("the companion was acquired")
-            .content_sha256()
+            .require_content_sha256()
+            .expect("acquired companion seal carries content sha256")
             .to_vec();
         std::fs::write(&companion_file, b"mutated-companion-bytes").unwrap();
         let mut mutated = spec;
@@ -751,7 +759,8 @@ mod tests {
             .iter()
             .find(|pin| pin.loader_path() == companion_file.as_path())
             .expect("the companion is re-acquired")
-            .content_sha256()
+            .require_content_sha256()
+            .expect("re-acquired companion seal carries content sha256")
             .to_vec();
         assert_ne!(
             acquired_digest, mutated_digest,

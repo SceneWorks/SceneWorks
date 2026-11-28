@@ -68,6 +68,14 @@ const REVIEWED_CANDIDATES = [
     REPAIR_SHA256[1], REPAIR_SHA256[2],
     "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
   ]],
+  // Portable admission shares each worker's parsed claim set across one admission instead of
+  // re-parsing it per proof read (cache keyed by the trigger-maintained claim version). The
+  // same claims decide the same route, so this records source review, not a new physical proof.
+  ["a6f74c142832e388bee92bb50496cd088c7b7809", [
+    "0422af9cd9e0f23fe2ab41228f44b5085436da7598ce46dd6ca467f56bb72395",
+    REPAIR_SHA256[1], REPAIR_SHA256[2],
+    "2b79936713a3157a71abc4e79cf02f7151bcda26ecb70a3c49bf9213347bd26f",
+  ]],
 ];
 
 async function readSource(root, file) {

@@ -48,6 +48,9 @@ use asset_indexing::ASSET_INDEX_VERSION_KEY;
 #[cfg(test)]
 use asset_indexing::UPSCALE_LINEAGE_QUERY;
 pub(crate) use asset_queries::record_asset_list_filesystem_operation;
+pub use asset_queries::{
+    summarize_listed_asset, AssetChanges, AssetListFilter, AssetListView, ASSET_LIST_VIEW_SUMMARY,
+};
 use asset_sidecars::build_generated_asset_sidecar;
 #[cfg(test)]
 use asset_sidecars::build_image_sidecar_parts;
@@ -86,6 +89,9 @@ use schema::install_ensure_ready_before_lock_hook;
 use schema::project_schema_version;
 #[cfg(test)]
 use schema::run_ensure_ready_before_lock_hook;
+use schema::ASSET_CHANGE_EPOCH_KEY;
+use schema::ASSET_INDEX_VERSION;
+#[cfg(test)]
 use schema::PROJECT_SCHEMA_VERSION;
 #[cfg(test)]
 use std::cell::Cell;
@@ -427,6 +433,10 @@ pub struct TrainingDatasetUpload {
 #[cfg(test)]
 #[path = "project_store_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "project_store_asset_list_view_tests.rs"]
+mod asset_list_view_tests;
 
 #[cfg(test)]
 #[path = "project_store_timeline_revision_tests.rs"]

@@ -670,7 +670,7 @@ export function providerNamedThroughGenCore({ repo, revision, provider, crateDir
       "grep", "-h", "-o", "-E", "gen_core(_[a-z0-9_]+)?::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
     ]);
   } catch {
-    return false;
+    named = "";
   }
   const references = new Set(
     named
@@ -679,6 +679,39 @@ export function providerNamedThroughGenCore({ repo, revision, provider, crateDir
       .filter(Boolean)
       .map((match) => `${match[1]}:${match[2]}`),
   );
+  // SW-6985: rustfmt groups `use gen_core_checkpoint::{ supra2::{ ..., PROVIDER_ID, ... } };`
+  // across multiple lines. When no single-line path matched, inspect files in `${crateDir}/src/`
+  // that import `PROVIDER_ID` from a `gen_core*` crate via a grouped `use` statement.
+  if (references.size === 0) {
+    let candidateFiles = "";
+    try {
+      candidateFiles = runGit(repo, [
+        "grep", "-l", "-E", "gen_core(_[a-z0-9_]+)?::", revision, "--", `${crateDir}/src/`,
+      ]);
+    } catch {
+      candidateFiles = "";
+    }
+    for (const rawFile of candidateFiles.split("\n")) {
+      const file = rawFile.trim().replace(/^[^:]+:/, "");
+      if (!file.endsWith(".rs")) continue;
+      let src = "";
+      try {
+        src = runGit(repo, ["show", `${revision}:${file}`]);
+      } catch {
+        continue;
+      }
+      for (const useMatch of src.matchAll(/\buse\s+(?:[a-z0-9_]+::)*gen_core((?:_[a-z0-9_]+)?)::([^;]+);/gs)) {
+        const suffix = useMatch[1];
+        const tail = useMatch[2];
+        for (const famMatch of tail.matchAll(/\b([a-z0-9_]+)::\{([^{}]*)\}/gs)) {
+          if (/\bPROVIDER_ID\b/.test(famMatch[2])) {
+            references.add(`${suffix}:${famMatch[1]}`);
+          }
+        }
+      }
+    }
+  }
+  if (references.size === 0) return false;
   const declaration = `pub const PROVIDER_ID: &str = "${provider}";`;
   for (const reference of references) {
     const [suffix, family] = reference.split(":");

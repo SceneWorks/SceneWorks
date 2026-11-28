@@ -94,6 +94,29 @@ fn shipped_entry() -> Value {
         .expect("minimax_h3_image is in the builtin catalog")
 }
 
+/// The `(repo, revision)` MiniMax-H3's packed `tier` text encoder installs from on THIS OS, read off
+/// `entry`'s own rows: the MLX-affine rehost on macOS, the Candle-native GGML rehost elsewhere. A
+/// fixture that hard-coded one of them would stage a component the other platform never reads.
+fn packed_text_encoder_source(entry: &Value, tier: &str) -> (String, String) {
+    let os = std::env::consts::OS;
+    let row = entry["downloads"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row["componentId"] == "text_encoder"
+                    && row["variant"] == tier
+                    && row["platforms"]
+                        .as_array()
+                        .is_none_or(|platforms| platforms.iter().any(|p| p == os))
+            })
+        })
+        .unwrap_or_else(|| panic!("a {tier} text encoder row installs on {os}"));
+    (
+        row["repo"].as_str().unwrap().to_owned(),
+        row["revision"].as_str().unwrap().to_owned(),
+    )
+}
+
 #[tokio::test]
 async fn minimax_h3_image_runs_only_after_its_license_is_accepted_and_admits_its_own_edge() {
     let _hf = isolate_hf_cache();
@@ -618,13 +641,8 @@ async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() 
         "6f62669b919bccdbf51b08c696fbb84542000a87",
     );
     touch(rehost.join("q4/transformer_diffusers/config.json"));
-    touch(
-        snapshot(
-            "SceneWorks/minimax-h3-mlx",
-            "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
-        )
-        .join("q4/text_encoder/config.json"),
-    );
+    let (te_repo, te_revision) = packed_text_encoder_source(&entry, "q4");
+    touch(snapshot(&te_repo, &te_revision).join("q4/text_encoder/config.json"));
     let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
     let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 q4").await;
     let job = |advanced: Value| {
@@ -729,13 +747,8 @@ async fn an_unselected_h3_image_request_freezes_the_installed_tier_end_to_end() 
     // for an "explicit" q4 the user never chose.
     std::fs::remove_dir_all(rehost.join("q4")).unwrap();
     touch(rehost.join("q8/transformer_diffusers/config.json"));
-    touch(
-        snapshot(
-            "SceneWorks/minimax-h3-mlx",
-            "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
-        )
-        .join("q8/text_encoder/config.json"),
-    );
+    let (te_repo, te_revision) = packed_text_encoder_source(&entry, "q8");
+    touch(snapshot(&te_repo, &te_revision).join("q8/text_encoder/config.json"));
     let (status, duplicate) = request(
         app.clone(),
         "POST",
@@ -822,13 +835,10 @@ async fn a_named_or_bound_h3_image_tier_is_the_tier_the_loader_loads() {
         "SceneWorks/minimax-h3-image-mlx",
         "6f62669b919bccdbf51b08c696fbb84542000a87",
     );
-    let text_encoder = snapshot(
-        "SceneWorks/minimax-h3-mlx",
-        "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
-    );
     for tier in ["q8", "q4"] {
         touch(rehost.join(format!("{tier}/transformer_diffusers/config.json")));
-        touch(text_encoder.join(format!("{tier}/text_encoder/config.json")));
+        let (te_repo, te_revision) = packed_text_encoder_source(&entry, tier);
+        touch(snapshot(&te_repo, &te_revision).join(format!("{tier}/text_encoder/config.json")));
     }
     let (app, state) = crate::create_app_with_state(settings.clone()).unwrap();
     let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 named").await;

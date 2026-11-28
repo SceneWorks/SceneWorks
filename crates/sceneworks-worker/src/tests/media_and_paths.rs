@@ -1369,32 +1369,57 @@ fn ffmpeg_timeout_helper_child() {
     );
     std::fs::write(dir.join("started"), std::process::id().to_string())
         .expect("helper records its PID");
-    std::thread::sleep(Duration::from_secs(2));
-    std::fs::write(dir.join("completed"), b"late completion")
-        .expect("a live helper records completion");
+    // Beat until killed. The run is bounded well past the test's widest deadline, so a helper the
+    // lifecycle failed to kill still exits on its own instead of leaking past the suite.
+    let mut heartbeat = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("heartbeat"))
+        .expect("helper opens its heartbeat");
+    for _ in 0..1_200 {
+        std::io::Write::write_all(&mut heartbeat, b".").expect("a live helper beats");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
+
+/// The helper is a re-exec of this whole test binary, so its startup time is the runner's, not
+/// ours: under a loaded CI host it can exceed a one-second deadline before `main` even runs. A run
+/// whose deadline fired before the helper started proves nothing about killing a live child, so it
+/// is retried with a wider deadline rather than asserted on.
+const FFMPEG_TIMEOUT_HELPER_DEADLINES: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(20),
+];
 
 #[tokio::test]
 async fn ffmpeg_probe_timeout_kills_and_reaps_the_real_helper_process() {
-    let temp = tempdir().expect("tempdir creates");
-    let mut command = tokio::process::Command::new(std::env::current_exe().expect("test binary"));
-    command
-        .args([
-            "--exact",
-            "tests::ffmpeg_timeout_helper_child",
-            "--nocapture",
-        ])
-        .env(FFMPEG_TIMEOUT_HELPER_ENV, "1")
-        .env(FFMPEG_TIMEOUT_HELPER_DIR_ENV, temp.path());
+    let mut started = None;
+    for deadline in FFMPEG_TIMEOUT_HELPER_DEADLINES {
+        let temp = tempdir().expect("tempdir creates");
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"));
+        command
+            .args([
+                "--exact",
+                "tests::ffmpeg_timeout_helper_child",
+                "--nocapture",
+            ])
+            .env(FFMPEG_TIMEOUT_HELPER_ENV, "1")
+            .env(FFMPEG_TIMEOUT_HELPER_DIR_ENV, temp.path());
 
-    let error = run_ffmpeg_probe_command_with_timeout(command, Duration::from_secs(1))
-        .await
-        .expect_err("the direct-probe lifecycle must time out its real child");
-    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
-    let pid = std::fs::read_to_string(temp.path().join("started"))
-        .expect("the helper started before the deadline")
-        .parse::<u32>()
-        .expect("helper PID parses");
+        let error = run_ffmpeg_probe_command_with_timeout(command, deadline)
+            .await
+            .expect_err("the direct-probe lifecycle must time out its real child");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        if let Ok(pid) = std::fs::read_to_string(temp.path().join("started")) {
+            started = Some((temp, pid));
+            break;
+        }
+    }
+    let (temp, pid) =
+        started.expect("the helper started before the widest deadline on at least one attempt");
+    let pid = pid.parse::<u32>().expect("helper PID parses");
 
     #[cfg(unix)]
     {
@@ -1411,10 +1436,14 @@ async fn ffmpeg_probe_timeout_kills_and_reaps_the_real_helper_process() {
     #[cfg(windows)]
     let _ = pid;
 
-    // Past the helper's own two-second completion point, it still cannot write: the timed-out child
-    // was killed rather than merely having its wait future dropped.
-    tokio::time::sleep(Duration::from_millis(2_200)).await;
-    assert!(!temp.path().join("completed").exists());
+    // A live helper appends every 50 ms; a killed one never beats again. Comparing two reads well
+    // apart proves the timed-out child was killed rather than merely having its wait future dropped.
+    let beats = || {
+        std::fs::metadata(temp.path().join("heartbeat")).map_or(0, |metadata| metadata.len())
+    };
+    let before = beats();
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert_eq!(beats(), before, "the timed-out helper PID {pid} kept running");
 }
 
 #[cfg(native_lane)]

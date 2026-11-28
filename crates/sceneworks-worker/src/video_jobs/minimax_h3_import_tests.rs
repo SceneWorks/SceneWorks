@@ -617,10 +617,8 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
                 });
             let digest = format!(
                 "sha256:{}",
-                pin.content_sha256()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
+                pin.require_content_sha256_hex()
+                    .expect("imported H3 pin carries content sha256")
             );
             assert_eq!(file["sha256"], digest);
             assert_eq!(

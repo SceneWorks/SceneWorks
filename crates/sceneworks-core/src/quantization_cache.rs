@@ -1,5 +1,6 @@
 //! Saved weight quantizations use the existing resolved-artifact store and its leases,
-//! atomic publication, source lifecycle and retention. Completed weights load without revalidation.
+//! atomic publication, source lifecycle and retention. Completed weights load without revalidation,
+//! and publication records each packed file by size only: it is never read back or hashed.
 use crate::model_artifacts::resolved_cache::{
     DerivedArtifactPlan, ReservationOutcome, ResolvedCacheLease, ResolvedCacheStore,
 };
@@ -160,7 +161,11 @@ impl SavedQuantizations {
                     let file = std::fs::OpenOptions::new().write(true).open(&path)?;
                     crate::fsutil::sync_file(&file)?;
                     drop(file);
-                    reservation.publish_produced(&plan).map_err(error)?;
+                    // Packed weights are a local, in-process function of an already-trusted
+                    // checkpoint: publish by size, never re-read and hash them.
+                    reservation
+                        .publish_produced_size_only(&plan)
+                        .map_err(error)?;
                     self.writes.fetch_add(1, Ordering::Relaxed);
                     // Packing itself is not an acquisition wait; give the new lease its own bound.
                     let deadline = Instant::now() + wait_timeout;
@@ -320,6 +325,49 @@ mod tests {
             })
             .unwrap();
         assert_ne!(changed.path(), artifact.path());
+    }
+    #[test]
+    fn packing_a_new_weight_never_reads_back_or_hashes_what_it_wrote() {
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let cache = SavedQuantizations::new(
+            data.path(),
+            source.path().to_owned(),
+            "model".into(),
+            "model/checkpoint".into(),
+        );
+        let key = QuantizationArtifactKey::new("size-only-v1", &[2, 2], b"weights", "ggml");
+        let (artifact, hashes) = crate::model_artifacts::observe_content_hashes(|| {
+            cache.materialize(&key, &mut |path| {
+                std::fs::write(path, b"packed")?;
+                Ok(())
+            })
+        });
+        let artifact = artifact.unwrap();
+        assert_eq!(
+            hashes, 0,
+            "a cache miss publishes packed weights without hashing them"
+        );
+        assert_eq!(std::fs::read(artifact.path()).unwrap(), b"packed");
+        assert_eq!(cache.counts(), (0, 1));
+
+        let (plan, filename) = artifact_plan(&key).unwrap();
+        let metadata = ResolvedCacheStore::open(data.path())
+            .unwrap()
+            .lookup_complete(&plan.cache_key().unwrap())
+            .unwrap()
+            .expect("the packed weight is published complete");
+        let files: Vec<_> = metadata
+            .artifact
+            .closure
+            .members
+            .iter()
+            .flat_map(|member| member.files.iter())
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].relative_path, PathBuf::from(&filename));
+        assert_eq!(files[0].size_bytes, Some(6), "size still feeds retention");
+        assert_eq!(files[0].sha256, None, "no digest is computed or recorded");
     }
     #[test]
     fn unreadable_runtime_weights_can_be_invalidated_after_the_loader_releases_its_lease() {

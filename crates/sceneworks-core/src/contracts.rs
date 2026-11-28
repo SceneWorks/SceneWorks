@@ -1355,6 +1355,29 @@ pub struct CancelPendingJobsResponse {
     pub extra: ExtraFields,
 }
 
+/// Body for `POST /api/v1/jobs/cancel` — cancel an explicit set of jobs in one request (Image
+/// Studio's batch Stop). Each listed job is cancelled exactly as `POST /api/v1/jobs/:id/cancel`
+/// would cancel it; unknown ids are ignored. The API caps the collection size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelJobsRequest {
+    pub job_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Response for `POST /api/v1/jobs/cancel`: the listed jobs' updated snapshots (terminal
+/// `canceled`, or cancel-requested for a worker-owned job) in request order, so the acting
+/// client upserts them without waiting for the SSE round-trip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelJobsResponse {
+    pub canceled: usize,
+    pub jobs: Vec<JobSnapshot>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 /// Body for `POST /api/v1/jobs/prioritize` — move selected jobs that have not started to the
 /// front of the durable worker queue. The API caps the collection size; unknown, active, and
 /// terminal ids are harmlessly ignored so a selection racing a worker claim cannot preempt it.

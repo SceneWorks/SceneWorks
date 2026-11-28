@@ -13017,6 +13017,19 @@
         // re-hosted and no byte counts move. The bf16 rows stay platform-split: see the note on the
         // bf16 DiT row below and the off-Mac block further down for which route serves which lane.
         //
+        // ⚠️ AND SINCE THE CANDLE-NATIVE GGML TIER, OFF-MAC q4/q8 NO LONGER READ THESE ROWS. Every
+        // q4/q8 row of `SceneWorks/minimax-h3-mlx` is `macos`-only again, and each has an off-Mac twin
+        // from `SceneWorks/minimax-h3-candle` (`windows`, `linux`): the same `{q4,q8}/{transformer,
+        // transformer_ref,text_encoder}/` subtrees, converted offline by inference's
+        // `candle_gen_minimax_h3::ggml_tier`, with every MLX affine triple replaced by one stored GGML
+        // block tensor (`Q4_1` for q4, `Q8_0` for q8; `config.json` marks `"storage": "ggml"`). The
+        // blocks are byte-for-byte what Candle's load-time repack used to build from the MLX tier, so
+        // the rendered model is unchanged. What changes is the first load: the MLX tier made Candle
+        // repack ~60 GB (q4) of projections and write each to the saved-quantization cache as
+        // `projection.ggml`; the GGML tier is loaded as-is and writes nothing. q4 is ~11 % larger on
+        // disk (Q4_1's f16 scale+min per 32 weights vs MLX's bf16 pair per 64); q8 is the same size.
+        // The bf16 rows are untouched — there is no packed form to convert.
+        //
         // ⚠️ OBTAINABILITY AND ROUTING ARE SEPARATE. SC-20755 makes these base-partition rows
         // scheduler-visible on Candle and binds them to the direct executor, per-tier resolver and
         // fail-closed admission gate. SC-20756 does the same for the sibling `minimax_h3_ref`
@@ -13028,9 +13041,22 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/transformer/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18780109783,
           "footprint": { "diskSizeBytes": 18780109783 }
+        },
+        // Off-Mac twin of the row above: the same `q4/transformer/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/transformer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20845195086,
+          "footprint": { "diskSizeBytes": 20845195086 }
         },
         {
           "provider": "huggingface",
@@ -13038,9 +13064,21 @@
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q8",
           "files": ["q8/transformer/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 35302064357,
           "footprint": { "diskSizeBytes": 35302064357 }
+        },
+        // Off-Mac twin of the row above: the same `q8/transformer/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "files": ["q8/transformer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 35301904430,
+          "footprint": { "diskSizeBytes": 35301904430 }
         },
         {
           "provider": "huggingface",
@@ -13090,8 +13128,22 @@
           "componentId": "text_encoder",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18722713964
+        },
+        // Off-Mac twin of the row above: the same `q4/text_encoder/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20597623690
         },
         {
           "provider": "huggingface",
@@ -13102,8 +13154,22 @@
           "componentId": "text_encoder",
           "subdir": "q8/text_encoder",
           "files": ["q8/text_encoder/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 33723765614
+        },
+        // Off-Mac twin of the row above: the same `q8/text_encoder/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 33723542738
         },
         {
           "provider": "huggingface",
@@ -13286,8 +13352,20 @@
           // `minimax_h3`/`minimax_h3_ref` q4/q8 cell still planned `weights_missing` naming
           // `transformer_ref/config.json`. `minimax_h3_ref` already ships its mirror of these rows
           // for all three platforms — the two entries' axes were never meant to differ here.
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18780109783
+        },
+        // Off-Mac twin of the row above: the same `q4/transformer_ref/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "coRequisite": true,
+          "files": ["q4/transformer_ref/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20845195086
         },
         {
           "provider": "huggingface",
@@ -13296,8 +13374,20 @@
           "variant": "q8",
           "coRequisite": true,
           "files": ["q8/transformer_ref/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 35302064357
+        },
+        // Off-Mac twin of the row above: the same `q8/transformer_ref/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "coRequisite": true,
+          "files": ["q8/transformer_ref/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 35301904430
         },
         {
           "provider": "huggingface",
@@ -13835,12 +13925,25 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/transformer_ref/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           // `transformer_ref` is byte-for-byte the same SIZE as `transformer` at every tier — the
           // two carry identical `config.json` and the same 638 tensor names, so a name-comparison
           // check cannot tell them apart; they are different WEIGHTS.
           "estimatedSizeBytes": 18780109783,
           "footprint": { "diskSizeBytes": 18780109783 }
+        },
+        // Off-Mac twin of the row above: the same `q4/transformer_ref/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/transformer_ref/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20845195086,
+          "footprint": { "diskSizeBytes": 20845195086 }
         },
         {
           "provider": "huggingface",
@@ -13848,9 +13951,21 @@
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q8",
           "files": ["q8/transformer_ref/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 35302064357,
           "footprint": { "diskSizeBytes": 35302064357 }
+        },
+        // Off-Mac twin of the row above: the same `q8/transformer_ref/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "files": ["q8/transformer_ref/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 35301904430,
+          "footprint": { "diskSizeBytes": 35301904430 }
         },
         {
           "provider": "huggingface",
@@ -13877,8 +13992,22 @@
           "componentId": "text_encoder",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18722713964
+        },
+        // Off-Mac twin of the row above: the same `q4/text_encoder/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20597623690
         },
         {
           "provider": "huggingface",
@@ -13889,8 +14018,22 @@
           "componentId": "text_encoder",
           "subdir": "q8/text_encoder",
           "files": ["q8/text_encoder/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 33723765614
+        },
+        // Off-Mac twin of the row above: the same `q8/text_encoder/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 33723542738
         },
         {
           "provider": "huggingface",
@@ -14000,8 +14143,20 @@
           "variant": "q4",
           "coRequisite": true,
           "files": ["q4/transformer/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18780109783
+        },
+        // Off-Mac twin of the row above: the same `q4/transformer/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "coRequisite": true,
+          "files": ["q4/transformer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20845195086
         },
         {
           "provider": "huggingface",
@@ -14010,8 +14165,20 @@
           "variant": "q8",
           "coRequisite": true,
           "files": ["q8/transformer/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 35302064357
+        },
+        // Off-Mac twin of the row above: the same `q8/transformer/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "coRequisite": true,
+          "files": ["q8/transformer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 35301904430
         },
         {
           "provider": "huggingface",
@@ -14300,8 +14467,22 @@
           "componentId": "text_encoder",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 18722713964
+        },
+        // Off-Mac twin of the row above: the same `q4/text_encoder/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 20597623690
         },
         {
           "provider": "huggingface",
@@ -14312,8 +14493,22 @@
           "componentId": "text_encoder",
           "subdir": "q8/text_encoder",
           "files": ["q8/text_encoder/*"],
-          "platforms": ["macos", "windows", "linux"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 33723765614
+        },
+        // Off-Mac twin of the row above: the same `q8/text_encoder/` subtree with every packed
+        // projection stored as GGML blocks, so Candle loads it as-is (see the tier block note).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 33723542738
         },
         {
           "provider": "huggingface",

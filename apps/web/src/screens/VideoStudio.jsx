@@ -531,6 +531,7 @@ export function VideoStudio() {
   compatibleLoras,
   selectedLoraIds,
   model,
+  mode,
   setSelectedLoraIds
   });
 

@@ -2117,8 +2117,9 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
                     "SceneWorks/minimax-h3-mlx",
                     "bf16/transformer_ref/*"
                 ),
-                ("q4", "SceneWorks/minimax-h3-mlx", "q4/transformer_ref/*"),
-                ("q8", "SceneWorks/minimax-h3-mlx", "q8/transformer_ref/*"),
+                // Off-Mac q4/q8 are the Candle-native GGML tiers; the MLX-affine ones are macOS-only.
+                ("q4", "SceneWorks/minimax-h3-candle", "q4/transformer_ref/*"),
+                ("q8", "SceneWorks/minimax-h3-candle", "q8/transformer_ref/*"),
             ])
         );
         for component in [
@@ -2137,6 +2138,67 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
                 }),
                 "minimax_h3_ref is missing its {component} Candle co-requisite on {os}"
             );
+        }
+    }
+}
+
+/// Off-Mac q4/q8 MiniMax-H3 tiers are the Candle-native GGML ones, never the MLX-affine rehost.
+///
+/// An MLX q4/q8 row visible on Windows/Linux makes Candle repack every packed projection (~60 GB at
+/// q4) into the saved-quantization cache on first load; a GGML row visible on macOS would hand the
+/// MLX engine blocks it cannot read. So per entry, per OS, every packed-tier row of either rehost is
+/// the right one, and each tiered component has exactly one row per (OS, tier).
+#[test]
+fn minimax_h3_packed_tiers_are_platform_split_between_mlx_and_candle_rehosts() {
+    use super::builtin_models;
+    const MLX: &str = "SceneWorks/minimax-h3-mlx";
+    const CANDLE: &str = "SceneWorks/minimax-h3-candle";
+
+    let models = builtin_models();
+    for (id, components) in [
+        (
+            "minimax_h3",
+            &["transformer", "transformer_ref", "text_encoder"][..],
+        ),
+        (
+            "minimax_h3_ref",
+            &["transformer", "transformer_ref", "text_encoder"][..],
+        ),
+        ("minimax_h3_image", &["text_encoder"][..]),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("{id} is in the builtin catalog"));
+        let downloads = model["downloads"].as_array().expect("downloads");
+        for (os, expected) in [("macos", MLX), ("windows", CANDLE), ("linux", CANDLE)] {
+            for tier in ["q4", "q8"] {
+                let rows: Vec<_> = downloads
+                    .iter()
+                    .filter(|d| d["variant"].as_str() == Some(tier))
+                    .filter(|d| matches!(d["repo"].as_str(), Some(MLX | CANDLE)))
+                    .filter(|d| {
+                        d["platforms"]
+                            .as_array()
+                            .is_some_and(|platforms| platforms.iter().any(|p| p == os))
+                    })
+                    .collect();
+                for row in &rows {
+                    assert_eq!(
+                        row["repo"].as_str(),
+                        Some(expected),
+                        "{id} {tier} on {os} must come from {expected}: {row}"
+                    );
+                }
+                for component in components {
+                    let pattern = format!("{tier}/{component}/*");
+                    let n = rows
+                        .iter()
+                        .filter(|d| d["files"][0].as_str() == Some(pattern.as_str()))
+                        .count();
+                    assert_eq!(n, 1, "{id} {tier} on {os}: exactly one `{pattern}` row");
+                }
+            }
         }
     }
 }

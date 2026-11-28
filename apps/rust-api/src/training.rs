@@ -802,7 +802,7 @@ pub(crate) async fn create_training_dataset_caption_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -993,7 +993,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1201,7 +1201,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1313,7 +1313,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1511,7 +1511,7 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -1669,7 +1669,7 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -2182,7 +2182,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -3268,7 +3268,7 @@ async fn enqueue_training_submission(
     })
     .await?;
     publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 

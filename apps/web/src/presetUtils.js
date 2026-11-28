@@ -297,9 +297,15 @@ export function loraMatchesModel(lora, model) {
     const engineId = model?.trainedCheckpoint?.engineModel ?? model?.id;
     if (base && engineId && base !== engineId) return false;
   }
+  // An imported MiniMax-H3 finetune keeps its own id but renders as the partition it declares, so
+  // the API serves `adapterPartitionModels` — the partition ids it also answers for — and the gate
+  // accepts a LoRA declared for any of them (the turbo adapters on a finetune).
   const declaredModelIds = loraModelIds(lora);
-  if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
-    return false;
+  if (declaredModelIds.length && model?.id) {
+    const answersFor = [model.id, ...(Array.isArray(model.adapterPartitionModels) ? model.adapterPartitionModels : [])];
+    if (!declaredModelIds.some((id) => answersFor.includes(id))) {
+      return false;
+    }
   }
   // MOSS Base and SFT share the `moss-image` family AND accept each other's adapters
   // (epic 27933, 2026-10-29): the two checkpoints are one transformer architecture, so a
@@ -327,6 +333,21 @@ export function loraMatchesModel(lora, model) {
     );
   }
   return true;
+}
+
+// `model` as the LoRA gate should see it for a request in `mode`. A HYBRID MiniMax-H3 import serves
+// both partitions (`adapterPartitionModels` lists both), but one request runs exactly one of them —
+// a `reference_to_video` render the reference partition, every other mode the base one — and the
+// API narrows it the same way (`entry_adapter_partition_models`). Without this the picker keeps an
+// fl2v turbo adapter on a reference render that the API refuses at enqueue. Every other model
+// (and an absent mode) is returned unchanged, same identity, so memoized consumers stay stable.
+export function loraModelForMode(model, mode) {
+  const partitions = model?.adapterPartitionModels;
+  if (!Array.isArray(partitions) || partitions.length < 2 || typeof mode !== "string" || !mode.trim()) {
+    return model;
+  }
+  const partition = mode.trim() === "reference_to_video" ? "minimax_h3_ref" : "minimax_h3";
+  return partitions.includes(partition) ? { ...model, adapterPartitionModels: [partition] } : model;
 }
 
 // The exact model ids a LoRA declares it is for (sc-19563), or `[]` when it declares none.

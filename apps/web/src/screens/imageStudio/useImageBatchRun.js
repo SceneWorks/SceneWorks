@@ -26,6 +26,20 @@ export function createImageBatchRuntime(setBatchRun) {
 
   const batchJobActionRef = ref(null);
 
+  // Bulk cancel (`POST /api/v1/jobs/cancel`): one request, one transaction and one queue
+  // refresh for a whole batch. Stopping a 42-job batch with one per-job POST each took
+  // minutes and starved the browser's connection pool.
+  const batchCancelJobsRef = ref(null);
+
+  function cancelBatchJobs(jobs) {
+    if (!jobs.length) return;
+    if (jobs.length > 1 && batchCancelJobsRef.current) {
+      batchCancelJobsRef.current(jobs.map((job) => job.id));
+      return;
+    }
+    for (const job of jobs) batchJobActionRef.current(job, "cancel");
+  }
+
   function replaceBatchRun(next) {
     batchRunRef.current = next;
     setBatchRun(next);
@@ -298,6 +312,7 @@ export function createImageBatchRuntime(setBatchRun) {
     if (!current) {
       return;
     }
+    const cancellable = [];
     for (const jobId of current.activeJobIds) {
       const status = batchItemStatus(jobId, batchJobsRef.current, batchObservedJobsRef.current);
       if (status !== "queued" && status !== "running") {
@@ -305,9 +320,10 @@ export function createImageBatchRuntime(setBatchRun) {
       }
       const job = batchJobsRef.current.find((entry) => entry.id === jobId) ?? batchOwnerRef.current?.jobs.get(jobId);
       if (job) {
-        batchJobActionRef.current(job, "cancel");
+        cancellable.push(job);
       }
     }
+    cancelBatchJobs(cancellable);
   }
 
   function observeJobs(jobs) {
@@ -339,10 +355,11 @@ export function createImageBatchRuntime(setBatchRun) {
     runBatch, replaceBatchRun, cancelBatchRun, observeJobs,
     progress: (jobs) => batchRunRef.current
       ? summarizeBatchRun(batchRunRef.current, jobs, batchObservedJobsRef.current) : null,
-    commit(projectId, jobs, jobAction) {
+    commit(projectId, jobs, jobAction, cancelJobs = null) {
       batchProjectRef.current = projectId;
       batchJobsRef.current = jobs;
       batchJobActionRef.current = jobAction;
+      batchCancelJobsRef.current = cancelJobs;
     },
     attachProject() {
       if (batchOwnerRef.current && batchOwnerRef.current.projectId !== batchProjectRef.current) {
@@ -358,10 +375,12 @@ export function createImageBatchRuntime(setBatchRun) {
       owner.controller.abort();
       owner.disposed = true;
       releaseBatchSlotWaiters();
+      const cancellable = [];
       for (const [id, submittedJob] of owner.jobs) {
         const job = batchJobsRef.current.find((entry) => entry.id === id) ?? submittedJob;
-        if (job && !terminalStatuses.has(job.status)) batchJobActionRef.current(job, "cancel");
+        if (job && !terminalStatuses.has(job.status)) cancellable.push(job);
       }
+      cancelBatchJobs(cancellable);
     },
   };
 }
@@ -371,6 +390,7 @@ export function createImageBatchRuntime(setBatchRun) {
 export function useImageBatchRun(options) {
   const local = useImageBatchController({
     activeProject: options.activeProject, jobs: options.jobs, jobAction: options.jobAction,
+    cancelJobs: options.cancelJobs,
     batchRun: options.backgroundImageBatch ? undefined : options.batchRun,
     setBatchRun: options.backgroundImageBatch ? undefined : options.setBatchRun,
   });

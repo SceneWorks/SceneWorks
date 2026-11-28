@@ -233,7 +233,7 @@ pub(crate) async fn register_worker(
     }
     drop(authenticated);
     publish(&state, "worker.updated", &worker);
-    publish_queue(&state).await?;
+    request_queue_publish(&state);
     Ok(Json(worker))
 }
 
@@ -302,19 +302,10 @@ pub(crate) async fn heartbeat_worker(
     if let Some(job) = &outcome.interrupted_job {
         invalidate_model_catalog_for_terminal_jobs(&state, std::slice::from_ref(job));
         publish(&state, "job.updated", job);
-        // Not `?`: the interrupt is already committed and `job.updated` already sent,
-        // so a queue-snapshot failure must not turn this into a 500 that denies the
-        // worker its snapshot and makes it retry a heartbeat it already delivered.
-        // (`handle_stale_sweep` avoids the question entirely — it publishes only
-        // `job.updated` and never refreshes the queue.)
-        if let Err(error) = publish_queue(&state).await {
-            tracing::warn!(
-                event = "queue_publish_failed_after_heartbeat_interrupt",
-                job_id = %job.id,
-                error = ?error,
-                "job.updated was published but the queue snapshot failed"
-            );
-        }
+        // The interrupt is already committed and `job.updated` already sent; the
+        // coalesced queue refresh can never fail this heartbeat (a failed rebuild is
+        // logged and retried by the publisher).
+        request_queue_publish(&state);
     }
     publish(&state, "worker.updated", &outcome.worker);
     Ok(Json(outcome.worker))
@@ -441,20 +432,10 @@ pub(crate) async fn worker_terminated(
         for job in &failed {
             publish(&state, "job.updated", job);
         }
-        // Not `?` (sc-18182): the job is already committed as failed and `job.updated`
-        // is already out, so a queue-snapshot error must not turn a SUCCESSFUL
-        // attribution into a 500 — the desktop supervisor would then log "failed to
-        // report worker termination" for a report that actually landed. This endpoint
-        // only became reachable on macOS with sc-18182, which is what makes the
-        // mislabelling reachable too.
-        if let Err(error) = publish_queue(&state).await {
-            tracing::warn!(
-                event = "queue_publish_failed_after_worker_termination",
-                failed_jobs = failed.len(),
-                error = ?error,
-                "job.updated was published but the queue snapshot failed"
-            );
-        }
+        // sc-18182: the job is already committed as failed and `job.updated` is
+        // already out; the coalesced queue refresh cannot turn this SUCCESSFUL
+        // attribution into a 500 (a failed rebuild is logged and retried).
+        request_queue_publish(&state);
     }
     Ok(Json(failed.into_iter().next().map(public_job_snapshot)))
 }

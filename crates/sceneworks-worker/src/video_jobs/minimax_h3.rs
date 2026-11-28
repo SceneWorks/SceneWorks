@@ -106,6 +106,7 @@ pub(super) fn record_cuda_proof_pool(job_id: &str, stage: &str) -> WorkerResult<
 // components, and they live in a DIFFERENT repo from the rest of the shared floor:
 //
 //     <tier root>/{q4,q8}/{transformer,transformer_ref,text_encoder}/ <- SceneWorks/minimax-h3-mlx
+//                                       (off-Mac: SceneWorks/minimax-h3-candle, GGML blocks)
 //     <tier root>/bf16/{transformer,transformer_ref}/                 <- SceneWorks/minimax-h3-mlx
 //     <base root>/{tokenizer,vae,audio_vae,FL2VA/audio_vae}/          <- MiniMaxAI/MiniMax-H3 (coReq)
 //     <base root>/text_encoder/                                       <- MiniMaxAI (bf16 tier ONLY)
@@ -130,8 +131,16 @@ pub(super) const CANDLE_MINIMAX_H3_ADAPTER: &str = "candle_minimax_h3";
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_MINIMAX_H3_REPO: &str = "MiniMaxAI/MiniMax-H3";
+/// The Candle-native q4/q8 tiers: the same `{q4,q8}/{transformer,transformer_ref,text_encoder}`
+/// layout as the MLX rehost, with every packed projection stored as GGML blocks (Q4_1 / Q8_0) so the
+/// load uses them as-is. Reading the MLX tiers here instead made the first render repack every
+/// projection (~130 GB) into the saved-quantization cache.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
+pub(super) const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-candle";
+/// The MLX rehost still serves the off-Mac **bf16** `transformer_ref` (`minimax_h3_ref`'s dense
+/// Ref2VA partition); there is no packed form to convert, and upstream ships no such directory.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const CANDLE_MINIMAX_H3_BF16_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
 
 /// The ONE registry id both catalog entries load. See fact 1 above — the partition split is a
 /// directory, not a provider.
@@ -1718,8 +1727,13 @@ pub(super) fn resolve_candle_minimax_h3_load(
     let (tier, quant) = candle_minimax_h3_tier(request);
     let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO)?;
     let is_reference = request.model == "minimax_h3_ref";
+    let tier_repo = if quant.is_some() {
+        CANDLE_MINIMAX_H3_TIER_REPO
+    } else {
+        CANDLE_MINIMAX_H3_BF16_TIER_REPO
+    };
     let tier_root = (quant.is_some() || is_reference)
-        .then(|| candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO))
+        .then(|| candle_minimax_h3_snapshot_dir(settings, tier_repo))
         .transpose()?
         .map(|root| root.join(tier));
     let dit_dir = match (tier_root.as_deref(), is_reference, quant.is_some()) {
@@ -1954,7 +1968,7 @@ fn imported_h3_load_identity(dit: &ImportedMiniMaxH3Dit) -> Value {
         "assembly": dit.assembly,
         "sourceFiles": dit._pins.iter().map(|pin| json!({
             "path": pin.loader_path(),
-            "sha256": sceneworks_core::hashing::hex(pin.content_sha256()),
+            "sha256": sceneworks_core::hashing::hex(&pin.content_or_identity_digest()),
         })).collect::<Vec<_>>(),
     })
 }
@@ -2181,11 +2195,14 @@ fn resolve_imported_minimax_h3_dit_with_check(
     // private attempt lease. Its original checkpoint id may embed a root id from another host,
     // so resolving it against this worker's plan store would reject identical registered bytes.
     // Unbound jobs retain the local store lease and its existing source-drift checks.
-    let (resolved, source_lease) = if let Some(verified) = &settings.verified_plan_layers {
+    let (resolved, source_lease, plan_store) = if let Some(verified) =
+        &settings.verified_plan_layers
+    {
         (
             verified
                 .resolve_checkpoint(&checkpoint_id, check)
                 .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
+            None,
             None,
         )
     } else {
@@ -2197,7 +2214,7 @@ fn resolve_imported_minimax_h3_dit_with_check(
         let resolved = store
             .resolve_with_check(&checkpoint_id, check)
             .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        (resolved, Some(source_lease))
+        (resolved, Some(source_lease), Some(store))
     };
     // The stamped plan id belongs to the API host's physical import. The portable guard already
     // bound this server-owned entry to the semantic plan and exact layer bytes, and the worker's
@@ -2220,19 +2237,34 @@ fn resolve_imported_minimax_h3_dit_with_check(
             // Native-main late consumer delta: the plan layer pins through the typed checked
             // pin, so a cancelled acquisition stops inside a bounded read and the native layer's
             // actual acquisition work reaches the active preparation span verbatim.
-            let pin = gen_core::PinnedWeightsFile::pin_with_progress(
-                &layer.path,
-                || match check() {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                        Err(gen_core::Error::Canceled)
-                    }
-                    Err(error) => Err(gen_core::Error::Io(error)),
-                },
-                |progress| {
-                    sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
-                },
-            )
+            let checked = || match check() {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    Err(gen_core::Error::Canceled)
+                }
+                Err(error) => Err(gen_core::Error::Io(error)),
+            };
+            let observe = |progress: &gen_core::runtime::ArtifactSealProgress| {
+                sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+            };
+            // The import already hashed this layer and the store still trusts its stamp: carry
+            // that proof into the seal rather than reading the whole source a second time. The
+            // attestation is redeemed only while the file is still the entry it was bound to;
+            // otherwise this is the ordinary reading pin.
+            let attestation = plan_store
+                .as_ref()
+                .and_then(|store| store.attest_resolved_layer(&resolved, layer));
+            let pin = match &attestation {
+                Some(attestation) => gen_core::PinnedWeightsFile::pin_attested_with_progress(
+                    &layer.path,
+                    attestation,
+                    checked,
+                    observe,
+                ),
+                None => {
+                    gen_core::PinnedWeightsFile::pin_with_progress(&layer.path, checked, observe)
+                }
+            }
             .map_err(|e| match e {
                 gen_core::Error::Canceled => {
                     refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
@@ -2244,10 +2276,12 @@ fn resolve_imported_minimax_h3_dit_with_check(
                 .source
                 .content_digest()
                 .map_err(|e| refuse("source-drift", e.to_string()))?;
+            let pin_sha = pin
+                .require_content_sha256()
+                .map_err(|e| refuse("source-drift", e.to_string()))?;
             if expected.len() != 64
                 || !(0..32).all(|i| {
-                    u8::from_str_radix(&expected[2 * i..2 * i + 2], 16).ok()
-                        == Some(pin.content_sha256()[i])
+                    u8::from_str_radix(&expected[2 * i..2 * i + 2], 16).ok() == Some(pin_sha[i])
                 })
             {
                 return Err(refuse(
@@ -2421,7 +2455,8 @@ fn resolve_imported_minimax_h3_dit_with_check(
                 })?;
                 let actual = format!(
                     "sha256:{}",
-                    sceneworks_core::hashing::hex(pin.content_sha256())
+                    pin.require_content_sha256_hex()
+                        .map_err(|e| refuse("source-drift", e.to_string()))?
                 );
                 if file.sha256.as_deref() != Some(actual.as_str()) {
                     return Err(refuse(

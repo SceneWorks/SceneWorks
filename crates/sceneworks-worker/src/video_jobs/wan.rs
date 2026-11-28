@@ -1651,7 +1651,8 @@ pub(super) struct VideoGenInput {
     ///
     /// MiniMax-H3 is the first video family whose tiered weights live in a DIFFERENT repo from its
     /// shared components: the pre-quantized DiT partitions come from `SceneWorks/minimax-h3-mlx`
-    /// while the text encoder, tokenizer and both VAEs come from the upstream `MiniMaxAI/MiniMax-H3`
+    /// (off-Mac q4/q8: the GGML-block `SceneWorks/minimax-h3-candle`) while the text encoder,
+    /// tokenizer and both VAEs come from the upstream `MiniMaxAI/MiniMax-H3`
     /// snapshot. `model_dir` (⇒ `spec.weights`) can only name one root, so the other has to ride the
     /// components map — the same mechanism LTX's optional `uncensored_enhancer` uses.
     pub(super) dit_component_dir: Option<PathBuf>,
@@ -1792,7 +1793,8 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
     //   different repo from its shared components, and `weights` can only name one root.
     // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
-    //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx`, while the
+    //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx` (off-Mac:
+    //   `SceneWorks/minimax-h3-candle`), while the
     //   dense bf16 one comes from upstream, so it is the same different-repo problem the DiT
     //   has. Absent ⇒ `mlx-gen-minimax-h3` falls back to `<weights>/text_encoder`, the dense
     //   upstream copy. It does NOT read `LoadSpec::text_encoder` — that field has zero hits in

@@ -82,33 +82,34 @@ fn seed_review_models(harness: &Harness) {
     for file in ["model.safetensors", "config.json", "tokenizer.json"] {
         write(&review_root.join(file), b"fixture");
     }
-    let tier_root = huggingface_repo_cache_path(
-        &harness.temp_dir.path().join("data"),
-        "SceneWorks/minimax-h3-mlx",
-    )
-    .expect("fixture video repo path")
-    .join("snapshots/fixture/q4");
-    let index = br#"{"weight_map":{"fixture":"model-00001-of-00001.safetensors"}}"#;
-    for partition in ["transformer", "transformer_ref"] {
-        write(&tier_root.join(partition).join("config.json"), b"{}");
+    // The q4 tier lives in the MLX-affine rehost on macOS and in the Candle-native GGML rehost on
+    // Windows/Linux; seed both so the fixture is complete whichever platform runs the review.
+    for repo in ["SceneWorks/minimax-h3-mlx", "SceneWorks/minimax-h3-candle"] {
+        let tier_root = huggingface_repo_cache_path(&harness.temp_dir.path().join("data"), repo)
+            .expect("fixture video repo path")
+            .join("snapshots/fixture/q4");
+        let index = br#"{"weight_map":{"fixture":"model-00001-of-00001.safetensors"}}"#;
+        for partition in ["transformer", "transformer_ref"] {
+            write(&tier_root.join(partition).join("config.json"), b"{}");
+            write(
+                &tier_root
+                    .join(partition)
+                    .join("diffusion_pytorch_model.safetensors.index.json"),
+                index,
+            );
+            write(
+                &tier_root
+                    .join(partition)
+                    .join("model-00001-of-00001.safetensors"),
+                b"fixture",
+            );
+        }
+        write(&tier_root.join("text_encoder/config.json"), b"{}");
         write(
-            &tier_root
-                .join(partition)
-                .join("diffusion_pytorch_model.safetensors.index.json"),
+            &tier_root.join("text_encoder/model.safetensors.index.json"),
             index,
         );
-        write(
-            &tier_root
-                .join(partition)
-                .join("model-00001-of-00001.safetensors"),
-            b"fixture",
-        );
     }
-    write(&tier_root.join("text_encoder/config.json"), b"{}");
-    write(
-        &tier_root.join("text_encoder/model.safetensors.index.json"),
-        index,
-    );
 
     let shared_root = huggingface_repo_cache_path(
         &harness.temp_dir.path().join("data"),

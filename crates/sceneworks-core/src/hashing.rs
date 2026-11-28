@@ -33,6 +33,21 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// Decode a SHA-256 digest from exactly 64 hex digits (either case, optional `sha256:` prefix).
+/// `None` for anything else, so a malformed digest can never be mistaken for a proof.
+pub fn sha256_digest_from_hex(text: &str) -> Option<[u8; 32]> {
+    let text = text.trim();
+    let text = text.strip_prefix("sha256:").unwrap_or(text);
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(digest)
+}
+
 /// Events around each bounded read, including the final empty read.
 pub enum ReadEvent<'a> {
     Before,

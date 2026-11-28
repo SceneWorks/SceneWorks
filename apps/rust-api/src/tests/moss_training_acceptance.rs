@@ -728,12 +728,7 @@ pub(super) fn weight_inventory(settings: &crate::Settings, case: &Case) -> Resul
         } else {
             None
         };
-        let digest = pin.as_ref().map(|pin| {
-            pin.content_sha256()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        });
+        let digest = pin.as_ref().and_then(|pin| pin.content_sha256_hex());
         let size = pin.as_ref().map(|pin| pin.target_fingerprint().size);
         let trusted = digest.as_deref() == Some(identity.sha256) && size == Some(identity.bytes);
         weights.push(json!({"path":path,"repository":identity.repository,"revision":identity.revision,"relativePath":identity.relative_path,"present":present,"sha256":digest,"bytes":size,"expectedSha256":identity.sha256,"expectedBytes":identity.bytes,"trustedHashMatches":trusted}));

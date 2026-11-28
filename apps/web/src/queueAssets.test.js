@@ -17,7 +17,7 @@ it("loads only Queue output IDs and reuses known records instead of loading the 
   const source = { id: "unrelated-source" };
   const output = { id: "output" };
   const item = vi.spyOn(assetsApi, "item").mockResolvedValue({ id: "new-output" });
-  const list = vi.spyOn(assetsApi, "listIncludingHidden");
+  const list = vi.spyOn(assetsApi, "listSummaryIncludingHidden");
   const jobs = [{ projectId: "project", result: { assetIds: ["output", "new-output"] } }];
   expect(await loadQueueAssets("project", "token", {}, jobs, [source, output]))
     .toEqual([output, { id: "new-output" }]);
@@ -44,7 +44,7 @@ it("limits concurrent output loads and stops on page disposal", async () => {
 
 it("resolves generation-set-only saved jobs without retaining unrelated library assets", async () => {
   const output = { id: "legacy-output", generationSetId: "legacy-set" };
-  vi.spyOn(assetsApi, "listIncludingHidden").mockResolvedValue([
+  vi.spyOn(assetsApi, "listSummaryIncludingHidden").mockResolvedValue([
     { id: "unrelated", generationSetId: "another-set" }, output,
   ]);
   expect(await loadQueueAssets("project", "token", {}, [

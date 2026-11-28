@@ -763,6 +763,55 @@ fn resolve_hashing_only_never_reads_a_layer_it_may_not_hash() {
     );
 }
 
+/// The digest an import proved for a layer seals that layer for loading without reading it again,
+/// and only while the store still trusts the layer's stamp: a changed file attests nothing.
+#[test]
+fn a_trusted_layer_seals_for_load_without_reading_and_a_changed_one_attests_nothing() {
+    let fx = fixture("attest");
+    let file = fx.library_dir.join("kreamania.safetensors");
+    write_krea_native_file(&file, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let store = settled(&fx.store);
+    let compiled = store
+        .compile_linked(&root.root_id, "kreamania.safetensors")
+        .unwrap();
+    let resolved = store
+        .resolve_with_check(&compiled.checkpoint_id, &|| Ok(()))
+        .unwrap();
+    let layer = &resolved.layers[0];
+    let attestation = store
+        .attest_resolved_layer(&resolved, layer)
+        .expect("a trusted stamp attests the import's digest");
+    let mut work = Vec::new();
+    let pin = gen_core::PinnedWeightsFile::pin_attested_with_progress(
+        &layer.path,
+        &attestation,
+        || Ok(()),
+        |progress| work.push((progress.acquisition, progress.hashed_bytes)),
+    )
+    .unwrap();
+    assert_eq!(
+        work,
+        vec![(gen_core::runtime::ArtifactSealAcquisition::Attested, 0)],
+        "the seal redeems the import's proof without hashing"
+    );
+    let sealed = pin
+        .require_content_sha256_hex()
+        .expect("attested pin carries content sha256");
+    assert_eq!(sealed, sha256_hex(&fs::read(&file).unwrap()));
+
+    // Same size, different bytes: the stamp no longer names this entry, so nothing is attested.
+    let mut bytes = fs::read(&file).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&file, &bytes).unwrap();
+    assert!(
+        store.attest_resolved_layer(&resolved, layer).is_none(),
+        "a changed layer must be read, never attested"
+    );
+}
+
 #[test]
 fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
     let fx = fixture("resolve");

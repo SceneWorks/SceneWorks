@@ -1663,7 +1663,7 @@ pub(crate) async fn run_catalog_analysis(
     })
     .await?;
     crate::publish(&state, "job.updated", &job);
-    crate::publish_queue(&state).await?;
+    crate::request_queue_publish(&state);
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 

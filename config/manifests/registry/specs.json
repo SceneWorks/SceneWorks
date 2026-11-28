@@ -31223,8 +31223,8 @@
                 },
                 "parameter_schema": {
                   "k": {
-                    "default_executed_steps": 30,
-                    "max": 29,
+                    "default_executed_steps": 24,
+                    "max": 23,
                     "max_exclusive": "executed_steps",
                     "min": 1,
                     "range": "1..executed_steps",
@@ -33170,8 +33170,8 @@
                 },
                 "parameter_schema": {
                   "k": {
-                    "default_executed_steps": 30,
-                    "max": 29,
+                    "default_executed_steps": 24,
+                    "max": 23,
                     "max_exclusive": "executed_steps",
                     "min": 1,
                     "range": "1..executed_steps",
@@ -53131,13 +53131,29 @@
             "diskSizeBytes": 18780109783
           },
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4"
+        },
+        {
+          "default": true,
+          "estimatedSizeBytes": 20845195086,
+          "files": [
+            "q4/transformer/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 20845195086
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q4"
         },
         {
@@ -53149,13 +53165,28 @@
             "diskSizeBytes": 35302064357
           },
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 35301904430,
+          "files": [
+            "q8/transformer/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 35301904430
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q8"
         },
         {
@@ -53182,13 +53213,28 @@
             "q4/text_encoder/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "subdir": "q4/text_encoder",
+          "variant": "q4"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 20597623690,
+          "files": [
+            "q4/text_encoder/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "subdir": "q4/text_encoder",
           "variant": "q4"
         },
@@ -53200,13 +53246,28 @@
             "q8/text_encoder/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "subdir": "q8/text_encoder",
+          "variant": "q8"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 33723542738,
+          "files": [
+            "q8/text_encoder/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "subdir": "q8/text_encoder",
           "variant": "q8"
         },
@@ -53318,13 +53379,26 @@
             "q4/transformer_ref/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 20845195086,
+          "files": [
+            "q4/transformer_ref/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q4"
         },
         {
@@ -53334,13 +53408,26 @@
             "q8/transformer_ref/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 35301904430,
+          "files": [
+            "q8/transformer_ref/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q8"
         },
         {
@@ -53952,13 +54039,28 @@
             "q4/text_encoder/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "subdir": "q4/text_encoder",
+          "variant": "q4"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 20597623690,
+          "files": [
+            "q4/text_encoder/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "subdir": "q4/text_encoder",
           "variant": "q4"
         },
@@ -53970,13 +54072,28 @@
             "q8/text_encoder/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "subdir": "q8/text_encoder",
+          "variant": "q8"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 33723542738,
+          "files": [
+            "q8/text_encoder/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "subdir": "q8/text_encoder",
           "variant": "q8"
         },
@@ -54755,13 +54872,29 @@
             "diskSizeBytes": 18780109783
           },
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4"
+        },
+        {
+          "default": true,
+          "estimatedSizeBytes": 20845195086,
+          "files": [
+            "q4/transformer_ref/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 20845195086
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q4"
         },
         {
@@ -54773,13 +54906,28 @@
             "diskSizeBytes": 35302064357
           },
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 35301904430,
+          "files": [
+            "q8/transformer_ref/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 35301904430
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q8"
         },
         {
@@ -54808,13 +54956,28 @@
             "q4/text_encoder/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "subdir": "q4/text_encoder",
+          "variant": "q4"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 20597623690,
+          "files": [
+            "q4/text_encoder/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "subdir": "q4/text_encoder",
           "variant": "q4"
         },
@@ -54826,13 +54989,28 @@
             "q8/text_encoder/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "subdir": "q8/text_encoder",
+          "variant": "q8"
+        },
+        {
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "estimatedSizeBytes": 33723542738,
+          "files": [
+            "q8/text_encoder/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "subdir": "q8/text_encoder",
           "variant": "q8"
         },
@@ -54944,13 +55122,26 @@
             "q4/transformer/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 20845195086,
+          "files": [
+            "q4/transformer/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q4"
         },
         {
@@ -54960,13 +55151,26 @@
             "q8/transformer/*"
           ],
           "platforms": [
-            "macos",
-            "windows",
-            "linux"
+            "macos"
           ],
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8"
+        },
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 35301904430,
+          "files": [
+            "q8/transformer/*"
+          ],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-candle",
+          "revision": "0ea7911bc8d456a264f20dd1b5821ade49ec8d24",
           "variant": "q8"
         },
         {
@@ -65487,8 +65691,8 @@
                 },
                 "parameter_schema": {
                   "k": {
-                    "default_executed_steps": 30,
-                    "max": 29,
+                    "default_executed_steps": 24,
+                    "max": 23,
                     "max_exclusive": "executed_steps",
                     "min": 1,
                     "range": "1..executed_steps",
@@ -67399,8 +67603,8 @@
                 },
                 "parameter_schema": {
                   "k": {
-                    "default_executed_steps": 30,
-                    "max": 29,
+                    "default_executed_steps": 24,
+                    "max": 23,
                     "max_exclusive": "executed_steps",
                     "min": 1,
                     "range": "1..executed_steps",
@@ -73876,8 +74080,8 @@
                 },
                 "parameter_schema": {
                   "k": {
-                    "default_executed_steps": 30,
-                    "max": 29,
+                    "default_executed_steps": 24,
+                    "max": 23,
                     "max_exclusive": "executed_steps",
                     "min": 1,
                     "range": "1..executed_steps",

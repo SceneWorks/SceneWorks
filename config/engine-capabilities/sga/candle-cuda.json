@@ -21667,27 +21667,9 @@
         "request_memory_strategies": [],
         "requires_sigma_shift": false,
         "samplers": [
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim",
-          "er_sde",
-          "dpmpp_2m_sde",
-          "lightning"
+          "euler_ancestral"
         ],
         "schedulers": [
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform",
-          "beta57",
           "discrete"
         ],
         "size_floor": {
@@ -21695,8 +21677,7 @@
         },
         "supported_family_extensions": [],
         "supported_guidance_methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "supported_quants": [
           "q4",
@@ -21820,8 +21801,8 @@
           },
           "parameter_schema": {
             "step": {
-              "default_executed_steps": 30,
-              "max": 29,
+              "default_executed_steps": 24,
+              "max": 23,
               "max_exclusive": "executed_steps",
               "min": 1,
               "range": "1..executed_steps",
@@ -21936,8 +21917,8 @@
           },
           "parameter_schema": {
             "k": {
-              "default_executed_steps": 30,
-              "max": 29,
+              "default_executed_steps": 24,
+              "max": 23,
               "max_exclusive": "executed_steps",
               "min": 1,
               "range": "1..executed_steps",
@@ -22111,8 +22092,8 @@
           },
           "parameter_schema": {
             "boundary_step": {
-              "default_executed_steps": 30,
-              "max": 29,
+              "default_executed_steps": 24,
+              "max": 23,
               "max_exclusive": "executed_steps",
               "min": 1,
               "range": "1..executed_steps",
@@ -22200,27 +22181,9 @@
         "request_memory_strategies": [],
         "requires_sigma_shift": false,
         "samplers": [
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim",
-          "er_sde",
-          "dpmpp_2m_sde",
-          "lightning"
+          "euler_ancestral"
         ],
         "schedulers": [
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform",
-          "beta57",
           "discrete"
         ],
         "size_floor": {
@@ -22228,8 +22191,7 @@
         },
         "supported_family_extensions": [],
         "supported_guidance_methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "supported_quants": [
           "q4",
@@ -22760,8 +22722,7 @@
         },
         "supported_family_extensions": [],
         "supported_guidance_methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "supported_quants": [
           "q4",
@@ -74088,8 +74049,8 @@
               },
               "parameter_schema": {
                 "step": {
-                  "default_executed_steps": 30,
-                  "max": 29,
+                  "default_executed_steps": 24,
+                  "max": 23,
                   "max_exclusive": "executed_steps",
                   "min": 1,
                   "range": "1..executed_steps",
@@ -74683,8 +74644,8 @@
               },
               "parameter_schema": {
                 "k": {
-                  "default_executed_steps": 30,
-                  "max": 29,
+                  "default_executed_steps": 24,
+                  "max": 23,
                   "max_exclusive": "executed_steps",
                   "min": 1,
                   "range": "1..executed_steps",
@@ -75506,8 +75467,8 @@
               },
               "parameter_schema": {
                 "boundary_step": {
-                  "default_executed_steps": 30,
-                  "max": 29,
+                  "default_executed_steps": 24,
+                  "max": 23,
                   "max_exclusive": "executed_steps",
                   "min": 1,
                   "range": "1..executed_steps",
@@ -76590,27 +76551,9 @@
         "request_memory_strategies": [],
         "requires_sigma_shift": false,
         "samplers": [
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim",
-          "er_sde",
-          "dpmpp_2m_sde",
-          "lightning"
+          "euler_ancestral"
         ],
         "schedulers": [
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform",
-          "beta57",
           "discrete"
         ],
         "size_floor": {
@@ -76618,8 +76561,7 @@
         },
         "supported_family_extensions": [],
         "supported_guidance_methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "supported_quants": [
           "q4",
@@ -76700,11 +76642,11 @@
           1024,
           1024
         ],
-        "guidance": 7.0,
-        "sampler": "ddim",
-        "schedule": null,
+        "guidance": 5.0,
+        "sampler": "euler_ancestral",
+        "schedule": "discrete",
         "shift": null,
-        "steps": 30,
+        "steps": 24,
         "strength": 0.550000011920929
       },
       "denoiser": {
@@ -76797,8 +76739,8 @@
           },
           "parameter_schema": {
             "step": {
-              "default_executed_steps": 30,
-              "max": 29,
+              "default_executed_steps": 24,
+              "max": 23,
               "max_exclusive": "executed_steps",
               "min": 1,
               "range": "1..executed_steps",
@@ -76913,8 +76855,8 @@
           },
           "parameter_schema": {
             "k": {
-              "default_executed_steps": 30,
-              "max": 29,
+              "default_executed_steps": 24,
+              "max": 23,
               "max_exclusive": "executed_steps",
               "min": 1,
               "range": "1..executed_steps",
@@ -77088,8 +77030,8 @@
           },
           "parameter_schema": {
             "boundary_step": {
-              "default_executed_steps": 30,
-              "max": 29,
+              "default_executed_steps": 24,
+              "max": 23,
               "max_exclusive": "executed_steps",
               "min": 1,
               "range": "1..executed_steps",
@@ -77124,8 +77066,7 @@
       ],
       "guidance": {
         "methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "pag": null,
         "requires_sigma_shift": false,
@@ -77198,14 +77139,6 @@
       },
       "route_id": "sdxl_detail",
       "schedules": [
-        "normal",
-        "simple",
-        "karras",
-        "exponential",
-        "sgm_uniform",
-        "beta",
-        "ddim_uniform",
-        "beta57",
         "discrete"
       ],
       "seed_and_batch": {
@@ -77215,17 +77148,7 @@
         "supports_prompt_batch": false
       },
       "solvers": [
-        "euler",
-        "euler_ancestral",
-        "heun",
-        "dpmpp_2m",
-        "dpmpp_sde",
-        "uni_pc",
-        "lcm",
-        "ddim",
-        "er_sde",
-        "dpmpp_2m_sde",
-        "lightning"
+        "euler_ancestral"
       ],
       "weight_plan": {
         "has_encoder_contract": false,
@@ -77310,27 +77233,9 @@
         "request_memory_strategies": [],
         "requires_sigma_shift": false,
         "samplers": [
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim",
-          "er_sde",
-          "dpmpp_2m_sde",
-          "lightning"
+          "euler_ancestral"
         ],
         "schedulers": [
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform",
-          "beta57",
           "discrete"
         ],
         "size_floor": {
@@ -77338,8 +77243,7 @@
         },
         "supported_family_extensions": [],
         "supported_guidance_methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "supported_quants": [
           "q4",
@@ -77418,9 +77322,9 @@
           1024,
           1024
         ],
-        "guidance": 7.0,
-        "sampler": "ddim",
-        "schedule": null,
+        "guidance": 5.0,
+        "sampler": "euler_ancestral",
+        "schedule": "discrete",
         "shift": null,
         "steps": 30,
         "strength": 0.800000011920929
@@ -77842,8 +77746,7 @@
       ],
       "guidance": {
         "methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "pag": null,
         "requires_sigma_shift": false,
@@ -77916,14 +77819,6 @@
       },
       "route_id": "sdxl_edit",
       "schedules": [
-        "normal",
-        "simple",
-        "karras",
-        "exponential",
-        "sgm_uniform",
-        "beta",
-        "ddim_uniform",
-        "beta57",
         "discrete"
       ],
       "seed_and_batch": {
@@ -77933,17 +77828,7 @@
         "supports_prompt_batch": false
       },
       "solvers": [
-        "euler",
-        "euler_ancestral",
-        "heun",
-        "dpmpp_2m",
-        "dpmpp_sde",
-        "uni_pc",
-        "lcm",
-        "ddim",
-        "er_sde",
-        "dpmpp_2m_sde",
-        "lightning"
+        "euler_ancestral"
       ],
       "weight_plan": {
         "has_encoder_contract": false,
@@ -78055,8 +77940,7 @@
         },
         "supported_family_extensions": [],
         "supported_guidance_methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "supported_quants": [
           "q4",
@@ -78136,9 +78020,9 @@
           1024,
           1024
         ],
-        "guidance": 7.0,
-        "sampler": "ddim",
-        "schedule": null,
+        "guidance": 5.0,
+        "sampler": "euler_ancestral",
+        "schedule": "discrete",
         "shift": null,
         "steps": 30,
         "strength": 0.699999988079071
@@ -78560,8 +78444,7 @@
       ],
       "guidance": {
         "methods": [
-          "cfg",
-          "cfg_pp"
+          "cfg"
         ],
         "pag": null,
         "requires_sigma_shift": false,

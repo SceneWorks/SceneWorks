@@ -177,7 +177,10 @@ fn moss_pin_spec_with_adapters(
             } else {
                 gen_core::moss_image_edit::EDIT_WEIGHTS_SHA256
             };
-            if sceneworks_core::hashing::hex(pin.content_sha256()) != expected {
+            let actual = pin.require_content_sha256_hex().map_err(|error| {
+                crate::classify_engine_error("MOSS edit frozen component identity", error)
+            })?;
+            if actual != expected {
                 return Err(WorkerError::InvalidPayload(format!(
                     "MOSS edit frozen component identity mismatch: {relative}"
                 )));
@@ -747,7 +750,9 @@ pub(crate) fn moss_generation_preload_for_test_with_check(
         let tensor_bytes = headers.iter().try_fold(0_u64, |sum, header| sum.checked_add(header.data_bytes)
             .ok_or_else(|| WorkerError::InvalidPayload("MOSS adapter header bytes overflow".into())))?;
         let pin=gen_core::PinnedWeightsFile::pin_with_check(&adapter.path, &mut *check).map_err(|e|crate::classify_engine_error("MOSS adapter preload canceled", e))?;
-        let sha256=sceneworks_core::hashing::hex(pin.content_sha256());
+        let sha256 = pin
+            .require_content_sha256_hex()
+            .map_err(|e| crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
         pin.ensure_unchanged().map_err(|e|crate::provider_error(e, |e| WorkerError::InvalidPayload(e.to_string())))?;
         Ok(json!({"path":adapter.path,"scale":adapter.scale,"tensorBytes":tensor_bytes,"sha256":sha256}))
     }).collect::<WorkerResult<Vec<Value>>>()?;

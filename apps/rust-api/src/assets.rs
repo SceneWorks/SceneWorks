@@ -1,24 +1,34 @@
 use super::*;
 
-pub(crate) async fn list_assets(
-    State(state): State<AppState>,
-    Path(project_id): Path<String>,
-    Query(query): Query<AssetsQuery>,
-) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let character_id = query.character_id.clone();
-    let scope = match query.scope.as_deref() {
-        Some("library") => sceneworks_core::project_store::AssetScope::Library,
-        _ => sceneworks_core::project_store::AssetScope::All,
-    };
-    let (assets, filesystem_operations) = project_call(state.clone(), move |store| {
-        store.list_assets_with_filesystem_operations(
-            &project_id,
-            query.include_rejected.unwrap_or(false),
-            query.include_trashed.unwrap_or(false),
-            scope,
-        )
-    })
-    .await?;
+fn asset_list_filter(query: &AssetsQuery) -> sceneworks_core::project_store::AssetListFilter {
+    sceneworks_core::project_store::AssetListFilter {
+        include_rejected: query.include_rejected.unwrap_or(false),
+        include_trashed: query.include_trashed.unwrap_or(false),
+        scope: match query.scope.as_deref() {
+            Some("library") => sceneworks_core::project_store::AssetScope::Library,
+            _ => sceneworks_core::project_store::AssetScope::All,
+        },
+    }
+}
+
+fn asset_list_view(
+    query: &AssetsQuery,
+) -> Result<sceneworks_core::project_store::AssetListView, ApiError> {
+    use sceneworks_core::project_store::AssetListView;
+    match query.view.as_deref() {
+        None | Some("full") => Ok(AssetListView::Full),
+        Some("summary") => Ok(AssetListView::Summary),
+        Some(_) => Err(ApiError::bad_request(
+            "view must be \"full\" or \"summary\"",
+        )),
+    }
+}
+
+fn log_asset_list_operations(
+    filesystem_operations: &sceneworks_core::project_store::AssetListFilesystemOperations,
+    asset_count: usize,
+    incremental: bool,
+) {
     tracing::debug!(
         event = "asset_list_filesystem_operations",
         total = filesystem_operations.total(),
@@ -38,23 +48,85 @@ pub(crate) async fn list_assets(
         index_marker_removes = filesystem_operations.index_marker_removes,
         directory_create_calls = filesystem_operations.directory_create_calls,
         db_opens = filesystem_operations.db_opens,
-        asset_count = assets.len(),
+        asset_count,
+        incremental,
         "listed assets from the indexed project store"
     );
-    let assets = match character_id {
-        Some(character_id) if !character_id.is_empty() => assets
-            .into_iter()
-            .filter(|asset| asset_matches_character(asset, &character_id))
-            .collect(),
-        _ => assets,
+}
+
+/// `GET /api/v1/projects/:project_id/assets`.
+///
+/// Without `since` this is the historical listing: a bare array, newest first,
+/// of full envelopes (or summaries with `view=summary`).
+///
+/// With `since` (empty for a first read) it is the incremental listing and
+/// answers `{ cursor, reset, assets, removedIds }`:
+///
+/// * `reset: true` — no or stale cursor: `assets` is the complete listing and
+///   the client replaces its catalog;
+/// * `reset: false` — `assets` holds only the new/changed assets that match the
+///   filters, and `removedIds` the ids to drop (purged, or changed out of the
+///   filters, `characterId` included).
+///
+/// Either way the next call passes the returned `cursor` as `since`.
+pub(crate) async fn list_assets(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Query(query): Query<AssetsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let filter = asset_list_filter(&query);
+    let view = asset_list_view(&query)?;
+    let character_id = query.character_id.clone().filter(|id| !id.is_empty());
+    let Some(since) = query.since.clone() else {
+        let (assets, filesystem_operations) = project_call(state.clone(), move |store| {
+            store.list_assets_view_with_filesystem_operations(&project_id, filter, view)
+        })
+        .await?;
+        log_asset_list_operations(&filesystem_operations, assets.len(), false);
+        let assets = match character_id {
+            Some(character_id) => assets
+                .into_iter()
+                .filter(|asset| asset_matches_character(asset, &character_id))
+                .collect(),
+            None => assets,
+        };
+        return Ok(Json(serde_json::Value::Array(assets)));
     };
-    Ok(Json(assets))
+    let (changes, filesystem_operations) = project_call(state.clone(), move |store| {
+        store.list_asset_changes(&project_id, filter, view, Some(&since))
+    })
+    .await?;
+    log_asset_list_operations(&filesystem_operations, changes.assets.len(), !changes.reset);
+    let mut removed_ids = changes.removed_ids;
+    let assets = match character_id {
+        Some(character_id) => {
+            let mut kept = Vec::with_capacity(changes.assets.len());
+            for asset in changes.assets {
+                if asset_matches_character(&asset, &character_id) {
+                    kept.push(asset);
+                } else if !changes.reset {
+                    if let Some(id) = asset.get("id").and_then(serde_json::Value::as_str) {
+                        removed_ids.push(id.to_owned());
+                    }
+                }
+            }
+            kept
+        }
+        None => changes.assets,
+    };
+    Ok(Json(serde_json::json!({
+        "cursor": changes.cursor,
+        "reset": changes.reset,
+        "assets": assets,
+        "removedIds": removed_ids,
+    })))
 }
 
 /// An asset belongs to a character when it was generated in association with it
 /// (recipe.normalizedSettings.characterId) or generated referencing it
 /// (metadata.characterReferences[].characterId). Powers the per-character gallery so
 /// character outputs persist beyond the transient "recent generations" window.
+/// Both fields survive the summary view, so the filter reads the same on either shape.
 fn asset_matches_character(asset: &serde_json::Value, character_id: &str) -> bool {
     let by_recipe = asset
         .get("recipe")
