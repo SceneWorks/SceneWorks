@@ -531,27 +531,8 @@ pub(crate) enum MlxRequestAdmission {
 /// A family's flat 1024² allowance, together with how much of it is fixed OS/app reserve rather than
 /// this request's area-dependent activation transient.
 ///
-/// The two constants that fill this slot are NOT the same kind of quantity, and conflating them is a
-/// live correctness bug rather than a naming wart:
-///
-/// * [`HEADROOM_GB`] (18) is a measured transient PLUS an OS/app reserve — sc-10863 built it as
-///   14.04 + ~4.
-/// * [`LENS_DENSE_HEADROOM_GB`] (29.88) is a measured transient ALONE — sc-11924 took it straight
-///   from `peak − resident` on lens-turbo bf16, and the weight half of that family's error is
-///   corrected separately via `materialized_expansion` in [`spec_component_bytes`]. There is no
-///   reserve inside it to hold out.
-///
-/// sc-16195's split therefore cannot be applied blindly. Subtracting a 2 GiB fixed reserve from the
-/// lens-dense allowance would take those 2 GiB out of its AREA term — `27.88·MP` becomes
-/// `2 + 25.88·MP` — which is strictly LESS conservative above 1024², growing as `2·(MP−1)`: about
-/// 2.5 GiB at 1152×2048 and 6 GiB at 2048², on a path that sc-11924 already records as
-/// under-predicting. That is the opposite of what this story was for.
-///
-/// Carrying `os_reserve_gb` alongside the load-time total lets the request planner recover a bare
-/// activation fallback without guessing: generic yields 18 − 4 = 14 GiB, while Lens dense yields
-/// 29.88 − 0 = 29.88 GiB. The request estimator then adds the remaining 2 GiB OS/app reserve as a
-/// separate fixed term. Thus Lens dense becomes `2 + 29.88·MP`, never the unsafe
-/// `2 + 27.88·MP` split that would take part of its measured activation out of the area term.
+/// The generic allowance ([`HEADROOM_GB`]) combines the measured transient with a fixed OS/app
+/// reserve. Keeping that reserve separate lets request admission scale only the transient with area.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct HeadroomAllowance {
     /// Total GiB the load-time gate adds on top of summed component weights.

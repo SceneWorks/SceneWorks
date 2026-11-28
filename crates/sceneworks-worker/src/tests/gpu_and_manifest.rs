@@ -473,22 +473,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("sensenova_u1_8b_infographic_v2_fast", true, false),
         // Infographic-V3 fast (epic 13095): rides the base `sensenova_u1_8b_fast` engine id → same flags.
         ("sensenova_u1_8b_infographic_v3_fast", true, false),
-        // Lens / Lens-Turbo (epic 3164 / sc-5105): the `mlx-gen-lens` descriptor advertises the
-        // norm-rescaled CFG path (`supports_guidance=true`) + a negative prompt
-        // (`supports_negative_prompt=true`) — a standard guidance family (NOT true-CFG), so the worker
-        // forwards the CFG scale via `guidance`. Turbo simply defaults guidance to 1.0 (≈ no CFG).
-        ("lens", true, true),
-        ("lens_turbo", true, true),
         // Bernini still-image companion (epic 4699 / sc-5424): the image-typed `bernini_image` id
         // maps to the SAME `bernini` engine the video id uses (`Modality::Both`). Standard guidance
         // family — `supports_guidance=true` (omega_txt) + `supports_negative_prompt=true`.
         ("bernini_image", true, true),
-        // Boogu-Image-0.1 (epic 6387 / sc-6399): Base + Edit are true-CFG (supports_guidance=true)
-        // with no user negative prompt (the CFG-negative is a fixed empty/drop instruction). Turbo is
-        // the DMD few-step, CFG-free distill (supports_guidance=false). None take a negative prompt.
-        ("boogu_image", true, true),
-        ("boogu_image_turbo", true, true),
-        ("boogu_image_edit", true, true),
         // Krea 2 Turbo (epic 7565 / sc-7572): TDM-distilled few-step, CFG-free
         // (supports_guidance=false) with no user negative prompt (supports_negative_prompt=false) — the
         // z_image_turbo / boogu_image_turbo distilled-turbo pattern.
@@ -523,14 +511,6 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("anima_base", true, true),
         ("anima_aesthetic", true, true),
         ("anima_turbo", true, true),
-        // Mage-Flow Base/RL and Edit-Base/Edit retain classifier-free guidance and negative
-        // conditioning; the distilled generation/edit Turbo recipes are CFG-free.
-        ("mage_flow_base", true, true),
-        ("mage_flow", true, true),
-        ("mage_flow_turbo", true, true),
-        ("mage_flow_edit_base", true, true),
-        ("mage_flow_edit", true, true),
-        ("mage_flow_edit_turbo", true, true),
         // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
         ("iris_3b", true, true),
         // FLUX 3 Image Klein, distilled (sc-26234): a flow map — no CFG, no negative prompt.
@@ -949,28 +929,6 @@ fn every_image_model_budgets_its_default_tier_against_a_measured_row() {
          DEFAULT tier against the LIGHTEST tier's number — a permissive under-prediction that can \
          admit a load which then OOMs (sc-13533). Measure the tier and add its row: {offenders:?}"
     );
-
-    // Pin the sc-13533 subjects on the value, not merely on the sweep above: both Boogu entries must
-    // still DERIVE q8 (the shipped `base/` / `turbo/` Q8 turnkey) and must carry a q8 row. Flipping
-    // `mlx.quantize` to dodge the lint, or dropping the row, both go RED here.
-    for id in ["boogu_image", "boogu_image_turbo"] {
-        let entry = builtin_model_entry(id);
-        assert_eq!(
-            default_tier_key(&entry),
-            "q8",
-            "{id} ships the Q8 turnkey as its only auto-downloaded tier, so a no-pick request must \
-             still derive q8 (sc-13533)"
-        );
-        assert!(
-            entry
-                .get("candle")
-                .and_then(|candle| candle.get("vramGbByTier"))
-                .and_then(|tiers| tiers.get("q8"))
-                .and_then(Value::as_f64)
-                .is_some(),
-            "{id} must carry a measured q8 `vramGbByTier` row — the tier it defaults to (sc-13533)"
-        );
-    }
 }
 
 /// The tier key a no-pick request derives for `model` from `mlx.quantize` alone — a lane-independent

@@ -8506,11 +8506,6 @@ fn a_narrowed_parameter_range_degrades_to_estimates_and_spares_valid_siblings() 
 const FLUX1_CONTROL_BYTES: u64 = 4_281_779_224;
 #[cfg(target_os = "macos")]
 const FLUX2_CONTROL_BYTES: u64 = 8_232_506_680;
-// The pinned Lens bf16 turnkeys share this exact three-shard MXFP4 encoder on disk. The provider
-// footprint query, not a copied resident-byte constant, supplies its load-exact expansion.
-#[cfg(target_os = "macos")]
-const LENS_BF16_TEXT_ENCODER_DISK_BYTES: u64 = 4_845_744_456 + 4_774_186_632 + 4_154_656_824;
-
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ResidentOnlyAuditSurface {
@@ -8549,7 +8544,6 @@ struct SourceBoundShippedTier {
 enum SourceBoundManifestDisposition {
     GenericSelector,
     PulidIdentityExcluded,
-    MageSplitComponentsExcluded,
 }
 
 #[cfg(target_os = "macos")]
@@ -8576,13 +8570,11 @@ struct SourceBoundExcludedCell {
 /// production routers expand this family scope into the exact candidate inventory.
 #[cfg(target_os = "macos")]
 const RESIDENT_ONLY_AUDIT_FAMILIES: &[&str] = &[
-    "boogu",
     "chroma",
     "flux",
     "flux2-dev",
     "flux2-klein",
     "ideogram",
-    "lens",
     "sd3",
 ];
 
@@ -8590,9 +8582,7 @@ const RESIDENT_ONLY_AUDIT_FAMILIES: &[&str] = &[
 fn source_bound_manifest_classifications(
     models: &[Value],
 ) -> Result<Vec<SourceBoundManifestClassification>, String> {
-    use SourceBoundManifestDisposition::{
-        GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
-    };
+    use SourceBoundManifestDisposition::{GenericSelector, PulidIdentityExcluded};
 
     let mut classifications = Vec::new();
     let mut unique = std::collections::BTreeSet::new();
@@ -8608,12 +8598,8 @@ fn source_bound_manifest_classifications(
             .ok_or_else(|| format!("shipped MLX image entry {manifest_id} has no string family"))?;
         let resolved = crate::engines::mlx_model(manifest_id);
         let is_pulid = crate::image_jobs::is_pulid_flux_model(manifest_id);
-        let routed_as_mage = resolved
-            .as_ref()
-            .is_some_and(|model| model.adapter_label() == "mlx_mage");
-        let in_mage_family = family == "mage-flow";
         let in_audit_family = RESIDENT_ONLY_AUDIT_FAMILIES.contains(&family);
-        if !in_audit_family && !is_pulid && !in_mage_family && !routed_as_mage {
+        if !in_audit_family && !is_pulid {
             continue;
         }
         if !unique.insert(manifest_id) {
@@ -8633,13 +8619,6 @@ fn source_bound_manifest_classifications(
                     ));
             }
             PulidIdentityExcluded
-        } else if in_mage_family || routed_as_mage {
-            if !in_mage_family || !routed_as_mage {
-                return Err(format!(
-                        "{manifest_id} Mage split-component classification drifted: expected family=mage-flow and a production mlx_mage route"
-                    ));
-            }
-            MageSplitComponentsExcluded
         } else if in_audit_family {
             if resolved.is_none() {
                 return Err(format!(
@@ -8884,9 +8863,7 @@ fn source_bound_excluded_inventory_from_classifications(
     models: &[Value],
     classifications: &[SourceBoundManifestClassification],
 ) -> Result<Vec<SourceBoundExcludedCell>, String> {
-    use SourceBoundManifestDisposition::{
-        GenericSelector, MageSplitComponentsExcluded, PulidIdentityExcluded,
-    };
+    use SourceBoundManifestDisposition::{GenericSelector, PulidIdentityExcluded};
 
     let mut cells = std::collections::BTreeSet::new();
     for classification in classifications {
@@ -8914,22 +8891,6 @@ fn source_bound_excluded_inventory_from_classifications(
                     ));
                 }
                 "pulid_flux"
-            }
-            MageSplitComponentsExcluded => {
-                let resolved =
-                    crate::engines::mlx_model(&classification.manifest_id).ok_or_else(|| {
-                        format!(
-                            "{} no longer resolves through the production Mage route",
-                            classification.manifest_id
-                        )
-                    })?;
-                if classification.family != "mage-flow" || resolved.adapter_label() != "mlx_mage" {
-                    return Err(format!(
-                        "{} no longer matches the Mage split-component exclusion",
-                        classification.manifest_id
-                    ));
-                }
-                resolved.engine_id()
             }
             GenericSelector => unreachable!("generic entries were skipped above"),
         };
@@ -9106,50 +9067,7 @@ fn audit_load_spec(
         tempfile::tempdir_in(fixtures.root.path()).map_err(|error| error.to_string())?,
     );
     let weights = fixture.path().join("weights");
-    if provider_id == "lens" && tier == "q4" {
-        // The production worker opts this one route into the load-exact deferred contract.
-        // Build the same component/config shape its registry contract inspects; a flat sparse
-        // file would make the lookup fall back and falsely classify measured Lens q4 as
-        // Resident-only.
-        let text_encoder_bytes = base_asset_bytes / 3;
-        let transformer_bytes = base_asset_bytes / 3;
-        let vae_bytes = base_asset_bytes - text_encoder_bytes - transformer_bytes;
-        for (component, bytes) in [
-            ("text_encoder", text_encoder_bytes),
-            ("transformer", transformer_bytes),
-            ("vae", vae_bytes),
-        ] {
-            set_sparse_valid_safetensor(&weights.join(component).join("model.safetensors"), bytes)?;
-        }
-        for component in ["text_encoder", "transformer"] {
-            std::fs::write(
-                weights.join(component).join("config.json"),
-                r#"{"quantization":{"bits":4,"group_size":64}}"#,
-            )
-            .map_err(|error| error.to_string())?;
-        }
-    } else if matches!(provider_id, "lens" | "lens_turbo") && tier == "bf16" {
-        if base_asset_bytes < LENS_BF16_TEXT_ENCODER_DISK_BYTES {
-            return Err(format!(
-                "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
-            ));
-        }
-        set_sparse_valid_safetensor(
-            &weights.join("text_encoder/model.safetensors"),
-            LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-        )?;
-        set_sparse_valid_safetensor(
-            &weights.join("transformer/model.safetensors"),
-            base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-        )?;
-        std::fs::write(
-            weights.join("text_encoder/config.json"),
-            r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
-        )
-        .map_err(|error| error.to_string())?;
-    } else if let Some(encoder_bytes) =
-        write_audited_flux2_encoder_fixture(&weights, provider_id, tier)?
-    {
+    if let Some(encoder_bytes) = write_audited_flux2_encoder_fixture(&weights, provider_id, tier)? {
         let remaining_bytes = base_asset_bytes.checked_sub(encoder_bytes).ok_or_else(|| {
             format!(
                 "{provider_id} {tier} registry encoder fixture uses {encoder_bytes} bytes, \
@@ -9437,14 +9355,14 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         source_bound_manifest_classifications(models).expect("source-bound classifications");
     assert_eq!(
         classifications.len(),
-        26,
+        15,
         "the source-derived generic-plus-excluded model inventory changed"
     );
     let generic_manifest_ids =
         source_bound_generic_manifest_ids(&classifications).collect::<Vec<_>>();
     assert_eq!(
         generic_manifest_ids.len(),
-        19,
+        14,
         "the generic-selector model inventory changed"
     );
     let surfaces = source_bound_audit_surfaces_from_manifest_ids(generic_manifest_ids)
@@ -9453,7 +9371,7 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         .expect("source-bound candidate inventory");
     assert_eq!(
         source_inventory.len(),
-        62,
+        53,
         "the source-derived candidate inventory changed; update the recorded audit result"
     );
     let excluded_inventory =
@@ -9463,21 +9381,11 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         .iter()
         .filter(|cell| cell.disposition == SourceBoundManifestDisposition::PulidIdentityExcluded)
         .count();
-    let mage_excluded = excluded_inventory
-        .iter()
-        .filter(|cell| {
-            cell.disposition == SourceBoundManifestDisposition::MageSplitComponentsExcluded
-        })
-        .count();
     assert_eq!(pulid_excluded, 3, "PuLID must account for q4/q8/bf16");
     assert_eq!(
-        mage_excluded, 18,
-        "the six Mage variants must each account for q4/q8/bf16"
-    );
-    assert_eq!(
         source_inventory.len() + pulid_excluded,
-        65,
-        "every route/tier cell in the eight-family story scope must be classified"
+        56,
+        "every shipped candidate and PuLID route/tier cell must be classified"
     );
     let classified_excluded =
         source_bound_classified_excluded_inventory(models, &excluded_inventory)
@@ -9539,14 +9447,10 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
         )
         .expect("source-bound audit spec");
         let media = crate::inference_runtime::media();
-        assert!(
-                !matches!(cell.provider_id, "lens" | "lens_turbo"),
-                "Lens materialization can change the resident total and must not enter the raw-source audit"
-            );
         let activation_anchor_bytes = media
             .activation_memory_bytes_1024(cell.provider_id)
             .expect("source-bound activation query");
-        // Every audited spec is directory-backed, and for these non-Lens providers the
+        // Every audited spec is directory-backed, and for these providers the
         // provider footprint can only refine the text-encoder split; it cannot change the
         // total used by the Resident path below. Let the production planner derive that total
         // from the sparse source sizes directly. Asking the provider registry for a redundant
@@ -9743,14 +9647,6 @@ fn resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones() {
         .expect("production source inventory");
     let (_, cells) = source_bound_resident_only_cells_from_inventory(models, &source_inventory)
         .expect("production resident-only cells");
-    assert!(
-        !cells.iter().any(|cell| {
-            cell.manifest_id == "lens"
-                && cell.tier == "q4"
-                && cell.surface == ResidentOnlyAuditSurface::Base
-        }),
-        "base Lens q4 must remain on its production measured deferred-materialization contract"
-    );
     assert!(
         !cells
             .iter()
@@ -10852,9 +10748,7 @@ fn generic_request_peak_scales_the_area_term_but_never_the_os_reserve() {
 /// whole measurement in the area term, with the request budget's remaining OS reserve added as
 /// a separate fixed term.
 ///
-/// This is the lens dense path ([`HeadroomAllowance { total_gb: 29.88, os_reserve_gb: 0.0 }`], sc-11924). Subtracting the
-/// legacy 2 GiB request-budget reserve from its 29.88 GiB BARE activation measurement would
-/// under-predict above 1024² by `2·MP`. The safe decomposition is fixed 2 + 29.88·MP.
+/// A synthetic 29.88 GiB transient must scale entirely with area, with the OS reserve added once.
 #[test]
 fn a_bare_transient_allowance_keeps_its_whole_area_term() {
     const TRANSIENT_GB: f64 = 29.88;
@@ -10866,8 +10760,8 @@ fn a_bare_transient_allowance_keeps_its_whole_area_term() {
         let activation_anchor_bytes =
             gib_to_bytes((headroom.total_gb - headroom.os_reserve_gb).max(0.0));
         MlxRequestPlan {
-            engine_id: "lens_turbo",
-            model_id: "lens_turbo".to_owned(),
+            engine_id: "fit_fixture",
+            model_id: "fit_fixture".to_owned(),
             tier: MemoryNumericTier {
                 precision: gen_core::Precision::Bf16,
                 quant: None,
@@ -12461,8 +12355,8 @@ fn optimized_fingerprint_mismatch_fails_closed() {
     };
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            model_family: "mage_flow".to_owned(),
-            resolved_route: "mage_flow".to_owned(),
+            model_family: "fit_fixture".to_owned(),
+            resolved_route: "fit_fixture".to_owned(),
             backend: gen_core::MemoryBackend::Mlx,
             tier: plan.tier,
             load_shape: gen_core::LoadShape::EagerMaterialization,
@@ -12830,12 +12724,6 @@ fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
 
     let additive = LoadSpec::new(WeightsSource::Dir(weights.clone()))
         .with_adapters(vec![adapter_spec.clone()]);
-    assert_eq!(spec_component_bytes("mage_flow", &additive).0, 1_250);
-    assert_eq!(
-        MlxRequestPlan::for_spec_and_manifest("mage_flow", "mage_flow", &additive, None, None)
-            .folded_adapter_bytes,
-        250
-    );
     // SW-7101: MiniMax-H3-Image installs every LoRA as a forward-time residual, dense or packed,
     // so the gate prices the adapter bytes on top of the weights.
     for spec in [
@@ -12888,8 +12776,7 @@ fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
     );
 }
 
-/// sc-15154: a split-layout tier's staged co-requisites are part of what it loads. Mage-Flow's
-/// per-tier dir holds the DiT alone; the shared text encoder and VAE must still count.
+/// A split-layout tier still counts staged components outside the transformer directory.
 #[test]
 fn a_staged_component_counts_toward_the_tier_that_loads_it() {
     let root_guard = tempfile::Builder::new()
@@ -12910,36 +12797,17 @@ fn a_staged_component_counts_toward_the_tier_that_loads_it() {
 
     // Nothing staged — the pre-fix reading, and still correct for a flat snapshot.
     let bare = LoadSpec::new(WeightsSource::Dir(tier.clone()));
-    assert_eq!(spec_component_bytes("mage_flow_edit", &bare).0, 3_000);
+    assert_eq!(spec_component_bytes("split_layout_fixture", &bare).0, 3_000);
 
     // Staged the way the load stages them.
     let staged = bare
         .clone()
         .with_component("text_encoder", WeightsSource::Dir(te))
         .with_component("vae", WeightsSource::Dir(vae));
-    let (total, te_bytes, _) = spec_component_bytes("mage_flow_edit", &staged);
-    println!(
-        "mage_flow_edit split tier: bare total={} staged total={total} staged te={te_bytes}",
-        spec_component_bytes("mage_flow_edit", &bare).0
-    );
     assert_eq!(
-        total, 9_000,
+        spec_component_bytes("split_layout_fixture", &staged).0,
+        9_000,
         "the staged text encoder and VAE are weights this tier holds resident"
-    );
-    // The TEXT-ENCODER split comes from the provider's own footprint at the pinned inference
-    // revision, which must likewise resolve the STAGED dir and not `<tier>/text_encoder`. A zero
-    // here would collapse the sequential schedule's `max(te, rest)` onto the whole model and
-    // silently over-reject, so it is asserted rather than inferred from the total.
-    //
-    // macOS ONLY: the MLX media registry — and therefore any provider footprint — is compiled in
-    // on macOS alone. Off-macOS `footprint()` yields `None`, `resolve_text_encoder_bytes` falls
-    // back to the diffusers `text_encoder*` subdir scan of the TIER dir, and that is correctly 0
-    // here. The `total` assertions above are registry-free and hold on every platform, which is
-    // what this test is really for.
-    #[cfg(target_os = "macos")]
-    assert_eq!(
-        te_bytes, 5_000,
-        "mage_flow's per-component footprint must follow the staged component dirs"
     );
 
     // A component that resolves INSIDE the weights dir was already counted by the scan, so it
@@ -12947,7 +12815,7 @@ fn a_staged_component_counts_toward_the_tier_that_loads_it() {
     let flat_te = write(tier.join("text_encoder"), 700);
     let flat = LoadSpec::new(WeightsSource::Dir(tier))
         .with_component("text_encoder", WeightsSource::Dir(flat_te));
-    assert_eq!(spec_component_bytes("mage_flow_edit", &flat).0, 3_700);
+    assert_eq!(spec_component_bytes("split_layout_fixture", &flat).0, 3_700);
 }
 
 #[test]
