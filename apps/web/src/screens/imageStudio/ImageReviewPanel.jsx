@@ -15,12 +15,8 @@ export function ImageReviewPanel({
   return (
 <section className="review-panel">
             <div className="review-panel-head">
+              {/* The ⌘ ↵ shortcut is shown inside the Generate button now, not repeated here. */}
               <h2>Latest batch</h2>
-              <span className="kbd-hint">
-                <kbd>⌘</kbd>
-                <kbd>↵</kbd>
-                to generate
-              </span>
             </div>
             {localJobGroups.length ? (
               <div className="worker-progress-card-stack local-job-stack">

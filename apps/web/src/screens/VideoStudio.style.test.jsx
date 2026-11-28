@@ -81,7 +81,7 @@ function baseContext(overrides = {}) {
 
 // The submit button carries its shortcut inside (`<span class="kbd">⌘ ↵</span>`), so compare
 // button labels without it.
-const buttonLabel = (b) => b.textContent.replace("⌘ ↵", "").trim();
+const buttonLabel = (b) => b.textContent.replace(b.querySelector(".kbd")?.textContent ?? "", "").trim();
 const buttonWithText = (root, text) =>
   [...root.querySelectorAll("button")].find((b) => buttonLabel(b) === text);
 const buttonContaining = (root, sel, text) =>

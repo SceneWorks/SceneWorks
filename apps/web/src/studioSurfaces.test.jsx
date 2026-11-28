@@ -35,7 +35,7 @@ it("recognizes the Video Replace person action rather than its mode tab", async 
   const mounted = await mount(currentCandidate(), { platform: "macos", studio: "video", model: "ltx_2_3", mode: "replace_person" });
   try {
     const action = submissionButton(mounted.container, "video");
-    expect(action?.textContent.replace("⌘ ↵", "").trim()).toBe("Replace person");
+    expect(action?.textContent.replace(action.querySelector(".kbd")?.textContent ?? "", "").trim()).toBe("Replace person");
     expect(action?.type).toBe("submit");
     expect(action?.classList.contains("studio-generate")).toBe(true);
   } finally { await mounted.close(); }

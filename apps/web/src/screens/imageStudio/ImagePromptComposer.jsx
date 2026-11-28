@@ -12,12 +12,7 @@ import { tierLabel } from "../../quantTier.js";
 import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../../minimaxH3ImageExpand.js";
 import { H3ExpanderModelPicker } from "../../components/H3ExpanderModelPicker.jsx";
 
-// The prompt textarea submits on Cmd+Enter or Ctrl+Enter (onPromptKeyDown accepts both); the
-// Generate button names the one this platform's users reach for.
-const IS_MAC =
-  typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform || navigator.userAgent || "");
-const SUBMIT_SHORTCUT_LABEL = IS_MAC ? "⌘ ↵" : "Ctrl ↵";
-const SUBMIT_SHORTCUT_ARIA = IS_MAC ? "Meta+Enter" : "Control+Enter";
+import { SUBMIT_SHORTCUT_ARIA, SUBMIT_SHORTCUT_LABEL } from "../../components/submitShortcut.js";
 
 // Image Studio compose panel (studio layout simplification): a top row (mode switch left; Batch,
 // Prompt guide, Saved presets right), then ONE prompt box — the textarea (or the structured

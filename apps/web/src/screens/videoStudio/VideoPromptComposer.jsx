@@ -3,6 +3,7 @@ import React, { useState } from "react";
 import { Icon } from "../../components/Icons.jsx";
 import { RefinePromptControl } from "../../components/RefinePromptControl.jsx";
 import { onPromptKeyDown } from "../../components/generationStudio.jsx";
+import { SUBMIT_SHORTCUT_ARIA, SUBMIT_SHORTCUT_LABEL } from "../../components/submitShortcut.js";
 
 const motionLabel = (value) => value.charAt(0).toUpperCase() + value.slice(1);
 
@@ -73,14 +74,14 @@ export function VideoPromptComposer({
           </label>
           <span aria-hidden="true" className="studio-prompt-box-spacer" />
           <button
-            aria-keyshortcuts="Meta+Enter Control+Enter"
+            aria-keyshortcuts={SUBMIT_SHORTCUT_ARIA}
             className="studio-generate"
             disabled={generateDisabled}
             type="submit"
           >
             <Icon.Sparkle size={16} />
             {submitting ? "Queueing…" : renderLabel}
-            <span className="kbd" aria-hidden="true">⌘ ↵</span>
+            <span className="kbd" aria-hidden="true">{SUBMIT_SHORTCUT_LABEL}</span>
           </button>
         </div>
       </div>

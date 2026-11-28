@@ -93,7 +93,7 @@ async function doubleClick(element) {
 
 // The submit button carries its shortcut inside (`<span class="kbd">⌘ ↵</span>`), so compare
 // button labels without it.
-const buttonLabel = (b) => b.textContent.replace("⌘ ↵", "").trim();
+const buttonLabel = (b) => b.textContent.replace(b.querySelector(".kbd")?.textContent ?? "", "").trim();
 const buttonWithText = (root, text) =>
   [...root.querySelectorAll("button")].find((b) => buttonLabel(b) === text);
 
@@ -3758,8 +3758,11 @@ describe("VideoStudio compose layout", () => {
     const foot = container.querySelector(".studio-prompt-box .studio-prompt-box-foot");
     const submit = foot.querySelector("button.studio-generate");
     expect(submit.type).toBe("submit");
-    expect(submit.getAttribute("aria-keyshortcuts")).toContain("Meta+Enter");
-    expect(submit.querySelector('.kbd[aria-hidden="true"]').textContent).toBe("⌘ ↵");
+    // The shortcut follows the platform: ⌘ ↵ / Meta+Enter on a Mac, Ctrl ↵ / Control+Enter elsewhere.
+    expect([["⌘ ↵", "Meta+Enter"], ["Ctrl ↵", "Control+Enter"]]).toContainEqual([
+      submit.querySelector('.kbd[aria-hidden="true"]').textContent,
+      submit.getAttribute("aria-keyshortcuts"),
+    ]);
     expect(buttonLabel(submit)).toBe("Render clip");
 
     // Refine is a toggle that opens the existing Refine my prompt block as an inline card.

@@ -60,6 +60,12 @@ import { minStepsForModel, referenceCaps } from "../videoModelLimits.js";
 
 import { restoreVedaSettings, vedaControlError } from "../vedaControls.js";
 
+// Summary text for a clip length: frame-derived durations like 5.1667 read as "5.17 s".
+const formatSeconds = (value) => {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? `${Number(seconds.toFixed(2))} s` : `${value} s`;
+};
+
 export function VideoStudio() {
   const {
     activeProject,
@@ -1195,7 +1201,7 @@ export function VideoStudio() {
   const modelTabSummary = [
     selectedModel?.ui?.label ?? selectedModel?.name,
     resolutionSummary,
-    ltx25AutoDurationEnabled ? "auto length" : `${duration} s`,
+    ltx25AutoDurationEnabled ? "auto length" : formatSeconds(duration),
     quantSummary,
   ].filter(Boolean).join(" · ");
   const selectedCharacter = characters.find((character) => character.id === characterId);
@@ -1568,7 +1574,7 @@ export function VideoStudio() {
         </WorkPanel>
 
         <VideoResultsArea
-          summary={`${ltx25AutoDurationEnabled ? "auto length" : `${duration} s`} · ${resolution.replace("x", " × ")} · ${fps} fps`}
+          summary={`${ltx25AutoDurationEnabled ? "auto length" : formatSeconds(duration)} · ${resolution.replace("x", " × ")} · ${fps} fps`}
           batch={(
             <VideoReviewPanel
               localJobs={localJobs}

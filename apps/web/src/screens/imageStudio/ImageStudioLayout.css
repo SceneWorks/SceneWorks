@@ -109,14 +109,29 @@
   font-weight: 700;
 }
 
+/* Try: suggestions stay on the footer's one line: they take the space between the tools and
+   Generate, and the ones that don't fit fade out rather than wrapping the footer onto more rows. */
 .image-studio .studio-prompt-suggestions {
-  flex-wrap: wrap;
+  flex: 1 1 0;
+  flex-wrap: nowrap;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+}
+
+.image-studio .studio-prompt-suggestions + .studio-prompt-box-spacer {
+  flex: 0 0 8px;
+}
+
+.image-studio .studio-prompt-suggestions .suggestion-row-label,
+.image-studio .studio-prompt-suggestions .suggestion {
+  flex-shrink: 0;
 }
 
 .image-studio .studio-prompt-suggestions .suggestion {
-  max-width: 280px;
+  max-width: 240px;
   height: 28px;
   padding: 0 12px;
   overflow: hidden;
