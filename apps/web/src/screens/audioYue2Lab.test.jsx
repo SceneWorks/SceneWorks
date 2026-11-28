@@ -339,7 +339,8 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       expect(calls("/yue2/jobs")).toHaveLength(0);
     };
     await assertBlocked(buttonWithText(lab(), "Generate song"));
-    expect(lab().textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the authored steps");
+    if (state === "pending") expect(lab().textContent).not.toContain("Checking options with the server");
+    else expect(lab().textContent).toContain(state === "server-required" ? "Reconnect to continue" : "Fix the authored steps");
     await assertBlocked(buttonWithText(container.querySelector('[data-testid="yue2-run-card"]'), "Decode again"));
     await click(buttonWithText(lab(), "Cover"));
     await choose(byLabel(lab(), "Cover score version"), "ver_1");
@@ -787,7 +788,8 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       feedbackState.value = { state, refusal: { field: "lookAheadSecs", detail: "Fix the transcription options" } };
       await render(context({ models: [...STANDARD, YUE1, entry], assets: [{ id: "asset_take", type: "audio", displayName: "take.wav" }] }));
       expect(buttonStarting(lab(), "Transcribe the recording").disabled).toBe(true);
-      expect(lab().textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the transcription options");
+      if (state === "pending") expect(lab().textContent).not.toContain("Checking options with the server");
+      else expect(lab().textContent).toContain(state === "server-required" ? "Reconnect to continue" : "Fix the transcription options");
       await click(buttonStarting(lab(), "Transcribe the recording"));
       expect(calls("/yue2/jobs")).toHaveLength(0);
     }

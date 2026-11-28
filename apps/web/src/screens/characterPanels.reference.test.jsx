@@ -344,7 +344,8 @@ describe("CharacterGenerationPanel catalog axes (sc-15441)", () => {
     await mount(createImageJob);
     const button = [...container.querySelectorAll("button")].find((candidate) => candidate.textContent.trim() === "Generate");
     expect(button.disabled).toBe(true);
-    expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix the authored steps");
+    if (state === "pending") expect(container.textContent).not.toContain("Checking options with the server");
+    else expect(container.textContent).toContain(state === "server-required" ? "Reconnect to continue" : "Fix the authored steps");
     await generate();
     expect(createImageJob).not.toHaveBeenCalled();
   });

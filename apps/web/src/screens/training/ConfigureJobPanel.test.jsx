@@ -2059,11 +2059,12 @@ describe("ConfigureJobPanel host-blocked targets", () => {
   });
 });
 
-it.each(["pending", "server-required"])("blocks training and explains %s feedback", (state) => {
+it.each(["pending", "server-required"])("blocks training while feedback is %s", (state) => {
   const submitTrainingJob = vi.fn();
   mount(<ConfigureJobPanel {...baseProps({ submitTrainingJob, trainingFeedback: { state } })} />);
   expect(submitButton().disabled).toBe(true);
-  expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : "Reconnect to continue");
+  if (state === "pending") expect(container.querySelector('[role="status"]')).toBeNull();
+  else expect(container.textContent).toContain("Reconnect to continue");
   act(() => submitButton().click());
   expect(submitTrainingJob).not.toHaveBeenCalled();
   mount(<ConfigureJobPanel {...baseProps({ submitTrainingJob, trainingFeedback: { state: "valid" } })} />);

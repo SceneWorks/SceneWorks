@@ -100,7 +100,8 @@ describe("RefinePromptControl", () => {
     const ui = <RefinePromptControl autoStart prompt="neon street" modelId="z" workflow="image" refinePrompt={refinePrompt} onApply={vi.fn()} />;
     render(ui);
     expect(refineButton(container).disabled).toBe(true);
-    expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : state === "server-required" ? "Reconnect to continue" : "Fix this prompt");
+    if (state === "pending") expect(container.querySelector('[role="status"]')).toBeNull();
+    else expect(container.textContent).toContain(state === "server-required" ? "Reconnect to continue" : "Fix this prompt");
     await act(async () => refineButton(container).click());
     expect(refinePrompt).not.toHaveBeenCalled();
     feedbackState.value = { state: "valid" };
