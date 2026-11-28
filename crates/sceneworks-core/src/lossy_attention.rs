@@ -126,4 +126,23 @@ mod tests {
         let bad = json!({ "engine": "seedvr2", "advanced": { "lossyAttention": { "sol": {} } } });
         assert!(standalone_lossy_attention(&JobType::ImageUpscale, &payload(bad)).is_err());
     }
+
+    /// Codex P2 on #3528: the shared validation admits a video upscale by its engine; it no longer
+    /// demands a generation-model capability the job has no entry for.
+    #[test]
+    fn shared_validation_admits_video_upscale_by_engine() {
+        let empty = JsonObject::new();
+        let admitted = payload(json!({ "sourceAssetId": "clip", "factor": 2,
+                                       "advanced": { "lossyAttention": { "int8": {} } } }));
+        crate::request_validation::validate("videoUpscale", &admitted, &empty).unwrap();
+        crate::request_validation::resolve("videoUpscale", &admitted, &empty).unwrap();
+        let malformed = payload(json!({ "sourceAssetId": "clip", "factor": 2,
+                                        "advanced": { "lossyAttention": { "sol": {} } } }));
+        assert!(crate::request_validation::validate("videoUpscale", &malformed, &empty).is_err());
+        // A generation kind still requires the model capability (an empty entry has none).
+        let image = payload(json!({ "projectId": "p", "model": "m", "prompt": "x",
+                                    "advanced": { "lossyAttention": { "int8": {} } } }));
+        let refusal = crate::request_validation::validate("image", &image, &empty).unwrap_err();
+        assert_eq!(refusal.field, "advanced.lossyAttention");
+    }
 }

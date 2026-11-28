@@ -73,6 +73,7 @@ pub(crate) async fn create_generation_job_with_binding_once(
         sceneworks_core::request_validation::validate(kind, &payload, &facts)
             .map_err(ApiError::from)?;
     }
+    admit_lossy_attention_enqueue(&state, &job_type, &payload)?;
     validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
     // Freeze the admitted selection for retry/duplicate too, including requests that were not
     // themselves replays. A later same-id catalog rebind must not change their weights.
@@ -199,6 +200,36 @@ pub(crate) fn refuse_lossy_attention_off_candle(
         return Err(ApiError::from(
             sceneworks_core::options::lossy_attention::mlx_refusal(model),
         ));
+    }
+    Ok(())
+}
+
+/// The backend the lossy-attention guard judges against: [`enqueue_backend`]'s answer, read through
+/// the `Settings::host_os` seam (sc-19570; production fills it with `std::env::consts::OS`) so the
+/// MLX branch is exercised by tests on every host.
+pub(crate) fn lossy_attention_enqueue_backend(state: &AppState) -> &'static str {
+    if state.settings.host_os != "macos" || state.settings.candle_required {
+        "candle"
+    } else {
+        "mlx"
+    }
+}
+
+/// SW-6132: THE enqueue guard for `advanced.lossyAttention`, called by every path that writes a job
+/// (generation creates through [`create_generation_job_with_binding_once`], the generic
+/// `POST /api/v1/jobs`, retry and duplicate, the replayed vector raster child): no worker on an MLX
+/// host can claim the option, and a standalone engine-named job (upscale / restoration) is judged by
+/// its engine (`sceneworks_core::lossy_attention`). Model-catalog admission stays in the shared
+/// request validation.
+pub(crate) fn admit_lossy_attention_enqueue(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    refuse_lossy_attention_off_candle(lossy_attention_enqueue_backend(state), payload)?;
+    if sceneworks_core::lossy_attention::is_standalone_job(job_type) {
+        sceneworks_core::lossy_attention::standalone_lossy_attention(job_type, payload)
+            .map_err(ApiError::from)?;
     }
     Ok(())
 }
@@ -434,7 +465,7 @@ pub(crate) async fn create_image_job(
         // for persistence. Read after the width/height/count defaults because the 4096-target
         // check needs the resolved geometry.
         {
-            refuse_lossy_attention_off_candle(enqueue_backend(&state), &job_payload)?;
+            admit_lossy_attention_enqueue(&state, &job_type, &job_payload)?;
             let resolved =
                 sceneworks_core::request_validation::resolve_request("image", &job_payload, entry)
                     .map_err(ApiError::from)?;
@@ -1123,6 +1154,7 @@ async fn enqueue_replayed_vector_raster_child(
         &frozen,
     )
     .await?;
+    admit_lossy_attention_enqueue(state, &source.job.job_type, &payload)?;
     let job = store_call(state.clone(), {
         let job_type = source.job.job_type.clone();
         let project_id = source.job.project_id.clone();
@@ -2754,7 +2786,7 @@ pub(crate) async fn create_video_job(
         sceneworks_core::request_validation::validate("video", &job_payload, entry)
             .map_err(ApiError::from)?;
     }
-    refuse_lossy_attention_off_candle(enqueue_backend(&state), &job_payload)?;
+    admit_lossy_attention_enqueue(&state, &job_type, &job_payload)?;
     let auto_duration_active =
         normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;

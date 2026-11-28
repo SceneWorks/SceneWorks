@@ -24,7 +24,25 @@ pub fn validate(
     payload: &JsonObject,
     entry: &JsonObject,
 ) -> Result<(), ValidationRefusal> {
-    sceneworks_options::request_validation::validate(kind, payload, &precision_facts(entry))
+    sceneworks_options::request_validation::validate(kind, payload, &precision_facts(entry))?;
+    admit_standalone_lossy_attention(kind, payload)
+}
+
+/// SW-6132: the shared validation picks the lossy-attention admission source by job type — the
+/// model capability (inside the portable validator) for generation, the engine for a standalone
+/// job (video upscale names SeedVR2, not a generation model). Image upscale has no validation
+/// kind; the API's enqueue guard runs the same engine rule for it.
+fn admit_standalone_lossy_attention(
+    kind: &str,
+    payload: &JsonObject,
+) -> Result<(), ValidationRefusal> {
+    if sceneworks_options::lossy_attention::is_standalone_validation_kind(kind) {
+        crate::lossy_attention::standalone_lossy_attention(
+            &crate::contracts::JobType::VideoUpscale,
+            payload,
+        )?;
+    }
+    Ok(())
 }
 
 pub fn resolve(
@@ -32,7 +50,10 @@ pub fn resolve(
     payload: &JsonObject,
     entry: &JsonObject,
 ) -> Result<JsonObject, ValidationRefusal> {
-    sceneworks_options::request_validation::resolve(kind, payload, &precision_facts(entry))
+    let resolved =
+        sceneworks_options::request_validation::resolve(kind, payload, &precision_facts(entry))?;
+    admit_standalone_lossy_attention(kind, payload)?;
+    Ok(resolved)
 }
 
 pub fn resolve_request(
@@ -40,7 +61,13 @@ pub fn resolve_request(
     payload: &JsonObject,
     entry: &JsonObject,
 ) -> Result<ResolvedRequest, ValidationRefusal> {
-    sceneworks_options::request_validation::resolve_request(kind, payload, &precision_facts(entry))
+    let resolved = sceneworks_options::request_validation::resolve_request(
+        kind,
+        payload,
+        &precision_facts(entry),
+    )?;
+    admit_standalone_lossy_attention(kind, payload)?;
+    Ok(resolved)
 }
 pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str> {
     use crate::contracts::JobType::*;

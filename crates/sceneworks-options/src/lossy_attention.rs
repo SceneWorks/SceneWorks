@@ -463,6 +463,13 @@ pub fn requested_lossy_attention(
     Ok(Some(wire))
 }
 
+/// Request-validation kinds whose job names an ENGINE rather than a generation model (SW-6132):
+/// their lossy-attention admission is engine-aware (`sceneworks_core::lossy_attention`), not the
+/// model catalog capability.
+pub fn is_standalone_validation_kind(kind: &str) -> bool {
+    kind == "videoUpscale"
+}
+
 /// The parsed `advanced.lossyAttention` of a raw payload (`None` when absent, null or requesting no
 /// kernel), for the standalone job types (upscale, restoration) that have no typed request.
 pub fn payload_lossy_attention(
