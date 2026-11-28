@@ -1322,7 +1322,8 @@ fn advanced_edit_b2_count2_uses_identical_admission_render_views_and_persists_or
     }
     assert!(rx.try_recv().is_err());
     let receipt =
-        super::super::image_execution_receipt(Path::new(&project.path), &receipt_facts, 4).unwrap();
+        super::super::fixture_image_execution_receipt(Path::new(&project.path), &receipt_facts, 4)
+            .unwrap();
     assert_eq!(
         receipt
             .outputs

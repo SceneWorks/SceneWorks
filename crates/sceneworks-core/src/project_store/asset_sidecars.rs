@@ -671,6 +671,26 @@ impl ProjectStore {
                 ));
             }
         }
+        // Progress reports accumulate completed assets. A user can discard one while the
+        // remaining images render, moving its media and sidecar into Trash. Replaying the
+        // worker's original path must not resurrect it or replace its current location.
+        // Also retain that location after Restore, which only clears the trashed flag.
+        let existing_sidecar = if project_path.join("trash").join(asset_id).is_dir() {
+            find_asset_sidecar_path(&project_path, asset_id)?
+        } else {
+            None
+        };
+        if let Some(sidecar_path) = existing_sidecar {
+            let existing = read_json(&sidecar_path)?;
+            if existing.pointer("/lineage/jobId").and_then(Value::as_str) == Some(job_id)
+                && existing.get("generationSetId").and_then(Value::as_str)
+                    == Some(generation_set_id)
+                && (existing.pointer("/status/trashed").and_then(Value::as_bool) == Some(true)
+                    || existing.pointer("/file/path").and_then(Value::as_str) != Some(media_rel))
+            {
+                return Ok(existing);
+            }
+        }
         let mut asset = build_generated_asset_sidecar(project_id, job_id, generation_set_id, fact);
         self.inherit_model_provenance(&project_path, &mut asset)?;
         let media_path = project_path.join(media_rel);
@@ -689,6 +709,40 @@ impl ProjectStore {
         index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
         index_mutation.commit();
         Ok(asset)
+    }
+
+    /// Hash a worker output at its current location, including after Discard or Restore.
+    /// The original file may move between resolving and opening it, including in a
+    /// separate API process. On NotFound, retry the store-owned Trash destination.
+    /// Discard moves the media there before updating its sidecar/index, so this also
+    /// covers that transition without depending on a sidecar being published yet.
+    pub fn generated_asset_sha256(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        media_rel: &str,
+    ) -> ProjectStoreResult<String> {
+        if !is_safe_id(asset_id) || !is_safe_relative_path(media_rel) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid generated asset path or id".to_owned(),
+            ));
+        }
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let hash = |relative: &str| -> std::io::Result<String> {
+            let path = crate::safe_path::resolve_local_file(&project_path, relative)?;
+            crate::hashing::sha256_file(&path)
+        };
+        match hash(media_rel) {
+            Ok(digest) => Ok(digest),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let filename = Path::new(media_rel).file_name().ok_or_else(|| {
+                    ProjectStoreError::BadRequest("Invalid generated asset filename".to_owned())
+                })?;
+                let trash_path = project_path.join("trash").join(asset_id).join(filename);
+                Ok(hash(&relative_string(&project_path, &trash_path)?)?)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Keep immutable model ancestry through edits, media conversion, and multi-input generation,
