@@ -159,6 +159,7 @@ describe("selectEditorMediaAssets", () => {
     const vector = { id: "logo", type: "vector" };
     const unrelated = { id: "model", type: "model" };
 
-    expect(selectEditorMediaAssets([audio, video, vector, unrelated])).toEqual([audio, video, vector]);
+    const discarded = { id: "discarded", type: "image", status: { trashed: true } };
+    expect(selectEditorMediaAssets([audio, video, vector, unrelated, discarded])).toEqual([audio, video, vector, discarded]);
   });
 });

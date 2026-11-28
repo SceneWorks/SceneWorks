@@ -1062,7 +1062,7 @@ export function App() {
   const recentImageAssets = useMemo(
     () =>
       dropUpscaledVariants(
-        assets.filter((asset) => asset.type === "image" && (!activeProject?.id || asset.projectId === activeProject.id)),
+        assets.filter((asset) => !asset.status?.trashed && asset.type === "image" && (!activeProject?.id || asset.projectId === activeProject.id)),
       )
         .sort(sortNewest)
         .slice(0, 20),
@@ -1071,7 +1071,7 @@ export function App() {
   const recentVideoAssets = useMemo(
     () =>
       assets
-        .filter((asset) => asset.type === "video" && (!activeProject?.id || asset.projectId === activeProject.id))
+        .filter((asset) => !asset.status?.trashed && asset.type === "video" && (!activeProject?.id || asset.projectId === activeProject.id))
         .slice()
         .sort(sortNewest)
         .slice(0, 20),
@@ -1083,7 +1083,7 @@ export function App() {
   const recentAudioAssets = useMemo(
     () =>
       assets
-        .filter((asset) => asset.type === "audio" && (!activeProject?.id || asset.projectId === activeProject.id))
+        .filter((asset) => !asset.status?.trashed && asset.type === "audio" && (!activeProject?.id || asset.projectId === activeProject.id))
         .slice()
         .sort(sortNewest)
         .slice(0, 20),

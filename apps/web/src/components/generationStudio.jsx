@@ -557,7 +557,10 @@ export function useGenerationStudio({
 
   const resultVisible = useCallback((job) => {
     if (job.result?.generationSetId) {
-      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId);
+      return latestAssets.some((asset) => asset.generationSetId === job.result.generationSetId) ||
+        // Discarded outputs have already arrived. Hiding them from Recent Assets
+        // must not put the completed job back into its waiting-for-output state.
+        assets.some((asset) => asset.generationSetId === job.result.generationSetId && asset.status?.trashed);
     }
     const assetIds = job.result?.assetIds ?? [];
     return assetIds.length > 0 && assetIds.every((id) => assets.some((asset) => asset.id === id));
