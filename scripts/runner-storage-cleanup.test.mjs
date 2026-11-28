@@ -269,10 +269,11 @@ test('dev-host setup binds a fresh invocation, preserves Cargo consumers and kee
   assert.equal(slotExports.CARGO_TARGET_DIR, target);
   assert.match(await readFile(env.GITHUB_ENV, 'utf8'), /CARGO_TARGET_DIR=/); // dev-host: allow-path asserts an environment export, not a filesystem path
   // dev-host 0.2.0 and later keep job folders and build slots in hosts/<host>/.
-  const own = join(root, 'hosts/HOST'), hostedWork = join(own, 't/3456abcd'), hostedTarget = join(own, 'build/managed-slot');
-  await mkdir(hostedWork, { recursive: true }); await mkdir(hostedTarget, { recursive: true });
-  const hostedRun = cargo => async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.3.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${cargo}\nTMPDIR=${hostedWork}\n` });
-  await assert.rejects(prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: hostedRun(target), nonce: 'root-slot' }), /outside its managed build slots/);
+  // A rejected call has already claimed its job folder, so each call gets a fresh one.
+  const own = join(root, 'hosts/HOST'), hostedWork = join(own, 't/3456abcd'), rejectedWork = join(own, 't/6789abcd'), hostedTarget = join(own, 'build/managed-slot');
+  for (const dir of [hostedWork, rejectedWork, hostedTarget]) await mkdir(dir, { recursive: true });
+  const hostedRun = (cargo, tmp = hostedWork) => async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.3.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${cargo}\nTMPDIR=${tmp}\n` });
+  await assert.rejects(prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: hostedRun(target, rejectedWork), nonce: 'root-slot' }), /outside its managed build slots/);
   const rootRun = async (_binary, args) => ({ stdout: args[0] === '--version' ? 'dev-host 0.1.1' : args[0] === 'check' ? 'ok' : `CARGO_TARGET_DIR=${hostedTarget}\nTMPDIR=${join(root, 't/5678abcd')}\n` });
   await mkdir(join(root, 't/5678abcd'), { recursive: true });
   await assert.rejects(prepareDevHost({ ...env, 'INPUT_CARGO-SLOT': 'true' }, { run: rootRun, nonce: 'hosted-slot-for-root-work' }), /outside its managed build slots/);
