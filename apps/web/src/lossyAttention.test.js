@@ -136,4 +136,34 @@ describe("lossy attention opt-in (SW-6132)", () => {
     expect(result.block).toBeNull();
     expect(result.error).toMatch(/Sol-Attn/);
   });
+
+  // Codex P2 on #3538: a replayed recipe that cannot run here blocks; a sticky preference is quiet.
+  it("blocks a replayed recipe on MLX or a model with neither kernel, and drops a sticky preference", () => {
+    const replay = lossyAttentionFromRecipe({ int8: { kCentering: "always" } });
+    for (const [backend, model, pattern] of [
+      ["mlx", BOTH, /CUDA/],
+      ["candle", NEITHER, /cannot take/],
+      ["candle", null, /cannot take/],
+      ["candle", { id: "moss_image_base" }, /cannot take/],
+    ]) {
+      const result = resolveLossyAttention({ backend, model, options: replay });
+      expect(result.block).toBeNull();
+      expect(result.error).toMatch(pattern);
+      expect(result.error).toMatch(/turn lossy attention off/);
+    }
+    // Turning the control off clears the block: the recipe runs on the exact path by choice.
+    expect(resolveLossyAttention({ backend: "mlx", model: BOTH, options: { ...replay, enabled: false } })).toEqual({
+      block: null,
+      error: null,
+    });
+    // A sticky preference (no replayed recipe) is silently not offered.
+    const sticky = { ...lossyAttentionDefaults(), enabled: true, kernel: "sol" };
+    for (const [backend, model] of [["mlx", BOTH], ["candle", NEITHER], ["candle", null]]) {
+      expect(resolveLossyAttention({ backend, model, options: sticky })).toEqual({ block: null, error: null });
+    }
+    // Unchanged: the same replay on a model serving its kernel re-sends it whole.
+    expect(resolveLossyAttention({ backend: "candle", model: BOTH, options: replay }).block).toEqual({
+      int8: { kCentering: "always" },
+    });
+  });
 });

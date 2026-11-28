@@ -66,8 +66,25 @@ export function selectedLossyKernels(state) {
 }
 
 /**
+ * Why a replayed recipe's lossy attention cannot run here: an MLX (non-CUDA) backend, or a model
+ * (or no model) whose attention takes neither kernel. Turning the control off runs it exactly.
+ */
+export function lossyAttentionReplayBlockedError(backend) {
+  return backend === "candle"
+    ? "This recipe used lossy attention, which this model's attention cannot take; turn lossy attention off to run it on the exact path."
+    : "This recipe used lossy attention, which runs only on CUDA (candle) workers; turn lossy attention off to run it on the exact path.";
+}
+
+/** Whether a replayed recipe's lossy attention is enabled but cannot be honored here. */
+export function lossyAttentionReplayBlocked(backend, model, options) {
+  const state = { ...lossyAttentionDefaults(), ...(options ?? {}) };
+  return Boolean(state.enabled && state.recorded && !lossyAttentionAvailable(backend, model));
+}
+
+/**
  * Resolve the studio state to the outgoing `advanced.lossyAttention` wire. Returns
- * `{ block, error }`: `block` is null when the control is off or unavailable. Without a replayed
+ * `{ block, error }`: `block` is null when the control is off or unavailable (an error when it is a
+ * replayed recipe's configuration that cannot run here, silence for a sticky preference). Without a replayed
  * recipe, a kernel this model does not serve falls back to one it does (a sticky choice from another
  * model never leaks onto one that would refuse it). A replayed recipe's configuration is kept
  * whole — only the fields the control exposes are overlaid — and a recorded kernel this model
@@ -75,9 +92,14 @@ export function selectedLossyKernels(state) {
  */
 export function resolveLossyAttention({ backend, model, options }) {
   const state = { ...lossyAttentionDefaults(), ...(options ?? {}) };
-  if (!state.enabled || !lossyAttentionAvailable(backend, model)) return { block: null, error: null };
-  const served = servedLossyKernels(model);
+  if (!state.enabled) return { block: null, error: null };
   const recorded = state.recorded && typeof state.recorded === "object" ? state.recorded : null;
+  if (!lossyAttentionAvailable(backend, model)) {
+    // A sticky preference (no replayed recipe) is silently not offered here. A replayed recipe
+    // that used lossy attention cannot be honored: block rather than run it on the exact path.
+    return { block: null, error: recorded ? lossyAttentionReplayBlockedError(backend) : null };
+  }
+  const served = servedLossyKernels(model);
   let kernels = selectedLossyKernels(state);
   if (!recorded && !served.includes(kernels[0])) kernels = [served[0]];
   const unserved = kernels.filter((kernel) => !served.includes(kernel));

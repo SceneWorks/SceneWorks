@@ -5042,6 +5042,51 @@ export async function recordCoTenantCensus(bundlePath, censusRecord) {
   await writeFile(bundlePath, `${JSON.stringify(bundle, null, 2)}\n`);
 }
 
+/**
+ * Walk the runnable anchors in order: one `measure(row)` per cell, each result pushed and the
+ * summary rewritten after every cell. A cell's failure is its result (`measureAnchor` returns
+ * `capture_failed` and friends rather than throwing), so one bad cell never abandons the rest; only
+ * `state.halt` (a proven-contaminated host, a Metal refusal) or an interrupt stops the walk.
+ */
+export async function walkAnchors(runnable, {
+  measure,
+  state,
+  results = [],
+  contamination = { streak: 0, signature: null, processes: null },
+  writeSummary = async () => {},
+  listProcesses = gpuComputeProcesses,
+  say = (line) => process.stdout.write(line),
+}) {
+  for (const row of runnable) {
+    if (state.halt) break;
+    if (state.stopRequested) { results.push({ key: row.key, status: "not_started", reason: "interrupted" }); continue; }
+    say(`\n=== ${row.key} (${results.length + 1}/${runnable.length}) ${new Date().toISOString()}\n`);
+    const result = await measure(row);
+    // sc-22738: name the foreign process, and stop once the host has proved itself contaminated.
+    const contaminating = contaminationPids(result.reason);
+    if (contaminating) {
+      // Queried once per contaminated STREAK, not once per cell: the process set does not change
+      // between two refusals four seconds apart, and this runs while the GPU is otherwise idle.
+      contamination.processes ??= await listProcesses();
+      result.reason = nameContaminatingProcesses(result.reason, contaminating, contamination.processes);
+      const signature = contaminating.join(",");
+      contamination.streak = signature === contamination.signature ? contamination.streak + 1 : 1;
+      contamination.signature = signature;
+      if (contamination.streak >= CONTAMINATION_ABORT_STREAK) {
+        state.halt = contaminatedHostHalt(contaminating, contamination.processes);
+      }
+    } else {
+      contamination.streak = 0;
+      contamination.signature = null;
+      contamination.processes = null;
+    }
+    results.push(result);
+    say(`--- ${row.key}: ${result.status}${result.reason ? ` (${result.reason})` : ""} in ${result.seconds}s\n`);
+    await writeSummary();
+  }
+  return results;
+}
+
 export async function measureAnchor(row, context) {
   // `platform` decides ONLY whether this capture runs under the footprint guard (`guardsCapture`),
   // and defaults to the host's. It is overridable for the same reason `guardsCapture` takes the
@@ -5213,11 +5258,20 @@ export async function measureAnchor(row, context) {
   if (cardGpu !== null) {
     // An unreadable store or manifest leaves the requirement unknown, which the rule handles
     // conservatively (near-empty card only); it never turns into an admission.
-    requirement = captureRequirement(row, {
-      store: await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8").then(JSON.parse).catch(() => null),
-      models: context.models ?? await readManifestModels(root).catch(() => []),
-    });
-    admission = await (context.admitCard ?? admitCard)(cardGpu, requirement, { env });
+    // Codex P2 on #3538: the census (nvidia-smi) can time out or return unreadable output. That is
+    // a failure of THIS cell's admission, never of the walk: it is caught here, reported by name as
+    // `capture_failed`, and never admits (fail closed). Uncaught, it escaped `measureAnchor` and
+    // abandoned every remaining cell without reaching the summary.
+    try {
+      requirement = captureRequirement(row, {
+        store: await readFile(path.join(root, ANCHOR_STORE_PATH), "utf8").then(JSON.parse).catch(() => null),
+        models: context.models ?? await readManifestModels(root).catch(() => []),
+      });
+      admission = await (context.admitCard ?? admitCard)(cardGpu, requirement, { env });
+    } catch (error) {
+      log.write(`card admission GPU ${cardGpu}: census failed -> REFUSED: ${failureReason(error)}\n`);
+      return finish("capture_failed", `GPU ${cardGpu} admission census failed, so the capture was not admitted: ${failureReason(error)}`.slice(0, FAILURE_REASON_LIMIT));
+    }
     const tenants = admission.census.coTenants.map((tenant) => `${tenant.pid} ${tenant.name} ${tenant.usedMiB ?? "N/A"} MiB sm ${tenant.sm} mem ${tenant.mem}`).join("; ") || "none";
     log.write(`card admission GPU ${cardGpu}: free ${admission.census.freeMiB}/${admission.census.totalMiB} MiB, required ${admission.requiredMiB ?? "unknown"} MiB (${requirement.source}), co-tenants: ${tenants}${admission.admitted ? " -> admitted" : ` -> REFUSED: ${admission.reasons.join("; ")}`}\n`);
     if (!admission.admitted) {
@@ -5642,33 +5696,13 @@ export async function main(argv = process.argv.slice(2)) {
   const contamination = { streak: 0, signature: null, processes: null };
   const summaryPath = path.join(args.workDir, `summary-${stamp()}.json`);
   const writeSummary = () => writeFile(summaryPath, JSON.stringify({ campaign, backend: args.backend, inferencePin, results, commits: state.commits, rows }, null, 2));
-  for (const row of runnable) {
-    if (state.halt) break;
-    if (state.stopRequested) { results.push({ key: row.key, status: "not_started", reason: "interrupted" }); continue; }
-    process.stdout.write(`\n=== ${row.key} (${results.length + 1}/${runnable.length}) ${new Date().toISOString()}\n`);
-    const result = await measureAnchor(row, { args, inferencePin, campaignDir, campaignPrefix, workDir: args.workDir, state });
-    // sc-22738: name the foreign process, and stop once the host has proved itself contaminated.
-    const contaminating = contaminationPids(result.reason);
-    if (contaminating) {
-      // Queried once per contaminated STREAK, not once per cell: the process set does not change
-      // between two refusals four seconds apart, and this runs while the GPU is otherwise idle.
-      contamination.processes ??= await gpuComputeProcesses();
-      result.reason = nameContaminatingProcesses(result.reason, contaminating, contamination.processes);
-      const signature = contaminating.join(",");
-      contamination.streak = signature === contamination.signature ? contamination.streak + 1 : 1;
-      contamination.signature = signature;
-      if (contamination.streak >= CONTAMINATION_ABORT_STREAK) {
-        state.halt = contaminatedHostHalt(contaminating, contamination.processes);
-      }
-    } else {
-      contamination.streak = 0;
-      contamination.signature = null;
-      contamination.processes = null;
-    }
-    results.push(result);
-    process.stdout.write(`--- ${row.key}: ${result.status}${result.reason ? ` (${result.reason})` : ""} in ${result.seconds}s\n`);
-    await writeSummary();
-  }
+  await walkAnchors(runnable, {
+    measure: (row) => measureAnchor(row, { args, inferencePin, campaignDir, campaignPrefix, workDir: args.workDir, state }),
+    state,
+    results,
+    contamination,
+    writeSummary,
+  });
   await writeSummary();
   process.stdout.write(`\n${table(results, ["key", "status", "seconds", "reason"])}\n`);
   process.stdout.write(`\ncommits: ${state.commits.length ? state.commits.join(" ") : "none"}\nsummary: ${summaryPath}\n`);

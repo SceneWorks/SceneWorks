@@ -171,6 +171,7 @@ import {
   coTenantActivity, monitorCoTenants, parsePmon,
   CO_TENANT_RESERVE_MIB, CO_TENANT_UNKNOWN_REQUIREMENT_MAX_USED_MIB, CO_TENANT_ADMISSION_WAIT_MS, cardCensus, captureRequirement,
   coTenantAdmission, admitCard, coTenantCensusRecord, recordCoTenantCensus, coTenantIsActive, mibReading,
+  walkAnchors,
 } from "./measure-memory-catalog.mjs";
 import {
   ANCHOR_LANE_DEFAULT_STRATEGY_PATH,
@@ -6025,6 +6026,43 @@ async function bracketedCapture(windows, activity = []) {
   });
   return { result: await measureAnchor(row, context), context, sampled };
 }
+
+// Codex P2 on #3538: a transient census failure (nvidia-smi timeout, unreadable output) used to throw
+// through `admitCard`, out of `measureAnchor` and out of the walk, abandoning every remaining cell.
+test("card admission: a census that throws is this cell's capture_failed, never an admission, and the walk goes on", async () => {
+  const checkout = await stubCheckout();
+  const tierRoot = await mkdtemp(path.join(tmpdir(), "catalog-tier-"));
+  await writeFile(path.join(tierRoot, "w.safetensors"), "weights");
+  const row = { key: "z_image_turbo:q4:mlx", physical: false, tierRoot, env: { SCENEWORKS_Z_IMAGE_ROOT: tierRoot } };
+  let sampled = 0;
+  const context = stubContext(checkout, {
+    coTenantGpu: () => "1",
+    admitCard: async () => { throw new Error("nvidia-smi --query-gpu timed out after 30s"); },
+    sampleCardBaseline: async () => { sampled += 1; return { samples: [0], min: 0, max: 0 }; },
+  });
+  const failed = await measureAnchor(row, context);
+  assert.equal(failed.status, "capture_failed");
+  assert.match(failed.reason, /GPU 1 admission census failed, so the capture was not admitted: .*nvidia-smi --query-gpu timed out/);
+  assert.equal(sampled, 0, "fail closed: nothing past admission ran");
+
+  // The walk records the failing cell and carries on to the next anchor; the summary has both.
+  const next = { key: "z_image_turbo:q8:mlx" };
+  const summaries = [];
+  const results = [];
+  await walkAnchors([row, next], {
+    results,
+    measure: async (cell) => (cell === row ? measureAnchor(row, context) : { key: next.key, status: "captured", reason: null, seconds: 1 }),
+    state: { commits: [], halt: null, stopRequested: false },
+    writeSummary: async () => { summaries.push(structuredClone(results)); },
+    say: () => {},
+  });
+  assert.deepEqual(results.map((result) => [result.key, result.status]), [
+    [row.key, "capture_failed"],
+    [next.key, "captured"],
+  ]);
+  assert.match(results[0].reason, /admission census failed/);
+  assert.equal(summaries.at(-1).length, 2, "the summary written after the last cell holds both");
+});
 
 const PMON = (rows) => "# gpu         pid   type     sm    mem    enc    dec    jpg    ofa     fb   ccpm    command\n"
   + "# Idx           #    C/G      %      %      %      %      %      %     MB     MB    name\n"

@@ -3,6 +3,7 @@ import {
   DEFAULT_SOL_TOPK_RATIO,
   lossyAttentionAvailable,
   lossyAttentionDefaults,
+  lossyAttentionReplayBlocked,
   selectedLossyKernels,
   servedLossyKernels,
 } from "../lossyAttention.js";
@@ -23,8 +24,27 @@ const KERNEL_LABELS = {
 };
 
 export function LossyAttentionControl({ backend, model, value, onChange, error }) {
-  if (!lossyAttentionAvailable(backend, model)) return null;
   const state = { ...lossyAttentionDefaults(), ...(value ?? {}) };
+  if (!lossyAttentionAvailable(backend, model)) {
+    // A replayed recipe that used lossy attention stays visible here with its blocking error and
+    // the switch to turn it off; anything else is not offered on this backend/model.
+    if (!lossyAttentionReplayBlocked(backend, model, state)) return null;
+    return (
+      <details className="lossy-attention-control" open>
+        <summary title={LOSSY_ATTENTION_TOOLTIP}>Experimental: lossy attention</summary>
+        <label className="checkline" title={LOSSY_ATTENTION_TOOLTIP}>
+          <input
+            aria-label="Lossy attention (experimental)"
+            checked
+            onChange={(event) => onChange({ ...state, enabled: event.target.checked })}
+            type="checkbox"
+          />
+          Lossy attention (experimental)
+        </label>
+        {error ? <span className="field-error">{error}</span> : null}
+      </details>
+    );
+  }
   const served = servedLossyKernels(model);
   const recorded = state.recorded && typeof state.recorded === "object" ? state.recorded : null;
   // A replayed recipe keeps its own kernel choice (an unserved one surfaces as `error`); otherwise a

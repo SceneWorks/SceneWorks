@@ -631,9 +631,12 @@ export function ImageStudio() {
   const [flashAttn, setFlashAttn] = useState(saved.flashAttn ?? true);
   // SW-6132: per-job opt-in for the lossy CUDA attention kernels (INT8 QK / Sol-Attn). Off by
   // default; offered only on candle for a model whose catalog entry advertises `lossyAttention`.
+  // A persisted setting is a sticky preference, never a replayed recipe: its `recorded` block is
+  // dropped so it cannot block submission on a backend or model that does not offer the control.
   const [lossyAttention, setLossyAttention] = useState(() => ({
     ...lossyAttentionDefaults(),
     ...saved.lossyAttention,
+    recorded: null,
   }));
   // FLUX.2-dev "Enhance prompt" (sc-6135): the model's built-in Mistral3 caption upsampler rewrites
   // the prompt before encoding — text-only for txt2img, reference-aware for edit. Per-payload

@@ -97,4 +97,19 @@ describe("LossyAttentionControl (SW-6132)", () => {
     expect(container.querySelector('select[aria-label="INT8 attention P·V precision"]')).not.toBeNull();
     expect(container.textContent).toContain("Recipe settings not shown here are kept as recorded.");
   });
+
+  it("keeps a blocked replay visible with its error and an off switch", () => {
+    const onChange = vi.fn();
+    const replay = lossyAttentionFromRecipe({ sol: { tau: 1 } });
+    render({ backend: "mlx", value: replay, onChange, error: "This recipe used lossy attention, which runs only on CUDA (candle) workers; turn lossy attention off to run it on the exact path." });
+    const details = container.querySelector("details.lossy-attention-control");
+    expect(details.open).toBe(true);
+    expect(container.querySelector(".field-error").textContent).toMatch(/CUDA/);
+    expect(container.querySelector('select[aria-label="Lossy attention kernel"]')).toBeNull();
+    act(() => container.querySelector('input[aria-label="Lossy attention (experimental)"]').click());
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+    // A sticky preference on MLX stays hidden.
+    render({ backend: "mlx", value: { ...lossyAttentionDefaults(), enabled: true } });
+    expect(container.querySelector(".lossy-attention-control")).toBeNull();
+  });
 });
