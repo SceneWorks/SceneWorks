@@ -2894,10 +2894,7 @@ mod tests {
             .iter()
             .any(|route| route.supports_lora || route.supports_lokr));
 
-        for (family, source) in [
-            ("sdxl", "fused_checkpoint"),
-            ("mage-flow", "transformer_directory"),
-        ] {
+        for (family, source) in [("sdxl", "fused_checkpoint")] {
             let routes = imported_provider_routes("mlx", family)
                 .filter(|route| route.source == source)
                 .collect::<Vec<_>>();
@@ -3366,7 +3363,6 @@ mod tests {
         let source = |family: &str| match family {
             "krea_2" => "transformer_file",
             "sdxl" => "fused_checkpoint",
-            "mage-flow" => "transformer_directory",
             _ => "transformer_file",
         };
         let mlx = |family: &str| {
@@ -3401,23 +3397,6 @@ mod tests {
         // advertisement is honest on both lanes and must be left alone.
         assert_eq!(mlx("sdxl"), Some(true));
         assert_eq!(candle("sdxl"), Some(true));
-
-        // mage-flow — the two answers differ, and the difference is the point. `Some(false)` means
-        // "this lane serves the family and refuses adapters"; `None` means "this backend is not on
-        // the seam at all, so it has no opinion to advertise". MLX declares a `mage-flow` imported
-        // provider whose seam rejects adapters, so it answers `Some(false)`. Candle declares no
-        // `mage-flow` imported provider in its engine facts, so the base claim never lands and the
-        // honest answer is `None` — advertising `Some(false)` there would imply a lane exists.
-        assert_eq!(
-            mlx("mage-flow"),
-            Some(false),
-            "a Mage fine-tune renders t2i on MLX but refuses adapters"
-        );
-        assert_eq!(
-            candle("mage-flow"),
-            None,
-            "candle declares no mage-flow imported provider, so it advertises no opinion"
-        );
 
         // A family the route-by-family path does not serve at all: no opinion, entry untouched.
         assert_eq!(mlx("flux"), None);

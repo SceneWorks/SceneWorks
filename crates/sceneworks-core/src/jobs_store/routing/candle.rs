@@ -2021,7 +2021,7 @@ pub(crate) fn ideogram_edit_candle_eligible(payload: &Map<String, Value>) -> boo
 /// (`candle-gen-ideogram` `resolve_edit` → `prepare_edit` with `mask = None`, sc-6598). So an ideogram
 /// job in a non-edit mode with a `referenceAssetId` is candle-eligible; the worker resolves the init
 /// generically (`model_supports_img2img`, sc-10134). Same payload predicate as
-/// [`boogu_img2img_candle_eligible`] / [`sd3_img2img_candle_eligible`], gated to the ideogram ids by the
+/// [`sd3_img2img_candle_eligible`], gated to the ideogram ids by the
 /// caller. DISJOINT from the [`ideogram_edit_candle_eligible`] Remix/inpaint lane (that arm is
 /// `edit_image` + `sourceAssetId`). Mirrors the mlx generic img2img arm (sc-10192).
 pub(crate) fn ideogram_img2img_candle_eligible(payload: &Map<String, Value>) -> bool {

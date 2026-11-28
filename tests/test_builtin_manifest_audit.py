@@ -354,7 +354,7 @@ def test_minimax_h3_sibling_dit_partition_ships_wherever_its_tier_does():
         ("minimax_h3_ref", "transformer_ref", "transformer"),
     ]:
         rows = [d for d in models[model_id]["downloads"] if d["repo"] == rehost]
-        for tier in TIERS:
+        for tier in ("q4", "q8", "bf16"):
             primary = [
                 d for d in rows
                 if d.get("variant") == tier
@@ -790,7 +790,6 @@ def test_manifest_model_path_is_only_an_optional_override():
         "image_jobs/krea_control.rs",
         "image_jobs/krea_control_candle.rs",
         "image_jobs/krea_imported.rs",
-        "image_jobs/mage_finetuned.rs",
         "image_jobs/qwen_control.rs",
         "image_jobs/qwen_edit_candle.rs",
         "image_jobs/sdxl_edit_candle.rs",

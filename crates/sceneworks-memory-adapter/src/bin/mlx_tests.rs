@@ -5,9 +5,7 @@ use super::*;
 /// `protocol::settle_plain_overlay_scenario` REPLACES an existing `overlay` scenario and
 /// refuses — "provider fragment is missing the required overlay scenario" — a fragment that has
 /// none. The refusal fires while the receipt is being built, i.e. AFTER a completed render, so
-/// the whole cost of a capture is paid before the omission is visible: that is exactly how the
-/// Mage arm cost eighteen 11-38 s renders. Nothing else in the binary asked this question
-/// statically, so a nineteenth arm could repeat it.
+/// the whole cost of a capture is paid before the omission is visible.
 ///
 /// Every scenario array literal in this file must therefore carry either the placeholder or an
 /// `overlay_scenario` binding (the shape `run_flux_one` and `run_qwen_edit_provider` use, where
@@ -15,8 +13,7 @@ use super::*;
 /// arm's, which assigns a `scenarios` binding — is not a literal and is not scanned; it builds
 /// its entries through the same helper.
 ///
-/// MUTATION: deleting the `overlay` entry from any scenario literal, including
-/// [`mage_scenarios`], reds this with that literal's line number.
+/// Deleting the `overlay` entry from any scenario literal reports that literal's line number.
 #[test]
 fn every_scenario_literal_declares_the_overlay_entry_the_protocol_settles() {
     let source = crate::mlx_source_for_tests();
@@ -52,17 +49,6 @@ fn every_scenario_literal_declares_the_overlay_entry_the_protocol_settles() {
     assert!(
         scanned >= 15,
         "only {scanned} scenario literals were scanned; the guard has lost its subject"
-    );
-    // The one list that is NOT a literal here is the Mage arm's, hoisted into
-    // [`mage_scenarios`] so the settler can be run over it — assert it by calling it, rather
-    // than leaving the arm this guard exists for outside the guard's reach.
-    assert!(
-        mage_scenarios(0)
-            .as_array()
-            .expect("the Mage scenario list is an array")
-            .iter()
-            .any(|scenario| scenario["name"] == "overlay"),
-        "mage_scenarios declares no overlay entry"
     );
 }
 

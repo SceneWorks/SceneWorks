@@ -560,19 +560,6 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_sensenova",
     },
-    // Microsoft Lens / Lens-Turbo (epic 3164 engine / sc-5105 cutover) — gpt-oss-20b MoE text
-    // encoder + 48-layer dual-stream MMDiT + the Flux.2 VAE. Pure **T2I** (the descriptor advertises
-    // no conditioning — no img2img / ControlNet / IP), so both ids ride the base [`generate_stream`]
-    // path with quant (Q8 default) + LoRA/LoKr. Standard guidance family: `supports_guidance=true` +
-    // `supports_negative_prompt=true` (NOT [`uses_true_cfg`]), so the CFG scale flows through
-    // `guidance` and the negative prompt is forwarded. `mac_only` — this row is the MLX path; the
-    // off-Mac native candle lane is registered separately.
-    // The two SceneWorks ids map 1:1 to the engine registry ids of the same name and differ only in
-    // their step/guidance defaults: base `lens` is 20-step / CFG 5.0, distilled `lens_turbo` is
-    // 4-step / guidance 1.0 (≈ no CFG) — Python `MODEL_TARGETS` parity. Each variant resolves its own
-    // SceneWorks re-host: base `lens` → `SceneWorks/lens-mlx` (recovered/rebuilt from Comfy-Org/Lens,
-    // sc-8767; original microsoft/Lens source is dead), distilled `lens_turbo` → `SceneWorks/lens-turbo-mlx`.
-    // Both are pre-quantized per-tier turnkey snapshots (q4/q8/bf16, standardTierLayout).
     // Bernini still-image companion (epic 4699 / sc-5424) — the image-typed catalog id maps to the
     // SAME engine registry id (`bernini`) the video `bernini` id uses (`Modality::Both`), mirroring
     // the `z_image_edit → z_image_turbo` two-id/one-engine row above. The dedicated
@@ -592,20 +579,6 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.0,
         adapter_label: "mlx_bernini",
     },
-    // Boogu-Image-0.1 (epic 6387) — native MLX, ungated (Apache-2.0). ~10.3B Lumina-Image-2.0 /
-    // OmniGen2-lineage flow-matching DiT + Qwen3-VL-8B condition encoder + FLUX.1 VAE. Three variants,
-    // one engine crate (`mlx-gen-boogu`); each id maps 1:1 to its gen_core descriptor id. The turnkey
-    // `SceneWorks/boogu-image-mlx` ships pre-packed Q8 `base/ turbo/ edit/` subfolders (default) +
-    // `*-bf16/`; `resolve_boogu_model_dir` (image_jobs/base.rs) points the engine at the variant
-    // subfolder. The packed weights auto-detect their quant on load, so the worker's Q8 quant spec is
-    // a no-op there. Base = true-CFG T2I (50 steps / guidance 4.0).
-    // Boogu Turbo — the DMD few-step, CFG-free distilled variant (`turbo/` checkpoint). 4 steps;
-    // guidance is INERT (the `boogu_image_turbo` descriptor advertises supports_guidance=false, so
-    // `resolve_guidance` returns None and never forwards a value).
-    // Boogu Edit — instruction image-edit (`edit/` checkpoint). The source image is read by the
-    // Qwen3-VL vision tower + VAE-encoded into the DiT's spatial reference latent; the prompt is the
-    // edit instruction. true-CFG (50 steps / guidance 4.0). The worker's `resolve_boogu_edit` builds
-    // the source `Conditioning::Reference` (no mask path).
     // Krea 2 Turbo (epic 7565) — native MLX, CFG-free rectified-flow few-step T2I (Qwen3-VL-4B TE +
     // 28-block single-stream DiT + Qwen-Image VAE). 8 steps; guidance is INERT (the `krea_2_turbo`
     // descriptor advertises supports_guidance=false, so `resolve_guidance` returns None and never

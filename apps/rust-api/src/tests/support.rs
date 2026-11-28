@@ -840,18 +840,14 @@ pub(crate) fn seed_pinned_training_base_fixture(data_dir: &std::path::Path, base
             && selectors.iter().any(|file| file == "bf16/*")
         {
             let bf16 = cache.join("snapshots").join(revision).join("bf16");
-            let components: &[&str] = if base_model == "mage_flow_base" {
-                &["transformer", "scheduler"]
-            } else {
-                &["transformer", "text_encoder", "vae"]
-            };
+            let components = ["transformer", "text_encoder", "vae"];
             let mut index = serde_json::Map::new();
             for component in components {
                 let dir = bf16.join(component);
                 std::fs::create_dir_all(&dir).expect("training tier component dir");
                 std::fs::write(dir.join("fixture.safetensors"), b"fixture")
                     .expect("training tier component file");
-                index.insert((*component).to_owned(), json!(["fixture", "Fixture"]));
+                index.insert(component.to_owned(), json!(["fixture", "Fixture"]));
             }
             std::fs::write(
                 bf16.join("model_index.json"),

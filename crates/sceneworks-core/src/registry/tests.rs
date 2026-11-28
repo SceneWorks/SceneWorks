@@ -915,7 +915,6 @@ fn hook4_low_res_start_feature_projects_from_runtime_snapshot_and_flips_when_pre
         "krea_2_raw",
         "krea_2_turbo",
         "sana_sprint_1600m",
-        "boogu_image_turbo",
         "ltx_2_5",
     ] {
         let spec = builtin_model_spec(unsupported)

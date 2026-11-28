@@ -6443,11 +6443,6 @@ fn model_mac_support_hides_torch_only_models_keeps_mlx_models() {
     // Lens / Lens-Turbo (epic 3164 / sc-5105) are MLX-routed now — pure T2I, so both are supported
     // and in the picker with no gap reason. The edit-mode gating (Lens has no edit path) is asserted
     // in `model_mac_support_feature_flags_mirror_routing_without_over_gating`.
-    for id in ["lens", "lens_turbo"] {
-        let lens = model_mac_support(id, "image", None);
-        assert!(lens.supported, "{id} should be MLX-supported");
-        assert!(lens.reason.is_none(), "{id} should carry no gap reason");
-    }
     // PuLID-FLUX (sc-3344) is MLX-routed now — it stays in the picker as a supported face-ID
     // backbone (character_image reference), no longer a torch-only port-epic gap.
     let pulid = model_mac_support("pulid_flux_dev", "image", None);
@@ -6537,12 +6532,6 @@ fn model_mac_support_feature_flags_mirror_routing_without_over_gating() {
     // Lens / Lens-Turbo (epic 3164 / sc-5105) are pure T2I — no edit path on any platform, so
     // `edit_image` is gated off (mirrors Chroma / FLUX.1); a lens edit job never silently degrades to
     // T2I against a dropped source image.
-    for id in ["lens", "lens_turbo"] {
-        assert!(
-            !model_mac_support(id, "image", None).features.edit,
-            "{id} has no edit path → edit must be gated off"
-        );
-    }
     // Bernini still-image companion (epic 4699 / sc-5424): the image-typed `bernini_image` id
     // serves t2i + i2i (`edit_image`) on MLX → supported with edit enabled. (Like lens/chroma it
     // gates only `edit_image`, so the "available in some MLX config" `reference`/`pose` probes come
@@ -7559,7 +7548,6 @@ fn candle_worker_claims_candle_native_training_kernels() {
     let cases: &[(&str, &str, &str)] = &[
         ("sdxl_lora", "sdxl", "lora"),
         ("z_image_lora", "z_image_turbo", "lokr"),
-        ("lens_lora", "lens", "lora"),
         ("krea_lora", "krea_2_raw", "lokr"),
         ("ltx_mlx_lora", "ltx_2_3", "lora"),
         ("kolors_lora", "kolors", "lokr"),
@@ -7570,9 +7558,6 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("wan_moe_lora", "wan_2_2_t2v_14b", "lokr"),
         ("wan_moe_lora", "wan_2_2_i2v_14b", "lora"),
         ("anima_lora", "anima_base", "lokr"),
-        ("mage_flow_lora", "mage_flow_base", "lora"),
-        ("mage_flow_lora", "mage_flow_base", "lokr"),
-        ("mage_flow_lora", "mage_flow_base", "full"),
         // sc-24160: the Qwen Image 2.1 Candle trainer, both adapter kinds.
         ("qwen_image_2_1_lora", "qwen_image_2_1", "lora"),
         ("qwen_image_2_1_lora", "qwen_image_2_1", "lokr"),
@@ -7609,8 +7594,6 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
         ("wan_moe_lora", "wan_2_2_i2v_14b", "lokr"),
         ("wan_moe_lora", "wan_2_2_unknown", "lora"),
         ("anima_lora", "anima_turbo", "lora"),
-        ("mage_flow_lora", "mage_flow_edit_base", "lora"),
-        ("mage_flow_lora", "mage_flow_base", "mystery"),
         // sc-24160: the 2.1 trainer never takes the distinct 2512 bases nor a non-adapter run.
         ("qwen_image_2_1_lora", "qwen_image", "lora"),
         ("qwen_image_2_1_lora", "qwen_image_edit", "lokr"),

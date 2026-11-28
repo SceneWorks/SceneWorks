@@ -1996,7 +1996,7 @@ fn apply_body_losses_resolved(
 /// face-landmark losses, the body losses) hands the trainer as `perceptual_decoder_dir` — ONE resolution for all of
 /// them, so a family's decoder is wired once (sc-24830's [`X0DecoderSource`] mapping). `None` for
 /// a trainer that decodes through its own base-model VAE ([`X0DecoderSource::BaseModelVae`],
-/// Mage-Flow): its descriptor declares `techniques.builtin_x0_decoder`, so the engine floor does not
+/// which declares `techniques.builtin_x0_decoder`): the engine floor does not
 /// ask for a directory and the trainer never reads one. `technique` labels the refusal.
 #[cfg(native_lane)]
 fn perceptual_decoder_dir(
@@ -7206,11 +7206,6 @@ mod tests {
                 "{kernel}"
             );
         }
-        // Mage-Flow decodes through its own VAE (`builtin_x0_decoder`): no decoder directory.
-        let mage = plan("mage_flow_lora", "mage_flow_base");
-        let mut config = map_training_config(&mage.config).expect("valid mapped training config");
-        apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
-        assert_eq!(config.perceptual_decoder_dir, None);
     }
 
     /// sc-25213 (d): the plan's `trainingAdapterVersion` maps to the right installed adapter file —
@@ -7373,38 +7368,6 @@ mod tests {
             }
             other => panic!("expected an unknown-version refusal, got {other:?}"),
         }
-    }
-
-    /// The worker's x0-decoder table and the engine descriptors agree on which trainers decode
-    /// through their own VAE: `x0_decoder_for_trainer(id) == BaseModelVae` exactly when the
-    /// active platform's descriptor declares `techniques.builtin_x0_decoder`. Mutation: map
-    /// `mage_flow_base` to a cataloged decoder (or drop `BaseModelVae`) ⇒ red.
-    #[cfg(native_lane)]
-    #[test]
-    fn base_model_vae_decoder_matches_builtin_x0_decoder_descriptors() {
-        use sceneworks_core::training::depth_anchoring::X0DecoderSource;
-        let descriptors: Vec<_> = crate::inference_runtime::media()
-            .trainers()
-            .map(|registration| (registration.descriptor)())
-            .collect();
-        assert!(
-            !descriptors.is_empty(),
-            "no trainers registered on this platform"
-        );
-        let mut builtin = 0;
-        for descriptor in descriptors {
-            let id = descriptor.id;
-            let base_vae = x0_decoder_for_trainer(id) == Some(X0DecoderSource::BaseModelVae);
-            assert_eq!(
-                base_vae, descriptor.techniques.builtin_x0_decoder,
-                "{id}: x0_decoder_for_trainer BaseModelVae vs descriptor builtin_x0_decoder"
-            );
-            builtin += usize::from(base_vae);
-        }
-        assert!(
-            builtin > 0,
-            "no trainer declares builtin_x0_decoder on this platform"
-        );
     }
 
     /// sc-2125: an enabled depth-anchoring plan maps onto the engine's typed config — schedule,
@@ -9031,11 +8994,11 @@ mod tests {
         }
         // Trainers without a fixed BF16 source contract keep tracking train_dtype.
         assert!(matches!(
-            training_load_precision("lens", "f32"),
+            training_load_precision("z_image_turbo", "f32"),
             Precision::Fp32
         ));
         assert!(matches!(
-            training_load_precision("lens", "bf16"),
+            training_load_precision("z_image_turbo", "bf16"),
             Precision::Bf16
         ));
     }
@@ -9066,9 +9029,6 @@ mod tests {
             // the trainer registers under the generator id `"kolors"`.
             ("kolors_lora", "kolors", Some("kolors")),
             ("kolors_lora", "not_kolors", None),
-            // Lens gained a native mlx-gen trainer (sc-5148) and now routes here (sc-5180); the
-            // trainer registers under the base generator id `"lens"`.
-            ("lens_lora", "lens", Some("lens")),
             // Krea trains the undistilled Raw DiT; the engine trainer registers under the base id
             // `"krea_2_raw"` (sc-7577/7578).
             ("krea_lora", "krea_2_raw", Some("krea_2_raw")),
@@ -9082,13 +9042,6 @@ mod tests {
             ("anima_lora", "anima_aesthetic", None),
             ("anima_lora", "anima_turbo", None),
             ("anima_lora", "anima_unknown", None),
-            // Mage-Flow (sc-15277): the single `mlx-gen-mage` trainer registers under the
-            // inference-generator id of the training base. The same id serves lora/lokr/full.
-            ("mage_flow_lora", "mage_flow_base", Some("mage_flow_base")),
-            // …and every non-Base Mage checkpoint is refused rather than silently trained through
-            // the generation-only conditioning path (the Edit variants need reference tokens).
-            ("mage_flow_lora", "mage_flow_edit_base", None),
-            ("mage_flow_lora", "mage_flow_turbo", None),
             // Qwen Image 2.1 (sc-24159): the trainer registers under the base generator id.
             // The distinct 2512 `qwen_image` / Edit models never resolve to it.
             (

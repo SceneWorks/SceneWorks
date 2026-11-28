@@ -311,7 +311,7 @@ fn dir_has_visible_entry(dir: &Path) -> bool {
 }
 
 // The per-family tier-completeness predicates for the no-`model_index` MLX turnkeys
-// (`anima_tier_complete` / `boogu_tier_complete` / `sana_tier_complete`, plus their
+// (`anima_tier_complete` / `sana_tier_complete`, plus their
 // `dir_has_visible_file_ending` helper) live in `sceneworks_core::mlx_tier_completeness` and are
 // called fully-qualified below. They are shared with rust-api's catalog completeness so the worker's
 // tier resolvers and the /models `installed`-vs-`incomplete` report cannot drift apart (sc-13513).
@@ -331,12 +331,6 @@ fn dir_has_visible_entry(dir: &Path) -> bool {
 pub(super) fn resolved_tier_is_complete(request: &ImageRequest, dir: &Path) -> bool {
     if is_anima_model(&request.model) {
         return sceneworks_core::mlx_tier_completeness::anima_tier_complete(dir);
-    }
-    if matches!(
-        request.model.as_str(),
-        "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
-    ) {
-        return sceneworks_core::mlx_tier_completeness::boogu_tier_complete(dir);
     }
     if matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m") {
         return tier_components_present(dir)
@@ -368,8 +362,7 @@ use sceneworks_core::mlx_tier_completeness::sensenova_tier_predicate;
 ///
 /// `complete` is family-specific: the diffusers-turnkey families pass [`tier_components_present`]
 /// (reads the tier's own `model_index.json`); families with a bespoke on-disk layout and no
-/// `model_index.json` (Anima's `diffusion_models/ + text_encoders/ + vae/`, Boogu's packed subfolders,
-/// InstantID's `unet/`) pass their own predicate so the completeness half is not a silent no-op for
+/// `model_index.json` (Anima's `diffusion_models/ + text_encoders/ + vae/`, InstantID's `unet/`) pass their own predicate so the completeness half is not a silent no-op for
 /// them (the pre-generalization gap that let those families still short-circuit onto a torn tier).
 pub(super) fn pick_loadable_tier(
     chain: &[&str],

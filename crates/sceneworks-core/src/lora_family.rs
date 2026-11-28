@@ -5696,49 +5696,23 @@ mod tests {
         assert_eq!(detect_keys(&deep), None);
     }
 
-    /// A Mage adapter is offered on Mage models and nowhere else: the detected token is the
-    /// verbatim `mage-flow` the catalog's `loraCompatibility.families` and the
-    /// `mage_flow_*_lora` training targets declare, it survives canonicalization unchanged, and
-    /// the compatibility gate accepts it on `mage-flow` while rejecting it everywhere else.
     #[test]
-    fn a_mage_flow_lora_is_accepted_only_on_mage_flow_models() {
-        assert_eq!(canonical_lora_family("mage-flow"), "mage-flow");
-        assert_eq!(canonical_lora_family("mage_flow"), "mage-flow");
-        assert_eq!(accepted_lora_families("mage-flow"), vec!["mage-flow"]);
-
-        let lora = json!({ "id": "mage_style", "family": "mage-flow" });
-        assert!(validate_lora_compatibility(
-            std::slice::from_ref(&lora),
-            Some("mage-flow"),
-            "mage_style",
-            Some("mage_flow_base")
-        )
-        .is_ok());
-        for other in ["qwen-image", "z-image", "krea_2", "flux2"] {
-            assert!(
-                validate_lora_compatibility(
+    fn a_retired_lora_is_not_usable_on_retained_or_legacy_models() {
+        for lora in [
+            json!({"id":"old_lora","family":"mage_flow"}),
+            json!({"id":"old_lora","baseModel":"lens_turbo"}),
+            json!({"id":"old_lora","family":"boogu"}),
+        ] {
+            for model_family in [None, Some("mage-flow"), Some("qwen-image")] {
+                let error = validate_lora_compatibility(
                     std::slice::from_ref(&lora),
-                    Some(other),
-                    "mage_style",
-                    Some("some_model")
+                    model_family,
+                    "image",
+                    Some("qwen_image"),
                 )
-                .is_err(),
-                "a mage-flow LoRA must be refused on a {other} model"
-            );
-        }
-        // …and the reverse: a sibling MMDiT family's LoRA is refused on a Mage model.
-        for other in ["qwen-image", "z-image"] {
-            let foreign = json!({ "id": "other", "family": other });
-            assert!(
-                validate_lora_compatibility(
-                    &[foreign],
-                    Some("mage-flow"),
-                    "other",
-                    Some("mage_flow_base")
-                )
-                .is_err(),
-                "a {other} LoRA must be refused on a mage-flow model"
-            );
+                .unwrap_err();
+                assert!(error.contains("no longer supported"), "{error}");
+            }
         }
     }
 
@@ -7246,11 +7220,9 @@ mod tests {
     #[test]
     fn imported_family_defaults_do_not_restore_unrouted_image_modes() {
         for (family, adapter) in [
-            ("lens", "lens_turbo"),
             ("chroma", "chroma_diffusers"),
             ("qwen-image", "qwen_image"),
             ("sdxl", "sdxl_diffusers"),
-            ("mage-flow", "mlx_mage"),
         ] {
             let mut entry = serde_json::Map::new();
             apply_model_manifest_defaults(&mut entry, "image", Some(family));

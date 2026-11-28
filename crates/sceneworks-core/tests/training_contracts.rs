@@ -144,7 +144,6 @@ fn builtin_targets_gate_network_types() {
             "illustrious_xl_v1_lora",
             "illustrious_xl_v2_lora",
             "kolors_lora",
-            "lens_turbo_lora",
             "krea_2_raw_lora",
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
@@ -163,13 +162,6 @@ fn builtin_targets_gate_network_types() {
             // T2V-14B retains its existing Candle LoKr path. The single-DiT TI2V-5B and I2V-14B
             // generated-matrix obligations remain LoRA-only.
             "wan_t2v_14b_lora",
-            // Mage-Flow (sc-14055, offered in sc-14056): the `mlx-gen-mage` trainer reports
-            // `supports_lokr` and has a real LoKr branch, and Mage inference installs LoKr through
-            // the same strict adapter seam as LoRA (`apply_mage_adapters`). It was absent from this
-            // list only because the target never advertised `lokr` — shipped but unreachable.
-            // Base only: `mage_flow_edit_base_lora` is no longer offered (sc-15277 — no edit
-            // trainer exists, so it could only ever claim-then-fail; restoring it is sc-15320).
-            "mage_flow_base_lora",
             // Iris-3B generation (sc-25685/sc-25686): both native trainers report `supports_lokr`
             // and write the LyCORIS layout the Iris adapter loader reads.
             "iris_3b_generation"
@@ -1639,8 +1631,8 @@ fn build_training_plan_derives_the_output_kind_from_the_run_not_the_target() {
     let target = registry
         .targets
         .iter()
-        .find(|target| target.base_model == "mage_flow_base")
-        .expect("the Mage-Flow Base training target is registered");
+        .find(|target| target.id == "iris_3b_generation")
+        .expect("Iris generation training target is registered");
     assert_eq!(
         target.output_kind,
         TrainingOutputKind::Lora,
@@ -1668,7 +1660,7 @@ fn build_training_plan_derives_the_output_kind_from_the_run_not_the_target() {
             config,
             preset: None,
             lora_id: "out_kind",
-            base_model_path: "/data/cache/huggingface/SceneWorks/Mage-Flow-Base".to_owned(),
+            base_model_path: "/data/models/iris_3b".to_owned(),
             dataset_root: Path::new("/data/training/ds_abc123"),
             output_dir: Path::new("/data/models/finetunes/out_kind"),
             file_name: "out.safetensors".to_owned(),
@@ -1700,7 +1692,6 @@ fn build_training_plan_rejects_network_types_outside_the_target_surface() {
     for (target_id, network_type) in [
         ("wan_lora", "lokr"),
         ("wan_i2v_14b_lora", "lokr"),
-        ("mage_flow_base_lora", "mystery"),
         ("sd3_5_large_lora", "full"),
     ] {
         let target = registry
@@ -1736,12 +1727,7 @@ fn build_training_plan_rejects_network_types_outside_the_target_surface() {
 #[test]
 fn core_targets_preserve_the_preexisting_mlx_checkpoint_and_preview_defaults() {
     let registry = builtin_training_targets();
-    for target_id in [
-        "kolors_lora",
-        "mage_flow_base_lora",
-        "sd3_5_large_lora",
-        "sd3_5_medium_lora",
-    ] {
+    for target_id in ["kolors_lora", "sd3_5_large_lora", "sd3_5_medium_lora"] {
         let target = registry
             .targets
             .iter()
@@ -2657,14 +2643,15 @@ fn depth_anchoring_refuses_full_finetune_and_no_video_ltx_workflows_at_submit() 
         }
         other => panic!("{what}: expected a depthAnchoringWeight field error, got {other:?}"),
     };
-    let mage = registry
-        .targets
-        .iter()
-        .find(|t| t.base_model == "mage_flow_base")
-        .expect("mage target")
-        .clone();
-    with(&mage, &[("networkType", json!("lora"))]).expect("Mage LoRA admits depth");
-    refused(with(&mage, &[("networkType", json!("full"))]), "mage full");
+    let mut full_capable = target("z_image_turbo_lora");
+    full_capable
+        .limits
+        .insert("networkTypes".to_owned(), json!(["lora", "full"]));
+    with(&full_capable, &[("networkType", json!("lora"))]).expect("LoRA admits depth");
+    refused(
+        with(&full_capable, &[("networkType", json!("full"))]),
+        "full fine-tune",
+    );
     let ltx = target("ltx_2_5_video_lora");
     with(&ltx, &[("ltxWorkflow", json!("t2v_lora"))]).expect("LTX-2.5 t2v admits depth");
     for workflow in DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS {
@@ -2735,7 +2722,7 @@ fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
         x0_decoder_for_trainer, X0DecoderSource, TAEF1_MODEL, TAELTX2_3_MODEL, TAEQI2_1_MODEL,
         TAESD3_MODEL, TAESDXL_MODEL, TAEW2_1_MODEL, TAEW2_2_MODEL,
     };
-    use X0DecoderSource::{BaseModelVae, Catalog};
+    use X0DecoderSource::Catalog;
     for (trainer, expected) in [
         ("z_image_turbo", Catalog(&TAEF1_MODEL)),
         ("sdxl", Catalog(&TAESDXL_MODEL)),
@@ -2751,7 +2738,6 @@ fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
         ("ltx_2_3", Catalog(&TAELTX2_3_MODEL)),
         ("ltx_2_5", Catalog(&TAELTX2_3_MODEL)),
         ("ltx_2_5_distilled", Catalog(&TAELTX2_3_MODEL)),
-        ("mage_flow_base", BaseModelVae),
     ] {
         assert_eq!(x0_decoder_for_trainer(trainer), Some(expected), "{trainer}");
     }
@@ -3867,7 +3853,10 @@ fn face_losses_refuse_full_finetune_and_no_video_ltx_workflows_at_submit() {
             .expect("target")
             .clone()
     };
-    let mage = target(&|t| t.base_model == "mage_flow_base");
+    let mut full_capable = target(&|t| t.id == "z_image_turbo_lora");
+    full_capable
+        .limits
+        .insert("networkTypes".to_owned(), json!(["lora", "full"]));
     let ltx = target(&|t| t.id == "ltx_2_5_video_lora");
     for key in [IDENTITY_LOSS_WEIGHT_KEY, FACE_LANDMARK_LOSS_WEIGHT_KEY] {
         let with = |t: &sceneworks_core::training::TrainingTarget, extra: &[(&str, Value)]| {
@@ -3882,8 +3871,11 @@ fn face_losses_refuse_full_finetune_and_no_video_ltx_workflows_at_submit() {
             Err(TrainingPlanError::InvalidField { field, .. }) => assert_eq!(field, key, "{what}"),
             other => panic!("{what}: expected a {key} field error, got {other:?}"),
         };
-        with(&mage, &[("networkType", json!("lora"))]).expect("Mage LoRA admits it");
-        refused(with(&mage, &[("networkType", json!("full"))]), "mage full");
+        with(&full_capable, &[("networkType", json!("lora"))]).expect("LoRA admits it");
+        refused(
+            with(&full_capable, &[("networkType", json!("full"))]),
+            "full fine-tune",
+        );
         with(&ltx, &[("ltxWorkflow", json!("t2v_lora"))]).expect("LTX-2.5 t2v admits it");
         for workflow in DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS {
             refused(with(&ltx, &[("ltxWorkflow", json!(workflow))]), workflow);
@@ -4168,9 +4160,12 @@ fn latent_perceptual_losses_refuse_the_combinations_the_engine_refuses() {
         }
         validate_training_config_for_target(target, &config)
     };
-    let mage = by_id("mage_flow_base_lora");
-    field_error(&mage, &[]).expect("Mage-Flow LoRA admits the VAE anchor");
-    match field_error(&mage, &[("networkType", json!("full"))]) {
+    let mut full_capable = by_id("z_image_turbo_lora");
+    full_capable
+        .limits
+        .insert("networkTypes".to_owned(), json!(["lora", "full"]));
+    field_error(&full_capable, &[]).expect("LoRA admits the VAE anchor");
+    match field_error(&full_capable, &[("networkType", json!("full"))]) {
         Err(TrainingPlanError::InvalidField { field, message }) => {
             assert_eq!(field, VAE_ANCHOR.weight_key);
             assert!(message.contains("full fine-tune"), "{message}");
@@ -4227,7 +4222,6 @@ fn builtin_targets_advertise_their_families_x0_decoder() {
         decoder("sd3_5_medium_lora"),
         installed("TAESD3 tiny decoder")
     );
-    assert_eq!(decoder("lens_turbo_lora"), installed("TAEF2 tiny decoder"));
     assert_eq!(
         decoder("anima_base_lora"),
         installed("TAEW2.1 tiny decoder")
@@ -4240,10 +4234,6 @@ fn builtin_targets_advertise_their_families_x0_decoder() {
     assert_eq!(
         decoder("ltx_2_5_video_lora"),
         installed("TAELTX2.3 tiny decoder")
-    );
-    assert_eq!(
-        decoder("mage_flow_base_lora"),
-        Some(json!({ "label": "the base model's own VAE", "install": false }))
     );
     assert_eq!(decoder("krea_2_control"), None);
     // Every target offering a decoded-x0 loss names its decoder.

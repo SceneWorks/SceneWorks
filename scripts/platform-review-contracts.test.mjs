@@ -1385,8 +1385,6 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
     [
       // Krea five-rung reference (and the registry-loaded providers that ride it).
       ["load_five_rung_generator", 'if request.get("sdxlEndpoint").is_some() { endpoint_vram_probe()? } else { certifying_vram_probe() }'],
-      // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
-      ["load_mage_generator", "certifying_vram_probe()"],
       // The inline Krea arm.
       ["run", "certifying_vram_probe()"],
       // The InstantID bespoke arm (sc-22729).
@@ -1562,13 +1560,11 @@ function assertEveryVramProbeIsCertifying(adapter) {
     [],
     "a function constructing a VRAM probe must sample a phase with it",
   );
-  // The certifying arms are exactly the capture sites: the InstantID arm (sc-22729), the Mage-Flow
-  // loader (sc-22733), the SenseNova arm (sc-22734) and the sc-22737 video block are all among them.
+  // The certifying arms are exactly the capture sites.
   assert.deepEqual(
     [...certifying].sort(),
     [
       "load_five_rung_generator",
-      "load_mage_generator",
       "run",
       "run_instantid_candle",
       "run_pulid_flux_capture",
