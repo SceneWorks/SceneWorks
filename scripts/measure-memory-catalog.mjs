@@ -1244,6 +1244,9 @@ export async function prepareFlux3ResourceCases(cases, { root }) {
   return prepared;
 }
 
+/** The three tensor components a packed DiT turnkey carries inside each `<tier>/` root. */
+export const PACKED_DIT_COMPONENTS = Object.freeze(["text_encoder", "transformer", "vae"]);
+
 export const PROVIDER_FAMILIES = Object.freeze({
   flux3_klein_base: {
     env: "FLUX3_KLEIN", repo: FLUX3_BASE_REPOSITORY, arms: ["mlx", "candle"],
@@ -1270,16 +1273,21 @@ export const PROVIDER_FAMILIES = Object.freeze({
     arms: ["mlx", "candle"],
     sideArtifact: { qwen_image_edit_2511_lightning: QWEN_EDIT_LIGHTNING_LORA },
   },
-  z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"] },
+  // SW-6138: every member of these four families packs its text encoder, transformer and VAE
+  // as `<tier>/{text_encoder,transformer,vae}/` (verified against the pinned rehosts), and both
+  // lanes open all three. Without the declaration a tier root holding only `transformer/` (a
+  // fetch that stopped after its first glob, run 46124090866) classified `runnable` and the
+  // capture died inside the engine's contract read on the missing encoder (`os error 2`).
+  z_image_turbo: { env: "Z_IMAGE", repo: "SceneWorks/z-image-turbo-mlx", arms: ["mlx", "candle"], requiredTensorComponents: PACKED_DIT_COMPONENTS },
   // The undistilled base is a distinct engine provider (`z_image`) with its own artifact family
   // (sc-22724). Never the Turbo env: a base plan satisfied by Turbo weights re-labels Turbo's peaks.
-  z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"] },
-  krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"] },
+  z_image: { env: "Z_IMAGE_BASE", repo: "SceneWorks/z-image-mlx", arms: ["mlx", "candle"], requiredTensorComponents: PACKED_DIT_COMPONENTS },
+  krea_2_turbo: { env: "KREA", repo: "SceneWorks/krea-2-turbo-mlx", arms: ["mlx", "candle"], requiredTensorComponents: PACKED_DIT_COMPONENTS },
   // sc-22735. The UNDISTILLED Krea 2 base is a separate engine provider (`krea_2_raw`) served by
   // the same two crates as Turbo (`mlx-gen-krea` / `candle-gen-krea`) off its OWN tiered rehost, so
   // it gets its own env family: a raw plan satisfied by Turbo weights would re-label Turbo's peaks
   // as the true-CFG base model's, the `z_image` / `z_image_turbo` split for the same reason.
-  krea_2_raw: { env: "KREA_RAW", repo: "SceneWorks/krea-2-raw-mlx", arms: ["mlx", "candle"] },
+  krea_2_raw: { env: "KREA_RAW", repo: "SceneWorks/krea-2-raw-mlx", arms: ["mlx", "candle"], requiredTensorComponents: PACKED_DIT_COMPONENTS },
   // sc-22735. The VIDEO member of the family, and MLX-ONLY: `mlx-gen-krea-realtime` is the only
   // engine that registers it, the worker's video route table has no candle arm for it, and every
   // manifest download is `platforms: ["macos"]`. The tier root is the `<tier>/` subdir of the one
@@ -3346,6 +3354,59 @@ export function hfDownloadArgvs(target, cacheRoot) {
   return target.include.map((glob) => hfDownloadArgv(target, cacheRoot, glob));
 }
 
+/**
+ * One hub `--include` pattern as the CLI applies it: Python `fnmatch` over the repo-relative POSIX
+ * path, where `*` also crosses `/` (so `q4/*` selects `q4/text_encoder/model.safetensors`).
+ */
+export function hubGlobRegExp(glob) {
+  let source = "";
+  for (let index = 0; index < glob.length; index += 1) {
+    const char = glob[index];
+    if (char === "*") source += ".*";
+    else if (char === "?") source += ".";
+    else if (char === "[") {
+      const end = glob.indexOf("]", index + 1);
+      if (end === -1) { source += "\\["; continue; }
+      let body = glob.slice(index + 1, end);
+      if (body.startsWith("!")) body = `^${body.slice(1)}`;
+      source += `[${body.replace(/\\/g, "\\\\")}]`;
+      index = end;
+    } else source += char.replace(/[.+^${}()|\\/]/g, "\\$&");
+  }
+  return new RegExp(`^${source}$`, "s");
+}
+
+/** Every regular file (symlinks followed) under `root`, as a POSIX path relative to it. */
+async function snapshotRelativeFiles(root) {
+  const files = [];
+  const visit = async (dir, prefix) => {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const child = path.join(dir, entry.name);
+      const info = await stat(child).catch(() => null);
+      if (info?.isDirectory()) await visit(child, relative);
+      else if (info?.isFile()) files.push(relative);
+    }
+  };
+  await visit(root, "");
+  return files;
+}
+
+/**
+ * The globs of one fetch that matched no file in the staged snapshot. A whole-snapshot fetch (no
+ * globs) is checked as one pattern that any file satisfies.
+ */
+export async function unlandedGlobs(snapshot, globs) {
+  const files = await snapshotRelativeFiles(snapshot);
+  const patterns = globs.length > 0 ? globs : ["*"];
+  return patterns.filter((glob) => {
+    const pattern = hubGlobRegExp(glob);
+    return !files.some((file) => pattern.test(file));
+  });
+}
+
 /** Files and bytes under one staged snapshot, for the per-anchor log line. */
 async function snapshotFileStats(root) {
   let files = 0;
@@ -3429,6 +3490,23 @@ export async function fetchAnchorSnapshots(row, models, {
       };
     }
     const staged = snapshotPath(cacheRoot, target.repo, target.revision);
+    // SW-6138 (run 46124090866): a zero exit is not a landed fetch. For a commit-hash revision,
+    // huggingface_hub's `snapshot_download` answers a failed Hub API call by RETURNING the existing
+    // local snapshot folder unchanged, so a snapshot already holding another tier "succeeds" with
+    // nothing fetched: krea_2_turbo landed `q4/transformer/*` and none of its five later globs, and
+    // z_image_turbo's `q4/*` landed nothing at all, every invocation exiting 0. Each glob must now
+    // match at least one file under the staged snapshot, or the target fails by name.
+    const unlanded = await unlandedGlobs(staged, target.include);
+    if (unlanded.length > 0) {
+      return {
+        fetched,
+        failed: `${target.repo}@${target.revision.slice(0, 8)}: the hub CLI exited 0 but no file matching `
+          + `${unlanded.join(" ")} is under ${staged}; huggingface_hub returns an existing snapshot unchanged `
+          + "when its Hub API call fails, so check this host's Hub connectivity, rate limit and free space "
+          + `on ${cacheRoot}`,
+        unfetchable,
+      };
+    }
     const stats = await snapshotFileStats(staged);
     log(`download: ${row.key} ${target.repo}@${target.revision.slice(0, 8)} ${stats.files} files, ${stats.bytes} bytes`);
     fetched.push({ ...target, ...stats });

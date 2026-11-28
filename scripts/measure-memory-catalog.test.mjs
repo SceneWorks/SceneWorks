@@ -149,6 +149,7 @@ import {
   hfDownloadArgvs,
   HF_DOTFILE_EXCLUDES,
   fetchAnchorSnapshots,
+  hubGlobRegExp,
   tierDownloadRows,
   manifestPlatform,
   HF_CLI_CANDIDATES,
@@ -357,6 +358,18 @@ async function fakeHub(layout, { empty = false } = {}) {
     const root = snapshotPath(hub, repo, revision, ...rest);
     await mkdir(root, { recursive: true });
     if (!empty) await writeFile(path.join(root, "weights.safetensors"), repo.includes("sensenova") ? tinySafetensors() : "w");
+    // SW-6138: a tier root of a family that declares `requiredTensorComponents` is only a staged
+    // root with those components in it, so the default fixture stages them; a test that wants a
+    // partial mirror builds it with `empty` or by hand.
+    if (!empty && rest.length === 1) {
+      const declared = Object.values(PROVIDER_FAMILIES)
+        .filter((family) => family.repo === repo && family.requiredTensorComponents)
+        .flatMap((family) => family.requiredTensorComponents);
+      for (const component of new Set(declared)) {
+        await mkdir(path.join(root, component), { recursive: true });
+        await writeFile(path.join(root, component, "weights.safetensors"), "w");
+      }
+    }
   }
   return hub;
 }
@@ -7692,10 +7705,13 @@ test("a refusal on a no-commit run surfaces as `exceeded` naming the Metal refus
 const skipWithoutShebang = process.platform === "win32" && "the stub CLI is a shebang script on PATH";
 
 /** A stub `hf` on PATH: appends its argv to $STUB_HF_LOG and creates the snapshot it was asked for. */
-async function stubHuggingFaceCli({ fail = false } = {}) {
+async function stubHuggingFaceCli({ fail = false, noop = false } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "catalog-hf-cli-"));
   const log = path.join(dir, "invocations.txt");
-  const body = fail
+  // SW-6138: `noop` is huggingface_hub's offline fallback: the Hub API call failed, the revision is
+  // a commit hash and a local snapshot folder exists, so the CLI returns it and exits 0 having
+  // fetched nothing.
+  const body = noop ? "process.exit(0);" : fail
     ? 'process.stderr.write("stub refusal: 401 Client Error\\n");\nprocess.exit(1);'
     : [
       'const repo = argv[1];',
@@ -7712,6 +7728,8 @@ async function stubHuggingFaceCli({ fail = false } = {}) {
       // empty `q4/` is now its own host condition (`EMPTY_SNAPSHOT_PREFIX`) rather than a staged
       // root — a stub that created only the directory was asserting the wrong outcome.
       '  fs.writeFileSync(path.join(snapshot, directory, "weights.safetensors"), "w");',
+      // SW-6138: a literal (wildcard-free) glob names one file, and the CLI lands exactly that file.
+      '  if (glob !== "." && !/[*?[]/.test(glob)) fs.writeFileSync(path.join(snapshot, glob), "{}");',
       '}',
       'fs.writeFileSync(path.join(snapshot, "config.json"), "{}");',
       // `refs/` is written exactly as the hub CLI writes it: not at all for a 40-hex revision.
@@ -8013,6 +8031,59 @@ test("a failed fetch leaves the anchor weights_missing naming the reason, and ne
   assert.match(refused.reason, new RegExp(`${PROVIDER_FAMILIES.qwen_image.repo}@${DOWNLOAD_REVISION.slice(0, 8)}`));
   // The walk keeps going: the other anchor is classified exactly as it was.
   assert.equal(rows.find((row) => row.key === "z_image_turbo:q4:mlx").status, "runnable");
+});
+
+// SW-6138, run 46124090866: krea_2_turbo:q4:mlx landed only its first glob and z_image_turbo:q4:mlx
+// landed nothing, every `hf download` exiting 0 because huggingface_hub hands back the existing
+// snapshot folder when its Hub API call fails. A zero exit with nothing matching is a failed fetch.
+test("a fetch that exits 0 but lands nothing for a glob is a failed fetch, named by glob", { skip: skipWithoutShebang }, async () => {
+  const { anchors, models } = downloadFixture();
+  const root = await fakePlanRoot(anchors, models);
+  // The snapshot folder already exists (another tier), exactly the precondition of the fallback.
+  const hub = await fakeHub([
+    [PROVIDER_FAMILIES.z_image_turbo.repo, DOWNLOAD_REVISION, "q4"],
+    [PROVIDER_FAMILIES.qwen_image.repo, DOWNLOAD_REVISION, "bf16"],
+  ]);
+  const stub = await stubHuggingFaceCli({ noop: true });
+  const args = {
+    ...parseArgs(["--backend", "mlx", "--list", "--download-missing"]),
+    campaign: "sc-dl-test", hfCache: [hub],
+  };
+  const { rows } = await withStubCli(stub, () => planRun(args, root));
+  const refused = rows.find((row) => row.key === "qwen_image:q4:mlx");
+  assert.equal(refused.status, "weights_missing");
+  assert.match(refused.reason, /download failed:.*exited 0 but no file matching q4\/\* is under/);
+  assert.equal((await stub.invocations()).length, 1);
+});
+
+test("hub globs match the way the CLI's fnmatch does, with * crossing directories", () => {
+  assert.ok(hubGlobRegExp("q4/*").test("q4/text_encoder/model.safetensors"));
+  assert.ok(hubGlobRegExp("q4/transformer/*").test("q4/transformer/config.json"));
+  assert.ok(!hubGlobRegExp("q4/transformer/*").test("q4/text_encoder/model.safetensors"));
+  assert.ok(hubGlobRegExp("q4/model_index.json").test("q4/model_index.json"));
+  assert.ok(!hubGlobRegExp("q4/model_index.json").test("q4/model_indexXjson"), "a dot is literal");
+  assert.ok(hubGlobRegExp("*.safetensors").test("vae/model.safetensors"));
+  assert.ok(hubGlobRegExp("q?/vae/*").test("q8/vae/config.json"));
+  assert.ok(hubGlobRegExp("q[48]/vae/*").test("q4/vae/config.json") && !hubGlobRegExp("q[48]/vae/*").test("q2/vae/x"));
+});
+
+test("a packed DiT tier root holding only transformer/ is weights_missing on both lanes, naming what is absent", async () => {
+  const models = await readManifestModels();
+  for (const modelId of ["krea_2_turbo", "krea_2_raw", "z_image_turbo", "z_image"]) {
+    const family = PROVIDER_FAMILIES[modelId];
+    assert.deepEqual([...family.requiredTensorComponents], ["text_encoder", "transformer", "vae"], modelId);
+    const download = tierDownload(models, modelId, family.repo, "q4");
+    const hub = await mkdtemp(path.join(tmpdir(), "catalog-hub-partial-"));
+    const transformer = snapshotPath(hub, family.repo, download.revision, "q4", "transformer");
+    await mkdir(transformer, { recursive: true });
+    await writeFile(path.join(transformer, "diffusion_pytorch_model.safetensors"), "w");
+    for (const backend of ["mlx", "candle"]) {
+      const row = await classifyAnchor(`${modelId}:q4:${backend}`, { provider: modelId },
+        { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+      assert.equal(row.status, "weights_missing", `${modelId}:${backend}`);
+      assert.match(row.reason, /missing text_encoder\/\*\.safetensors, vae\/\*\.safetensors/, `${modelId}:${backend}`);
+    }
+  }
 });
 
 test("--dry-run --download-missing prints what it would fetch and fetches nothing", { skip: skipWithoutShebang }, async () => {
