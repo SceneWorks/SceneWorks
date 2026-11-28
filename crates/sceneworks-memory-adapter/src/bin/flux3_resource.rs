@@ -359,7 +359,7 @@ pub(super) fn bind(
             _ => return Err(blocked("decoder did not return a source-mode reference")),
         };
         if generation.get("layout").is_some() {
-            request.flux3_layout_bindings.push(
+            request.extensions.flux3_mut().layout_bindings.push(
                 gen_core_flux3::layouts::ReferenceBinding::oriented(id, size),
             );
         }
@@ -373,7 +373,7 @@ pub(super) fn bind(
         inputs.push(inventory);
     }
     if let Some(layout) = generation.get("layout") {
-        request.flux3_layout =
+        request.extensions.flux3_mut().layout =
             Some(gen_core_flux3::layouts::Layout::from_json(layout.clone()).map_err(blocked)?);
     }
     gen_core_flux3::references::normalize_request(&mut request).map_err(blocked)?;
@@ -469,7 +469,12 @@ pub(super) fn bind(
             let boxes = scenario.ends_with("_boxes");
             if !request.enhance_prompt
                 || count != if editing { 10 } else { 0 }
-                || boxes != request.flux3_layout.is_some()
+                || boxes
+                    != request
+                        .extensions
+                        .flux3
+                        .as_ref()
+                        .is_some_and(|flux3| flux3.layout.is_some())
                 || !adapters.is_empty()
             {
                 return Err(blocked(
@@ -523,8 +528,8 @@ pub(super) fn actual_request_observation(request: &GenerationRequest) -> Value {
     json!({"prompt":request.prompt,"negativePrompt":request.negative_prompt,"width":request.width,"height":request.height,
         "count":request.count,"seed":request.seed,"steps":request.steps,"guidance":request.guidance,"trueCfg":request.true_cfg,
         "sampler":request.sampler,"scheduler":request.scheduler,"schedulerShift":request.scheduler_shift,"enhancePrompt":request.enhance_prompt,
-        "layout":request.flux3_layout.as_ref().map(|layout|layout.to_json()),
-        "layoutBindings":request.flux3_layout_bindings.iter().map(|binding|json!({"instanceId":binding.id,
+        "layout":request.extensions.flux3.as_ref().and_then(|flux3|flux3.layout.as_ref()).map(|layout|layout.to_json()),
+        "layoutBindings":request.extensions.flux3.as_ref().map(|flux3|flux3.layout_bindings.as_slice()).unwrap_or(&[]).iter().map(|binding|json!({"instanceId":binding.id,
             "originalSize":binding.original_size,"orientation":binding.orientation})).collect::<Vec<_>>(),
         "referenceCarriers":request.conditioning.iter().filter_map(reference_carrier).collect::<Vec<_>>(),
         "conditioningCount":request.conditioning.len()})
@@ -793,7 +798,12 @@ mod tests {
         .unwrap();
         assert_eq!(bound.request.image_reference_count(), 10);
         assert!(
-            bound.request.flux3_layout_bindings.is_empty(),
+            bound
+                .request
+                .extensions
+                .flux3
+                .as_ref()
+                .is_none_or(|flux3| flux3.layout_bindings.is_empty()),
             "ordinary references are ordered attachments, not a layout document"
         );
         assert_eq!(bound.inputs[9]["instanceId"], "instance-9");
@@ -807,8 +817,15 @@ mod tests {
             &fixture.root,
         )
         .unwrap();
-        assert_eq!(boxed.request.flux3_layout_bindings.len(), 10);
-        assert_eq!(boxed.request.flux3_layout_bindings[9].id, "instance-9");
+        let boxed_bindings = &boxed
+            .request
+            .extensions
+            .flux3
+            .as_ref()
+            .expect("boxed layout attaches flux3 extension")
+            .layout_bindings;
+        assert_eq!(boxed_bindings.len(), 10);
+        assert_eq!(boxed_bindings[9].id, "instance-9");
         assert!(bound.reference_resources.is_some());
         assert_eq!(bound.inputs[9]["index"], 9);
         assert_eq!(bound.inputs[9]["assetId"], "same-asset");

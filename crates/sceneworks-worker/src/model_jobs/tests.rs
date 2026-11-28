@@ -699,16 +699,16 @@ mod anima_convert_tests {
             assert_eq!(
                 anima_is_dit_quant_target(key),
                 *expected,
-                "partition drift for `{key}` — must match runtime_macos::providers::anima::convert::is_dit_quant_target"
+                "partition drift for `{key}` — must match runtime_macos::converters::anima::is_dit_quant_target"
             );
             // On macOS the crate is linked: assert the REAL predicate the converter now delegates to
-            // (`convert_anima_prequant` → `runtime_macos::providers::anima::quantize_anima_dit` → this) still matches the
+            // (`convert_anima_prequant` → `runtime_macos::converters::anima::quantize_anima_dit` → this) still matches the
             // pinned table, so a future mlx-gen rev can't silently repartition the checkpoint.
             #[cfg(target_os = "macos")]
             assert_eq!(
-                runtime_macos::providers::anima::is_dit_quant_target(key),
+                runtime_macos::converters::anima::is_dit_quant_target(key),
                 *expected,
-                "crate drift for `{key}` — runtime_macos::providers::anima::is_dit_quant_target diverged from the pin"
+                "crate drift for `{key}` — runtime_macos::converters::anima::is_dit_quant_target diverged from the pin"
             );
         }
     }
@@ -978,7 +978,7 @@ mod tier_builder {
                 bits > 0,
                 "boogu assemble builds a packed Q tier (set SC8513_BITS=4 or 8)"
             );
-            runtime_macos::providers::boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
+            runtime_macos::converters::boogu::convert::assemble_quantized_snapshot(&src, &out, bits)
                 .unwrap_or_else(|error| panic!("boogu assemble failed: {error}"));
             eprintln!("[sc-8513] DONE {tier} at {}", out.display());
             return;

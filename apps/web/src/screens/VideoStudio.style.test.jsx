@@ -79,18 +79,31 @@ function baseContext(overrides = {}) {
   };
 }
 
+// The submit button carries its shortcut inside (`<span class="kbd">⌘ ↵</span>`), so compare
+// button labels without it.
+const buttonLabel = (b) => b.textContent.replace(b.querySelector(".kbd")?.textContent ?? "", "").trim();
 const buttonWithText = (root, text) =>
-  [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+  [...root.querySelectorAll("button")].find((b) => buttonLabel(b) === text);
 const buttonContaining = (root, sel, text) =>
   [...root.querySelectorAll(sel)].find((b) => b.textContent.includes(text));
 
+// The Style picker and the composed-prompt preview live in the Style & look settings tab.
+async function openStyleTab(container) {
+  const tab = [...container.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+    node.textContent.includes("Style"),
+  );
+  if (tab && tab.getAttribute("aria-selected") !== "true") await click(tab);
+}
+
 async function selectStyle(container, groupName, styleName) {
+  await openStyleTab(container);
   await click(container.querySelector('button[aria-label="Style"]'));
   await click(buttonContaining(container, "button.style-picker-group-nav", groupName));
   await click(buttonWithText(container, styleName));
 }
 
 async function clearStyle(container) {
+  await openStyleTab(container);
   await click(container.querySelector('button[aria-label="Style"]'));
   // The picker reopens at the selected group's level 2; None lives at the group list, so step back.
   const back = container.querySelector("button.style-picker-back");
@@ -289,6 +302,7 @@ describe("VideoStudio — Style Catalog recipe replay (sc-13136)", () => {
     await render(context);
 
     // The picker was cleared, so no live preview is rendered.
+    await openStyleTab(container);
     expect(container.querySelector('[data-testid="styled-prompt-preview"]')).toBeNull();
 
     await click(buttonWithText(container, "Render clip"));

@@ -227,7 +227,7 @@ impl DetailTileRefiner for dyn Generator + '_ {
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
+impl DetailTileRefiner for runtime_cuda::calibration::sdxl::SdxlDetail {
     fn refine_tile(
         &self,
         tile: Image,
@@ -238,7 +238,7 @@ impl DetailTileRefiner for runtime_cuda::providers::sdxl::SdxlDetail {
         preview: &gen_core::PreviewSink,
         cancel: &CancelFlag,
     ) -> WorkerResult<(Vec<u8>, gen_core::generator::ExecutionIdentity)> {
-        let request = runtime_cuda::providers::sdxl::SdxlDetailRequest {
+        let request = runtime_cuda::calibration::sdxl::SdxlDetailRequest {
             prompt: params.prompt.clone(),
             negative: params.negative.clone(),
             width: eng_w,
@@ -707,7 +707,7 @@ pub(crate) async fn run_image_detail_job(
         // actionable error.
         let (tokenizer_clip_l, tokenizer_clip_bigg, vae_fp16_fix) =
             resolve_candle_detail_components(&request, settings, &weights_dir)?;
-        let paths = runtime_cuda::providers::sdxl::SdxlDetailPaths {
+        let paths = runtime_cuda::calibration::sdxl::SdxlDetailPaths {
             sdxl_base: weights_dir.clone(),
             tokenizer_clip_l: tokenizer_clip_l.clone(),
             tokenizer_clip_bigg: tokenizer_clip_bigg.clone(),
@@ -835,7 +835,7 @@ pub(crate) async fn run_image_detail_job(
         };
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let blocking = crate::load_progress::spawn_blocking(move || {
-            let detail = runtime_cuda::providers::sdxl::SdxlDetail::load_admitted(
+            let detail = runtime_cuda::calibration::sdxl::SdxlDetail::load_admitted(
                 &candle_paths,
                 &candle_provider_spec,
                 candle_memory_context,

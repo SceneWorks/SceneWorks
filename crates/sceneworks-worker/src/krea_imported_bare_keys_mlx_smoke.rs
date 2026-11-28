@@ -78,7 +78,7 @@ fn krea_imported_bare_keys_mlx_gpu_smoke() {
         count: 1,
         seed: Some(42),
         steps: Some(steps),
-        sampler: Some("euler".to_owned()),
+        sampler: Some("euler".into()),
         ..Default::default()
     };
     let mut last = String::new();

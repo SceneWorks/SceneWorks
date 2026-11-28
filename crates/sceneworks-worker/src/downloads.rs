@@ -1915,7 +1915,10 @@ pub(crate) fn record_sealed_entry_for_admission(
     if seal.ensure_unchanged().is_err() {
         return false;
     }
-    let digest = sceneworks_core::hashing::hex(seal.content_sha256());
+    let Ok(sha) = seal.require_content_sha256() else {
+        return false;
+    };
+    let digest = sceneworks_core::hashing::hex(sha);
     matches!(
         cache.record_hashed(observed, &format!("sha256:{digest}")),
         Ok(true)
@@ -1957,7 +1960,7 @@ async fn place_proven_entry(
     // seal of the proven bytes may stand in for the snapshot entry's verification.
     gen_core::PinnedWeightsFile::pin_attested(&link, &entry)
         .ok()
-        .filter(|seal| seal.content_sha256() == proven.content_sha256())
+        .filter(|seal| seal.content_sha256() == Some(proven.content_sha256()))
 }
 
 pub(crate) async fn download_lora_source_url(

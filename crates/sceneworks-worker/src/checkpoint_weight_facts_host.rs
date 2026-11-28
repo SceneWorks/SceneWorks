@@ -54,10 +54,9 @@ pub(crate) fn host_native_execution_capability() -> NativeExecutionCapabilityFac
             crate::gpu::cached_compute_cap().filter(|cap| cap.is_finite() && *cap >= 0.0)
         {
             let capability =
-                candle_gen::logical_weights::CandleCodecResidency::from_cuda_compute_cap((
-                    cap.trunc() as i32,
-                    (cap.fract() * 10.0).round() as i32,
-                ))
+                runtime_cuda::media::logical_weights::CandleCodecResidency::from_cuda_compute_cap(
+                    (cap.trunc() as i32, (cap.fract() * 10.0).round() as i32),
+                )
                 .native_execution_capability();
             return NativeExecutionCapabilityFact::new(capability.native_codec_ids())
                 .expect("the backend produces canonical codec ids");

@@ -68,7 +68,10 @@ use candle_qwen_edit_family::*;
 mod candle_dispatch_family;
 use candle_dispatch_family::*;
 
-use candle_gen::testkit::{StableIdleConfig, VramProbe};
+use runtime_cuda::calibration::pulid::PulidFluxRequest;
+// sc-22728: the bespoke Candle edit provider the WORKER drives by name — it is not a registered
+// generator, so the capture calls the same constructor the worker does rather than the catalog.
+use runtime_cuda::calibration::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
 use runtime_cuda::gen_core::{
     adapter_stack_identity, AdapterKind, AdapterSpec, Capabilities, ComponentPrecisionFloor,
     Conditioning, GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image,
@@ -76,12 +79,9 @@ use runtime_cuda::gen_core::{
     MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope,
     MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, ModelDescriptor, OffloadPolicy, Precision, Progress, Quant,
-    TransformerComponent, WeightsSource,
+    TransformerComponent, VideoMode, WeightsSource,
 };
-use runtime_cuda::providers::pulid::PulidFluxRequest;
-// sc-22728: the bespoke Candle edit provider the WORKER drives by name — it is not a registered
-// generator, so the capture calls the same constructor the worker does rather than the catalog.
-use runtime_cuda::providers::qwen_image::{QwenEdit, QwenEditPaths, QwenEditRequest};
+use runtime_cuda::media::testkit::{StableIdleConfig, VramProbe};
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -449,7 +449,7 @@ const SD3_5_FIXTURE_SLUGS: [(&str, &str); 3] = [
 /// PuLID-FLUX (sc-22726). On this lane it is NOT a registered generator: `candle-gen-pulid`
 /// registers nothing (its `lib.rs` says so in as many words, and the checked-in capability dump
 /// lists it under `bespokeMemoryRouteWaivers`). The worker loads it as
-/// `runtime_cuda::providers::pulid::PulidFlux::load_with_memory_context_spec(&PulidFluxPaths, ctx,
+/// `runtime_cuda::calibration::pulid::PulidFlux::load_with_memory_context_spec(&PulidFluxPaths, ctx,
 /// &spec)` after compiling its render plan against `spec` (`image_jobs/pulid_candle.rs`), so this
 /// arm does exactly that — going through the registry
 /// would be a different code path, not the production one (E4).
@@ -663,7 +663,7 @@ struct InstantIdCandleBinding {
     revision: String,
     /// The candle `InstantIdPaths` carries the whole priced composition — including `face_dir`,
     /// which is the identity bundle's own root — so the resolved bundle needs no separate field.
-    paths: runtime_cuda::providers::instantid::InstantIdPaths,
+    paths: runtime_cuda::calibration::instantid::InstantIdPaths,
     artifact_fingerprint: String,
 }
 
@@ -976,7 +976,7 @@ struct PulidFluxBinding {
     revision: String,
     tier: &'static str,
     bundle: protocol::PulidIdentityBundle,
-    paths: runtime_cuda::providers::pulid::PulidFluxPaths,
+    paths: runtime_cuda::calibration::pulid::PulidFluxPaths,
 }
 
 /// Hand-written because `PulidFluxPaths` (an inference type) derives no `Debug`; the fingerprint

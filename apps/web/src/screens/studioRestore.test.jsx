@@ -11,9 +11,11 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+import { apiFetch } from "../api.js";
 import { AppContext } from "../context/AppContext.js";
 import { recipeFromWorkflowShare } from "../workflowShare.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 
 // sc-11962 — S3: restart-restore must not clobber a restored studio snapshot when the
@@ -271,6 +273,13 @@ const activeGeneralNames = () =>
   [...document.body.querySelectorAll(".general-preset-chips button.preset-chip.active")].map((n) => n.textContent.trim());
 const loraSlotNames = () =>
   [...document.body.querySelectorAll(".lora-slot .lora-slot-meta strong")].map((n) => n.textContent.trim());
+// Video Studio's settings tab strip: open the tab whose label contains `label`.
+async function openVideoSettingsTab(label) {
+  const tab = [...document.body.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+    node.textContent.includes(label),
+  );
+  if (tab && tab.getAttribute("aria-selected") !== "true") await click(tab);
+}
 
 describe("studio restart-restore does not clobber the restored snapshot (sc-11962)", () => {
   let container;
@@ -307,13 +316,14 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     seedSnapshot("image", IMAGE_SNAPSHOT);
     await renderSequence(ImageStudio, [imageContext(), imageContext(IMAGE_FULL)]);
 
-    // Open Advanced so the LoRA slot renders.
-    await click(document.body.querySelector(".advanced-section-toggle"));
-
+    // One settings tab is open at a time: Model & output (the default), then Style & look, then
+    // LoRAs so the LoRA slot renders.
     expect(modelSelectValue()).toBe("flux2_dev");
     expect(imageSizeValue()).toBe("1536x1536");
+    await openSettingsTab("Style");
     expect(activeBasePresetName()).toBe("Cinematic");
     expect(activeGeneralNames()).toEqual(["Enhance"]);
+    await openSettingsTab("LoRAs");
     expect(loraSlotNames()).toContain("Lora A");
 
     const snap = readSnapshot("image");
@@ -339,6 +349,7 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
 
     expect(modelSelectValue()).toBe("flux2_dev");
     expect(imageSizeValue()).toBe("1536x1536");
+    await openSettingsTab("Style");
     expect(activeBasePresetName()).toBe("Cinematic");
     expect(activeGeneralNames()).toEqual(["Enhance"]);
 
@@ -376,12 +387,13 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     seedSnapshot("video", VIDEO_SNAPSHOT);
     await renderSequence(VideoStudio, [videoContext(), videoContext(VIDEO_FULL)]);
 
-    await click(document.body.querySelector(".advanced-section-toggle"));
-
+    // Video Studio's settings live in a tab strip; Model & output is open by default.
     expect(modelSelectValue()).toBe("wan_t2v");
     expect(aspectSelectValue()).toBe("1280x720");
+    await openVideoSettingsTab("Style");
     expect(activeBasePresetName()).toBe("Video Cinematic");
     expect(activeGeneralNames()).toEqual(["Video Enhance"]);
+    await openVideoSettingsTab("LoRAs");
     expect(loraSlotNames()).toContain("Vid Lora A");
 
     const snap = readSnapshot("video");
@@ -392,6 +404,87 @@ describe("studio restart-restore does not clobber the restored snapshot (sc-1196
     expect(snap.selectedLoraIds).toEqual(["vlora-a"]);
     expect(snap.selectedPresetId).toBe("vcine");
     expect(snap.generalStackIds).toEqual(["venhance"]);
+  });
+
+  // The open settings tab is persisted UI state (it replaced the Advanced disclosure's
+  // `advancedOpen`). A snapshot from before the tab strip carries only `advancedOpen`: an open
+  // Advanced restores as the Sampling tab, a closed one as the default Model & output tab.
+  it("Video: restores the open settings tab, migrating a pre-tab-strip advancedOpen", async () => {
+    const openTab = () => document.body.querySelector('.studio-settings-tablist [aria-selected="true"]')?.dataset.tab;
+
+    seedSnapshot("video", { ...VIDEO_SNAPSHOT, advancedOpen: true });
+    // `preferencesHydrated` opens the snapshot writer's gate (sc-15425), so the tab round-trips.
+    await renderSequence(VideoStudio, [videoContext({ ...VIDEO_FULL, preferencesHydrated: true })]);
+    expect(openTab()).toBe("sampling");
+    expect(readSnapshot("video").settingsTab).toBe("sampling");
+
+    await openVideoSettingsTab("Style");
+    expect(readSnapshot("video").settingsTab).toBe("style");
+    // Picking the open tab again closes the strip; that persists too.
+    await click(document.body.querySelector('.studio-settings-tablist [data-tab="style"]'));
+    expect(readSnapshot("video").settingsTab).toBeNull();
+  });
+
+  it("Video: a pre-tab-strip snapshot with Advanced closed opens on Model & output", async () => {
+    seedSnapshot("video", { ...VIDEO_SNAPSHOT, advancedOpen: false });
+    await renderSequence(VideoStudio, [videoContext(VIDEO_FULL)]);
+    expect(document.body.querySelector('.studio-settings-tablist [aria-selected="true"]')?.dataset.tab).toBe("model");
+  });
+
+  // Iris restoration plans its output inside the Upscale & finish panel, and that plan gates
+  // Generate. The panel stays mounted (hidden) while Iris is on, so a restored Iris pass is planned
+  // with the tab closed, and a size change made from another tab replans.
+  it("Image: plans a restored Iris pass and replans a size change with Upscale & finish closed", async () => {
+    const IRIS = { id: "iris_3b_restore", name: "Iris 3B Restoration", type: "upscaler", installState: "installed", capabilities: [] };
+    const planBodies = () =>
+      apiFetch.mock.calls
+        .filter(([path]) => path === "/api/v1/image-restoration/plan")
+        .map(([, , options]) => JSON.parse(options.body));
+    apiFetch.mockImplementation(async (path, _token, options) =>
+      path === "/api/v1/image-restoration/plan"
+        ? { items: [{ width: JSON.parse(options.body).width * 2, height: JSON.parse(options.body).height * 2 }] }
+        : {},
+    );
+    const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 260)); });
+    seedSnapshot("image", {
+      ...IMAGE_SNAPSHOT,
+      advancedOpen: true,
+      upscaleEnabled: true,
+      upscaleEngine: "iris",
+      upscaleRestore: { scale: 2, inputSizing: "budgeted", colorFix: true },
+    });
+    await renderSequence(ImageStudio, [
+      imageContext({
+        ...IMAGE_FULL,
+        models: [...IMAGE_FULL.models, IRIS],
+        macCapabilities: { features: { imageUpscaleIris: { supported: true } } },
+      }),
+    ]);
+    await settle();
+
+    // The pre-tab-strip snapshot opens Sampling; the Finish panel is mounted but hidden.
+    expect(document.body.querySelector('.studio-settings-tablist [aria-selected="true"]')?.dataset.tab).toBe("sampling");
+    expect(document.body.querySelector('.studio-settings-panel[data-panel="finish"]')?.hidden).toBe(true);
+    expect(planBodies().at(-1)).toMatchObject({ width: 1536, height: 1536, scale: 2 });
+
+    // A size change from the Sampling tab replans without opening Upscale & finish.
+    const widthOverride = [...document.body.querySelectorAll(".studio-settings-panel label")]
+      .find((label) => label.textContent.trim().startsWith("Width override"))
+      ?.querySelector("input");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(widthOverride, "1024");
+      widthOverride.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+    expect(planBodies().at(-1)).toMatchObject({ width: 1024, height: 1536 });
+    expect(document.body.querySelector('.studio-settings-panel[data-panel="finish"]')?.hidden).toBe(true);
+    apiFetch.mockImplementation(async () => ({}));
+  });
+
+  it("Video: an explicit settingsTab wins over a stale advancedOpen", async () => {
+    seedSnapshot("video", { ...VIDEO_SNAPSHOT, advancedOpen: true, settingsTab: "loras" });
+    await renderSequence(VideoStudio, [videoContext(VIDEO_FULL)]);
+    expect(document.body.querySelector('.studio-settings-tablist [aria-selected="true"]')?.dataset.tab).toBe("loras");
   });
 
   it("Video: survives a LoRA-first / models+presets-later load ordering", async () => {

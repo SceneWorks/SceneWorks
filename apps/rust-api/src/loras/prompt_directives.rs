@@ -74,6 +74,7 @@ pub(crate) fn append_resolved(
     models: &[Value],
     catalog: &[Value],
     model_id: &str,
+    mode: Option<&str>,
     directives: &[Directive],
     selected: &mut Vec<Value>,
 ) {
@@ -109,9 +110,15 @@ pub(crate) fn append_resolved(
                 continue;
             };
             let spec = json!({"id": id, "weight": directive.strength});
-            if let Ok(mut normalized) =
-                validate_lora_specs_for_model(models, catalog, model_id, &[spec], false, "LoRA")
-            {
+            if let Ok(mut normalized) = validate_lora_specs_for_model_in_mode(
+                models,
+                catalog,
+                model_id,
+                &[spec],
+                false,
+                "LoRA",
+                mode,
+            ) {
                 if let Some(lora) = normalized.pop() {
                     resolved = Some(lora);
                     break;
@@ -153,7 +160,14 @@ pub(crate) async fn resolve_for_inline_replay(
         .cloned()
         .unwrap_or_default();
     let selected = tokio::task::spawn_blocking(move || {
-        append_resolved(&models, &catalog, &model_id, &directives, &mut selected);
+        append_resolved(
+            &models,
+            &catalog,
+            &model_id,
+            None,
+            &directives,
+            &mut selected,
+        );
         selected
     })
     .await
@@ -267,13 +281,13 @@ mod tests {
         let mut directives = Vec::new();
         take_from_text("<lora:directflash:2><lora:flash:3><lora:Soft Light:-.5><lora:soft:1><lora:Absent:1><lora:missing:1>", &mut directives);
         let mut selected = vec![json!({"id":"flash", "weight":0.25})];
-        append_resolved(&models, &catalog, "image", &directives, &mut selected);
+        append_resolved(&models, &catalog, "image", None, &directives, &mut selected);
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0]["weight"], 0.25);
         assert_eq!(selected[1]["id"], "soft");
         assert_eq!(selected[1]["weight"], -0.5);
         let mut selected = Vec::new();
-        append_resolved(&models, &catalog, "image", &directives, &mut selected);
+        append_resolved(&models, &catalog, "image", None, &directives, &mut selected);
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0]["id"], "flash");
         assert_eq!(selected[0]["weight"], 2.0);

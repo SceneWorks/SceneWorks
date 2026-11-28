@@ -243,9 +243,9 @@
       ],
       "patches": [
         {
-          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
+          "file": "crates/sceneworks-core/src/registry/route_bindings.rs",
           "op": "replace",
-          "old": "    \"moss_image_base_lora\": \"moss_image_base\",\n    \"moss_image_sft_lora\": \"moss_image_sft\",\n",
+          "old": "    (\"moss_image_base_lora\", \"moss_image_base\", \"moss_image_base\"),\n    (\"moss_image_sft_lora\", \"moss_image_sft\", \"moss_image_sft\"),\n",
           "new": ""
         }
       ]
@@ -341,10 +341,10 @@
       ],
       "patches": [
         {
-          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
+          "file": "crates/sceneworks-core/src/registry/route_bindings.rs",
           "op": "replace",
-          "old": "\"moss_image_base_lora\": \"moss_image_base\"",
-          "new": "\"moss_image_base_lora\": \"wrong\""
+          "old": "(\"moss_image_base_lora\", \"moss_image_base\", \"moss_image_base\")",
+          "new": "(\"moss_image_base_lora\", \"wrong\", \"moss_image_base\")"
         }
       ]
     },
@@ -355,10 +355,10 @@
       ],
       "patches": [
         {
-          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
+          "file": "crates/sceneworks-core/src/registry/route_bindings.rs",
           "op": "replace",
-          "old": "\"moss_image_sft_lora\": \"moss_image_sft\"",
-          "new": "\"moss_image_sft_lora\": \"wrong\""
+          "old": "(\"moss_image_sft_lora\", \"moss_image_sft\", \"moss_image_sft\")",
+          "new": "(\"moss_image_sft_lora\", \"wrong\", \"moss_image_sft\")"
         }
       ]
     },

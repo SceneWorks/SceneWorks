@@ -10,10 +10,8 @@ const PREVIEW: &str = include_str!("../../../../config/manifests/builtin.preview
 fn preview_json() -> String {
     crate::jsonc::strip_jsonc_comments(PREVIEW)
 }
-const MLX: &str =
-    include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
-const CANDLE: &str =
-    include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json");
+const MLX: &str = crate::sga_capabilities::MACOS_MLX_JSON;
+const CANDLE: &str = crate::sga_capabilities::CANDLE_CUDA_JSON;
 
 #[test]
 fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
@@ -231,19 +229,15 @@ fn descriptor_contents_change_the_spec_while_provenance_does_not() {
         .unwrap()
     };
     let before = build(&mlx);
-    mlx["generatedFrom"]["inferenceRevision"] = json!("unrelated-pin");
+    // M8: sga.capabilities/2 is hardware- and pin-free — no generatedFrom/inferenceRevision exists.
+    assert!(mlx.get("generatedFrom").is_none());
     assert_eq!(
         serde_json::to_value(&before).unwrap(),
         serde_json::to_value(build(&mlx)).unwrap()
     );
-    let desc = mlx["snapshot"]["generator_capabilities"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|row| row["id"] == "flux1_schnell")
-        .unwrap();
-    desc["supports_preview"] = json!(false);
-    desc["samplers"]
+    let desc = &mut mlx["routes"]["flux1_schnell"];
+    desc["capabilities"]["supports_preview"] = json!(false);
+    desc["solvers"]
         .as_array_mut()
         .unwrap()
         .retain(|entry| entry != "heun");
@@ -488,16 +482,12 @@ fn yue2_tiers_require_the_candle_audio_export() {
         .filter_map(|row| row["variant"].as_str())
         .collect();
     assert_eq!(tiers, ["bf16", "q4", "q8"].into_iter().collect());
-    let candle_audio: Value = serde_json::from_str(include_str!(
-        "../../../../config/engine-capabilities/audio/capabilities.candle.json"
-    ))
-    .unwrap();
-    assert_eq!(candle_audio["backend"], "candle");
-    assert!(candle_audio["engines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["id"] == "yue2" && row["modality"] == "audio"));
+    let candle_audio = crate::sga_capabilities::candle_cuda();
+    assert_eq!(candle_audio.audio_backend.as_deref(), Some("candle"));
+    assert!(candle_audio
+        .audio_routes
+        .get("yue2")
+        .is_some_and(|route| route.modality == "audio"));
     assert!(spec.provider_routes.contains_key("candle"));
     // The generic runtime export also mentions YuE2 on MLX. The typed public projection
     // correctly withholds that provider because only Candle registers the audio engine.
@@ -956,20 +946,20 @@ fn hook4_low_res_start_feature_projects_from_runtime_snapshot_and_flips_when_pre
         );
     }
 
-    // HOOK-4 end-to-end: removing a structural precondition in the engine capability snapshot
-    // flips availability in the assembled spec and catalog projection with no table edits.
+    // HOOK-4 end-to-end: removing a structural precondition in the sga.capabilities/2 export
+    // flips availability in the assembled spec and catalog projection with zero table edits.
     let mut mlx: Value = serde_json::from_str(MLX).unwrap();
-    let desc = mlx["snapshot"]["generator_capabilities"]
+    let low_res = mlx["routes"]["flux1_dev"]["features"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
-        .find(|row| row["id"] == "flux1_dev")
+        .find(|feature| feature["feature_id"] == "low_res_start")
         .unwrap();
-    desc["features"]["low_res_start"]["applicable"] = json!(false);
-    desc["features"]["low_res_start"]["supported"] = json!(false);
-    desc["features"]["low_res_start"]["available"] = json!(false);
-    desc["features"]["low_res_start"]["inapplicability_reasons"] =
-        json!(["missing_spatial_unpack_repack"]);
+    low_res["applicable"] = json!(false);
+    low_res["reasons"] = json!([{
+        "code": "missing_spatial_unpack_repack",
+        "message": "route 'flux1_dev' does not declare spatial unpack/repack support"
+    }]);
 
     let reassembled = assemble::assemble(
         &product_json(),

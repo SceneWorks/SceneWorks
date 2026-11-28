@@ -3932,6 +3932,9 @@ fn seed_registered_minimax_primary(
         Some("SceneWorks/minimax-h3-mlx") => {
             "models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294"
         }
+        Some("SceneWorks/minimax-h3-candle") => {
+            "models--SceneWorks--minimax-h3-candle/snapshots/f22bc294"
+        }
         Some("MiniMaxAI/MiniMax-H3") => "models--MiniMaxAI--MiniMax-H3/snapshots/939557dc",
         other => panic!("{model} {tier}: unexpected primary repository {other:?}"),
     };
@@ -3945,12 +3948,32 @@ fn seed_registered_minimax_primary(
     dir
 }
 
+/// This module's fixture snapshot of the rehost MiniMax-H3's `tier` is served from on THIS host:
+/// the MLX-affine `SceneWorks/minimax-h3-mlx` on macOS and for bf16, the Candle-native GGML
+/// `SceneWorks/minimax-h3-candle` for q4/q8 off macOS — read off the registered `minimax_h3` row.
+#[cfg(test)]
+fn minimax_tier_snapshot(data_dir: &std::path::Path, tier: &str) -> std::path::PathBuf {
+    let repo = registered_entry_for_api_host("minimax_h3")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["variant"] == tier
+                && row["files"][0] == format!("{tier}/transformer_ref/*").as_str()
+        })
+        .and_then(|row| row["repo"].as_str())
+        .unwrap_or("SceneWorks/minimax-h3-mlx")
+        .replace('/', "--");
+    data_dir.join(format!(
+        "cache/huggingface/hub/models--{repo}/snapshots/f22bc294"
+    ))
+}
+
 /// Seed the PACKED per-tier text encoder (sc-19120) into the rehost snapshot. Tier-scoped, so a q4
 /// install's co-requisite set is only satisfied by the q4 copy.
 #[cfg(test)]
 fn seed_minimax_packed_text_encoder(data_dir: &std::path::Path, tier: &str) {
-    let component = data_dir
-        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294")
+    let component = minimax_tier_snapshot(data_dir, tier)
         .join(tier)
         .join("text_encoder");
     std::fs::create_dir_all(&component).expect("packed text encoder dir creates");
@@ -3993,19 +4016,16 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
     assert_eq!(status, StatusCode::CREATED);
 
     // The primary job fetches THIS entry's partition of THAT tier — not the tier, not the repo.
-    assert_eq!(primary["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(
+        primary["payload"]["repo"],
+        registered_minimax_primary("minimax_h3", "q8")["repo"]
+    );
     assert_eq!(primary["payload"]["variant"], "q8");
     assert_eq!(primary["payload"]["files"], json!(["q8/transformer/*"]));
     // minimax_h3 is registered, so its downloads (and their pins) come from the compiled registry,
     // not the config-dir fixture: the tier fetch carries the registered row's own pin.
-    let registered_pin = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
-        .expect("minimax_h3 is registered")["downloads"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["files"] == json!(["q8/transformer/*"]))
-        .expect("the registered q8 transformer row")["revision"]
-        .clone();
+    // This host's row: the q8 tier is platform-split between the MLX and GGML rehosts.
+    let registered_pin = registered_minimax_primary("minimax_h3", "q8")["revision"].clone();
     assert!(registered_pin.as_str().is_some_and(|pin| pin.len() == 40));
     assert_eq!(
         primary["payload"]["revision"], registered_pin,
@@ -4109,11 +4129,15 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
     write_empty_sibling_manifests(&config_dir);
 
     let data_dir = temp_dir.path().join("data");
-    let snapshot = data_dir
-        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    let snapshot = |tier: &str| minimax_tier_snapshot(&data_dir, tier);
     // `minimax_h3` q4: complete. `minimax_h3_ref` q4: index + config landed, ONE of two shards missing.
-    seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
-    seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS[..1]);
+    seed_minimax_partition(&snapshot("q4"), "q4", "transformer", &MINIMAX_SHARDS);
+    seed_minimax_partition(
+        &snapshot("q4"),
+        "q4",
+        "transformer_ref",
+        &MINIMAX_SHARDS[..1],
+    );
     seed_minimax_shared_floor(&data_dir);
     seed_minimax_packed_text_encoder(&data_dir, "q4");
 
@@ -4174,8 +4198,11 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
     // Repair must clear the warning, and losing a shard in either required partition must restore
     // it on both cards. CUDA's independent layout is covered by the variant-install tests.
     for partition in ["transformer_ref", "transformer"] {
-        seed_minimax_partition(&snapshot, "q4", partition, &MINIMAX_SHARDS);
-        let shard = snapshot.join("q4").join(partition).join(MINIMAX_SHARDS[1]);
+        seed_minimax_partition(&snapshot("q4"), "q4", partition, &MINIMAX_SHARDS);
+        let shard = snapshot("q4")
+            .join("q4")
+            .join(partition)
+            .join(MINIMAX_SHARDS[1]);
         for complete in [true, false, true] {
             if complete {
                 std::fs::write(&shard, b"x").unwrap();
@@ -4212,11 +4239,10 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
     .unwrap();
     write_empty_sibling_manifests(&config_dir);
     let data_dir = temp_dir.path().join("data");
-    let snapshot = data_dir
-        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    let snapshot = |tier: &str| minimax_tier_snapshot(&data_dir, tier);
     for tier in ["q4", "bf16"] {
         for partition in ["transformer", "transformer_ref"] {
-            seed_minimax_partition(&snapshot, tier, partition, &MINIMAX_SHARDS);
+            seed_minimax_partition(&snapshot(tier), tier, partition, &MINIMAX_SHARDS);
         }
     }
     // Each card's bf16 primary as this host registers it (off macOS `minimax_h3`'s is upstream
@@ -4350,9 +4376,8 @@ async fn minimax_h3_is_not_installed_without_its_shared_component_floor() {
     write_empty_sibling_manifests(&config_dir);
 
     let data_dir = temp_dir.path().join("data");
-    let snapshot = data_dir
-        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
-    seed_minimax_partition(&snapshot, "q4", "transformer", &MINIMAX_SHARDS);
+    let snapshot = |tier: &str| minimax_tier_snapshot(&data_dir, tier);
+    seed_minimax_partition(&snapshot("q4"), "q4", "transformer", &MINIMAX_SHARDS);
     // The floor is seeded, then the audio VAE is taken back out — one MISSING component of three.
     seed_minimax_shared_floor(&data_dir);
     std::fs::remove_dir_all(
@@ -4427,13 +4452,12 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     write_empty_sibling_manifests(&config_dir);
 
     let data_dir = temp_dir.path().join("data");
-    let snapshot = data_dir
-        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    let snapshot = |tier: &str| minimax_tier_snapshot(&data_dir, tier);
     // Both entries installed: `minimax_h3` at q4 + bf16 (each at the primary this host registers),
     // `minimax_h3_ref` at q4.
     let deleted_partitions =
         ["q4", "bf16"].map(|tier| seed_registered_minimax_primary(&data_dir, "minimax_h3", tier));
-    seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS);
+    seed_minimax_partition(&snapshot("q4"), "q4", "transformer_ref", &MINIMAX_SHARDS);
     seed_minimax_shared_floor(&data_dir);
     seed_minimax_packed_text_encoder(&data_dir, "q4");
 
@@ -4456,7 +4480,7 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
         assert!(!partition.exists(), "{} removed", partition.display());
     }
     // …the sibling's partition survives, file for file…
-    let sibling = snapshot.join("q4/transformer_ref");
+    let sibling = snapshot("q4").join("q4/transformer_ref");
     assert!(sibling.join("config.json").is_file());
     for shard in MINIMAX_SHARDS {
         assert!(sibling.join(shard).is_file(), "{shard} retained");
@@ -7671,7 +7695,10 @@ async fn license_acknowledgment_model_download_proceeds_once_asserted() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(
+        job["payload"]["repo"],
+        registered_minimax_primary("minimax_h3", "q4")["repo"]
+    );
 
     // The gate is scoped to the entries that declare it. A model with no license requirement must
     // still download from a body that says nothing about a license — otherwise this would be a
@@ -8571,7 +8598,10 @@ async fn license_acknowledgment_survives_a_typed_download_retry() {
         StatusCode::CREATED,
         "an authorized download must stay retryable: {retry_job:?}",
     );
-    assert_eq!(retry_job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+    assert_eq!(
+        retry_job["payload"]["repo"],
+        registered_minimax_primary("minimax_h3", "q4")["repo"]
+    );
 }
 
 /// Deleting a model must reconcile the resolved-model hot cache (sc-19710). Without this the

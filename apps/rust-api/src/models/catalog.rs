@@ -1929,13 +1929,27 @@ pub(super) fn apply_last_only_video_capability(object: &mut JsonObject) {
     );
     // SW-7032: the MiniMax-H3 turbo adapter surface is the server's own H3 predicate (typed
     // family for a registered builtin, legacy id prefix otherwise), served so the web does not
-    // restate it.
+    // restate it. A verified imported finetune carries the surface too: it keeps its own id, but the
+    // worker renders it under its declared partition's semantics, where the turbo resolver applies.
+    let supports_turbo = imported_partition.is_some()
+        || sceneworks_core::video_request::is_minimax_h3_model(
+            object.get("id").and_then(Value::as_str).unwrap_or_default(),
+        );
     object.insert(
         "supportsMinimaxH3Turbo".to_owned(),
-        Value::Bool(sceneworks_core::video_request::is_minimax_h3_model(
-            object.get("id").and_then(Value::as_str).unwrap_or_default(),
-        )),
+        Value::Bool(supports_turbo),
     );
+    // The builtin partition ids whose `modelIds`-declared adapters this row also accepts — the
+    // exact set `validate_lora_specs_for_model` honours with no mode — served so the picker's
+    // declared-partition gate matches the API's without restating the import shape. Absent on
+    // every row that is not a verified imported finetune, so stock rows are unchanged.
+    let partition_models =
+        sceneworks_core::minimax_h3_import::entry_adapter_partition_models(object, None);
+    if partition_models.is_empty() {
+        object.remove("adapterPartitionModels");
+    } else {
+        object.insert("adapterPartitionModels".to_owned(), json!(partition_models));
+    }
 }
 
 /// Give a provider-aliased model row the canonical provider's exact optional decoder donors.

@@ -91,8 +91,11 @@ async function doubleClick(element) {
   });
 }
 
+// The submit button carries its shortcut inside (`<span class="kbd">⌘ ↵</span>`), so compare
+// button labels without it.
+const buttonLabel = (b) => b.textContent.replace(b.querySelector(".kbd")?.textContent ?? "", "").trim();
 const buttonWithText = (root, text) =>
-  [...root.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
+  [...root.querySelectorAll("button")].find((b) => buttonLabel(b) === text);
 
 // Save-as-preset is an inline pair in the style-preset row (sc-15372): the dropdown opens a
 // scope menu, and picking a scope both sets it and fires the save.
@@ -107,12 +110,46 @@ const saveWithScope = async (container, scopeLabel) => {
     ),
   );
 };
-// The Advanced disclosure is collapsed by default — open it before touching a knob that lives
-// inside it.
-const openAdvanced = async (container) => {
-  const toggle = container.querySelector(".advanced-section-toggle");
-  if (toggle) {
-    await click(toggle);
+// Settings live in a tab strip along the bottom of the compose panel (studio layout
+// simplification); only the open tab's panel is mounted. Model & output is open by default —
+// open the tab that holds a knob before touching it.
+const openSettingsTab = async (container, label) => {
+  const tab = [...container.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+    node.textContent.includes(label),
+  );
+  if (tab && tab.getAttribute("aria-selected") !== "true") {
+    await click(tab);
+  }
+};
+
+// Video modes sit in three groups (Create / From video / People); only the picked group's mode
+// tabs render. Picking a group lands on its first available mode.
+const VIDEO_MODE_GROUP = {
+  "Text → Video": "Create",
+  "Image → Video": "Create",
+  "First → Last": "Create",
+  "Reference → Video": "Create",
+  Extend: "From video",
+  Bridge: "From video",
+  "Video → Video": "From video",
+  "Reference + Video": "From video",
+  "Multi-Clip → Video": "From video",
+  "Clip + Ref Video": "From video",
+  "Replace person": "People",
+  "Animate character": "People",
+};
+const modeGroupButton = (container, label) =>
+  [...container.querySelectorAll(".video-mode-group")].find((b) => b.textContent.trim() === label);
+const modeTab = (container, label) =>
+  [...container.querySelectorAll('.studio-mode-tabs [role="tab"]')].find((b) => b.textContent.trim() === label);
+const selectMode = async (container, label) => {
+  const group = modeGroupButton(container, VIDEO_MODE_GROUP[label]);
+  if (group && group.getAttribute("aria-pressed") !== "true") {
+    await click(group);
+  }
+  const tab = modeTab(container, label);
+  if (tab && tab.getAttribute("aria-selected") !== "true") {
+    await click(tab);
   }
 };
 
@@ -161,9 +198,9 @@ describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
     await act(async () => {});
   }
 
-  it("shows Quality in Advanced for the SVD adapter, which honors it", async () => {
+  it("shows Quality under Sampling for the SVD adapter, which honors it", async () => {
     await render(baseContext({ videoModels: [SVD] }));
-    await openAdvanced(container);
+    await openSettingsTab(container, "Sampling");
 
     const segment = container.querySelector(".quality-segment");
     expect(segment).toBeTruthy();
@@ -203,7 +240,7 @@ describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
 
   it("hides Quality for an adapter that never reads the key", async () => {
     await render(baseContext({ videoModels: [LTX] }));
-    await openAdvanced(container);
+    await openSettingsTab(container, "Sampling");
 
     expect(container.querySelector(".quality-segment")).toBeNull();
     // The Steps override — which beats `quality` even on SVD — is still there, so the run is not
@@ -238,16 +275,24 @@ describe("VideoStudio Save as Preset", () => {
       );
     });
     await act(async () => {});
+    // Save as preset sits in the Style & look settings tab.
+    await openSettingsTab(container, "Style");
   }
 
-  // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
-  // the Purpose zone is one elevated card. It shipped detached in sc-10477 and was
-  // pulled back in by sc-10490 — assert the nesting so it cannot drift again.
-  it("nests the Advanced disclosure inside the work-panel", async () => {
+  // The settings belong INSIDE the work-panel, not floating beneath it: the Purpose zone is one
+  // elevated card (sc-10477 / sc-10490). The settings tab strip replaced the Advanced disclosure
+  // and must be the panel's LAST child — it bleeds to the panel's edges and rounds its corners.
+  it("nests the settings tab strip inside the work-panel as its last child", async () => {
     await render(baseContext());
 
-    expect(document.body.querySelector(".work-panel .advanced-section")).toBeTruthy();
-    expect(document.body.querySelector(".studio-shell > .advanced-section")).toBeNull();
+    const strip = document.body.querySelector(".work-panel > .studio-settings-tabs");
+    expect(strip).toBeTruthy();
+    expect(strip.parentElement.lastElementChild).toBe(strip);
+    expect(document.body.querySelector(".studio-shell > .studio-settings-tabs")).toBeNull();
+    expect(document.body.querySelector(".advanced-section")).toBeNull();
+    expect(
+      [...strip.querySelectorAll('[role="tab"]')].map((tab) => tab.querySelector(".studio-settings-tab-label").textContent),
+    ).toEqual(["Model & output", "Character & LoRAs", "Style & look", "Sampling"]);
   });
 
   it("snapshots the video config into a text_to_video preset without the seed", async () => {
@@ -371,8 +416,7 @@ describe("VideoStudio video_bridge", () => {
     await render(context);
 
     // Switch to Bridge mode; the left clip is pre-filled from the selected asset.
-    const modeControl = container.querySelector(".mode-control");
-    await click(buttonWithText(modeControl, "Bridge"));
+    await selectMode(container, "Bridge");
 
     // Drive the right-clip picker (the only "Select clip" button; the left
     // picker shows "Change" because it already has a value).
@@ -425,7 +469,6 @@ describe("VideoStudio fit mode (sc-6139)", () => {
     await act(async () => {});
   }
 
-  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
   const fitField = () => container.querySelector(".fit-mode-field");
   const fitButton = (label) => fitField() && buttonWithText(fitField(), label);
 
@@ -436,13 +479,13 @@ describe("VideoStudio fit mode (sc-6139)", () => {
     // Default Text → Video has no starting image, so no fit control.
     expect(fitField()).toBeFalsy();
 
-    await click(modeButton("Image → Video"));
+    await selectMode(container, "Image → Video");
     expect([...fitField().querySelectorAll("button")].map((b) => b.textContent.trim())).toEqual([
       "Crop",
       "Pad",
     ]);
 
-    await click(modeButton("First → Last"));
+    await selectMode(container, "First → Last");
     expect(fitField()).toBeTruthy();
     expect(fitButton("Outpaint")).toBeFalsy();
   });
@@ -450,7 +493,7 @@ describe("VideoStudio fit mode (sc-6139)", () => {
   it("threads the chosen fitMode into the image_to_video payload (default crop)", async () => {
     const context = baseContext({ assets: [source], selectedAsset: source });
     await render(context);
-    await click(modeButton("Image → Video"));
+    await selectMode(container, "Image → Video");
 
     // Default selection is crop.
     await click(buttonWithText(container, "Render clip"));
@@ -493,7 +536,7 @@ describe("VideoStudio fit mode (sc-6139)", () => {
 
     await act(async () => root.render(<Host />));
     await act(async () => {});
-    await click(modeButton("First → Last"));
+    await selectMode(container, "First → Last");
     const fieldByLabel = (label) =>
       [...container.querySelectorAll(".asset-picker-field")].find(
         (field) => field.querySelector(".asset-picker-label")?.textContent === label,
@@ -578,34 +621,33 @@ describe("VideoStudio Bernini task modes", () => {
   // Scope to the mode's media-input band so the unrelated upscaler card (which also
   // has a "Source clip" picker in the results rail) doesn't leak into the assertions.
   const pickerLabels = () =>
-    [...(container.querySelector(".studio-source-band")?.querySelectorAll(".asset-picker-label") ?? [])].map(
+    [...(container.querySelector(".video-inputs")?.querySelectorAll(".asset-picker-label") ?? [])].map(
       (el) => el.textContent,
     );
-  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
 
   it("shows the right media slots for each mode", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA, refB] });
     await render(context);
 
-    await click(modeButton("Video → Video"));
+    await selectMode(container, "Video → Video");
     expect(pickerLabels()).toContain("Source clip");
     expect(pickerLabels()).not.toContain("Reference images");
 
-    await click(modeButton("Reference → Video"));
+    await selectMode(container, "Reference → Video");
     expect(pickerLabels()).toContain("Reference images");
     expect(pickerLabels()).not.toContain("Source clip");
 
-    await click(modeButton("Reference + Video"));
+    await selectMode(container, "Reference + Video");
     expect(pickerLabels()).toEqual(expect.arrayContaining(["Source clip", "Reference images"]));
 
     // mv2v: a single multi-clip picker, no single "Source clip" or reference images.
-    await click(modeButton("Multi-Clip → Video"));
+    await selectMode(container, "Multi-Clip → Video");
     expect(pickerLabels()).toContain("Source clips");
     expect(pickerLabels()).not.toContain("Source clip");
     expect(pickerLabels()).not.toContain("Reference images");
 
     // ads2v: source clip + reference video + reference images.
-    await click(modeButton("Clip + Ref Video"));
+    await selectMode(container, "Clip + Ref Video");
     expect(pickerLabels()).toEqual(
       expect.arrayContaining(["Source clip", "Reference video", "Reference images"]),
     );
@@ -615,7 +657,7 @@ describe("VideoStudio Bernini task modes", () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA] });
     await render(context);
 
-    await click(modeButton("Video → Video"));
+    await selectMode(container, "Video → Video");
     await click(buttonWithText(container, "Select clip"));
     let modal = document.querySelector(".media-source-modal");
     expect([...modal.querySelectorAll('[role="tab"]')].map((el) => el.textContent.trim())).toEqual([
@@ -627,7 +669,7 @@ describe("VideoStudio Bernini task modes", () => {
     expect(modal.querySelector('input[type="file"]').accept).toBe("video/*");
     await click(buttonWithText(modal, "Cancel"));
 
-    await click(modeButton("Reference → Video"));
+    await selectMode(container, "Reference → Video");
     await click(buttonWithText(container, "Select images"));
     modal = document.querySelector(".media-source-modal");
     await click([...modal.querySelectorAll('[role="tab"]')].find((el) => el.textContent.includes("File Upload")));
@@ -639,7 +681,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("keeps Render disabled until the required reference image is selected", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA, refB] });
     await render(context);
-    await click(modeButton("Reference → Video"));
+    await selectMode(container, "Reference → Video");
 
     // No reference selected yet.
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
@@ -656,7 +698,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("submits the source clip for video_to_video", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip], selectedAsset: clip });
     await render(context);
-    await click(modeButton("Video → Video"));
+    await selectMode(container, "Video → Video");
     await click(buttonWithText(container, "Render clip"));
 
     expect(context.createVideoJob).toHaveBeenCalledTimes(1);
@@ -671,7 +713,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("carries the audio-reference list on the submitted payload", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip], selectedAsset: clip });
     await render(context);
-    await click(modeButton("Video → Video"));
+    await selectMode(container, "Video → Video");
     await click(buttonWithText(container, "Render clip"));
 
     const payload = context.createVideoJob.mock.calls[0][0];
@@ -681,7 +723,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("submits all chosen reference images for reference_to_video", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [refA, refB] });
     await render(context);
-    await click(modeButton("Reference → Video"));
+    await selectMode(container, "Reference → Video");
 
     await click(buttonWithText(container, "Select images"));
     const modal = document.querySelector(".asset-picker-modal");
@@ -702,7 +744,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("submits both clip and references for reference_video_to_video", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip, refA], selectedAsset: clip });
     await render(context);
-    await click(modeButton("Reference + Video"));
+    await selectMode(container, "Reference + Video");
 
     await click(buttonWithText(container, "Select images"));
     const modal = document.querySelector(".asset-picker-modal");
@@ -722,7 +764,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("requires at least two clips before submitting multi_video_to_video", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [clip, clip2], selectedAsset: clip });
     await render(context);
-    await click(modeButton("Multi-Clip → Video"));
+    await selectMode(container, "Multi-Clip → Video");
 
     // One clip auto-selected from selectedAsset isn't enough — mv2v needs >=2.
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
@@ -753,7 +795,7 @@ describe("VideoStudio Bernini task modes", () => {
       selectedAsset: clip,
     });
     await render(context);
-    await click(modeButton("Clip + Ref Video"));
+    await selectMode(container, "Clip + Ref Video");
 
     // Source clip auto-selected; reference video + a reference image still required.
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
@@ -793,7 +835,7 @@ describe("VideoStudio Bernini task modes", () => {
   it("disables an editing mode on a model that does not support it", async () => {
     const context = baseContext({ videoModels: [LTX], assets: [clip] });
     await render(context);
-    await click(modeButton("Reference → Video"));
+    await selectMode(container, "Reference → Video");
 
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
     await vi.waitFor(() => expect(container.textContent).toContain("does not support this mode"));
@@ -868,15 +910,14 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
   }
 
   const pickerLabels = () =>
-    [...(container.querySelector(".studio-source-band")?.querySelectorAll(".asset-picker-label") ?? [])].map(
+    [...(container.querySelector(".video-inputs")?.querySelectorAll(".asset-picker-label") ?? [])].map(
       (el) => el.textContent,
     );
-  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
 
   it("shows the driving video + reference character slots for animate_character", async () => {
     const context = baseContext({ videoModels: [SCAIL2], assets: [clip, character] });
     await render(context);
-    await click(modeButton("Animate character"));
+    await selectMode(container, "Animate character");
 
     expect(pickerLabels()).toEqual(expect.arrayContaining(["Driving video", "Reference character"]));
   });
@@ -884,7 +925,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
   it("submits the driving clip + reference character for animate_character", async () => {
     const context = baseContext({ videoModels: [SCAIL2], assets: [clip, character] });
     await render(context);
-    await click(modeButton("Animate character"));
+    await selectMode(container, "Animate character");
 
     // Both inputs required → Render stays disabled until selected.
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);
@@ -926,7 +967,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     ];
     const context = baseContext({ videoModels: [SCAIL2_MULTI_REFERENCE], assets: [clip, ...characters] });
     await render(context);
-    await click(modeButton("Animate character"));
+    await selectMode(container, "Animate character");
 
     expect(pickerLabels()).toContain("Reference characters (ordered, up to 6)");
     await click(buttonWithText(container, "Select clip"));
@@ -953,7 +994,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
   it("offers SCAIL-2 as a replacement engine when 2+ backends can replace", async () => {
     const context = baseContext({ videoModels: [WAN, SCAIL2], assets: [clip] });
     await render(context);
-    await click(modeButton("Replace person"));
+    await selectMode(container, "Replace person");
 
     const engineLabel = [...container.querySelectorAll("label")].find((el) =>
       el.textContent.includes("Replacement engine"),
@@ -993,7 +1034,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     // This leg is what makes the assertion per-model rather than a global removal.
     const context = baseContext({ videoModels: [WAN, SCAIL2], assets: [clip] });
     await render(context);
-    await click(modeButton("Replace person"));
+    await selectMode(container, "Replace person");
     expect(modeLabel(), "Wan-VACE honors the mode and must keep the control").toBeTruthy();
     expect([...modeLabel().querySelector("select").options].map((o) => o.value)).toEqual([
       "face_only",
@@ -1063,7 +1104,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     expect(context.createVideoJob).not.toHaveBeenCalled();
     // The submit CTA's LABEL is per-mode ("Replace person" here), so target the CTA by class
     // rather than by a label that changes with the mode under test.
-    const submitCta = container.querySelector(".prompt-cta");
+    const submitCta = container.querySelector(".studio-generate");
     expect(submitCta.disabled, "the restored snapshot must be submittable").toBe(false);
     await click(submitCta);
 
@@ -1080,7 +1121,7 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
   it("hides the replacement engine picker when only one backend can replace", async () => {
     const context = baseContext({ videoModels: [WAN], assets: [clip] });
     await render(context);
-    await click(modeButton("Replace person"));
+    await selectMode(container, "Replace person");
 
     const engineLabel = [...container.querySelectorAll("label")].find((el) =>
       el.textContent.includes("Replacement engine"),
@@ -1171,7 +1212,7 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
     await act(async () => {});
   }
 
-  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+  const modeButton = (label) => modeTab(container, label);
   const modelSelect = () => container.querySelector(".settings-field-model select");
 
   it("does not trap the user after switching to a model-specific mode", async () => {
@@ -1186,17 +1227,17 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
     expect(modelSelect().value).toBe("wan_2_2");
 
     // Switch to Animate character → snaps the model to SCAIL-2 (the only model that serves it).
-    await click(modeButton("Animate character"));
+    await selectMode(container, "Animate character");
     expect(modelSelect().value).toBe("scail2_14b");
 
     // The bug: with SCAIL-2 selected, every other tab used to be disabled with no way back.
-    // Now Text→Video / Image→Video stay enabled because Wan serves them.
-    expect(modeButton("Text → Video").disabled).toBe(false);
-    expect(modeButton("Image → Video").disabled).toBe(false);
+    // Now the Create group and its Text→Video / Image→Video tabs stay enabled because Wan serves them.
+    expect(modeGroupButton(container, "Create").disabled).toBe(false);
 
     // And leaving the mode snaps back to a model that serves the target mode.
-    await click(modeButton("Text → Video"));
-    expect(modeButton("Text → Video").className).toContain("active");
+    await selectMode(container, "Text → Video");
+    expect(modeButton("Text → Video").getAttribute("aria-selected")).toBe("true");
+    expect(modeButton("Image → Video").disabled).toBe(false);
     expect(modelSelect().value).toBe("wan_2_2");
   });
 
@@ -1210,12 +1251,16 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
 
     // Only SCAIL-2 is installed (animate_character + replace_person). Enter animate_character so it
     // isn't the active tab being checked, then assert the unserved modes are disabled.
-    await click(modeButton("Animate character"));
+    await selectMode(container, "Animate character");
     expect(modeButton("Animate character").disabled).toBe(false);
     expect(modeButton("Replace person").disabled).toBe(false);
-    expect(modeButton("Text → Video").disabled).toBe(true);
-    expect(modeButton("Image → Video").disabled).toBe(true);
-    expect(modeButton("Video → Video").disabled).toBe(true);
+    // No installed model serves any Create or From-video mode, so each of those whole groups is
+    // disabled with the gating tooltip — none of their tabs (Text→Video, Image→Video,
+    // Video→Video …) can be reached.
+    for (const group of ["Create", "From video"]) {
+      expect(modeGroupButton(container, group).disabled).toBe(true);
+      expect(modeGroupButton(container, group).title).toBe("No installed model supports this mode on macOS.");
+    }
   });
 
   it("filters the model picker to models that serve the active mode", async () => {
@@ -1230,11 +1275,11 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
     expect([...modelSelect().options].map((o) => o.value)).toEqual(["wan_2_2"]);
 
     // Animate character: only SCAIL-2 serves it.
-    await click(modeButton("Animate character"));
+    await selectMode(container, "Animate character");
     expect([...modelSelect().options].map((o) => o.value)).toEqual(["scail2_14b"]);
 
     // Replace person: both backends serve it.
-    await click(modeButton("Replace person"));
+    await selectMode(container, "Replace person");
     expect([...modelSelect().options].map((o) => o.value)).toEqual(
       expect.arrayContaining(["wan_2_2", "scail2_14b"]),
     );
@@ -1362,16 +1407,31 @@ describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
     await act(async () => {});
   }
 
-  // The tabs a user can actually reach: rendered AND not disabled. This is the set the assertions
-  // below check for absence in — a disabled tab is not a way into a mode.
-  const reachableModeTabs = () =>
-    [...container.querySelectorAll(".mode-control button")]
-      .filter((button) => !button.disabled)
-      .map((button) => button.textContent.trim());
-  const modeButton = (label) =>
-    [...container.querySelectorAll(".mode-control button")].find(
-      (button) => button.textContent.trim() === label,
-    );
+  // The tabs a user can actually reach: in a group that can be picked, rendered AND not disabled.
+  // This is the set the assertions below check for absence in — a disabled tab is not a way into a
+  // mode, and neither is a tab whose whole group is disabled.
+  const reachableModeTabs = async () => {
+    const reachable = [];
+    for (const group of ["Create", "From video", "People"]) {
+      const button = modeGroupButton(container, group);
+      if (button.disabled) continue;
+      if (button.getAttribute("aria-pressed") !== "true") await click(button);
+      reachable.push(
+        ...[...container.querySelectorAll('.studio-mode-tabs [role="tab"]')]
+          .filter((tab) => !tab.disabled)
+          .map((tab) => tab.textContent.trim()),
+      );
+    }
+    return reachable;
+  };
+  // The control that gates a mode: its tab when its group can be shown, else the (disabled) group
+  // switch button that stands in for every tab of a group with no served mode.
+  const modeButton = async (label) => {
+    const group = modeGroupButton(container, VIDEO_MODE_GROUP[label]);
+    if (group.disabled) return group;
+    if (group.getAttribute("aria-pressed") !== "true") await click(group);
+    return modeTab(container, label);
+  };
   const modelSelect = () => container.querySelector(".settings-field-model select");
 
   const STRANDED_TABS = ["Image → Video", "First → Last", "Extend", "Bridge", "Replace person"];
@@ -1386,7 +1446,7 @@ describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
     );
 
     // ABSENT — not "present but refuses on submit". Every one of these was reachable before.
-    const reachable = reachableModeTabs();
+    const reachable = await reachableModeTabs();
     for (const label of STRANDED_TABS) {
       expect(
         reachable,
@@ -1394,8 +1454,9 @@ describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
       ).not.toContain(label);
       // Rendered-but-disabled is how this screen has always expressed an unavailable mode, and the
       // tooltip must name the platform doing the gating — off-Mac the Mac sentence is backwards.
-      expect(modeButton(label).disabled).toBe(true);
-      expect(modeButton(label).title).toBe(
+      const gate = await modeButton(label);
+      expect(gate.disabled).toBe(true);
+      expect(gate.title).toBe(
         "No installed model supports this mode on this platform (macOS/MLX only).",
       );
     }
@@ -1417,7 +1478,7 @@ describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
       "wan_2_2_vace_fun_14b",
     );
     // …and its only mode is unreachable too, so the model cannot be reached the long way round.
-    expect(reachableModeTabs()).not.toContain("Replace person");
+    expect(await reachableModeTabs()).not.toContain("Replace person");
   });
 
   it("engages the sc-5947 download gate when the platform filter empties the catalog", async () => {
@@ -1476,11 +1537,11 @@ describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
     // Same models, same `candleSupport` blocks, gating switch off: nothing is hidden. Without this
     // leg the assertions above would be satisfied by a screen that hid these unconditionally — on a
     // Mac, where every one of them renders.
-    const reachable = reachableModeTabs();
+    const reachable = await reachableModeTabs();
     for (const label of [...STRANDED_TABS, "Text → Video", "Video → Video"]) {
       expect(reachable, `${label} must stay reachable when gating is inert`).toContain(label);
     }
-    await click(modeButton("Replace person"));
+    await selectMode(container, "Replace person");
     expect([...modelSelect().options].map((option) => option.value)).toContain(
       "wan_2_2_vace_fun_14b",
     );
@@ -1576,12 +1637,9 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await act(async () => {});
   }
 
-  const openAdvanced = async () => {
-    const toggle = container.querySelector(".advanced-section-toggle");
-    if (toggle?.getAttribute("aria-expanded") !== "true") {
-      await click(toggle);
-    }
-  };
+  // The quant slot, hardware knobs and prompt enhancement live in the Model & output tab, which
+  // is open by default; the engine-specific blocks live under Sampling › For this model.
+  const openModelTab = () => openSettingsTab(container, "Model");
   const tierPicker = () => container.querySelector("label.quant-tier-picker select");
   const quantizationPicker = () =>
     [...container.querySelectorAll("label")]
@@ -1596,13 +1654,14 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       }),
     );
 
-    // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374) — no disclosure
-    // needs opening. Quality is gone from that row entirely, and on a Bernini (non-SVD) adapter it
-    // is not in Advanced either (sc-15398) — nothing reads the key there.
-    expect(container.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
-    expect(container.querySelector(".settings-bar-row .quality-segment")).toBeNull();
-    await openAdvanced();
+    // Quant tier is an everyday Model & output knob, not a Sampling one (sc-15374) — that tab is
+    // open by default, so nothing needs opening. Quality is not in that panel, and on a Bernini
+    // (non-SVD) adapter it is not under Sampling either (sc-15398) — nothing reads the key there.
+    expect(container.querySelector('.studio-settings-panel[data-panel="model"] label.quant-tier-picker')).toBeTruthy();
+    expect(container.querySelector('.studio-settings-panel[data-panel="model"] .quality-segment')).toBeNull();
+    await openSettingsTab(container, "Sampling");
     expect(container.querySelector(".quality-segment")).toBeNull();
+    await openModelTab();
 
     // All bits-based tiers appear (NVFP4 filtered on MLX); bf16 is declared-but-not-installed → disabled.
     expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
@@ -1620,7 +1679,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       macCapabilities: MAC_CAPS,
     });
     await render(context);
-    await openAdvanced();
+    await openModelTab();
 
     expect(tierPicker()).toBeTruthy();
     expect(tierPicker().value).toBe("q4");
@@ -1679,13 +1738,14 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
     context.createVideoJob.mockClear();
     setSelect(tierPicker(), "bf16");
-    await openAdvanced();
+    await openModelTab();
     expect(
       [...container.querySelectorAll("label")].find((label) =>
         label.textContent.includes("Enhance prompt before generation"),
       ),
     ).toBeFalsy();
     expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
+    await openSettingsTab(container, "Sampling");
     setSelect(container.querySelector('select[aria-label="LTX-2.5 transformer"]'), "dev");
     await act(async () => {});
     await click(buttonWithText(container, "Render clip"));
@@ -1952,7 +2012,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     });
     await render(context);
 
-    await click(buttonWithText(container.querySelector(".mode-control"), "Image → Video"));
+    await selectMode(container, "Image → Video");
     expect(container.querySelector(".settings-field-model select").value).toBe("image_video");
     expect(tierPicker().value).toBe("q4");
     expect(container.textContent).toContain("requires Bernini at Q8");
@@ -2041,7 +2101,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await act(async () => {});
     expect(container.textContent).not.toContain("This recipe was recorded at Q8");
     expect(tierPicker().value).toBe("bf16");
-    const submitCta = container.querySelector(".prompt-cta");
+    const submitCta = container.querySelector(".studio-generate");
     expect(submitCta.disabled).toBe(false);
     await click(submitCta);
     expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({
@@ -2147,7 +2207,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       macCapabilities: MAC_CAPS,
     });
     await render(context);
-    await openAdvanced();
+    await openModelTab();
 
     // The picker shows the bits-based tiers, but NVFP4 is filtered out even though it's installed.
     expect(tierPicker()).toBeTruthy();
@@ -2163,7 +2223,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     const model = tieredVideoModel(["q4", "q8", "bf16"]);
     const context = baseContext({ videoModels: [model], macCapabilities: MAC_CAPS });
     await render(context);
-    await openAdvanced();
+    await openModelTab();
 
     setSelect(tierPicker(), "q8");
     await act(async () => {});
@@ -2176,7 +2236,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await unmountRoot(root, container);
     ({ container, root } = mountRoot());
     await render(baseContext({ videoModels: [model], macCapabilities: MAC_CAPS }));
-    await openAdvanced();
+    await openModelTab();
     expect(tierPicker().value).toBe("q8");
   });
 
@@ -2186,7 +2246,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     });
     const mlxContext = baseContext({ videoModels: [both], macCapabilities: MAC_CAPS });
     await render(mlxContext);
-    await openAdvanced();
+    await openModelTab();
 
     expect(tierPicker()).toBeTruthy();
     expect(quantizationPicker()).toBeNull();
@@ -2200,7 +2260,7 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     ({ container, root } = mountRoot());
     const torchContext = baseContext({ videoModels: [both] });
     await render(torchContext);
-    await openAdvanced();
+    await openModelTab();
 
     expect(tierPicker()).toBeNull();
     expect(quantizationPicker()).toBeTruthy();
@@ -2287,10 +2347,8 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     await act(async () => {});
   }
 
-  // Open the Advanced disclosure where the toggle + steps/guidance live.
-  const openAdvanced = async () => {
-    await click(container.querySelector(".advanced-section-toggle"));
-  };
+  // Lightning, steps and guidance live in the Sampling tab (Lightning under "For this model").
+  const openSampling = () => openSettingsTab(container, "Sampling");
   const lightningLabel = () =>
     [...container.querySelectorAll(".lightning-toggle label")].find((el) =>
       el.textContent.includes("Lightning"),
@@ -2304,7 +2362,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("renders default-on for Wan A14B T2V", async () => {
     const context = baseContext({ videoModels: [WAN_T2V_14B] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const box = lightningCheckbox();
     expect(box).toBeTruthy();
@@ -2314,7 +2372,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("renders default-on for Wan A14B I2V", async () => {
     const context = baseContext({ videoModels: [WAN_I2V_14B] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const box = lightningCheckbox();
     expect(box).toBeTruthy();
@@ -2324,7 +2382,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("is not rendered for the dense Wan 5B", async () => {
     const context = baseContext({ videoModels: [WAN_5B] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     expect(lightningCheckbox()).toBeFalsy();
   });
@@ -2332,7 +2390,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("is not rendered for a non-Wan engine", async () => {
     const context = baseContext({ videoModels: [NON_WAN] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     expect(lightningCheckbox()).toBeFalsy();
   });
@@ -2354,7 +2412,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("sends advanced.lightning = false when the toggle is turned off", async () => {
     const context = baseContext({ videoModels: [WAN_T2V_14B] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     await act(async () => lightningCheckbox().click());
     expect(lightningCheckbox().checked).toBe(false);
@@ -2367,7 +2425,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("keeps experimental guidance editable with Lightning while retaining its step recipe", async () => {
     const context = baseContext({ videoModels: [WAN_T2V_14B] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     // On (default): governed by the recipe.
     expect(labeledInput("Steps").disabled).toBe(true);
@@ -2461,7 +2519,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(ltx23?.recommended).toBe(true);
   });
 
-  it("keeps LTX-2.3 as the default and confines LTX-2.5 execution controls to its Advanced panel", async () => {
+  it("keeps LTX-2.3 as the default and confines LTX-2.5 execution controls to its Sampling panel", async () => {
     const context = baseContext({
       videoModels: [LTX25, DISTILLED_LTX],
       macCapabilities: LTX25_MAC_CAPS,
@@ -2469,7 +2527,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     await render(context);
 
     expect(container.querySelector(".settings-field-model select").value).toBe("ltx_2_3");
-    await openAdvanced();
+    await openSampling();
     expect(container.querySelector('[aria-label="LTX-2.5 VAE decoder"]')).toBeNull();
     expect(container.querySelector('[aria-label="LTX-2.5 auto duration"]')).toBeNull();
     expect(container.querySelector('[aria-label="LTX-2.5 temporal upsampling"]')).toBeNull();
@@ -2478,7 +2536,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("submits LTX-2.5 decoder, duration-head bounds, and temporal upsampling without a manual duration", async () => {
     const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const decoder = container.querySelector('[aria-label="LTX-2.5 VAE decoder"]');
     const autoDuration = container.querySelector('[aria-label="LTX-2.5 auto duration"]');
@@ -2515,9 +2573,10 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("returns LTX-2.5 to an explicit duration when the duration picker changes", async () => {
     const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);
-    await openAdvanced();
+    await openSampling();
     await act(async () => container.querySelector('[aria-label="LTX-2.5 auto duration"]').click());
 
+    await openSettingsTab(container, "Model");
     const durationPicker = container.querySelector(".settings-field-count select");
     await act(async () => setSelect(durationPicker, "8"));
     await click(buttonWithText(container, "Render clip"));
@@ -2530,7 +2589,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("routes the LTX-2.5 dev selector into the request and pins its 30-step row", async () => {
     const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const variant = container.querySelector('select[aria-label="LTX-2.5 transformer"]');
     expect(variant.value).toBe("distilled");
@@ -2570,7 +2629,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("keeps distilled LTX-2.5 sealed while exposing only its stock prompt enhancer", async () => {
     const context = baseContext({ videoModels: [LTX25], macCapabilities: LTX25_MAC_CAPS });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const steps = labeledInput("Steps");
     expect(steps.disabled).toBe(true);
@@ -2584,8 +2643,10 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(labeledInput("Video CFG")).toBeFalsy();
     expect(labeledInput("Video STG")).toBeFalsy();
     expect(labeledInput("Video rescale")).toBeFalsy();
-    expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
 
+    // Prompt enhancement and the text encoder are hardware knobs under Model & output.
+    await openSettingsTab(container, "Model");
+    expect(container.querySelector('select[aria-label="Text encoder model"]')).toBeNull();
     const enhance = [...container.querySelectorAll("label")]
       .find((label) => label.textContent.includes("Enhance prompt before generation"))
       ?.querySelector('input[type="checkbox"]');
@@ -2615,7 +2676,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("pins the Steps control for a model that declares a single legal step count", async () => {
     const context = baseContext({ videoModels: [DISTILLED_LTX] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const steps = labeledInput("Steps");
     expect(steps.disabled).toBe(true);
@@ -2631,7 +2692,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     // other video model, so this is the half that keeps the test above honest.
     const context = baseContext({ videoModels: [NON_WAN] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     expect(labeledInput("Steps").disabled).toBe(false);
   });
@@ -2643,20 +2704,25 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     const unpinned = { ...NON_WAN, id: "wan_2_2", name: "Wan 2.2" };
     const context = baseContext({ videoModels: [unpinned, DISTILLED_LTX] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const modelPicker = () =>
       [...container.querySelectorAll("label")]
         .find((el) => el.textContent.trim().startsWith("Model"))
         ?.querySelector("select");
 
+    // The model picker is under Model & output, Steps under Sampling.
+    await openSettingsTab(container, "Model");
     await act(async () => setSelect(modelPicker(), "wan_2_2"));
+    await openSampling();
     expect(labeledInput("Steps").disabled).toBe(false);
     await act(async () => setInput(labeledInput("Steps"), "30"));
     expect(labeledInput("Steps").value).toBe("30");
 
     // Switch to the distilled model: the control pins and the stale 30 must not reach the payload.
+    await openSettingsTab(container, "Model");
     await act(async () => setSelect(modelPicker(), "ltx_2_3"));
+    await openSampling();
     expect(labeledInput("Steps").disabled).toBe(true);
 
     await click(buttonWithText(container, "Render clip"));
@@ -2689,7 +2755,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   it("offers a menu-shaped Steps picker for a model declaring more than one legal count", async () => {
     const context = baseContext({ videoModels: [MENU_LTX] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     // A free-text box here would be the "UI looser than the gate" desync. It must be a picker.
     expect(labeledInput("Steps")).toBeNull();
@@ -2711,18 +2777,23 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     const unmenued = { ...NON_WAN, id: "wan_2_2", name: "Wan 2.2" };
     const context = baseContext({ videoModels: [unmenued, MENU_LTX] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
 
     const modelPicker = () =>
       [...container.querySelectorAll("label")]
         .find((el) => el.textContent.trim().startsWith("Model"))
         ?.querySelector("select");
 
+    // The model picker is under Model & output, Steps under Sampling.
+    await openSettingsTab(container, "Model");
     await act(async () => setSelect(modelPicker(), "wan_2_2"));
+    await openSampling();
     await act(async () => setInput(labeledInput("Steps"), "30"));
     expect(labeledInput("Steps").value).toBe("30");
 
+    await openSettingsTab(container, "Model");
     await act(async () => setSelect(modelPicker(), "ltx_menu"));
+    await openSampling();
     // The stale 30 is off this model's menu, so the picker falls back to the cleared entry rather
     // than to the menu's first option — which is what a `<select>` with an unmatched value shows,
     // and would silently assert `limits.steps[0]` is the default.
@@ -2813,7 +2884,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
         ],
       }),
     );
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
 
     expect(enhanceCheckbox()).toBeTruthy();
     expect(encoderSelect()).toBeTruthy();
@@ -2825,7 +2896,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
     await unmountRoot(root, container);
     ({ container, root } = mountRoot());
     await render(baseContext({ videoModels: [{ ...LTX, adapter: "ltx_video" }] }));
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
     expect(encoderSelect()).toBeNull();
   });
 
@@ -2851,7 +2922,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
     };
     const context = baseContext({ videoModels: [futureModel] });
     await render(context);
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
 
     expect(encoderSelect().value).toBe("future_bundled");
     await click(enhanceCheckbox());
@@ -2878,7 +2949,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
       ],
     };
     await render(baseContext({ videoModels: [LTX_WITH_ENCODERS, futureModel] }));
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
     await click(enhanceCheckbox());
     await act(async () => setSelect(encoderSelect(), AMORAL_ENCODER.id));
 
@@ -2909,13 +2980,17 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
       }),
     );
 
+    // Style presets are under Style & look; the encoder knobs under Model & output.
+    await openSettingsTab(container, "Style");
     await click(buttonWithText(container, "Amoral prompt"));
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
     expect(enhanceCheckbox().checked).toBe(true);
     expect(encoderSelect().value).toBe(AMORAL_ENCODER.id);
 
+    await openSettingsTab(container, "Style");
     const presetAxis = container.querySelector(".style-axis-presets");
     await click(buttonWithText(presetAxis, "None"));
+    await openSettingsTab(container, "Model");
     expect(enhanceCheckbox().checked).toBe(false);
     expect(encoderSelect().value).toBe(DEFAULT_ENCODER.id);
   });
@@ -2923,7 +2998,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
   it("emits the exact non-default selector with prompt enhancement, never the legacy boolean", async () => {
     const context = baseContext({ videoModels: [LTX_WITH_ENCODERS] });
     await render(context);
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
 
     expect(encoderSelect().disabled).toBe(true);
     await click(enhanceCheckbox());
@@ -2950,7 +3025,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
   it("keeps the shipped encoder as the omission-based default", async () => {
     const context = baseContext({ videoModels: [LTX_WITH_ENCODERS] });
     await render(context);
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
     await click(enhanceCheckbox());
     await click(buttonWithText(container, "Render clip"));
 
@@ -2978,7 +3053,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
       },
     });
     await render(context);
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
 
     expect(enhanceCheckbox().checked).toBe(true);
     expect(encoderSelect().value).toBe(AMORAL_ENCODER.id);
@@ -3008,7 +3083,7 @@ describe("VideoStudio runtime text-encoder selector (sc-13800)", () => {
       },
     });
     await render(context);
-    await openAdvanced(container);
+    await openSettingsTab(container, "Model");
 
     expect(encoderSelect().value).toBe(AMORAL_ENCODER.id);
     await click(buttonWithText(container, "Render clip"));
@@ -3169,20 +3244,15 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     await act(async () => {});
   }
 
-  const modeButton = (label) => buttonWithText(container.querySelector(".mode-control"), label);
+  const modeButton = (label) => modeTab(container, label);
   const labelStartingWith = (text) =>
     [...container.querySelectorAll("label")].find((el) => el.textContent.trim().startsWith(text));
   const selectLabelled = (text) => labelStartingWith(text)?.querySelector("select");
   const optionValues = (select) => [...select.options].map((option) => option.value);
   const clipStrengthInput = () => labelStartingWith("Clip strength")?.querySelector("input");
-  // The disclosure's open state survives a re-render into the same root, so a blind toggle would
-  // CLOSE it on the second model of a two-model discriminator test. Open only when it is shut.
-  const ensureAdvancedOpen = async () => {
-    const toggle = container.querySelector(".advanced-section-toggle");
-    if (toggle && toggle.getAttribute("aria-expanded") !== "true") {
-      await click(toggle);
-    }
-  };
+  // Guidance, negative prompt, steps and clip strength live in the Sampling tab. A second click on
+  // the open tab closes it, so open only when it is not already the open one.
+  const openSampling = () => openSettingsTab(container, "Sampling");
 
   it("keeps the fixture identical to the shipped krea_realtime_14b manifest entry", () => {
     const manifestPath = resolve(
@@ -3227,6 +3297,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     };
     const loraPicker = () => container.querySelector(".lora-picker");
     const openPicker = async () => {
+      await openSettingsTab(container, "LoRAs");
       const add = loraPicker().querySelector(".lora-add");
       await act(async () => add.click());
     };
@@ -3270,7 +3341,9 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
 
     // Mode tabs are gated at the MODE level under Mac gating, so a tab is enabled exactly when
     // some available model serves it. With Krea the only model, that is exactly its capabilities.
-    const enabled = ALL_VIDEO_MODES.filter((value) => {
+    // A tab is reachable through its group switch; a group with no served mode is disabled.
+    const enabled = [];
+    for (const value of ALL_VIDEO_MODES) {
       const label = {
         text_to_video: "Text → Video",
         image_to_video: "Image → Video",
@@ -3285,15 +3358,18 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
         ads2v: "Clip + Ref Video",
         animate_character: "Animate character",
       }[value];
-      return !modeButton(label).disabled;
-    });
+      const group = modeGroupButton(container, VIDEO_MODE_GROUP[label]);
+      if (group.disabled) continue;
+      if (group.getAttribute("aria-pressed") !== "true") await click(group);
+      if (!modeButton(label).disabled) enabled.push(value);
+    }
     expect(enabled.sort()).toEqual([...KREA_CAPABILITIES].sort());
   });
 
   it("surfaces the manifest's own duration / fps / resolution / steps, not the screen's fallbacks", async () => {
     await render(baseContext({ videoModels: [KREA], macCapabilities: MAC_CAPS }));
-    await ensureAdvancedOpen();
 
+    // Duration, frame rate and resolution are under Model & output (open by default).
     const durations = selectLabelled("Duration");
     // `limits.durations[0]` is 2 and the DEFAULT is 4 — asserting the selected value is 4 is
     // therefore a real discriminator, not the "first entry is the default" tautology.
@@ -3314,7 +3390,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(optionValues(resolutions)).toEqual(["832x480", "480x832", "1280x720", "720x1280"]);
     expect(resolutions.value).toBe("832x480");
 
-    // The Advanced steps control reflects the model's own few-step recipe as its placeholder.
+    // The Sampling steps control reflects the model's own few-step recipe as its placeholder.
+    await openSampling();
     const steps = labelStartingWith("Steps").querySelector("input");
     expect(steps.placeholder).toBe("6");
     expect(steps.disabled).toBe(false);
@@ -3322,13 +3399,13 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
 
   it("shows no Lightning toggle for Krea while still showing it for a Wan A14B engine", async () => {
     await render(baseContext({ videoModels: [KREA], macCapabilities: MAC_CAPS }));
-    await ensureAdvancedOpen();
+    await openSampling();
     expect(container.textContent).not.toContain("Lightning");
 
     // Same screen, same disclosure, a model that DOES carry the toggle — so the assertion above
     // cannot be passing merely because the control was removed or renamed.
     await render(baseContext({ videoModels: [WAN_A14B] }));
-    await ensureAdvancedOpen();
+    await openSampling();
     expect(container.textContent).toContain("Lightning");
   });
 
@@ -3340,8 +3417,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
       selectedAsset: clip,
     });
     await render(context);
-    await click(modeButton("Video → Video"));
-    await ensureAdvancedOpen();
+    await selectMode(container, "Video → Video");
+    await openSampling();
 
     const strength = clipStrengthInput();
     expect(strength, "Krea v2v must expose the clip strength the worker reads").toBeTruthy();
@@ -3356,8 +3433,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
   it("hides the clip strength on a v2v model whose worker route ignores it", async () => {
     const context = baseContext({ videoModels: [BERNINI_V2V], assets: [clip], selectedAsset: clip });
     await render(context);
-    await click(modeButton("Video → Video"));
-    await ensureAdvancedOpen();
+    await selectMode(container, "Video → Video");
+    await openSampling();
 
     // Same mode, different engine: Bernini's v2v never reads `videoConditioningStrength`, so the
     // control must not appear — the gate is the adapter, not the tab.
@@ -3375,8 +3452,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
       selectedAsset: still,
     });
     await render(context);
-    await click(modeButton("Image → Video"));
-    await ensureAdvancedOpen();
+    await selectMode(container, "Image → Video");
+    await openSampling();
 
     // The i2v reference still only warms the AR KV cache — the engine reads the image and never
     // `strength`. Offering the knob here would be a control that silently does nothing.
@@ -3406,7 +3483,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(gate, "an empty video picker must render the availability gate").toBeTruthy();
     expect(gate.textContent).toContain("Video Studio needs a video model");
     // The studio body is replaced, not merely annotated.
-    expect(container.querySelector(".mode-control")).toBeFalsy();
+    expect(container.querySelector(".video-mode-picker")).toBeFalsy();
 
     // Krea is offered specifically — `videoModelUsable` accepts it (video type, Mac-supported,
     // serves >=1 mode), so the gate names it rather than falling back to "nothing supports this".
@@ -3428,7 +3505,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
   it("hides Guidance and Negative prompt for a CFG-free engine and sends neither", async () => {
     const context = baseContext({ videoModels: [BERNINI_V2V, KREA] });
     await render(context);
-    await ensureAdvancedOpen();
+    await openSampling();
 
     // On the guidance-taking model first: set both, so the state is genuinely non-empty.
     await act(async () => setInput(labelStartingWith("Guidance").querySelector("input"), "7.5"));
@@ -3439,9 +3516,10 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
       negative.dispatchEvent(new window.Event("input", { bubbles: true }));
     });
 
-    // Switch to the CFG-free engine. Both controls go away…
+    // Switch to the CFG-free engine (the model picker is under Model & output). Both controls go away…
+    await openSettingsTab(container, "Model");
     await act(async () => setSelect(selectLabelled("Model"), "krea_realtime_14b"));
-    await ensureAdvancedOpen();
+    await openSampling();
     expect(labelStartingWith("Guidance")).toBeFalsy();
     expect(labelStartingWith("Negative prompt")).toBeFalsy();
 
@@ -3464,7 +3542,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
   it("keeps Guidance and Negative prompt for a model that declares no video axes", async () => {
     const context = baseContext({ videoModels: [BERNINI_V2V] });
     await render(context);
-    await ensureAdvancedOpen();
+    await openSampling();
 
     const guidance = labelStartingWith("Guidance")?.querySelector("input");
     expect(guidance).toBeTruthy();
@@ -3534,7 +3612,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
 
     const context = baseContext({ videoModels: [SVD] });
     await render(context);
-    await ensureAdvancedOpen();
+    await openSampling();
     expect(labelStartingWith("Guidance")).toBeFalsy();
     expect(labelStartingWith("Negative prompt")).toBeFalsy();
   });
@@ -3555,6 +3633,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     const context = baseContext({ videoModels: [BERNINI_V2V, KREA], presets: [stackPreset] });
     await render(context);
 
+    // The general stack and its preview are under Style & look.
+    await openSettingsTab(container, "Style");
     const chip = [...container.querySelectorAll(".general-preset-chips .preset-chip")].find(
       (el) => el.textContent.trim() === "Film Look",
     );
@@ -3570,7 +3650,9 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
 
     // Same stack, CFG-free engine: the composed PROMPT is still shown (it is still sent), but the
     // Negative line is gone — because the payload no longer carries it.
+    await openSettingsTab(container, "Model");
     await act(async () => setSelect(selectLabelled("Model"), "krea_realtime_14b"));
+    await openSettingsTab(container, "Style");
     preview = container.querySelector(".preset-stack-preview");
     expect(preview.textContent).toContain("Kodak Portra 400");
     expect(preview.textContent).not.toContain("Negative:");
@@ -3592,14 +3674,14 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     // text_to_video — the default tab, no conditioning media.
     await click(buttonWithText(container, "Render clip"));
 
-    await click(modeButton("Image → Video"));
+    await selectMode(container, "Image → Video");
     await click(buttonWithText(container, "Select image"));
     let modal = document.querySelector(".asset-picker-modal");
     await click([...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Opening Still")));
     await click(buttonWithText(modal, "Use Selection"));
     await click(buttonWithText(container, "Render clip"));
 
-    await click(modeButton("Video → Video"));
+    await selectMode(container, "Video → Video");
     await click(buttonWithText(container, "Select clip"));
     modal = document.querySelector(".asset-picker-modal");
     await click([...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Source Clip")));
@@ -3611,5 +3693,139 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     for (const [payload] of context.createVideoJob.mock.calls) {
       expect(payload.model).toBe("krea_realtime_14b");
     }
+  });
+});
+
+// Studio layout simplification: the compose panel is a mode picker (group switch + underline
+// tabs), the prompt box with its tools and submit in the footer, the inputs, then the settings
+// tab strip; the results area switches between the latest batch and the video upscaler.
+describe("VideoStudio compose layout", () => {
+  let container;
+  let root;
+
+  const clip = { id: "vid_src", type: "video", projectId: "project_1", displayName: "Source Clip" };
+  const EXTEND_MODEL = { ...LTX, id: "extend_video", name: "Extend Video", capabilities: ["text_to_video", "extend_clip", "video_bridge"] };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  it("shows only the selected group's modes and lands on the group's first mode", async () => {
+    await render(baseContext({ videoModels: [EXTEND_MODEL] }));
+
+    expect(modeGroupButton(container, "Create").getAttribute("aria-pressed")).toBe("true");
+    expect([...container.querySelectorAll('.studio-mode-tabs [role="tab"]')].map((tab) => tab.textContent)).toEqual([
+      "Text → Video",
+      "Image → Video",
+      "First → Last",
+      "Reference → Video",
+    ]);
+
+    await click(modeGroupButton(container, "From video"));
+    expect(modeGroupButton(container, "From video").getAttribute("aria-pressed")).toBe("true");
+    expect(modeTab(container, "Extend").getAttribute("aria-selected")).toBe("true");
+    expect(modeTab(container, "Bridge")).toBeTruthy();
+    expect(modeTab(container, "Text → Video")).toBeUndefined();
+
+    // Picking the group that already holds the mode keeps it.
+    await click(modeTab(container, "Bridge"));
+    await click(modeGroupButton(container, "From video"));
+    expect(modeTab(container, "Bridge").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("puts Refine, Motion and the shortcut-labelled submit in the prompt box footer", async () => {
+    const context = baseContext();
+    await render(context);
+
+    const foot = container.querySelector(".studio-prompt-box .studio-prompt-box-foot");
+    const submit = foot.querySelector("button.studio-generate");
+    expect(submit.type).toBe("submit");
+    // The shortcut follows the platform: ⌘ ↵ / Meta+Enter on a Mac, Ctrl ↵ / Control+Enter elsewhere.
+    expect([["⌘ ↵", "Meta+Enter"], ["Ctrl ↵", "Control+Enter"]]).toContainEqual([
+      submit.querySelector('.kbd[aria-hidden="true"]').textContent,
+      submit.getAttribute("aria-keyshortcuts"),
+    ]);
+    expect(buttonLabel(submit)).toBe("Render clip");
+
+    // Refine is a toggle that opens the existing Refine my prompt block as an inline card.
+    const refine = foot.querySelector("button.studio-prompt-tool");
+    expect(refine.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector(".video-refine-card").hidden).toBe(true);
+    await click(refine);
+    expect(refine.getAttribute("aria-pressed")).toBe("true");
+    const card = container.querySelector(".video-refine-card");
+    expect(card.hidden).toBe(false);
+    expect(buttonWithText(card, "Refine my prompt")).toBeTruthy();
+
+    // Motion is a compact select over the same values the chip row wrote, into the same field.
+    const motion = foot.querySelector('select[aria-label="Motion"]');
+    expect([...motion.options].map((option) => option.value)).toEqual([
+      "static", "slow push-in", "pull out", "pan left", "pan right", "tilt up", "tilt down", "handheld",
+    ]);
+    expect(motion.value).toBe("slow push-in");
+    await act(async () => setSelect(motion, "pan left"));
+    await click(submit);
+    expect(context.createVideoJob.mock.calls[0][0].advanced.motion).toBe("pan left");
+  });
+
+  it("summarizes each settings tab and keeps one panel open at a time", async () => {
+    await render(baseContext());
+    const tab = (id) => container.querySelector(`.studio-settings-tablist [data-tab="${id}"]`);
+
+    expect(tab("model").getAttribute("aria-selected")).toBe("true");
+    expect(tab("model").textContent).toContain("LTX 2.3 · 512p · 6 s");
+    expect(tab("loras").textContent).toContain("No character · No LoRAs");
+    expect(tab("sampling").textContent).toContain("Model defaults");
+    expect(container.querySelectorAll('[role="tabpanel"].studio-settings-panel')).toHaveLength(1);
+    // Frames and GPU moved out of Advanced into Model & output.
+    const modelLabels = [...container.querySelectorAll('.studio-settings-panel[data-panel="model"] label')].map(
+      (label) => label.childNodes[0]?.textContent.trim(),
+    );
+    expect(modelLabels).toEqual(expect.arrayContaining(["Resolution", "Duration", "Frames", "GPU"]));
+
+    await click(tab("sampling"));
+    expect(container.querySelector('.studio-settings-panel[data-panel="sampling"]').textContent).toContain("Seed");
+    expect(container.querySelector('.studio-settings-panel[data-panel="model"]')).toBeNull();
+  });
+
+  it("switches the results area to the upscaler without submitting the compose form", async () => {
+    const createVideoUpscaleJob = vi.fn(async () => ({ id: "upscale-1" }));
+    const context = baseContext({ assets: [clip], selectedAsset: clip, createVideoUpscaleJob });
+    await render(context);
+
+    const view = (label) => [...container.querySelectorAll('.video-results-switch [role="tab"]')].find((node) => node.textContent === label);
+    expect(view("Latest batch").getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector(".review-panel")).toBeTruthy();
+    expect(container.querySelector('[data-testid="video-upscale-panel"]')).toBeNull();
+
+    await click(view("Upscale video"));
+    const upscale = container.querySelector('[data-testid="video-upscale-panel"]');
+    expect(upscale).toBeTruthy();
+    expect(container.querySelector(".review-panel")).toBeNull();
+    // The upscaler left the settings: no tab panel holds it.
+    expect(upscale.closest(".studio-settings-panel")).toBeNull();
+
+    await click(buttonWithText(upscale, "4×"));
+    await click(buttonWithText(upscale, "Upscale clip"));
+    expect(createVideoUpscaleJob).toHaveBeenCalledWith(expect.objectContaining({ sourceAssetId: "vid_src", factor: 4 }));
+    expect(context.createVideoJob).not.toHaveBeenCalled();
   });
 });

@@ -35,7 +35,7 @@ pub(super) fn sensenova_candle_calibration_fingerprint(
 ) -> String {
     format!(
         "sensenova-u1-{}-{tier}-candle-request-memory-ladder-v1",
-        runtime_cuda::providers::sensenova::memory_strategy::route_label(arm.model_id)
+        runtime_cuda::calibration::sensenova::memory_strategy::route_label(arm.model_id)
             .expect("registered SenseNova route")
     )
 }

@@ -58,6 +58,8 @@ use super::load_spec::attach_selected_decoder;
 use super::load_spec::load_spec;
 #[cfg(target_os = "macos")]
 use super::memory::downtier_candidate_tiers;
+#[cfg(target_os = "macos")]
+use super::memory::shared_image_reference_count;
 #[cfg(all(test, target_os = "macos"))]
 use super::memory::TierFit;
 #[cfg(target_os = "macos")]
@@ -89,17 +91,17 @@ use super::quantization::tier_key_from_resolved_dir;
 #[cfg(target_os = "macos")]
 use super::quantization::tier_quant_from_resolved_dir;
 #[cfg(target_os = "macos")]
-use super::render::generate_one_with_hires_on_surface;
+use super::render::generate_one_on_surface;
 #[cfg(target_os = "macos")]
-use super::render::hires_fix_reference_count;
-#[cfg(target_os = "macos")]
-use super::render::lane_reference_count;
+use super::render::render_hires_multi_pass_on_surface;
 #[cfg(target_os = "macos")]
 use super::render::render_on_surface;
 #[cfg(target_os = "macos")]
-use super::render::resolve_hires_fix_plan;
+use super::render::HiresRefinement;
 #[cfg(target_os = "macos")]
 use super::render::LaneRgbaSurface;
+#[cfg(target_os = "macos")]
+use super::render::PreparedRender;
 #[cfg(target_os = "macos")]
 use super::resolve_seed;
 #[cfg(target_os = "macos")]
@@ -507,7 +509,7 @@ pub(super) async fn generate_stream_using(
     // present, otherwise the true-CFG family scale (Chroma). `None` for the guidance-scalar and
     // distilled families, which carry CFG (if any) through `guidance` instead.
     let true_cfg = flux_true_cfg.or(model_true_cfg);
-    let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
+    let hires_fix = HiresRefinement::from_request(request, steps, guidance, true_cfg);
 
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is
     // out-of-distribution and stochastically renders the "Image blocked by safety filter"
@@ -556,10 +558,11 @@ pub(super) async fn generate_stream_using(
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
     // Admission describes the heaviest pass. Hires fix renders the first pass at `width`/`height`
-    // and the refinement at the plan dimensions, so every memory fit and request scope must use the
-    // latter. `generate_one_with_hires` derives a base-pass scope from this final-pass identity.
+    // and the refinement at the refinement target dimensions, so every memory fit and request scope
+    // must use the latter. `render_hires_multi_pass_on_surface` derives a base-pass scope from this
+    // final-pass identity.
     let (memory_width, memory_height) =
-        hires_fix.map_or((width, height), |plan| (plan.width, plan.height));
+        hires_fix.map_or((width, height), |hires| (hires.width(), hires.height()));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
     let calibration_opt_in = request
@@ -653,15 +656,12 @@ pub(super) async fn generate_stream_using(
         // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
         // through to legacy shaping; only a manifest with no relevant BTR entry uses that unchanged
         // path. The tier is the resolved artifact tier, not the load-time quant field on the spec.
-        let declaration_reference_count = if hires_fix.is_some() {
-            hires_fix_reference_count()
-        } else {
-            lane_reference_count(
-                identity_init.is_some(),
-                edit_refs.len().max(flux3_reference_count),
-                ideogram_edit_mask.is_some(),
-            )
-        };
+        let declaration_reference_count = shared_image_reference_count(
+            edit_refs.len().max(flux3_reference_count),
+            identity_init.is_some(),
+            ideogram_edit_mask.is_some(),
+            hires_fix.is_some(),
+        );
         let reference_memory_mode = if flux3_references.is_some() {
             "edit_image"
         } else {
@@ -734,7 +734,7 @@ pub(super) async fn generate_stream_using(
         // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
         // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
         // first hires pass renders at the base size with the caller's own conditioning and gets its own
-        // request-scope identity inside `generate_one_with_hires`.
+        // request-scope identity inside `render_hires_multi_pass_on_surface`.
         let reference_count = declaration_reference_count;
         let mut memory_overlays = Vec::new();
         if has_request_reference {
@@ -802,7 +802,7 @@ pub(super) async fn generate_stream_using(
                 width,
                 height,
                 steps,
-                hires_fix.map(|hires| (hires.width, hires.height, hires.steps)),
+                hires_fix.map(|hires| (hires.width(), hires.height(), hires.steps)),
                 native_batch_images,
                 model.descriptor.capabilities.pag.as_ref(),
                 lane_controls.pag.as_ref(),
@@ -854,8 +854,8 @@ pub(super) async fn generate_stream_using(
                         width,
                         height,
                         steps,
-                        hires.width,
-                        hires.height,
+                        hires.width(),
+                        hires.height(),
                         hires.steps,
                         native_batch_images,
                         &pass0_reference_canvases,
@@ -1114,7 +1114,7 @@ pub(super) async fn generate_stream_using(
                 multi_reference_alpha: &planning_edit_ref_alpha,
                 flux3_references: planning_flux3_references.as_ref(),
                 flux3_layout: planning_flux3_layout.as_ref(),
-                // The Hires.fix first pass always decodes RGB (`generate_one_with_hires_on_surface`).
+                // The Hires.fix first pass always decodes RGB (`render_hires_multi_pass_on_surface`).
                 output_channels: if hires_fix.is_some() {
                     gen_core::OutputChannels::Rgb
                 } else {
@@ -1176,30 +1176,16 @@ pub(super) async fn generate_stream_using(
                             None,
                         );
                     };
-                    // The refinement pass through the builder `generate_one_with_hires_on_surface`
-                    // runs, minus the reference the plan binds from the first pass.
-                    let refine = super::render::build_hires_refinement_request(
-                        item_prompt,
-                        seed,
-                        &hires,
-                        planning_negative.clone(),
-                        None,
-                        planning_sampler.as_deref(),
-                        planning_scheduler.as_deref(),
-                        scheduler_shift,
-                        planning_guidance_method.as_deref(),
-                        text_style_gain,
+                    // The refinement pass through the shared `HiresRefinement::refinement_request`
+                    // builder, minus the reference the multi-pass plan binds from pass 0.
+                    let refine = hires.refinement_request(
+                        &candidate,
+                        rgba_output_channels,
                         None,
                         &planning_enhance,
                         gen_core::PromptEnhancementSink::default(),
-                        gen_core::PreviewSink::default(),
-                        &LaneRgbaSurface {
-                            output_channels: rgba_output_channels,
-                            controls: planning_lane_controls.clone(),
-                            ..Default::default()
-                        },
-                        planning_cancel,
-                    )?;
+                        None,
+                    );
                     super::render::compile_prepared_render(
                         crate::inference_runtime::media(),
                         engine_id,
@@ -1300,6 +1286,7 @@ pub(super) async fn generate_stream_using(
                             .process_limit_bytes
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let adapter_apply_reports = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
                         let pag_report = std::cell::RefCell::new(None);
@@ -1335,16 +1322,14 @@ pub(super) async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
+                                adapter_apply_reports: Some(&adapter_apply_reports),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
                                 low_res_start_report: Some(&low_res_start_report),
                                 source_image: None,
                                 prompt_batch: Some(batch),
-                                render_plan: render_plans
-                                    .first()
-                                    .and_then(|plans| plans.pass.as_ref()),
-                                hires_render_plan: None,
+                                render_plan: render_plans.first().and_then(PreparedRender::pass),
                             },
                             &cancel,
                             on_progress,
@@ -1352,7 +1337,7 @@ pub(super) async fn generate_stream_using(
                         let mut facts = lane_controls::image_facts(
                             &warnings.take(),
                             &adapter_identities,
-                            &generator.adapter_apply_reports(),
+                            &adapter_apply_reports.take(),
                             crate::execution_planner::prefix_kv_cache_record(
                                 memory_evaluation.prefix_kv_cache,
                                 prefix_kv_cache_report.take().as_ref(),
@@ -1409,62 +1394,98 @@ pub(super) async fn generate_stream_using(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                     let warnings = std::cell::RefCell::new(Vec::new());
+                    let adapter_apply_reports = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
                     let pag_report = std::cell::RefCell::new(None);
                     let low_res_start_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                        generate_one_with_hires_on_surface(
-                            generator,
-                            &prompt,
-                            width,
-                            height,
-                            seed,
-                            steps,
-                            guidance,
-                            negative_prompt.clone(),
-                            identity_init.as_ref(),
-                            &edit_refs,
-                            ideogram_edit_mask.as_ref(),
-                            true_cfg,
-                            sampler.as_deref(),
-                            scheduler.as_deref(),
-                            scheduler_shift,
-                            guidance_method.as_deref(),
-                            use_pid,
-                            text_style_gain,
-                            Some(memory_evaluation.memory),
-                            Some(memory_evaluation.memory),
-                            Some(&memory_evaluation.context),
-                            None,
-                            &enhance,
-                            hires_fix,
-                            preview.clone(),
-                            prompt_enhancement.for_prompt(&prompt),
-                            &LaneRgbaSurface {
-                                multi_reference_alpha: &edit_ref_alpha,
-                                flux3_references: flux3_references.as_ref(),
-                                flux3_layout: flux3_layout.as_ref(),
-                                output_channels: rgba_output_channels,
-                                controls: lane_controls.clone(),
-                                warnings: Some(&warnings),
-                                prefix_kv_cache: Some(&prefix_kv_cache_report),
-                                execution_report: Some(&execution_report),
-                                pag_report: Some(&pag_report),
-                                low_res_start_report: Some(&low_res_start_report),
-                                source_image: flux_source_image.as_ref(),
-                                prompt_batch: None,
-                                render_plan: render_plans
-                                    .get(index)
-                                    .and_then(|plans| plans.pass.as_ref()),
-                                hires_render_plan: render_plans
-                                    .get(index)
-                                    .and_then(|plans| plans.hires.as_ref()),
-                            },
-                            &cancel,
-                            on_progress,
-                        )
+                        let surface = LaneRgbaSurface {
+                            multi_reference_alpha: &edit_ref_alpha,
+                            flux3_references: flux3_references.as_ref(),
+                            flux3_layout: flux3_layout.as_ref(),
+                            output_channels: rgba_output_channels,
+                            controls: lane_controls.clone(),
+                            warnings: Some(&warnings),
+                            adapter_apply_reports: Some(&adapter_apply_reports),
+                            prefix_kv_cache: Some(&prefix_kv_cache_report),
+                            execution_report: Some(&execution_report),
+                            pag_report: Some(&pag_report),
+                            low_res_start_report: Some(&low_res_start_report),
+                            source_image: flux_source_image.as_ref(),
+                            prompt_batch: None,
+                            render_plan: render_plans.get(index).and_then(PreparedRender::pass),
+                        };
+                        if let Some(hires) = hires_fix {
+                            let base_request = super::render::build_render_request(
+                                &prompt,
+                                width,
+                                height,
+                                seed,
+                                steps,
+                                guidance,
+                                negative_prompt.clone(),
+                                identity_init.as_ref(),
+                                &edit_refs,
+                                ideogram_edit_mask.as_ref(),
+                                true_cfg,
+                                sampler.as_deref(),
+                                scheduler.as_deref(),
+                                scheduler_shift,
+                                guidance_method.as_deref(),
+                                use_pid,
+                                text_style_gain,
+                                Some(memory_evaluation.memory),
+                                &PromptEnhance::default(),
+                                gen_core::PromptEnhancementSink::default(),
+                                preview.clone(),
+                                &surface,
+                                &cancel,
+                            )?;
+                            render_hires_multi_pass_on_surface(
+                                generator,
+                                base_request,
+                                &hires,
+                                render_plans.get(index).and_then(PreparedRender::multi_pass),
+                                Some(memory_evaluation.memory),
+                                None,
+                                Some(&memory_evaluation.context),
+                                &enhance,
+                                prompt_enhancement.for_prompt(&prompt),
+                                &surface,
+                                on_progress,
+                            )
+                        } else {
+                            generate_one_on_surface(
+                                generator,
+                                &prompt,
+                                width,
+                                height,
+                                seed,
+                                steps,
+                                guidance,
+                                negative_prompt.clone(),
+                                identity_init.as_ref(),
+                                &edit_refs,
+                                ideogram_edit_mask.as_ref(),
+                                true_cfg,
+                                sampler.as_deref(),
+                                scheduler.as_deref(),
+                                scheduler_shift,
+                                guidance_method.as_deref(),
+                                use_pid,
+                                text_style_gain,
+                                Some(memory_evaluation.memory),
+                                Some(&memory_evaluation.context),
+                                &enhance,
+                                prompt_enhancement.for_prompt(&prompt),
+                                preview.clone(),
+                                &surface,
+                                &cancel,
+                                on_progress,
+                            )
+                        }
                     };
                     // Detect-and-recover safety net (sc-6501): the caption guard makes the placeholder
                     // rare, but a residual one can still occur even with a caption. Detect it via the
@@ -1503,7 +1524,7 @@ pub(super) async fn generate_stream_using(
                     let mut facts = lane_controls::image_facts(
                         &warnings.take(),
                         &adapter_identities,
-                        &generator.adapter_apply_reports(),
+                        &adapter_apply_reports.take(),
                         crate::execution_planner::prefix_kv_cache_record(
                             memory_evaluation.prefix_kv_cache,
                             prefix_kv_cache_report.take().as_ref(),

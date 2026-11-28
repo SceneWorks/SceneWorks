@@ -11,7 +11,7 @@ pub(super) fn validate_minimax_candle_geometry(
     height: u32,
     frames: u32,
 ) -> Result<(), String> {
-    let lattice = runtime_cuda::providers::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS;
+    let lattice = runtime_cuda::calibration::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS;
     let frames_usize =
         usize::try_from(frames).map_err(|_| "MiniMax-H3 frame count must fit usize".to_owned())?;
     if !lattice.contains(&frames_usize) {
@@ -20,14 +20,14 @@ pub(super) fn validate_minimax_candle_geometry(
              {frames}"
         ));
     }
-    let stride = runtime_cuda::providers::minimax_h3::pipeline::SPATIAL_STRIDE;
+    let stride = runtime_cuda::calibration::minimax_h3::pipeline::SPATIAL_STRIDE;
     if !width.is_multiple_of(stride) || !height.is_multiple_of(stride) {
         return Err(format!(
             "Candle MiniMax-H3 requires geometry divisible by the {stride}px stride, got \
              {width}x{height}"
         ));
     }
-    let budget = runtime_cuda::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
+    let budget = runtime_cuda::calibration::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
     let pixels = width.saturating_mul(height);
     if pixels > budget {
         return Err(format!(
@@ -44,8 +44,8 @@ pub(super) fn validate_minimax_candle_geometry(
 /// The direction is the opposite of what the repository names suggest, and it is the worker's:
 /// `resolve_candle_minimax_h3_load` makes `MiniMaxAI/MiniMax-H3` the load ROOT on every tier — it is
 /// the only tree carrying `vae/`, `audio_vae/`, `tokenizer/` and the `FL2VA/` documents — and stages
-/// `transformer/` and `text_encoder/` out of `SceneWorks/minimax-h3-mlx/<tier>` when the tier is
-/// packed. `bf16` on the BASE entry stages neither, because the dense partitions live in the
+/// `transformer/` and `text_encoder/` out of `SceneWorks/minimax-h3-candle/<tier>` (the GGML tiers)
+/// when the tier is packed. `bf16` on the BASE entry stages neither, because the dense partitions live in the
 /// upstream root already; `minimax_h3_ref` stages the tier tree at every tier, because the reference
 /// partition is only published in the rehost.
 ///
@@ -88,7 +88,13 @@ pub(super) fn minimax_candle_load_plan(
     let staged = if quant.is_some() || is_reference {
         let repository = protocol::required_env("SCENEWORKS_MINIMAX_H3_REPOSITORY")?;
         let revision = protocol::required_env("SCENEWORKS_MINIMAX_H3_REVISION")?;
-        protocol::validate_artifact_identity(&repository, &revision, protocol::MINIMAX_REPOSITORY)?;
+        // q4/q8 bind the Candle-native GGML tiers; only the dense reference tier binds the MLX rehost.
+        let expected_repository = if quant.is_some() {
+            protocol::MINIMAX_CANDLE_REPOSITORY
+        } else {
+            protocol::MINIMAX_REPOSITORY
+        };
+        protocol::validate_artifact_identity(&repository, &revision, expected_repository)?;
         let tier_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
             "SCENEWORKS_MINIMAX_H3_ROOT",
         )?))
@@ -98,7 +104,7 @@ pub(super) fn minimax_candle_load_plan(
             &repository,
             &revision,
             &target.tier,
-            protocol::MINIMAX_REPOSITORY,
+            expected_repository,
         )?;
         spec = spec.with_component(
             "transformer",

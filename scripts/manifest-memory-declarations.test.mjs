@@ -405,7 +405,7 @@ test("projected rows carry only engine-derived axes and never guess measured sha
   for (const row of rows) {
     assert.deepEqual(Object.keys(row), ["rung", "tiers", "modes", "overlays", "loadProfiles", "source"]);
     assert.ok(row.tiers.length > 0 && row.modes.length > 0 && row.overlays.length > 0);
-    assert.match(row.source, /^config\/engine-capabilities\/capabilities\.mlx\.json#memoryContracts\//);
+    assert.match(row.source, /^config\/engine-capabilities\/sga\/macos-mlx\.json#routes\//);
   }
 });
 

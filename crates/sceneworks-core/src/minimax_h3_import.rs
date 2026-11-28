@@ -134,6 +134,44 @@ pub fn entry_partition_model(
     }
 }
 
+/// The builtin partition ids whose catalog-declared adapters (a LoRA's `modelIds`, sc-19563) an
+/// imported MiniMax-H3 finetune accepts, or `[]` for every entry that is not one.
+///
+/// A finetune keeps its own model id, so an exact-id `modelIds` gate alone refuses every
+/// partition-scoped adapter on it — lightx2v's turbo files included — even though the worker
+/// renders the finetune under that partition's semantics ([`entry_partition_model`]) and folds the
+/// adapter into the imported DiT. The partition the declaration names is the identity the gate is
+/// really asking about: `fl2va` answers for `minimax_h3`, `ref2va` for `minimax_h3_ref`.
+///
+/// `mode` narrows a `hybrid` import to the partition that request will actually run — the same
+/// `reference_to_video` split the worker applies — so an fl2v adapter on a reference render stays
+/// refused exactly as it is on the stock pair. With no mode (a preset, the picker) a hybrid answers
+/// for both partitions, because it serves both.
+pub fn entry_adapter_partition_models(
+    entry: &Map<String, Value>,
+    mode: Option<&str>,
+) -> Vec<&'static str> {
+    if !entry_is_imported_minimax_h3(entry) {
+        return Vec::new();
+    }
+    let Ok(partition) = MiniMaxH3Partition::from_entry(entry) else {
+        return Vec::new();
+    };
+    if let Some(mode) = mode {
+        return entry_partition_model(entry, mode.trim() == "reference_to_video")
+            .map(|model| vec![model])
+            .unwrap_or_default();
+    }
+    let mut models = Vec::new();
+    if partition.supports_base() {
+        models.push(MINIMAX_H3_BASE_PARTITION_MODEL);
+    }
+    if partition.supports_references() {
+        models.push(MINIMAX_H3_REFERENCE_PARTITION_MODEL);
+    }
+    models
+}
+
 /// A validated dense MiniMax-H3 import assembly — see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MiniMaxH3ImportAssembly {
@@ -1029,6 +1067,64 @@ mod tests {
         );
         plan.validate().unwrap();
         (temporary, guard)
+    }
+
+    #[test]
+    fn imported_finetunes_answer_for_their_declared_partition_adapters() {
+        let entry = |value: Value| value.as_object().unwrap().clone();
+        let import = |base: &str, partition: &str| {
+            entry(json!({
+                "id": "my_h3_finetune", "family": MINIMAX_H3_IMPORT_FAMILY,
+                "importSourceShape": MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+                "baseModel": base, "minimaxH3Partition": partition,
+                "importPlan": {"checkpointId": "managed/my_h3_finetune", "assembly": {
+                    "schemaVersion": MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, "partition": partition
+                }}
+            }))
+        };
+        let fl2va = import("minimax_h3", "fl2va");
+        let ref2va = import("minimax_h3_ref", "ref2va");
+        let hybrid = import("minimax_h3", "hybrid");
+        assert_eq!(entry_adapter_partition_models(&fl2va, None), ["minimax_h3"]);
+        assert_eq!(
+            entry_adapter_partition_models(&ref2va, None),
+            ["minimax_h3_ref"]
+        );
+        assert_eq!(
+            entry_adapter_partition_models(&hybrid, None),
+            ["minimax_h3", "minimax_h3_ref"]
+        );
+        // A hybrid narrows to the partition the request runs, as the worker does.
+        assert_eq!(
+            entry_adapter_partition_models(&hybrid, Some("first_last_frame")),
+            ["minimax_h3"]
+        );
+        assert_eq!(
+            entry_adapter_partition_models(&hybrid, Some("reference_to_video")),
+            ["minimax_h3_ref"]
+        );
+        // A mode the partition cannot serve answers for nothing rather than a guess.
+        assert!(entry_adapter_partition_models(&fl2va, Some("reference_to_video")).is_empty());
+        // Stock entries, unverified plans, mismatched declarations and other families are not
+        // imports, so they keep exact-id gating.
+        let mut forged = fl2va.clone();
+        forged["importPlan"]["assembly"]["partition"] = json!("hybrid");
+        let mut planless = fl2va.clone();
+        planless.remove("importPlan");
+        let mut other_family = fl2va.clone();
+        other_family.insert("family".to_owned(), json!("wan-video"));
+        for other in [
+            entry(json!({"id":"minimax_h3","family":"minimax-h3"})),
+            import("minimax_h3", "ref2va"),
+            forged,
+            planless,
+            other_family,
+        ] {
+            assert!(
+                entry_adapter_partition_models(&other, None).is_empty(),
+                "{other:?}"
+            );
+        }
     }
 
     #[test]

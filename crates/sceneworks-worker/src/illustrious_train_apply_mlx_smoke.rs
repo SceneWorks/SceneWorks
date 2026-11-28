@@ -118,7 +118,11 @@ fn render(
     if let Some(a) = adapter {
         spec = spec.with_adapters(vec![a]);
     }
-    let generator = runtime_macos::providers::sdxl::load(&spec).expect("load mlx sdxl generator");
+    let generator = runtime_macos::catalog()
+        .expect("macos catalog")
+        .media()
+        .load("sdxl", &spec)
+        .expect("load mlx sdxl generator");
     let req = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt: Some("blurry, low quality, deformed, watermark".to_owned()),
@@ -269,10 +273,11 @@ fn illustrious_train_apply_mlx_smoke() {
     mlx_rs::memory::clear_cache();
     mlx_rs::memory::reset_peak_memory();
     let t0 = Instant::now();
-    let mut trainer = runtime_macos::providers::sdxl::load_trainer(&LoadSpec::new(
-        WeightsSource::Dir(bf16_dir.clone()),
-    ))
-    .expect("mlx sdxl trainer loads from the Illustrious bf16 tier");
+    let mut trainer = runtime_macos::catalog()
+        .expect("macos catalog")
+        .media()
+        .load_trainer("sdxl", &LoadSpec::new(WeightsSource::Dir(bf16_dir.clone())))
+        .expect("mlx sdxl trainer loads from the Illustrious bf16 tier");
     trainer
         .validate(&request)
         .expect("trainer accepts the Illustrious training plan");

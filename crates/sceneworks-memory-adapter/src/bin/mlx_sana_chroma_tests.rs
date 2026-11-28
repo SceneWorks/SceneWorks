@@ -125,11 +125,11 @@ fn every_planned_sana_chroma_mlx_cell_names_the_identity_its_loaded_generator_pu
         "chroma1_base:q4:mlx"
     );
     assert_eq!(
-        runtime_macos::providers::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::sana::memory_strategy::RESIDENT_MEMORY_CALIBRATION_FINGERPRINT,
         "sana-mlx-full-ladder-2026-08-06-v1-resident"
     );
     assert_eq!(
-        runtime_macos::providers::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+        runtime_macos::calibration::chroma::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "chroma1-base-q4-mlx-shared-ladder-2026-08-05-v1"
     );
     // The thirteen new cells, spelled out: the strings inference PR 951 mints.

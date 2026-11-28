@@ -2891,7 +2891,13 @@ mod tests {
             assert!(native.scheduler_shift.is_none());
             assert!(native.negative_prompt.as_deref().is_none_or(str::is_empty));
             assert_eq!(
-                native.moss_image.unwrap().acceleration,
+                native
+                    .extensions
+                    .moss_image
+                    .unwrap()
+                    .options
+                    .unwrap()
+                    .acceleration,
                 sceneworks_core::moss_image::options(body["advanced"].as_object().unwrap())
                     .unwrap()
                     .acceleration

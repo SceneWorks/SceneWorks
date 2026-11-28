@@ -193,12 +193,12 @@ pub(super) fn encoded_latent(vae: &QwenVae, width: u32, height: u32) -> Result<A
             pixels.push((((x + y) as u64 * 127) / (width as u64 + height as u64)) as u8);
         }
     }
-    let image = mlx_gen::media::Image {
+    let image = runtime_macos::gen_core::Image {
         width,
         height,
         pixels,
     };
-    let input = mlx_gen::img2img::preprocess_init_image(&image, width, height)
+    let input = runtime_macos::media::img2img::preprocess_init_image(&image, width, height)
         .map_err(|error| format!("preprocess encoded-latent fixture: {error}"))?;
     let latent = vae
         .encode(&input)
@@ -351,7 +351,7 @@ pub(super) fn scoped_generate_observed_after_configuration(
     }
     let outcome = match &result {
         Ok(_) => MemoryRunOutcome::Complete,
-        Err(mlx_gen::gen_core::Error::Canceled) => {
+        Err(runtime_macos::gen_core::Error::Canceled) => {
             *observed_failure = Some(ScopedGenerationFailureKind::Canceled);
             MemoryRunOutcome::Canceled
         }
@@ -383,7 +383,7 @@ pub(super) fn scoped_generate_observed_after_configuration(
 /// loaded buffer. Process-global and monotonic, so a render's incidence is the delta around it.
 pub(super) fn gpu_view_retries() -> (u64, u64) {
     (
-        mlx_gen::coherence::retries(),
+        runtime_macos::media::coherence::retries(),
         runtime_macos::llm::primitives::coherence::retries(),
     )
 }
@@ -407,8 +407,8 @@ pub(super) fn report_gpu_view_retries(before: (u64, u64)) {
 /// generation error does not make `finish` advisory: lifecycle certification requires the scope to
 /// close successfully on complete, canceled, and error outcomes alike.
 pub(super) fn settle_scoped_generation(
-    result: mlx_gen::gen_core::Result<GenerationOutput>,
-    finish: mlx_gen::gen_core::Result<()>,
+    result: runtime_macos::gen_core::Result<GenerationOutput>,
+    finish: runtime_macos::gen_core::Result<()>,
     observed_failure: &mut Option<ScopedGenerationFailureKind>,
 ) -> Result<GenerationOutput, String> {
     match (result, finish) {
@@ -664,6 +664,12 @@ pub(super) fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32,
         GenerationOutput::Interleaved { .. } => {
             Err("MLX LTX-2.3 render returned interleaved output, not a video clip".to_owned())
         }
+        GenerationOutput::Vector(_) => {
+            Err("MLX LTX-2.3 render returned vector output, not a video clip".to_owned())
+        }
+        GenerationOutput::Latents { .. } => {
+            Err("MLX LTX-2.3 render returned latent output, not a video clip".to_owned())
+        }
     }
 }
 
@@ -704,6 +710,12 @@ pub(super) fn diagnostic_video_frames(
         )),
         GenerationOutput::Interleaved { .. } => Err(format!(
             "{label} render returned interleaved output, not a video clip"
+        )),
+        GenerationOutput::Vector(_) => Err(format!(
+            "{label} render returned vector output, not a video clip"
+        )),
+        GenerationOutput::Latents { .. } => Err(format!(
+            "{label} render returned latent output, not a video clip"
         )),
     }
 }

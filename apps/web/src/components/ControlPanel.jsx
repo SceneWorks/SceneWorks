@@ -59,6 +59,9 @@ export function ControlPanel({
   controlScaleConfig,
   controlScale,
   onControlScaleChange,
+  // `embedded`: render the body only, without the collapsible disclosure — for a host that owns
+  // the reveal itself (Image Studio's "Structure" prompt tool). The reveal props are then unused.
+  embedded = false,
 }) {
   const modes = Array.isArray(supportedModes) ? supportedModes : [];
   // Collapsed by default (this is a large, optional section on an already-busy page); the user opts
@@ -80,14 +83,8 @@ export function ControlPanel({
   const activeMode = modes.includes(controlMode) ? controlMode : modes[0];
   const scaleCfg = controlScaleConfig ?? {};
 
-  return (
-    <AdvancedSection
-      className="control-panel"
-      hint="lock pose, edges, or depth to a reference"
-      label="Structure control"
-      onToggle={() => setOpen((prev) => !prev)}
-      open={open}
-    >
+  const body = (
+    <>
       <p className="control-panel-desc">
         Lock the output's pose, edges, or depth to a reference.
       </p>
@@ -189,6 +186,21 @@ export function ControlPanel({
         />
         <span>{Number(controlScale).toFixed(2)}</span>
       </label>
+    </>
+  );
+
+  if (embedded) {
+    return <div className="control-panel control-panel-embedded">{body}</div>;
+  }
+  return (
+    <AdvancedSection
+      className="control-panel"
+      hint="lock pose, edges, or depth to a reference"
+      label="Structure control"
+      onToggle={() => setOpen((prev) => !prev)}
+      open={open}
+    >
+      {body}
     </AdvancedSection>
   );
 }

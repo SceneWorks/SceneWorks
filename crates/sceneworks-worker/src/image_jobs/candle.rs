@@ -188,15 +188,19 @@ use super::pid::resolve_pid_weights;
 #[cfg(not(target_os = "macos"))]
 use super::quantization::resolve_tier_dir;
 #[cfg(not(target_os = "macos"))]
-use super::render::generate_one_with_hires_on_surface;
+use super::render::generate_one_on_surface;
 #[cfg(not(target_os = "macos"))]
 use super::render::lane_reference_count;
 #[cfg(not(target_os = "macos"))]
+use super::render::render_hires_multi_pass_on_surface;
+#[cfg(not(target_os = "macos"))]
 use super::render::render_on_surface;
 #[cfg(not(target_os = "macos"))]
-use super::render::resolve_hires_fix_plan;
+use super::render::HiresRefinement;
 #[cfg(not(target_os = "macos"))]
 use super::render::LaneRgbaSurface;
+#[cfg(not(target_os = "macos"))]
+use super::render::PreparedRender;
 #[cfg(not(target_os = "macos"))]
 use super::resolve_seed;
 #[cfg(not(target_os = "macos"))]
@@ -689,7 +693,7 @@ async fn generate_candle_registry_stream_using(
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
     let mut true_cfg = resolve_true_cfg(request, &model);
-    let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
+    let hires_fix = HiresRefinement::from_request(request, steps, guidance, true_cfg);
     // The same request controls the MLX arm resolves (sc-25681): CFG interval, caption-overflow
     // policy and the CFG-bound negative prompt, each refused before load when the linked engine
     // does not honour it or CFG-off would make it inert. Inert for every model that sends none.
@@ -882,10 +886,11 @@ async fn generate_candle_registry_stream_using(
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
     // Admission describes the heaviest pass. Hires fix renders the first pass at `width`/`height`
-    // and the refinement at the plan dimensions, so every memory fit and request scope must use the
-    // latter. `generate_one_with_hires` derives a base-pass scope from this final-pass identity.
+    // and the refinement at the refinement target dimensions, so every memory fit and request scope
+    // must use the latter. `render_hires_multi_pass_on_surface` derives a base-pass scope from this
+    // final-pass identity.
     let (memory_width, memory_height) =
-        hires_fix.map_or((width, height), |plan| (plan.width, plan.height));
+        hires_fix.map_or((width, height), |hires| (hires.width(), hires.height()));
     // Krea "text style" tap-reweight gain — see `resolve_text_style_gain` (sc-11878, gate fixed sc-12008).
     let text_style_gain = resolve_text_style_gain(request);
     // VRAM fit-gate (epic 10765, sc-10766 Phase 0 + sc-10821 Phase 1b + sc-10856): when the selected
@@ -1008,7 +1013,7 @@ async fn generate_candle_registry_stream_using(
         width,
         height,
         steps,
-        hires_fix.map(|plan| (plan.width, plan.height, plan.steps)),
+        hires_fix.map(|hires| (hires.width(), hires.height(), hires.steps)),
         native_batch
             .as_ref()
             .map_or(1, lane_controls::NativePromptBatch::images),
@@ -1068,8 +1073,8 @@ async fn generate_candle_registry_stream_using(
                 width,
                 height,
                 steps,
-                hires.width,
-                hires.height,
+                hires.width(),
+                hires.height(),
                 hires.steps,
                 native_batch_images,
                 &pass0_reference_canvases,
@@ -2543,28 +2548,14 @@ async fn generate_candle_registry_stream_using(
                             None,
                         );
                     };
-                    let refine = super::render::build_hires_refinement_request(
-                        item_prompt,
-                        seed,
-                        &hires,
-                        planning_negative.clone(),
-                        None,
-                        planning_sampler.as_deref(),
-                        planning_scheduler.as_deref(),
-                        scheduler_shift,
-                        planning_guidance_method.as_deref(),
-                        text_style_gain,
+                    let refine = hires.refinement_request(
+                        &candidate,
+                        rgba_output_channels,
                         None,
                         &planning_enhance,
                         gen_core::PromptEnhancementSink::default(),
-                        gen_core::PreviewSink::default(),
-                        &LaneRgbaSurface {
-                            output_channels: rgba_output_channels,
-                            controls: planning_lane_controls.clone(),
-                            ..Default::default()
-                        },
-                        planning_cancel,
-                    )?;
+                        None,
+                    );
                     super::render::compile_prepared_render(
                         crate::inference_runtime::media(),
                         engine_id,
@@ -2817,6 +2808,7 @@ async fn generate_candle_registry_stream_using(
                     batch.images() as usize,
                     |preview, on_progress| {
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let adapter_apply_reports = std::cell::RefCell::new(Vec::new());
                         let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let execution_report = std::cell::RefCell::new(None);
                         let pag_report = std::cell::RefCell::new(None);
@@ -2852,16 +2844,14 @@ async fn generate_candle_registry_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls.clone(),
                                 warnings: Some(&warnings),
+                                adapter_apply_reports: Some(&adapter_apply_reports),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 execution_report: Some(&execution_report),
                                 pag_report: Some(&pag_report),
                                 low_res_start_report: Some(&low_res_start_report),
                                 source_image: None,
                                 prompt_batch: Some(batch),
-                                render_plan: render_plans
-                                    .first()
-                                    .and_then(|plans| plans.pass.as_ref()),
-                                hires_render_plan: None,
+                                render_plan: render_plans.first().and_then(PreparedRender::pass),
                             },
                             &cancel,
                             on_progress,
@@ -2869,7 +2859,7 @@ async fn generate_candle_registry_stream_using(
                         let mut facts = lane_controls::image_facts(
                             &warnings.take(),
                             &adapter_identities,
-                            &generator.adapter_apply_reports(),
+                            &adapter_apply_reports.take(),
                             crate::execution_planner::prefix_kv_cache_record(
                                 prefix_kv_cache_plan,
                                 prefix_kv_cache_report.take().as_ref(),
@@ -2897,76 +2887,112 @@ async fn generate_candle_registry_stream_using(
                 move |index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                     let warnings = std::cell::RefCell::new(Vec::new());
+                    let adapter_apply_reports = std::cell::RefCell::new(Vec::new());
                     // ...and the prefix-KV-cache path its render reports (epic 25899).
                     let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let execution_report = std::cell::RefCell::new(None);
                     let pag_report = std::cell::RefCell::new(None);
                     let low_res_start_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
-                        generate_one_with_hires_on_surface(
-                            generator,
-                            &prompt,
-                            width,
-                            height,
-                            seed,
-                            steps,
-                            guidance,
-                            negative_prompt.clone(),
-                            // Ideogram edit source (edit_image) OR the Krea 2 Turbo img2img init (sc-10134) —
-                            // mutually exclusive by mode/family; whichever resolved seeds the single
-                            // `Conditioning::Reference` slot.
-                            edit_reference.as_ref().or(img2img_reference.as_ref()),
-                            &edit_refs,
-                            edit_mask.as_ref(),
-                            true_cfg,
-                            // Per-payload sampler / scheduler / schedule-shift (sc-7127), already N3-guarded
-                            // against this family's advertised surface above. RealVisXL Lightning forces
-                            // `lightning`; most candle families advertise only their default until P4, so an
-                            // unsupported request was dropped to `None` (the engine default) before reaching here.
-                            sampler.as_deref(),
-                            scheduler.as_deref(),
-                            scheduler_shift,
-                            // Guidance method, N3-guarded against this family's advertised surface above
-                            // (sc-7448). candle adopts cfg_pp/cfg_rescale/apg in P4; until then an unsupported
-                            // method was already dropped to `None` (the engine default) before reaching here.
-                            guidance_method.as_deref(),
-                            // Per-generation PiD decode (epic 7840): route the final latent through the
-                            // `spec.pid` super-resolving student when resolved (opt-in + snapshots cached),
-                            // else the native VAE. Every candle image provider reads `spec.pid` (sc-7853), so
-                            // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
-                            use_pid,
-                            text_style_gain,
-                            generation_memory,
-                            hires_first_pass_generation_memory,
-                            memory_strategy_context.as_ref(),
-                            hires_first_pass_memory_context.as_ref(),
-                            &enhance,
-                            hires_fix,
-                            preview.clone(),
-                            prompt_enhancement.for_prompt(&prompt),
-                            &LaneRgbaSurface {
-                                multi_reference_alpha: &edit_ref_alpha,
-                                flux3_references: flux3_references.as_ref(),
-                                flux3_layout: flux3_layout.as_ref(),
-                                output_channels: rgba_output_channels,
-                                controls: lane_controls.clone(),
-                                warnings: Some(&warnings),
-                                prefix_kv_cache: Some(&prefix_kv_cache_report),
-                                execution_report: Some(&execution_report),
-                                pag_report: Some(&pag_report),
-                                low_res_start_report: Some(&low_res_start_report),
-                                source_image: flux_source_image.as_ref(),
-                                prompt_batch: None,
-                                render_plan: render_plans
-                                    .get(index)
-                                    .and_then(|plans| plans.pass.as_ref()),
-                                hires_render_plan: render_plans
-                                    .get(index)
-                                    .and_then(|plans| plans.hires.as_ref()),
-                            },
-                            &cancel,
-                            on_progress,
-                        )
+                        let surface = LaneRgbaSurface {
+                            multi_reference_alpha: &edit_ref_alpha,
+                            flux3_references: flux3_references.as_ref(),
+                            flux3_layout: flux3_layout.as_ref(),
+                            output_channels: rgba_output_channels,
+                            controls: lane_controls.clone(),
+                            warnings: Some(&warnings),
+                            adapter_apply_reports: Some(&adapter_apply_reports),
+                            prefix_kv_cache: Some(&prefix_kv_cache_report),
+                            execution_report: Some(&execution_report),
+                            pag_report: Some(&pag_report),
+                            low_res_start_report: Some(&low_res_start_report),
+                            source_image: flux_source_image.as_ref(),
+                            prompt_batch: None,
+                            render_plan: render_plans.get(index).and_then(PreparedRender::pass),
+                        };
+                        if let Some(hires) = hires_fix {
+                            let base_request = super::render::build_render_request(
+                                &prompt,
+                                width,
+                                height,
+                                seed,
+                                steps,
+                                guidance,
+                                negative_prompt.clone(),
+                                // Ideogram edit source (edit_image) OR the Krea 2 Turbo img2img init (sc-10134) —
+                                // mutually exclusive by mode/family; whichever resolved seeds the single
+                                // `Conditioning::Reference` slot.
+                                edit_reference.as_ref().or(img2img_reference.as_ref()),
+                                &edit_refs,
+                                edit_mask.as_ref(),
+                                true_cfg,
+                                // Per-payload sampler / scheduler / schedule-shift (sc-7127), already N3-guarded
+                                // against this family's advertised surface above. RealVisXL Lightning forces
+                                // `lightning`; most candle families advertise only their default until P4, so an
+                                // unsupported request was dropped to `None` (the engine default) before reaching here.
+                                sampler.as_deref(),
+                                scheduler.as_deref(),
+                                scheduler_shift,
+                                // Guidance method, N3-guarded against this family's advertised surface above
+                                // (sc-7448). candle adopts cfg_pp/cfg_rescale/apg in P4; until then an unsupported
+                                // method was already dropped to `None` (the engine default) before reaching here.
+                                guidance_method.as_deref(),
+                                // Per-generation PiD decode (epic 7840): route the final latent through the
+                                // `spec.pid` super-resolving student when resolved (opt-in + snapshots cached),
+                                // else the native VAE. Every candle image provider reads `spec.pid` (sc-7853), so
+                                // the whole off-Mac catalog honors the toggle in lockstep with `spec.pid` above.
+                                use_pid,
+                                text_style_gain,
+                                hires_first_pass_generation_memory.or(generation_memory),
+                                &PromptEnhance::default(),
+                                gen_core::PromptEnhancementSink::default(),
+                                preview.clone(),
+                                &surface,
+                                &cancel,
+                            )?;
+                            render_hires_multi_pass_on_surface(
+                                generator,
+                                base_request,
+                                &hires,
+                                render_plans.get(index).and_then(PreparedRender::multi_pass),
+                                generation_memory,
+                                hires_first_pass_memory_context.as_ref(),
+                                memory_strategy_context.as_ref(),
+                                &enhance,
+                                prompt_enhancement.for_prompt(&prompt),
+                                &surface,
+                                on_progress,
+                            )
+                        } else {
+                            generate_one_on_surface(
+                                generator,
+                                &prompt,
+                                width,
+                                height,
+                                seed,
+                                steps,
+                                guidance,
+                                negative_prompt.clone(),
+                                edit_reference.as_ref().or(img2img_reference.as_ref()),
+                                &edit_refs,
+                                edit_mask.as_ref(),
+                                true_cfg,
+                                sampler.as_deref(),
+                                scheduler.as_deref(),
+                                scheduler_shift,
+                                guidance_method.as_deref(),
+                                use_pid,
+                                text_style_gain,
+                                generation_memory,
+                                memory_strategy_context.as_ref(),
+                                &enhance,
+                                prompt_enhancement.for_prompt(&prompt),
+                                preview.clone(),
+                                &surface,
+                                &cancel,
+                                on_progress,
+                            )
+                        }
                     };
                     // Ideogram 4 placeholder detect-and-reseed (sc-6858, parity with the macOS
                     // `generate_stream` net, sc-6501): the caption guard above makes it rare, but a residual
@@ -3003,7 +3029,7 @@ async fn generate_candle_registry_stream_using(
                     let mut facts = lane_controls::image_facts(
                         &warnings.take(),
                         &adapter_identities,
-                        &generator.adapter_apply_reports(),
+                        &adapter_apply_reports.take(),
                         crate::execution_planner::prefix_kv_cache_record(
                             prefix_kv_cache_plan,
                             prefix_kv_cache_report.take().as_ref(),

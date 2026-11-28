@@ -39,7 +39,7 @@ pub(super) const ENVS: protocol::MinimaxH3ImageEnvs = protocol::MinimaxH3ImageEn
 
 /// The identity the Candle plan rows name: the engine's own constant, one for every tier.
 pub(super) fn plan_fingerprint() -> &'static str {
-    runtime_cuda::providers::minimax_h3::image_memory_strategy::IMAGE_MEMORY_CALIBRATION_FINGERPRINT
+    runtime_cuda::calibration::minimax_h3::image_memory_strategy::IMAGE_MEMORY_CALIBRATION_FINGERPRINT
 }
 
 use protocol::elapsed_millis as millis;
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(MINIMAX_H3_IMAGE_ID, protocol::MINIMAX_H3_IMAGE_PROVIDER);
         assert_eq!(
             protocol::MINIMAX_H3_IMAGE_PROVIDER,
-            runtime_cuda::providers::minimax_h3::image_model::IMAGE_MODEL_ID
+            runtime_cuda::calibration::minimax_h3::image_model::IMAGE_MODEL_ID
         );
         let plan: Value = serde_json::from_str(include_str!(
             "../../../../config/memory-calibration-plan.json"
@@ -462,7 +462,7 @@ mod tests {
                 )]);
             }
             let contract =
-                runtime_cuda::providers::minimax_h3::image_memory_strategy::weights_free_contract(
+                runtime_cuda::calibration::minimax_h3::image_memory_strategy::weights_free_contract(
                     &spec,
                 )
                 .expect("weights-free contract");

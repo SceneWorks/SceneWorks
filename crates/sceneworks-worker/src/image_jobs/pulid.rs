@@ -577,29 +577,32 @@ pub(super) async fn generate_pulid_flux_stream(
     let pulid_request = move |seed: i64,
                               memory: Option<gen_core::GenerationMemory>,
                               preview: gen_core::PreviewSink,
-                              cancel: &CancelFlag| GenerationRequest {
-        prompt: prompt.clone(),
-        negative_prompt: None,
-        width,
-        height,
-        count: 1,
-        seed: Some(seed as u64),
-        steps: Some(steps),
-        guidance: Some(guidance),
-        true_cfg: None,
-        timestep_to_start_cfg: Some(start_cfg),
-        sampler: sampler.clone(),
-        scheduler: scheduler.clone(),
-        scheduler_shift,
-        pag: pag.clone(),
-        conditioning: vec![Conditioning::Reference {
-            image: reference.clone(),
-            strength: Some(id_weight),
-        }],
-        memory,
-        preview,
-        cancel: cancel.clone(),
-        ..Default::default()
+                              cancel: &CancelFlag| {
+        let mut req = GenerationRequest {
+            prompt: prompt.clone(),
+            negative_prompt: None,
+            width,
+            height,
+            count: 1,
+            seed: Some(seed as u64),
+            steps: Some(steps),
+            guidance: Some(guidance),
+            true_cfg: None,
+            sampler: sampler.clone().map(Into::into),
+            scheduler: scheduler.clone().map(Into::into),
+            scheduler_shift,
+            conditioning: vec![Conditioning::Reference {
+                image: reference.clone(),
+                strength: Some(id_weight),
+            }],
+            memory,
+            preview,
+            cancel: cancel.clone(),
+            ..Default::default()
+        };
+        req.extensions.pulid_mut().timestep_to_start_cfg = Some(start_cfg);
+        req.features.pag = pag.clone();
+        req
     };
     let planning_request = pulid_request.clone();
     let planning_seeds = seeds.clone();

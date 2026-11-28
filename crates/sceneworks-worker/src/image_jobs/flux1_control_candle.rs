@@ -368,13 +368,13 @@ impl Flux1StrictControl {
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
-            sampler: self.sampling.sampler.clone(),
-            scheduler: self.sampling.scheduler.clone(),
+            sampler: self.sampling.sampler.as_deref().map(str::to_owned),
+            scheduler: self.sampling.scheduler.as_deref().map(str::to_owned),
             scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             control_scale: Some(self.control_scale),
             control_kind: self.control_kind.clone(),
-            pag: self.sampling.pag.clone(),
+            pag: self.sampling.features.pag.clone(),
             seed,
             memory: self.memory,
             preview: preview.clone(),
@@ -455,7 +455,7 @@ impl CandleStrictControl for Flux1StrictControl {
     ) -> WorkerResult<gen_core::RenderPlan> {
         // Preview never shapes the trajectory; the live sink is bound at generation time.
         let req = self.request_for(seed, cancel, &gen_core::PreviewSink::default());
-        runtime_cuda::providers::flux::control_provider::compile_control_plan(
+        runtime_cuda::calibration::flux::control_provider::compile_control_plan(
             &self.paths(),
             &self.planning_spec,
             &req,

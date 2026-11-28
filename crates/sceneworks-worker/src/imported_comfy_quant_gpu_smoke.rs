@@ -332,7 +332,7 @@ async fn run_imported_comfy_quant_smoke(case: SmokeCase, stage: AcceptanceStage)
                 reference_pair,
                 "dense reference requires its SDXL workflow profile"
             );
-            candle_gen::logical_weights::CandleCodecResidency::force_dense_fp8_for_model_proof();
+            runtime_cuda::media::logical_weights::CandleCodecResidency::force_dense_fp8_for_model_proof();
             false
         }
     };

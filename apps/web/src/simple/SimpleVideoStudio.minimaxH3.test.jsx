@@ -56,14 +56,14 @@ const SVD = {
 /// The shipped 768p turbo entry as the catalog route serves it — the manifest entry (so the step
 /// count and the declared `modelIds` partition are the real ones) plus the install state
 /// `normalize_lora_entry` probes.
-function turboFixture() {
+function turboFixture(id = "minimax_h3_turbo_4step_768p") {
   return {
     ...JSON5.parse(
       readFileSync(resolve(HERE, "../../../../config/manifests/builtin.loras.jsonc"), "utf8"),
-    ).loras.find((lora) => lora.id === "minimax_h3_turbo_4step_768p"),
+    ).loras.find((lora) => lora.id === id),
     scope: "builtin",
     installState: "installed",
-    installedPath: "/data/loras/minimax_h3_turbo_4step_768p.safetensors",
+    installedPath: `/data/loras/${id}.safetensors`,
   };
 }
 
@@ -365,5 +365,29 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     await openVideo(relaunched);
     expect(container.querySelector(`button[aria-label="Remove ${turbo.name}"]`)).toBeNull();
     expect(await generate(relaunched)).not.toContain(turbo.id);
+  });
+
+  // A hybrid H3 import serves both partitions, but Simple's modes (Text/Image → Video) only ever run
+  // the base one, and the API refuses the ref2v turbo adapter there. The "Add LoRA" sheet must
+  // filter against the same mode-narrowed model as the hook: offering ref2v here would let a user
+  // pick an adapter the hook's `compatibleLoras` then silently drops from the request.
+  it("offers a hybrid import only the base partition's turbo adapter", async () => {
+    const fl2v = turboFixture();
+    const ref2v = turboFixture("minimax_h3_ref2v_turbo_4step");
+    const hybrid = {
+      ...MINIMAX,
+      id: "my_h3_hybrid",
+      name: "My H3 Hybrid",
+      supportsMinimaxH3Turbo: true,
+      adapterPartitionModels: ["minimax_h3", "minimax_h3_ref"],
+    };
+    const context = { ...baseContext(), videoModels: [hybrid], models: [hybrid], loras: [fl2v, ref2v] };
+    await openVideo(context);
+    // The base partition's adapter is the seeded default...
+    expect(container.querySelector(`button[aria-label="Remove ${fl2v.name}"]`)).toBeTruthy();
+    // ...and the sheet does not offer the reference partition's one alongside it.
+    await click(container.querySelector(".su-lora-add"));
+    const offered = [...container.querySelectorAll(".su-lora-pick-row strong")].map((node) => node.textContent);
+    expect(offered).not.toContain(ref2v.name);
   });
 });

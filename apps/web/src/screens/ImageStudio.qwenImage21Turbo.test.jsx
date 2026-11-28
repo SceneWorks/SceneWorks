@@ -39,6 +39,7 @@ vi.mock("../hooks/usePortableFeedback.js", () => ({
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openPromptTool, openSettingsTab, promptToolButton } from "./imageStudio/studioTestUtils.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
@@ -103,7 +104,7 @@ const field = (container, labelText) => {
 const buttonWithText = (text) =>
   [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes(text));
 const generateButton = () =>
-  [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+  [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
 
 function setTextarea(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -154,7 +155,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
   it("offers the Qwen rewriter in Prompt tools and rewrites with Turbo as the target", async () => {
     const context = await render();
     await typePrompt("a lighthouse");
-    await click(buttonWithText("Qwen rewriter"));
+    await openPromptTool("Qwen rewrite");
     await click(buttonWithText("Rewrite prompt"));
     expect(context.qwenRewritePrompt).toHaveBeenCalledWith(
       expect.objectContaining({ modelId: "qwen_image_2_1_turbo", prompt: "a lighthouse" }),
@@ -167,8 +168,8 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
   it("offers no Qwen rewriter for a custom checkpoint on the Qwen Image 2.1 family", async () => {
     const custom = { ...TURBO, id: "custom_qwen21_finetune", name: "My Qwen 2.1 finetune" };
     await render(baseContext({ imageModels: [custom], models: [custom, REWRITE_T2I, REWRITE_I2I] }));
-    expect(buttonWithText("Refine my prompt"), "Prompt tools rendered").toBeTruthy();
-    expect(buttonWithText("Qwen rewriter")).toBeUndefined();
+    expect(promptToolButton("Refine"), "Prompt tools rendered").toBeTruthy();
+    expect(promptToolButton("Qwen rewrite")).toBeUndefined();
   });
 
   // The enqueue gate counts DISTINCT references (first occurrence kept), so a restored list that
@@ -195,7 +196,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
 
   it("defaults steps to the distilled 8 and sends another count unchanged", async () => {
     const context = await render();
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Sampling");
     const steps = field(container, "Steps");
     expect(steps.getAttribute("placeholder")).toBe("8");
     expect(steps.getAttribute("min"), "the 4-step floor from the step sweep (sc-25909)").toBe("4");
@@ -207,7 +208,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
 
   it("offers the transparency toggle and its prompt wording", async () => {
     const context = await render();
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Upscale & finish");
     await typePrompt("a courier");
     const toggle = container.querySelector(".transparency-toggle input");
     expect(toggle).toBeTruthy();

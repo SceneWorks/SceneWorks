@@ -2699,8 +2699,10 @@ async fn canonicalize_image_model_payload_with_replay_changes(
                     );
             }
             let options = request
+                .extensions
                 .moss_image
                 .as_ref()
+                .and_then(|ext| ext.options.as_ref())
                 .expect("MOSS request carries options");
             if matches!(job_type, JobType::ImageDetail) {
                 return Err(ApiError::bad_request(

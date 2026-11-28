@@ -1,93 +1,73 @@
-//! Backend-local trainer identity comes from the typed runtime capability export. The product
-//! target supplies its logical id, base model and kernel; the export binds that id to a registered
-//! native trainer on each backend.
-use serde::Deserialize;
+//! Backend-local trainer identity joins product training targets with the canonical
+//! `sga.capabilities/2` export (`SW-6983`, `REG-3`). The product target supplies its logical id,
+//! base model and kernel; `route_bindings::trainer_engine_id` binds it to the backend-local
+//! trainer id; the `sga.capabilities/2` export owns the registered trainer descriptor.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+use crate::sga_capabilities::{
+    CapabilitiesExportV2, ExportedTrainerEntry, CAPABILITIES_EXPORT_SCHEMA_VERSION,
+};
+
+#[derive(Clone)]
 struct TrainerFacts {
-    schema_version: u32,
+    backend: String,
     trainer_mappings: BTreeMap<String, String>,
-    snapshot: TrainerSnapshot,
-}
-
-#[derive(Clone, Deserialize)]
-struct TrainerSnapshot {
-    backend: String,
-    trainer_capabilities: Vec<TrainerDescriptor>,
-}
-
-#[derive(Clone, Deserialize)]
-struct TrainerDescriptor {
-    id: String,
-    backend: String,
-    #[serde(default)]
-    supports_lora: bool,
-    #[serde(default)]
-    supports_lokr: bool,
-    #[serde(default)]
-    supports_control: bool,
-    #[serde(default)]
-    supports_full_finetune: bool,
-    #[serde(default)]
-    max_reference_images: u32,
+    trainers: BTreeMap<String, ExportedTrainerEntry>,
 }
 
 static EXPORTS: LazyLock<BTreeMap<String, TrainerFacts>> = LazyLock::new(|| {
     let mut exports = BTreeMap::new();
     for (backend, source) in [
-        (
-            "mlx",
-            include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json"),
-        ),
-        (
-            "candle",
-            include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json"),
-        ),
+        ("mlx", crate::sga_capabilities::MACOS_MLX_JSON),
+        ("candle", crate::sga_capabilities::CANDLE_CUDA_JSON),
     ] {
         exports.insert(
             backend.to_owned(),
-            parse_trainer_facts(source, backend).expect("typed runtime trainer export"),
+            parse_trainer_facts(source, backend)
+                .expect("canonical sga.capabilities/2 trainer export"),
         );
     }
     exports
 });
 
 fn parse_trainer_facts(source: &str, backend: &str) -> Result<TrainerFacts, String> {
-    let facts: TrainerFacts = serde_json::from_str(source).map_err(|error| error.to_string())?;
-    if facts.schema_version != 2 || facts.snapshot.backend != backend {
+    let export = CapabilitiesExportV2::from_json_bytes(source.as_bytes())
+        .map_err(|error| error.to_string())?;
+    if export.schema_version != CAPABILITIES_EXPORT_SCHEMA_VERSION || export.backend != backend {
         return Err(format!("invalid {backend} trainer export schema/backend"));
     }
-    let registered: BTreeSet<_> = facts
-        .snapshot
-        .trainer_capabilities
-        .iter()
-        .filter(|trainer| trainer.backend == backend && !trainer.id.trim().is_empty())
-        .map(|trainer| trainer.id.as_str())
-        .collect();
-    if registered.len() != facts.snapshot.trainer_capabilities.len() {
-        return Err(format!(
-            "duplicate or wrong-backend {backend} trainer descriptor"
-        ));
+    let mut trainers = BTreeMap::new();
+    for (key, trainer) in export.trainers {
+        if trainer.backend != backend || trainer.id.trim().is_empty() || trainer.id != key {
+            return Err(format!(
+                "invalid or wrong-backend {backend} trainer descriptor {key:?}"
+            ));
+        }
+        trainers.insert(key, trainer);
     }
-    if facts
-        .trainer_mappings
-        .iter()
-        .any(|(target, engine)| target.trim().is_empty() || engine.trim().is_empty())
+    let mut trainer_mappings = BTreeMap::new();
+    for &(target_id, mlx_engine_id, candle_engine_id) in
+        super::route_bindings::TRAINER_TARGET_BINDINGS
     {
-        return Err(format!("incomplete {backend} trainer mapping"));
+        let engine_id = match backend {
+            "mlx" => mlx_engine_id,
+            "candle" => candle_engine_id,
+            _ => continue,
+        };
+        if target_id.trim().is_empty() || engine_id.trim().is_empty() {
+            return Err(format!("incomplete {backend} trainer mapping"));
+        }
+        trainer_mappings.insert(target_id.to_owned(), engine_id.to_owned());
     }
-    // The export also names deliberately unavailable mappings (for example Krea Control on
+    // The product binding also names deliberately unavailable mappings (for example Krea Control on
     // MLX). Claimability is a separate feature fact; keep the product identity available to
     // validation without treating every mapping as a registered route.
-    Ok(facts)
-}
-
-#[cfg(test)]
-fn parse_trainer_routes(source: &str, backend: &str) -> Result<BTreeMap<String, String>, String> {
-    parse_trainer_facts(source, backend).map(|facts| facts.trainer_mappings)
+    Ok(TrainerFacts {
+        backend: export.backend,
+        trainer_mappings,
+        trainers,
+    })
 }
 
 pub(crate) fn expected_backend_local_trainer_id(
@@ -109,8 +89,8 @@ pub(crate) fn expected_backend_local_trainer_id(
 }
 
 /// Kernels with a registered native trainer that supports at least one network type offered by a
-/// shipped target on this backend. Product targets own the kernel/technique choices; the runtime
-/// export owns the backend-local identity and executable descriptor. An exported mapping alone is
+/// shipped target on this backend. Product targets own the kernel/technique choices; the
+/// `sga.capabilities/2` export owns the executable descriptor. An exported mapping alone is
 /// insufficient: Krea Control intentionally maps on MLX without an MLX control trainer.
 pub(crate) fn native_training_kernels(backend: &str) -> BTreeSet<String> {
     let Some(facts) = EXPORTS.get(backend) else {
@@ -177,12 +157,9 @@ fn trainer_serves(
         return false;
     };
     let Some(descriptor) = facts
-        .snapshot
-        .trainer_capabilities
-        .iter()
-        .find(|descriptor| {
-            descriptor.id == *engine && descriptor.backend == facts.snapshot.backend
-        })
+        .trainers
+        .get(engine)
+        .filter(|descriptor| descriptor.id == *engine && descriptor.backend == facts.backend)
     else {
         return false;
     };
@@ -206,25 +183,22 @@ mod tests {
     use crate::training::{training_target_max_reference_images, TrainingTarget};
     use serde_json::{json, Value};
 
-    const MLX: &str =
-        include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
-    const CANDLE: &str =
-        include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json");
+    const MLX: &str = crate::sga_capabilities::MACOS_MLX_JSON;
+    const CANDLE: &str = crate::sga_capabilities::CANDLE_CUDA_JSON;
 
     fn native(backend: &str) -> TrainerFacts {
-        serde_json::from_str(if backend == "mlx" { MLX } else { CANDLE }).unwrap()
+        parse_trainer_facts(if backend == "mlx" { MLX } else { CANDLE }, backend).unwrap()
     }
 
     fn registered<'a>(
         facts: &'a TrainerFacts,
         target: &TrainingTarget,
-    ) -> Option<&'a TrainerDescriptor> {
+    ) -> Option<&'a ExportedTrainerEntry> {
         let engine = facts.trainer_mappings.get(&target.id)?;
         facts
-            .snapshot
-            .trainer_capabilities
-            .iter()
-            .find(|trainer| trainer.backend == facts.snapshot.backend && trainer.id == *engine)
+            .trainers
+            .get(engine)
+            .filter(|trainer| trainer.backend == facts.backend && trainer.id == *engine)
     }
 
     /// The production per-(target, technique) predicate the kernel projection is built from.
@@ -315,9 +289,10 @@ mod tests {
                     "minimax_h3_image"
                 );
                 assert!(
-                    facts.snapshot.trainer_capabilities.iter().any(|trainer| {
-                        trainer.id == "minimax_h3_image" && trainer.max_reference_images >= 16
-                    }),
+                    facts
+                        .trainers
+                        .get("minimax_h3_image")
+                        .is_some_and(|trainer| trainer.max_reference_images >= 16),
                     "{backend} registers the edit-capable minimax_h3_image trainer"
                 );
             }
@@ -392,22 +367,26 @@ mod tests {
     #[test]
     fn native_trainer_exports_refuse_incomplete_or_wrong_backend_descriptors() {
         for (backend, source) in [("mlx", MLX), ("candle", CANDLE)] {
-            parse_trainer_routes(source, backend).unwrap();
-            let mut incomplete: Value = serde_json::from_str(source).unwrap();
-            incomplete["trainerMappings"]["ltx_video_lora"] = json!("");
-            assert!(parse_trainer_routes(&incomplete.to_string(), backend).is_err());
+            parse_trainer_facts(source, backend).unwrap();
 
             let mut wrong_backend: Value = serde_json::from_str(source).unwrap();
-            wrong_backend["snapshot"]["trainer_capabilities"][0]["backend"] = json!("other");
-            assert!(parse_trainer_routes(&wrong_backend.to_string(), backend).is_err());
-
-            let mut duplicate: Value = serde_json::from_str(source).unwrap();
-            let first = duplicate["snapshot"]["trainer_capabilities"][0].clone();
-            duplicate["snapshot"]["trainer_capabilities"]
-                .as_array_mut()
+            let first_key = wrong_backend["trainers"]
+                .as_object()
                 .unwrap()
-                .push(first);
-            assert!(parse_trainer_routes(&duplicate.to_string(), backend).is_err());
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
+            wrong_backend["trainers"][&first_key]["backend"] = json!("other");
+            assert!(parse_trainer_facts(&wrong_backend.to_string(), backend).is_err());
+
+            let mut mismatched_id: Value = serde_json::from_str(source).unwrap();
+            mismatched_id["trainers"][&first_key]["id"] = json!("wrong_trainer_id");
+            assert!(parse_trainer_facts(&mismatched_id.to_string(), backend).is_err());
+
+            let mut wrong_schema: Value = serde_json::from_str(source).unwrap();
+            wrong_schema["schema_version"] = json!("sga.capabilities/999");
+            assert!(parse_trainer_facts(&wrong_schema.to_string(), backend).is_err());
         }
     }
 
@@ -431,13 +410,7 @@ mod tests {
             facts
                 .trainer_mappings
                 .insert(target.id.clone(), "qwen_image_2_1".to_owned());
-            let trainer = facts
-                .snapshot
-                .trainer_capabilities
-                .iter_mut()
-                .find(|trainer| trainer.id == "qwen_image_2_1")
-                .unwrap();
-            trainer.backend = "wrong_backend".to_owned();
+            facts.trainers.get_mut("qwen_image_2_1").unwrap().backend = "wrong_backend".to_owned();
             assert!(!supports(&facts, &target, "lora"));
         }
     }
@@ -463,22 +436,14 @@ mod tests {
         assert!(candle_kernels.contains("krea_control"));
 
         let mut missing = mlx.clone();
-        missing
-            .snapshot
-            .trainer_capabilities
-            .retain(|trainer| trainer.id != "qwen_image_2_1");
+        missing.trainers.remove("qwen_image_2_1");
         let missing_kernels = training_kernels_from_facts(&missing, &targets.targets);
         assert!(!missing_kernels.contains("qwen_image_2_1_lora"));
         assert!(!missing_kernels.contains("qwen_image_2_1_edit_lora"));
         assert!(missing_kernels.contains("mage_flow_lora"));
 
         let mut incapable = candle.clone();
-        let qwen = incapable
-            .snapshot
-            .trainer_capabilities
-            .iter_mut()
-            .find(|trainer| trainer.id == "qwen_image_2_1")
-            .unwrap();
+        let qwen = incapable.trainers.get_mut("qwen_image_2_1").unwrap();
         qwen.supports_lora = false;
         qwen.supports_lokr = false;
         let incapable_kernels = training_kernels_from_facts(&incapable, &targets.targets);
@@ -518,34 +483,19 @@ mod tests {
                 "{backend} unregistered trainer id"
             );
             let mut missing = native(backend);
-            missing
-                .snapshot
-                .trainer_capabilities
-                .retain(|trainer| trainer.id != "ltx_2_3");
+            missing.trainers.remove("ltx_2_3");
             assert!(
                 training_kernels_from_facts(&missing, only).is_empty(),
                 "{backend} missing descriptor"
             );
             let mut wrong_backend = native(backend);
-            wrong_backend
-                .snapshot
-                .trainer_capabilities
-                .iter_mut()
-                .find(|trainer| trainer.id == "ltx_2_3")
-                .unwrap()
-                .backend = "wrong_backend".to_owned();
+            wrong_backend.trainers.get_mut("ltx_2_3").unwrap().backend = "wrong_backend".to_owned();
             assert!(
                 training_kernels_from_facts(&wrong_backend, only).is_empty(),
                 "{backend} wrong-backend descriptor"
             );
             let mut no_lora = native(backend);
-            no_lora
-                .snapshot
-                .trainer_capabilities
-                .iter_mut()
-                .find(|trainer| trainer.id == "ltx_2_3")
-                .unwrap()
-                .supports_lora = false;
+            no_lora.trainers.get_mut("ltx_2_3").unwrap().supports_lora = false;
             assert!(
                 training_kernels_from_facts(&no_lora, only).is_empty(),
                 "{backend} missing LoRA support"
@@ -590,10 +540,8 @@ mod tests {
             ] {
                 let mut capped = facts.clone();
                 capped
-                    .snapshot
-                    .trainer_capabilities
-                    .iter_mut()
-                    .find(|trainer| trainer.id == "qwen_image_2_1")
+                    .trainers
+                    .get_mut("qwen_image_2_1")
                     .unwrap()
                     .max_reference_images = cap;
                 for kind in ["lora", "lokr"] {

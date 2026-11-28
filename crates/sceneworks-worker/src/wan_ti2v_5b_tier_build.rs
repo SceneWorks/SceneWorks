@@ -115,7 +115,7 @@ fn build_quant_tier(bf16_dir: &Path, out_dir: &Path, tier: &str, bits: i32) {
     let dense: HashMap<String, Array> = Array::load_safetensors(bf16_dir.join("model.safetensors"))
         .unwrap_or_else(|e| panic!("load bf16 model.safetensors for {tier}: {e:?}"));
     let packed =
-        runtime_macos::providers::wan::convert::quantize_wan_transformer(dense, bits, GROUP_SIZE)
+        runtime_macos::converters::wan::convert::quantize_wan_transformer(dense, bits, GROUP_SIZE)
             .unwrap_or_else(|e| panic!("quantize_wan_transformer {tier}: {e:?}"));
     // Materialize before writing (lazy MLX graph, mirrors mlx-gen-wan's save_map).
     mlx_rs::transforms::eval(packed.values().collect::<Vec<_>>())
@@ -190,7 +190,7 @@ fn wan_ti2v_5b_build_tiers() {
     // 1. Dense bf16 tier via the byte-parity-validated converter, then copy the tokenizer it omits.
     let bf16_dir = out_root.join("bf16");
     eprintln!("building bf16 tier → {}", bf16_dir.display());
-    runtime_macos::providers::wan::convert::convert_ti2v_5b(&native_dir, &bf16_dir)
+    runtime_macos::converters::wan::convert::convert_ti2v_5b(&native_dir, &bf16_dir)
         .unwrap_or_else(|e| panic!("convert_ti2v_5b bf16 failed: {e:?}"));
     mlx_rs::memory::clear_cache();
     std::fs::copy(&tokenizer, bf16_dir.join("tokenizer.json"))

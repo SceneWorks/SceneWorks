@@ -32,11 +32,11 @@ pub(super) fn flux_one_arm(request: &Value) -> Result<FluxOneArm, String> {
 pub(super) fn flux_one_calibration_fingerprint(arm: FluxOneArm, tier: &str) -> String {
     match (arm.provider, tier) {
         (FLUX1_DEV_PROVIDER, "q4") => {
-            runtime_macos::providers::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::flux::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (PULID_FLUX_PROVIDER, "q4") => {
-            runtime_macos::providers::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+            runtime_macos::calibration::pulid::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (FLUX1_DEV_PROVIDER, tier) => format!("flux1-dev-{tier}-mlx-shared-ladder-v1"),
@@ -54,7 +54,7 @@ pub(super) fn flux_one_calibration_fingerprint(arm: FluxOneArm, tier: &str) -> S
 #[cfg(test)]
 pub(super) fn is_flux_one_weights_free_fingerprint(fingerprint: &str) -> bool {
     fingerprint
-        .starts_with(runtime_macos::providers::flux::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        .starts_with(runtime_macos::calibration::flux::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
         || fingerprint == "pulid-flux-static-registry-behavior-v2"
 }
 

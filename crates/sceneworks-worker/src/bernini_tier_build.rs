@@ -169,7 +169,7 @@ fn build_quant_tier(bf16_dir: &Path, out_dir: &Path, tier: &str, bits: i32) {
         &bf16_dir.join(PLANNER_WEIGHTS),
         &out_dir.join(PLANNER_WEIGHTS),
         |m| {
-            runtime_macos::providers::bernini::convert::quantize_qwen_planner_backbone(
+            runtime_macos::converters::bernini::convert::quantize_qwen_planner_backbone(
                 m, bits, GROUP_SIZE,
             )
         },
@@ -180,7 +180,7 @@ fn build_quant_tier(bf16_dir: &Path, out_dir: &Path, tier: &str, bits: i32) {
     //    `WanTransformer::from_weights` loads them packed.
     for expert in RENDERER_EXPERTS {
         quantize_file(&bf16_dir.join(expert), &out_dir.join(expert), |m| {
-            runtime_macos::providers::wan::convert::quantize_wan_transformer(m, bits, GROUP_SIZE)
+            runtime_macos::converters::wan::convert::quantize_wan_transformer(m, bits, GROUP_SIZE)
         });
     }
     patch_config_quant(&out_dir.join(RENDERER_CONFIG), bits);

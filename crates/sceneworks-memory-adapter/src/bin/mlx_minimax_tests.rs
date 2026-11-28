@@ -1,5 +1,5 @@
 use super::*;
-use mlx_gen::gen_core::MemoryStrategySupport;
+use runtime_macos::gen_core::MemoryStrategySupport;
 
 /// An otherwise-valid t2va plan row: the shipped 16:9 canvas at EXACTLY the pixel budget, the
 /// shortest legal clip, and the one legal cadence. `modelId` stays `minimax_h3` even when
@@ -45,8 +45,8 @@ fn weights_free_spec(quant: Option<Quant>, load_shape: LoadShape) -> LoadSpec {
 fn fixture_contract(
     quant: Option<Quant>,
     load_shape: LoadShape,
-) -> mlx_gen::gen_core::MemoryProviderContract {
-    let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
+) -> runtime_macos::gen_core::MemoryProviderContract {
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let fixture = registry
         .memory_contract_fixture_registrations()
         .find(|fixture| fixture.provider_id == MINIMAX_PROVIDER)
@@ -155,15 +155,16 @@ fn dispatch_routes_the_minimax_provider_into_its_own_arm() {
 /// ceiling. Independently check the 17n + 5 progression; historical captures keep their own shape.
 #[test]
 fn minimax_envelope_is_the_pinned_engines_own() {
-    assert_eq!(mlx_gen_minimax_h3::SPATIAL_STRIDE, 32);
-    assert_eq!(mlx_gen_minimax_h3::CANVAS_MAX_PIXELS, 1_032_192);
-    assert_eq!(mlx_gen_minimax_h3::MINIMAX_H3_FPS, 24.0);
+    use runtime_macos::calibration::minimax_h3::{denoise::geometry, pipeline};
+    assert_eq!(pipeline::SPATIAL_STRIDE, 32);
+    assert_eq!(pipeline::CANVAS_MAX_PIXELS, 1_032_192);
+    assert_eq!(geometry::MINIMAX_H3_FPS, 24.0);
     assert_eq!(
-        mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS,
-        mlx_gen::gen_core::h3_memory::LEGAL_FRAME_COUNTS.map(|frames| frames as i32)
+        geometry::LEGAL_FRAME_COUNTS,
+        runtime_macos::gen_core::h3_memory::LEGAL_FRAME_COUNTS.map(|frames| frames as i32)
     );
-    assert_eq!(mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.last(), Some(&481));
-    for (index, frames) in mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.iter().enumerate() {
+    assert_eq!(geometry::LEGAL_FRAME_COUNTS.last(), Some(&481));
+    for (index, frames) in geometry::LEGAL_FRAME_COUNTS.iter().enumerate() {
         assert_eq!(
             *frames,
             17 * index as i32 + 124,
@@ -173,8 +174,8 @@ fn minimax_envelope_is_the_pinned_engines_own() {
     }
     // The budget is a PRODUCT, and the published resolution list proves it cannot be a per-edge
     // cap: two shipped canvases whose long edges differ by 192px have the identical area.
-    assert_eq!(1536 * 672, mlx_gen_minimax_h3::CANVAS_MAX_PIXELS);
-    assert_eq!(1344 * 768, mlx_gen_minimax_h3::CANVAS_MAX_PIXELS);
+    assert_eq!(1536 * 672, pipeline::CANVAS_MAX_PIXELS);
+    assert_eq!(1344 * 768, pipeline::CANVAS_MAX_PIXELS);
 }
 
 #[test]
@@ -419,7 +420,7 @@ fn the_pinned_minimax_contract_declares_rung_support_by_load_shape_not_by_tier()
             let calibration = contract.calibration.as_ref().unwrap();
             assert_eq!(
                 calibration.fingerprint,
-                mlx_gen_minimax_h3::memory_strategy::STATIC_CALIBRATION_FINGERPRINT,
+                runtime_macos::calibration::minimax_h3::memory_strategy::STATIC_CALIBRATION_FINGERPRINT,
                 "{where_we_are}"
             );
             assert!(
@@ -527,7 +528,7 @@ fn minimax_marked_root(
     bits: Option<u32>,
 ) -> PathBuf {
     let root = fixtures.path("minimax-marked-root");
-    let dit = root.join(mlx_gen_minimax_h3::model::DIT_COMPONENT);
+    let dit = root.join("transformer");
     std::fs::create_dir_all(&dit).unwrap();
     let body = match bits {
         Some(bits) => format!("{{\"quantization\":{{\"bits\":{bits},\"group_size\":64}}}}"),
@@ -551,7 +552,7 @@ fn minimax_marked_root(
 fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier() {
     let fixture_owner = crate::adapter_test_support::Fixtures::default();
     let fixtures = &fixture_owner;
-    let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let withheld = registry
         .memory_strategy_contract(
             MINIMAX_PROVIDER,
@@ -628,7 +629,7 @@ fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier()
 fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
     let fixture_owner = crate::adapter_test_support::Fixtures::default();
     let fixtures = &fixture_owner;
-    let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
+    let registry = runtime_macos::memory_contract_surface_registry().unwrap();
     let root = minimax_marked_root(fixtures, Some(4));
     let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
         .with_offload_policy(OffloadPolicy::Resident)
@@ -661,7 +662,7 @@ fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
         )
     };
     assert!(matches!(
-        mlx_gen_minimax_h3::memory_strategy::safety_check(
+        runtime_macos::calibration::minimax_h3::memory_strategy::safety_check(
             &spec,
             &contract,
             &context(&calibration.fingerprint, 1 << 40)
@@ -669,7 +670,7 @@ fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
         MemorySafetyDecision::Accept
     ));
     assert!(matches!(
-        mlx_gen_minimax_h3::memory_strategy::safety_check(
+        runtime_macos::calibration::minimax_h3::memory_strategy::safety_check(
             &spec,
             &contract,
             &context(&calibration.fingerprint, 0)
@@ -679,7 +680,7 @@ fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
     // The handshake is REAL: another tier's identity — a plausible member of this very family,
     // not a garbage string — is refused against the loaded q4 contract.
     let stale = minimax_calibration_fingerprint("q8").unwrap();
-    match mlx_gen_minimax_h3::memory_strategy::safety_check(
+    match runtime_macos::calibration::minimax_h3::memory_strategy::safety_check(
         &spec,
         &contract,
         &context(&stale, 1 << 40),
@@ -700,7 +701,7 @@ fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
 /// never be matched against a bf16 load. A tier the family does not ship is refused by name.
 #[test]
 fn the_minimax_identity_family_reproduces_the_engines_retained_key_with_a_tier_token() {
-    use mlx_gen_minimax_h3::memory_strategy as engine;
+    use runtime_macos::calibration::minimax_h3::memory_strategy as engine;
     assert_eq!(MINIMAX_CALIBRATED_TIER, engine::CALIBRATED_TIER);
     assert!(MINIMAX_TIERS.contains(&MINIMAX_CALIBRATED_TIER));
     let retained = engine::MEMORY_CALIBRATION_FINGERPRINT;

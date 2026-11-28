@@ -70,7 +70,7 @@ fn context(
         },
         calibration_abi: calibration
             .map(|identity| identity.abi)
-            .unwrap_or(mlx_gen::gen_core::MEMORY_CALIBRATION_ABI),
+            .unwrap_or(runtime_macos::gen_core::MEMORY_CALIBRATION_ABI),
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape,
         mode: MemoryMode::TextToImage,
@@ -556,11 +556,11 @@ mod tests {
         );
         assert_eq!(
             protocol::MINIMAX_H3_IMAGE_PROVIDER,
-            mlx_gen_minimax_h3::h3_image::model::IMAGE_MODEL_ID
+            runtime_macos::calibration::minimax_h3::h3_image::model::IMAGE_MODEL_ID
         );
         assert_ne!(
             PLAN_FINGERPRINT,
-            mlx_gen_minimax_h3::h3_image::memory::STATIC_CALIBRATION_FINGERPRINT,
+            runtime_macos::calibration::minimax_h3::h3_image::memory::STATIC_CALIBRATION_FINGERPRINT,
             "the plan must not name the weights-free registry identity"
         );
         let plan: Value = serde_json::from_str(include_str!(
@@ -623,7 +623,7 @@ mod tests {
             let mut spec = LoadSpec::new(WeightsSource::Dir("fixture".into()))
                 .with_load_shape(plan.load_shape);
             if plan.lora {
-                spec = spec.with_adapters(vec![mlx_gen::gen_core::AdapterSpec::new(
+                spec = spec.with_adapters(vec![runtime_macos::gen_core::AdapterSpec::new(
                     "fixture-lora.safetensors".into(),
                     1.0,
                     AdapterKind::Lora,
@@ -649,7 +649,7 @@ mod tests {
                             contract
                                 .capability(*rung)
                                 .map(|capability| &capability.support),
-                            Some(mlx_gen::gen_core::MemoryStrategySupport::Implemented)
+                            Some(runtime_macos::gen_core::MemoryStrategySupport::Implemented)
                         )
                     })
                     .collect();

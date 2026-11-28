@@ -75,8 +75,14 @@ export function modelIsMinimaxH3(selectedModel) {
 /// control says so rather than pretending.
 export function defaultTurboVariant(selectedModel, variants = []) {
   if (!variants.length) return null;
+  // An imported Ref2VA finetune runs the reference partition, so it takes the ref2v adapter too. A
+  // hybrid import serves both and defaults like the base partition, its non-reference modes.
+  const partitions = selectedModel?.adapterPartitionModels;
+  const referencePartition =
+    selectedModel?.id === "minimax_h3_ref" ||
+    (Array.isArray(partitions) && partitions.length === 1 && partitions[0] === "minimax_h3_ref");
   const preferred =
-    selectedModel?.id === "minimax_h3_ref"
+    referencePartition
       ? ["minimax_h3_ref2v_turbo_4step"]
       : ["minimax_h3_turbo_4step_768p", "minimax_h3_turbo_8step", "minimax_h3_turbo_4step_v01"];
   for (const id of preferred) {

@@ -23,6 +23,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
 
 // The full native-resolution aspect ladder the manifest advertises for Mage-Flow (every entry ÷16,
 // 512–2048 per side, incl. the 4:1 preset 2048x512 and its 1:4 inverse 512x2048).
@@ -158,7 +159,7 @@ const exactField = (container, labelText) => {
 const optionValues = (select) => [...select.options].map((option) => option.value);
 const optionLabels = (select) => [...select.options].map((option) => option.textContent);
 const generateButton = () =>
-  [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+  [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
 const modeTab = (label) =>
   [...document.body.querySelectorAll(".mode-tabs button")].find((b) => b.textContent === label);
 const headButtons = () => [...document.body.querySelectorAll(".asset-picker-head button")];
@@ -195,7 +196,7 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
     });
     await act(async () => {});
   }
-  const openAdvanced = () => click(document.body.querySelector(".advanced-section-toggle"));
+  const openAdvanced = () => openSettingsTab("Sampling");
 
   it("lists the Mage-Flow family in BOTH the generation and the edit model pickers", async () => {
     await render(baseContext({ imageModels: [MAGE_RL, MAGE_TURBO, MAGE_EDIT] }));
@@ -337,9 +338,9 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
 
   it("wires Turbo's 4-step / CFG-off defaults and seeds the native default resolution", async () => {
     await render(baseContext({ imageModels: [MAGE_TURBO] }));
+    expect(imageSize(container)).toBe("1024x1024");
     await openAdvanced();
     await act(async () => {});
-    expect(imageSize(container)).toBe("1024x1024");
     expect(field(container, "Steps").getAttribute("placeholder")).toBe("4");
     expect(exactField(container, "Guidance").getAttribute("placeholder")).toBe("1");
   });
@@ -376,7 +377,8 @@ describe("ImageStudio — Mage-Flow family (sc-14058)", () => {
       })),
     };
     await render(baseContext({ imageModels: [mageMatrix], macCapabilities: MAC_CAPS }));
-    await openAdvanced();
+    // The quant tier sits with the everyday model knobs in the Model & output tab.
+    await openSettingsTab("Model");
     await act(async () => {});
     const picker = [...container.querySelectorAll("label.quant-tier-picker select")][0];
     expect(picker).toBeTruthy();

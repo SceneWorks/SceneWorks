@@ -63,12 +63,12 @@ pub(super) fn instantid_candle_binding(tier: &str) -> Result<InstantIdCandleBind
         component_spec =
             component_spec.with_component(component, WeightsSource::Dir(component_root));
     }
-    let sdxl = runtime_cuda::providers::instantid::SdxlComponents::from_spec(&component_spec)
+    let sdxl = runtime_cuda::calibration::instantid::SdxlComponents::from_spec(&component_spec)
         .map_err(|error| format!("stage the InstantID SDXL components: {error}"))?;
     Ok(InstantIdCandleBinding {
         repository,
         revision,
-        paths: runtime_cuda::providers::instantid::InstantIdPaths {
+        paths: runtime_cuda::calibration::instantid::InstantIdPaths {
             sdxl_base: root,
             identitynet: WeightsSource::Dir(identitynet),
             ip_adapter: bundle.ip_adapter.clone(),
@@ -165,7 +165,7 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
     }
     let binding = instantid_candle_binding(tier)?;
     if selection.tier
-        != runtime_cuda::providers::instantid::memory_strategy::resolved_numeric_tier()
+        != runtime_cuda::calibration::instantid::memory_strategy::resolved_numeric_tier()
     {
         return Err(
             "the Candle InstantID stack resolves one dense numeric tier; the planned selection \
@@ -173,8 +173,8 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
                 .to_owned(),
         );
     }
-    let identity = runtime_cuda::providers::instantid::memory_strategy::InstantIdMemoryIdentity {
-        route: runtime_cuda::providers::instantid::memory_strategy::InstantIdRoute::Identity,
+    let identity = runtime_cuda::calibration::instantid::memory_strategy::InstantIdMemoryIdentity {
+        route: runtime_cuda::calibration::instantid::memory_strategy::InstantIdRoute::Identity,
         adapter_count: 0,
         use_pid: false,
         face_restore: false,
@@ -182,7 +182,7 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
     };
     let overlay = identity.overlay_key();
     let contract =
-        runtime_cuda::providers::instantid::memory_strategy::provider_contract_for_paths(
+        runtime_cuda::calibration::instantid::memory_strategy::provider_contract_for_paths(
             &binding.paths,
         )
         .map_err(|error| format!("read the pinned InstantID contract: {error}"))?;
@@ -250,13 +250,13 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
         predicted_peak_bytes: predicted,
         cache_state: MemoryCacheState::Cold,
         evidence_revision:
-            runtime_cuda::providers::instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
+            runtime_cuda::calibration::instantid::memory_strategy::REQUEST_EVIDENCE_REVISION
                 .to_owned(),
     };
     // Admission hygiene BEFORE the expensive load, so the two refusals below are evidence rather
     // than a blanket no.
     let safety = |fingerprint: &str, budget_bytes: u64| {
-        runtime_cuda::providers::instantid::memory_strategy::safety_check(
+        runtime_cuda::calibration::instantid::memory_strategy::safety_check(
             &contract,
             &identity,
             &context(fingerprint, budget_bytes, 1),
@@ -288,7 +288,7 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
     let mut vram = certifying_vram_probe();
     let load_sample = vram.phase();
     // THE production loader.
-    let mut model = runtime_cuda::providers::instantid::InstantId::load_with_memory_context(
+    let mut model = runtime_cuda::calibration::instantid::InstantId::load_with_memory_context(
         &binding.paths,
         identity,
         context(&calibration.fingerprint, total_bytes, 1),
@@ -305,7 +305,7 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
     let embedding = instantid_reference_embedding();
     let kps = instantid_kps(width);
     let generated = model.generate_with(
-        &runtime_cuda::providers::instantid::InstantIdRequest {
+        &runtime_cuda::calibration::instantid::InstantIdRequest {
             prompt: "a studio portrait of a person, soft key light".to_owned(),
             negative: "low quality, blurry, distorted".to_owned(),
             width,

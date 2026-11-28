@@ -29,7 +29,10 @@ pub(super) fn minimax_calibration_fingerprint(tier: &str) -> Result<String, Stri
         ));
     }
     if tier == MINIMAX_CALIBRATED_TIER {
-        return Ok(mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT.to_owned());
+        return Ok(
+            runtime_macos::calibration::minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned(),
+        );
     }
     Ok(format!(
         "minimax-h3-{tier}-mlx-staged-joint-av-eager-abi3-v1"
@@ -58,36 +61,45 @@ pub(super) fn validate_minimax_geometry(
 ) -> Result<MinimaxGeometry, String> {
     let lattice_frames = i32::try_from(frames)
         .ok()
-        .filter(|frames| mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.contains(frames))
+        .filter(|frames| {
+            runtime_macos::calibration::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS
+                .contains(frames)
+        })
         .ok_or_else(|| {
             format!(
                 "{MINIMAX_LABEL} requires geometry.frames on the 17n+5 lattice {:?}, got {frames}",
-                mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS
+                runtime_macos::calibration::minimax_h3::denoise::geometry::LEGAL_FRAME_COUNTS
             )
         })?;
-    let stride = mlx_gen_minimax_h3::SPATIAL_STRIDE;
+    let stride = runtime_macos::calibration::minimax_h3::pipeline::SPATIAL_STRIDE;
     if !width.is_multiple_of(stride) || !height.is_multiple_of(stride) {
         return Err(format!(
             "{MINIMAX_LABEL} requires geometry divisible by the {stride}px stride, got {width}x{height}"
         ));
     }
     let pixels = width.saturating_mul(height);
-    let budget = mlx_gen_minimax_h3::CANVAS_MAX_PIXELS;
+    let budget = runtime_macos::calibration::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
     if pixels > budget {
         return Err(format!(
             "{MINIMAX_LABEL} requires width*height within the {budget}px canvas budget, got \
              {width}x{height} ({pixels}px)"
         ));
     }
-    let video_latent_frames = mlx_gen_minimax_h3::video_latent_num_frames(lattice_frames)
+    let video_latent_frames =
+        runtime_macos::calibration::minimax_h3::denoise::geometry::video_latent_num_frames(
+            lattice_frames,
+        )
         .map_err(|error| format!("derive MiniMax-H3 video latent frames: {error}"))
         .and_then(|latents| {
             u32::try_from(latents)
                 .map_err(|_| "MiniMax-H3 video latent frame count must fit u32".to_owned())
         })?;
-    let audio_latent_frames =
-        u32::try_from(mlx_gen_minimax_h3::audio_latent_num_frames(lattice_frames))
-            .map_err(|_| "MiniMax-H3 audio latent count must fit u32".to_owned())?;
+    let audio_latent_frames = u32::try_from(
+        runtime_macos::calibration::minimax_h3::denoise::geometry::audio_latent_num_frames(
+            lattice_frames,
+        ),
+    )
+    .map_err(|_| "MiniMax-H3 audio latent count must fit u32".to_owned())?;
     Ok(MinimaxGeometry {
         width,
         height,
@@ -202,11 +214,11 @@ pub(super) fn planned_minimax_capture(
     let seed = seed
         .parse::<u64>()
         .map_err(|error| format!("parse MiniMax-H3 fixture seed {seed:?}: {error}"))?;
-    if f64::from(fps) != mlx_gen_minimax_h3::MINIMAX_H3_FPS {
+    if f64::from(fps) != runtime_macos::calibration::minimax_h3::denoise::geometry::MINIMAX_H3_FPS {
         return Err(format!(
             "planned.fixture declares fps {fps}, but the released MiniMax-H3 checkpoint generates \
              at {} fps only",
-            mlx_gen_minimax_h3::MINIMAX_H3_FPS
+            runtime_macos::calibration::minimax_h3::denoise::geometry::MINIMAX_H3_FPS
         ));
     }
     if seed != MINIMAX_SEED {
@@ -300,25 +312,21 @@ pub(super) fn minimax_load_spec(
         protocol::MINIMAX_UPSTREAM_REPOSITORY,
     )?;
 
-    let dit_root = tier_root.join(mlx_gen_minimax_h3::model::DIT_COMPONENT);
+    let dit_root = tier_root.join("transformer");
     let text_encoder_source = minimax_text_encoder_source(tier);
     let text_encoder_tree = if text_encoder_source == MINIMAX_UPSTREAM_TEXT_ENCODER {
         &upstream_root
     } else {
         &tier_root
     };
-    let text_encoder_root =
-        text_encoder_tree.join(mlx_gen_minimax_h3::model::TEXT_ENCODER_COMPONENT);
+    let text_encoder_root = text_encoder_tree.join("text_encoder");
 
     let mut spec = LoadSpec::new(WeightsSource::Dir(upstream_root.clone()))
         .with_offload_policy(OffloadPolicy::Resident)
         .with_load_shape(load_shape)
+        .with_component("transformer", WeightsSource::Dir(dit_root.clone()))
         .with_component(
-            mlx_gen_minimax_h3::model::DIT_COMPONENT,
-            WeightsSource::Dir(dit_root.clone()),
-        )
-        .with_component(
-            mlx_gen_minimax_h3::model::TEXT_ENCODER_COMPONENT,
+            "text_encoder",
             WeightsSource::Dir(text_encoder_root.clone()),
         );
     // `spec.quantize` never packs anything at load: `model::load` RECONCILES it against the staged
@@ -511,8 +519,9 @@ pub(super) fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     let shared_video_vae_bytes = safetensors_bytes(&artifact.upstream_root.join("vae"))?;
     let shared_audio_vae_bytes = safetensors_bytes(&artifact.upstream_root.join("audio_vae"))?;
 
-    let registry = mlx_gen_minimax_h3::provider_registry()
-        .map_err(|error| format!("build MiniMax-H3 registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(MINIMAX_PROVIDER, spec)
         .map_err(|error| format!("read {MINIMAX_PROVIDER} memory-strategy contract: {error}"))?
@@ -572,7 +581,7 @@ pub(super) fn run_minimax_h3(request: &Value) -> Result<Value, String> {
     // check: the gate must accept a fitting request (so the two rejections are not a blanket
     // refusal), reject an unknown/zero budget, and reject a mutated calibration fingerprint.
     let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
-        mlx_gen_minimax_h3::memory_strategy::safety_check(
+        runtime_macos::calibration::minimax_h3::memory_strategy::safety_check(
             spec,
             &contract,
             &minimax_context(

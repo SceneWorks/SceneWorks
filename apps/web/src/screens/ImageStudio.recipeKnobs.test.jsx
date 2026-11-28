@@ -24,6 +24,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openPromptTool, openSettingsTab, promptToolButton } from "./imageStudio/studioTestUtils.js";
 import { readLastTier } from "../lastTierStore.js";
 import { recipeFromWorkflowShare } from "../workflowShare.js";
 
@@ -161,13 +162,14 @@ function baseContext(overrides = {}) {
   };
 }
 
-// The advanced disclosures render their children only when open, and their open state is part of
-// the persisted studio snapshot — so the snapshot is how the test opens them, without simulating
-// three clicks that are not what is under test.
+// The settings tabs render only the open panel, and the open tab is part of the persisted studio
+// snapshot. A pre-tab-strip snapshot with `advancedOpen: true` reopens as the Sampling tab, so the
+// snapshot is how the test opens it (and exercises that migration) without simulating clicks that
+// are not what is under test. Controls in another tab open it explicitly.
 function seedOpenDisclosures(extra = {}) {
   window.localStorage.setItem(
     "sceneworks-studio-image-project_1",
-    JSON.stringify({ advancedOpen: true, multiPhaseOpen: true, ...extra }),
+    JSON.stringify({ advancedOpen: true, ...extra }),
   );
 }
 
@@ -248,9 +250,10 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     );
   const click = async (node) =>
     act(async () => node.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-  // The strict-control disclosure keeps its own local open state (collapsed by default), so the
-  // panel has to be expanded before its controls are in the DOM at all.
-  const openStructureControl = () => click(buttonByText("Structure control"));
+  // The strict-control panel is the Structure prompt tool's assist panel (closed by default), so the
+  // tool has to be opened before its controls are in the DOM at all.
+  const openStructureControl = () => openPromptTool("Structure");
+  const structureToolOpen = () => promptToolButton("Structure")?.getAttribute("aria-pressed");
   const activeControlModeLabel = () =>
     document.body.querySelector(".control-mode-tab.active")?.textContent.trim();
   const modelSelect = () =>
@@ -466,6 +469,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
 
     it("keeps a model the user picked while the catalog loads and binds nothing", async () => {
       await render(contextFor(loaded));
+      await openSettingsTab("Model");
       await editControl(pickerWith(FALLBACK_B.id), FALLBACK_B.id);
       expect(persistedStudioSettings().model).toBe(FALLBACK_B.id);
       await render(contextFor([...loaded, FLUX3]));
@@ -529,6 +533,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(persistedStudioSettings().referenceDimensionIntent).toBeNull();
     await render({ ...context, studioLaunch: launch(flux3Recipe(width, height)) });
     expect(persistedStudioSettings().referenceDimensionIntent).not.toBeNull();
+    await openSettingsTab("Model");
     await editControl([...document.querySelectorAll("select")].find((node) => [...node.options].some(({ value }) => value === other.id)), other.id);
     expect(persistedStudioSettings().referenceDimensionIntent).toBeNull();
   });
@@ -718,6 +723,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(document.querySelector('[aria-label="Box label"]').value).toBe("saved label");
     await click(buttonByText("Generate"));
     expect(createImageJob.mock.calls[0][0].advanced.flux3_reference_ids).toEqual(["saved-slot"]);
+    await openSettingsTab("Model");
     await editControl([...document.querySelectorAll("select")].find((node) =>
       [...node.options].some(({ value }) => value === FLUX2_DEV.id)), FLUX2_DEV.id);
     expect(document.querySelector('[aria-label="FLUX 3 layout editor"]')).toBeNull();
@@ -802,12 +808,14 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob,
         studioLaunch: launch(flux3Recipe(null, null)) }));
       // Picking 3:2 keeps the current 1.00 MP: 1280x832 on the fixture's 64 px preset grid.
+      if (field === "Aspect") await openSettingsTab("Model");
       await editControl(control(field), field === "Aspect" ? "3:2" : "512");
       await click(buttonByText("Generate"));
       expect(createImageJob.mock.calls[0][0]).toMatchObject({
         width: field === "Width override" ? 512 : field === "Aspect" ? 1280 : 1024,
         height: field === "Height override" ? 512 : field === "Aspect" ? 832 : 1024,
       });
+      await openSettingsTab("Sampling");
       expect(control("Width override").placeholder).not.toContain("Auto");
       expect(control("Height override").placeholder).not.toContain("Auto");
     },
@@ -974,6 +982,8 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       visibleWorkers: [{ status: "online", capabilities: ["candle", "nvfp4"] }],
       studioLaunch: launch({ model: id, mode: "text_to_image", prompt: "a fox", normalizedSettings: {}, rawAdapterSettings: {} }) });
     await render(context);
+    // The quant tier picker sits in the Model & output tab.
+    await openSettingsTab("Model");
     expect([...container.querySelectorAll("option")].some((option) => option.value === "fp8r")).toBe(false);
     expect([...container.querySelectorAll("option")].some((option) => option.value === "nvfp4")).toBe(false);
     await render({ ...context, visibleWorkers: [{ status: "online", capabilities: ["fp8r", "flux3_nvfp4"] }] });
@@ -1041,6 +1051,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
         promptEnhancement: { originalPrompt: "original fox", effectivePrompt: "a fox in snow", mode: "t2i", outcome: "enhanced" } } };
     await render(baseContext({ imageModels: [packed], models: [packed], createImageJob,
       visibleWorkers: [{ status: "online", capabilities: ["fp8r"] }], studioLaunch: launch(recipe) }));
+    await openSettingsTab("Model");
     const picker = [...container.querySelectorAll("select")].find((node) => [...node.options].some((option) => option.value === "fp8r"));
     expect(picker.value).toBe("fp8r");
     expect(container.querySelector('[aria-label="Keep FP8R (candle, sm_89+) as your pick"]')).toBeNull();
@@ -1092,6 +1103,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     await render(baseContext({ imageModels: [boogu], models: [boogu], createImageJob,
       studioLaunch: launch({ model: boogu.id, mode: "text_to_image", prompt: "a fox",
         normalizedSettings: {}, rawAdapterSettings: { mlxQuantize: 0 } }) }));
+    await openSettingsTab("Model");
     expect(checkbox("Full precision (bf16)")?.checked).toBe(true);
     expect(container.textContent).not.toContain("Recipe Full precision (bf16) unavailable");
     expect(buttonByText("Generate").disabled).toBe(false);
@@ -1108,6 +1120,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     const context = baseContext({ imageModels: [packed], models: [packed], createImageJob });
     await render({ ...context, studioLaunch: launch({ model: packed.id, mode: "text_to_image", prompt: "a fox",
       normalizedSettings: {}, rawAdapterSettings: { mlxQuantize: 4 } }) });
+    await openSettingsTab("Model");
     const keep = container.querySelector('[aria-label="Keep Q4 (smallest) as your pick"]');
     expect(keep).toBeTruthy();
     await click(keep);
@@ -1115,6 +1128,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     await unmountRoot(root, container);
     ({ container, root } = mountRoot());
     await render(context);
+    await openSettingsTab("Model");
     const picker = container.querySelector(".quant-tier-picker select");
     expect(picker.value).toBe("q4");
     await click(buttonByText("Generate"));
@@ -1130,6 +1144,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     await render(baseContext({ imageModels: [model], models: [model], assets: [FLUX3_REFERENCE],
       macCapabilities: { macGatingActive: backend === "mlx", available: true, supported: true },
       createImageJob, studioLaunch: launch(recipe) }));
+    await openSettingsTab("Model");
     expect(checkbox("Enhance prompt")?.checked).toBe(true);
     expect(control("Reference strength")).toBeUndefined();
     await click(buttonByText("Generate"));
@@ -1159,7 +1174,9 @@ describe("a replayed recipe reaches every allow-listed control", () => {
   it("sets the PiD decoder and its output tier without exposing a forged Krea enhancement flag", async () => {
     await render(baseContext({ studioLaunch: launch(everyKnobRecipe()) }));
 
+    await openSettingsTab("Model");
     expect(checkbox("Enhance prompt")).toBeUndefined();
+    await openSettingsTab("Upscale & finish");
     expect(checkbox("PiD decoder").checked).toBe(true);
     expect(document.body.querySelector(".pid-target-select select").value).toBe("2k");
   });
@@ -1170,6 +1187,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     recipe.rawAdapterSettings = { enhancePrompt: true };
     await render(baseContext({ studioLaunch: launch(recipe) }));
 
+    await openSettingsTab("Model");
     expect(checkbox("Enhance prompt").checked).toBe(true);
   });
 
@@ -1262,7 +1280,9 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     delete recipe.rawAdapterSettings.pidTarget;
     await render(baseContext({ studioLaunch: launch(recipe) }));
 
+    await openSettingsTab("Model");
     expect(checkbox("Enhance prompt")).toBeUndefined();
+    await openSettingsTab("Upscale & finish");
     expect(checkbox("PiD decoder").checked).toBe(false);
   });
 
@@ -1296,11 +1316,13 @@ describe("a replayed recipe reaches every allow-listed control", () => {
 
     await render(baseContext({ studioLaunch: launch(recipe) }));
     await openStructureControl();
+    await openSettingsTab("Model");
 
     expect(modelSelect().value).toBe(EVERY_LANE.id);
     expect(activeControlModeLabel()).toBe("Depth");
     // 0.7 here would mean the model-change reset landed after the recipe and won.
     expect(document.body.querySelector(".control-scale input").value).toBe("0.85");
+    await openSettingsTab("Sampling");
     expect(control("Text style").value).toBe("1.45");
   });
 
@@ -1386,9 +1408,11 @@ describe("a replayed recipe reaches every allow-listed control", () => {
 
     await render(baseContext({ createImageJob, studioLaunch }));
 
-    // The launch switches models, but the model-default reset must not erase its selection.
+    // The launch switches models, but the model-default reset must not erase its selection. The
+    // shared-pose launch opens the Structure tool on the poses it carries.
+    await openSettingsTab("Model");
     expect(modelSelect().value).toBe(EVERY_LANE.id);
-    expect(document.body.querySelector(".control-panel .advanced-section-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(structureToolOpen()).toBe("true");
     expect(activeControlModeLabel()).toBe("Pose");
     expect(document.body.querySelector(".pose-category-name").textContent).toBe("Shared workflow");
     expect(document.body.querySelectorAll(".pose-thumb-placeholder")).toHaveLength(2);
@@ -1512,8 +1536,9 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     await render(baseContext({ studioLaunch: launch(recipe, { id: "same-model-poses" }) }));
 
     expect(document.body.querySelector(".pose-thumb-placeholder")).not.toBeNull();
-    expect(document.body.querySelector(".control-panel .advanced-section-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(structureToolOpen()).toBe("true");
 
+    await openSettingsTab("Model");
     await act(async () => {
       modelSelect().value = OTHER_MODEL.id;
       modelSelect().dispatchEvent(new Event("change", { bubbles: true }));
@@ -1522,7 +1547,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
 
     expect(document.body.querySelector(".pose-thumb-placeholder")).toBeNull();
     expect(document.body.textContent).not.toContain("pose selected");
-    expect(document.body.querySelector(".control-panel .advanced-section-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(structureToolOpen()).toBe("false");
   });
 
   // Multi-phase denoise. A 3-phase schedule replaying as a single pass is a DIFFERENT image, not a

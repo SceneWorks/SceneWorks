@@ -201,7 +201,7 @@ pub(super) fn resolve_wan_vace_model_dir(settings: &Settings) -> WorkerResult<Pa
         )
     })?;
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
-    runtime_macos::providers::wan::convert::assemble_wan_vace_snapshot(
+    runtime_macos::converters::wan::convert::assemble_wan_vace_snapshot(
         &out_dir,
         &transformer_dir,
         &base_wan,
@@ -278,7 +278,7 @@ fn resolve_wan_vace_fun_model_dir(settings: &Settings) -> WorkerResult<PathBuf> 
         )
     })?;
     // CARVE-OUT(epic 3720): backend-specific weight packager; not a registry contract.
-    runtime_macos::providers::wan::convert::assemble_wan_vace_fun_snapshot(
+    runtime_macos::converters::wan::convert::assemble_wan_vace_fun_snapshot(
         &out_dir, &high, &low, &base_wan, true,
     )
     .map_err(|error| {

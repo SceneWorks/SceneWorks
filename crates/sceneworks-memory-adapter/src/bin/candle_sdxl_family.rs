@@ -9,7 +9,7 @@ use super::*;
 /// skipped comparison. `SdxlRoute` is not nameable from outside the crate (only the const is
 /// re-exported), which is why this returns the field rather than the row.
 pub(super) fn sdxl_candle_route_revision(arm: &SdxlCandleArm) -> Result<&'static str, String> {
-    let route = candle_gen_sdxl::SDXL_ROUTES
+    let route = runtime_cuda::calibration::sdxl::SDXL_ROUTES
         .iter()
         .find(|route| route.id == arm.model_id)
         .ok_or_else(|| {
@@ -179,7 +179,7 @@ pub(super) fn sdxl_endpoint_expected_uuid() -> Result<String, String> {
 
 pub(super) fn sdxl_endpoint_context_uuid() -> Result<String, String> {
     // SDXL's loader uses this same production device constructor (logical CUDA 0).
-    let device = candle_gen::default_device()
+    let device = runtime_cuda::media::default_device()
         .map_err(|error| format!("SDXL endpoint CUDA context: {error}"))?;
     let cuda = device.as_cuda_device().map_err(|error| error.to_string())?;
     let uuid = cuda

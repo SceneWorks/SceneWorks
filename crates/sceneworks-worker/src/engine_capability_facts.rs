@@ -533,6 +533,7 @@ fn modality_label(modality: &gen_core::Modality) -> &'static str {
         gen_core::Modality::Video => "video",
         gen_core::Modality::Both => "both",
         gen_core::Modality::Audio => "audio",
+        gen_core::Modality::Vector => "vector",
     }
 }
 
@@ -1601,6 +1602,87 @@ pub fn dump_runtime_descriptor_to(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(vec![path])
 }
 
+/// Typed refusal returned when the worker's linked inference runtime disagrees with the embedded
+/// canonical `sga.capabilities/2` export (`SW-6983`, `REG-3`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeExportAuthorityError {
+    NoLinkedRuntime,
+    RuntimeAssembly(String),
+    UnknownEmbeddedExport {
+        feature_set: String,
+        backend: String,
+    },
+    Disagreement(sceneworks_core::sga_capabilities::ExportDisagreementError),
+}
+
+impl std::fmt::Display for RuntimeExportAuthorityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoLinkedRuntime => write!(f, "no native inference runtime is linked in this build"),
+            Self::RuntimeAssembly(err) => {
+                write!(
+                    f,
+                    "failed to assemble live sga.capabilities/2 export from linked runtime: {err}"
+                )
+            }
+            Self::UnknownEmbeddedExport {
+                feature_set,
+                backend,
+            } => write!(
+                f,
+                "no embedded sga.capabilities/2 export found for linked feature_set `{feature_set}` (backend `{backend}`)"
+            ),
+            Self::Disagreement(err) => std::fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeExportAuthorityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Disagreement(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<sceneworks_core::sga_capabilities::ExportDisagreementError>
+    for RuntimeExportAuthorityError
+{
+    fn from(err: sceneworks_core::sga_capabilities::ExportDisagreementError) -> Self {
+        Self::Disagreement(err)
+    }
+}
+
+/// Verify a live runtime `sga.capabilities/2` export against an expected embedded export (`REG-3`).
+///
+/// The linked engine is authoritative at runtime; any disagreement between the live registry and
+/// the embedded export fails closed with a typed [`ExportDisagreementError`].
+pub fn verify_runtime_export_against_expected(
+    runtime: &sceneworks_core::sga_capabilities::CapabilitiesExportV2,
+    expected: &sceneworks_core::sga_capabilities::CapabilitiesExportV2,
+) -> Result<(), sceneworks_core::sga_capabilities::ExportDisagreementError> {
+    sceneworks_core::sga_capabilities::verify_runtime_against_export(runtime, expected)
+}
+
+/// Verify this worker build's linked inference runtime against its matching embedded
+/// `sga.capabilities/2` export (`SW-6983`, `REG-3`).
+pub fn verify_linked_runtime_against_embedded_export() -> Result<
+    &'static sceneworks_core::sga_capabilities::CapabilitiesExportV2,
+    RuntimeExportAuthorityError,
+> {
+    let live = crate::inference_runtime::linked_capabilities_export()
+        .ok_or(RuntimeExportAuthorityError::NoLinkedRuntime)?
+        .map_err(RuntimeExportAuthorityError::RuntimeAssembly)?;
+    let embedded = sceneworks_core::sga_capabilities::for_feature_set(&live.feature_set)
+        .ok_or_else(|| RuntimeExportAuthorityError::UnknownEmbeddedExport {
+            feature_set: live.feature_set.clone(),
+            backend: live.backend.clone(),
+        })?;
+    verify_runtime_export_against_expected(&live, embedded)?;
+    Ok(embedded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2429,5 +2511,64 @@ mod tests {
             "flux1_dev",
             "low_res_start"
         ));
+    }
+
+    #[test]
+    fn reg3_verify_runtime_against_export_refuses_disagreement_with_typed_error() {
+        let baseline = sceneworks_core::sga_capabilities::macos_mlx();
+        verify_runtime_export_against_expected(baseline, baseline)
+            .expect("identical sga.capabilities/2 exports must agree");
+
+        let mut drifted = baseline.clone();
+        let (mutated_route_id, route) = drifted
+            .routes
+            .iter_mut()
+            .next()
+            .expect("macos-mlx export has routes");
+        let mutated_route_id = mutated_route_id.clone();
+        route.capabilities.supports_preview = !route.capabilities.supports_preview;
+
+        let err = verify_runtime_export_against_expected(baseline, &drifted)
+            .expect_err("capability drift between runtime and export must refuse with typed error");
+        assert!(
+            !err.disagreements.is_empty(),
+            "ExportDisagreementError must record structured disagreements"
+        );
+        assert!(
+            err.disagreements
+                .iter()
+                .any(|d| d.subject.contains(&mutated_route_id)),
+            "disagreement must name drifted route `{mutated_route_id}`, got: {err:?}"
+        );
+
+        let mut missing_route = baseline.clone();
+        missing_route.routes.remove(&mutated_route_id);
+        let missing_err = verify_runtime_export_against_expected(baseline, &missing_route)
+            .expect_err("missing route in export must refuse");
+        assert!(
+            missing_err
+                .disagreements
+                .iter()
+                .any(|d| d.subject == mutated_route_id),
+            "disagreement must identify missing route `{mutated_route_id}`, got: {missing_err:?}"
+        );
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn reg3_linked_runtime_matches_embedded_sga_export_and_refuses_tampered_export() {
+        let embedded = verify_linked_runtime_against_embedded_export()
+            .expect("linked runtime must match embedded sga.capabilities/2 export");
+        let live = crate::inference_runtime::linked_capabilities_export()
+            .expect("native lane links runtime")
+            .expect("live export assembles");
+        assert_eq!(live.feature_set, embedded.feature_set);
+
+        let mut tampered = embedded.clone();
+        tampered.backend = "tampered-backend".to_owned();
+        let err = verify_runtime_export_against_expected(&live, &tampered)
+            .expect_err("tampered embedded export must be refused by linked runtime");
+        assert!(err.disagreements.iter().any(|d| d.kind
+            == sceneworks_core::sga_capabilities::ExportDisagreementKind::BackendMismatch));
     }
 }

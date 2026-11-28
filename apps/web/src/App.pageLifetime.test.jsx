@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { FakeEventSource, response, settle, changeField, field, zImageTrainingTarget, zImageTrainingPresets } from "./main.testSupport.jsx";
+import { openPromptTool, openSettingsTab } from "./screens/imageStudio/studioTestUtils.js";
 
 describe("foreground page lifetime", () => {
   let container;
@@ -202,8 +203,8 @@ describe("foreground page lifetime", () => {
     await settle();
     await act(async () => button("Use Selection").click());
     await settle();
-    // Open the strict-control disclosure and select the imported pose.
-    await act(async () => document.querySelector(".control-panel .advanced-section-toggle").click());
+    // Open the Structure prompt tool and select the imported pose.
+    await openPromptTool("Structure");
     await settle();
     await act(async () => document.querySelector('[aria-label="Select pose Shared workflow pose 1"]').click());
     await settle();
@@ -211,7 +212,8 @@ describe("foreground page lifetime", () => {
     expect(imageStudio()).toBeNull();
     await clickButton("Image");
     expect(document.querySelector('[aria-label="Active image reference"]').textContent).toContain("Portrait reference");
-    await act(async () => document.querySelector(".control-panel .advanced-section-toggle").click());
+    // The open prompt tool is part of the restored workspace; open it if it is not already.
+    await openPromptTool("Structure");
     await settle();
     expect(document.body.textContent).toContain("1 pose selected");
     expect(JSON.parse(localStorage.getItem("sceneworks-studio-image-project-1"))).toMatchObject({
@@ -476,6 +478,7 @@ describe("foreground page lifetime", () => {
       [...document.body.querySelectorAll(".general-preset-chips .preset-chip")].find((chip) =>
         chip.textContent.includes("Filmic Look"),
       );
+    await openSettingsTab("Style");
     expect(generalChip()).toBeTruthy();
     expect(generalChip().classList.contains("active")).toBe(false);
 
@@ -488,6 +491,7 @@ describe("foreground page lifetime", () => {
     await settle();
 
     expect(imageStudio()).not.toBe(studioBefore);
+    await openSettingsTab("Style");
     expect(generalChip().classList.contains("active")).toBe(true);
   });
 

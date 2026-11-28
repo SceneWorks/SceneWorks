@@ -716,7 +716,7 @@ pub(super) fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRung
     };
     if request.get("sdxlEndpoint").is_some() {
         // Match the ordinary worker's advanced.flashAttn default before loading SDXL.
-        runtime_cuda::providers::sdxl::set_flash_attn(true);
+        runtime_cuda::calibration::sdxl::set_flash_attn(true);
     }
     let load_sample = vram.phase();
     let generator = catalog
@@ -1140,7 +1140,7 @@ pub(super) fn run_five_rung_reference_loaded(
                 "seed": generation.seed, "steps": generation.steps,
                 "sampler": generation.sampler, "scheduler": generation.scheduler,
                 "guidance": generation.guidance, "memory": format!("{:?}", generation.memory),
-                "flashAttn": runtime_cuda::providers::sdxl::flash_attn_enabled(),
+                "flashAttn": runtime_cuda::calibration::sdxl::flash_attn_enabled(),
                 "count": generation.count, "cfgInterval": generation.cfg_interval,
                 "guidanceMethod": generation.guidance_method,
                 "schedulerShift": generation.scheduler_shift,
@@ -1159,14 +1159,14 @@ pub(super) fn run_five_rung_reference_loaded(
 /// step (`floor(steps * strength)`) still leaves two executed denoise steps.
 pub(super) fn five_rung_evidence_revision(provider: &str) -> String {
     if matches!(provider, SANA_ID | SANA_SPRINT_ID) {
-        runtime_cuda::providers::sana::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+        runtime_cuda::calibration::sana::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
     } else if matches!(
         provider,
         SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID
     ) {
-        runtime_cuda::providers::sd3::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+        runtime_cuda::calibration::sd3::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
     } else if provider == KOLORS_ID {
-        runtime_cuda::providers::kolors::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
+        runtime_cuda::calibration::kolors::memory_strategy::REQUEST_EVIDENCE_REVISION.to_owned()
     } else {
         format!(
             "{}@{}",
@@ -1185,7 +1185,7 @@ pub(super) fn five_rung_provider_generation_request(
     let mut generation = five_rung_generation_request(width, height, edit);
     if provider == BERNINI_CANDLE_ID {
         // Bernini's shared video provider requires an explicit single-frame mode.
-        generation.video_mode = Some(if edit { "i2i" } else { "t2i" }.to_owned());
+        generation.video_mode = Some(if edit { VideoMode::I2i } else { VideoMode::T2i });
         generation.frames = Some(1);
     }
     generation

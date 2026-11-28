@@ -598,6 +598,47 @@ test("a provider named through gen_core::<family>::PROVIDER_ID is still checked,
   sources["crates/contracts/gen-core-fam3-policy/src/lib.rs"] = 'pub const PROVIDER_ID: &str = "fam3_img";\n';
   assert.doesNotThrow(() => assertFor("fam3_img"));
   assert.throws(() => assertFor("other_img"), /never names it/);
+  // SW-6985: rustfmt-grouped multi-line `use gen_core_checkpoint::{ supra2::{ ..., PROVIDER_ID } };`
+  // resolves through the same verified policy-owner chain without trusting unverified crates.
+  const groupedSources = {
+    "crates/m/src/model.rs": [
+      "use gen_core_checkpoint::{",
+      "    supra2 as s2,",
+      "    supra2::{",
+      "        BundleCheck, PROVIDER_ID, TEXT_ENCODER_COMPONENT,",
+      "    },",
+      "};",
+    ].join("\n"),
+    "crates/contracts/gen-core-checkpoint/src/supra2.rs": "pub use gen_core_supra2_policy::PROVIDER_ID;\n",
+    "crates/contracts/gen-core-supra2-policy/src/lib.rs": 'pub const PROVIDER_ID: &str = "supra2_img";\n',
+  };
+  const groupedRunGit = (_repo, args) => {
+    if (args[0] === "grep" && args.includes("-F")) {
+      const err = new Error("no match");
+      err.status = 1;
+      throw err;
+    }
+    if (args[0] === "grep" && args.includes("-o")) return "";
+    if (args[0] === "grep" && args.includes("-l")) {
+      return Object.keys(groupedSources)
+        .filter((f) => f.startsWith(args.at(-1)))
+        .map((f) => `r1:${f}`)
+        .join("\n");
+    }
+    if (args[0] === "show") {
+      const file = args[1].split(":")[1];
+      if (!(file in groupedSources)) throw new Error(`no ${file}`);
+      return groupedSources[file];
+    }
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+  assert.doesNotThrow(() =>
+    assertProviderIsDeclaredInCrate({ repo: "/fake", revision: "r1", provider: "supra2_img", crateDir: "crates/m", runGit: groupedRunGit }),
+  );
+  assert.throws(
+    () => assertProviderIsDeclaredInCrate({ repo: "/fake", revision: "r1", provider: "wrong_img", crateDir: "crates/m", runGit: groupedRunGit }),
+    /never names it/,
+  );
 });
 
 test("two providers in the SAME crate get distinct digests", () => {

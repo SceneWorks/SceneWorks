@@ -1483,88 +1483,16 @@ use vace::{validate_vace_fun_capability, wan_vace_extend_raw_settings, wan_vace_
 /// dumper; it deliberately reuses the same family resolvers as [`resolve_video_route`] and
 /// [`resolve_candle_video_route`] instead of maintaining a second model table.
 #[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
 pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
-    if model == "wan_2_2_vace_fun_14b" {
-        return if mode == "replace_person" {
-            vec!["wan2_2_vace_fun_14b"]
-        } else {
-            Vec::new()
-        };
-    }
-    if mode == "replace_person" {
-        return if let Some(engine_id) = scail2_engine_id(model) {
-            vec![engine_id]
-        } else if let Some(engine_id) = ltx_engine_id(model) {
-            vec![engine_id]
-        } else {
-            vec!["wan_vace"]
-        };
-    }
-    if matches!(mode, "extend_clip" | "video_bridge")
-        && wan_engine_id(model) == Some("wan2_2_ti2v_5b")
-    {
-        // Production prefers the ControlClip VACE engine and falls back to the TI2V keyframe path
-        // when that snapshot is not provisioned. Both descriptors therefore govern the route.
-        return vec!["wan_vace", "wan2_2_ti2v_5b"];
-    }
-    wan_engine_id(model)
-        .or_else(|| ltx_engine_id(model))
-        .or_else(|| svd_engine_id(model))
-        .or_else(|| bernini_engine_id(model))
-        .or_else(|| scail2_engine_id(model))
-        .or_else(|| krea_realtime_engine_id(model))
-        .or_else(|| mochi_engine_id(model))
-        // MiniMax-H3 (epic 17137 / sc-19508) — the same tail arm `resolve_video_route_with` carries.
-        // Unfiltered by `minimax_h3_ready` exactly as every resolver above is unfiltered by its
-        // `*_available` sibling: this function answers "which inference generator does dispatch
-        // NAME for this route", not "is it loadable on this machine right now". Omitting it made
-        // the capability-facts dumper report "worker dispatch resolves no inference engine" for a
-        // route whose dispatch arm is right there — main added this derivation while the epic added
-        // the family, and neither side's diff touched the other's lines.
-        .or_else(|| minimax_h3_engine_id(model))
-        .into_iter()
-        .collect()
+    sceneworks_core::registry::route_bindings::video_route_ids("mlx", model, mode).to_vec()
 }
 
-/// Candle sibling of [`runtime_descriptor_engine_ids`], sourced from the actual Candle dispatch
-/// ladder and its `candle_video_engine_id` registry join.
+/// Candle sibling of [`runtime_descriptor_engine_ids`], delegating to the single shared video
+/// route binding table in `sceneworks_core::registry::route_bindings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'static str> {
-    // SC-18902 withdrew Eros from Candle after its exact-head CUDA acceptance produced unusable
-    // noise. Keep capability facts on the same terminal-refusal truth as production dispatch:
-    // generic replacement/extension fallbacks must never advertise Wan-VACE for this stable id.
-    if model == "ltx_2_3_eros" {
-        return Vec::new();
-    }
-    if model == "wan_2_2_vace_fun_14b" {
-        return if mode == "replace_person" {
-            vec!["wan2_2_vace_fun_14b"]
-        } else {
-            Vec::new()
-        };
-    }
-    if mode == "replace_person" {
-        return vec![scail2_engine_id(model)
-            .or_else(|| {
-                candle::candle_video_engine_id(model).filter(|engine_id| {
-                    matches!(*engine_id, "ltx_2_3_distilled" | "ltx_2_5_distilled")
-                })
-            })
-            .unwrap_or("wan_vace")];
-    }
-    if mode == "animate_character" {
-        return scail2_engine_id(model).into_iter().collect();
-    }
-    if matches!(mode, "extend_clip" | "video_bridge") {
-        return vec![candle::candle_video_engine_id(model)
-            .filter(|id| matches!(*id, "ltx_2_3_distilled" | "ltx_2_5_distilled"))
-            .unwrap_or("wan_vace")];
-    }
-    bernini_engine_id(model)
-        .or_else(|| candle::candle_video_engine_id(model))
-        .or_else(|| minimax_h3_engine_id(model))
-        .into_iter()
-        .collect()
+    sceneworks_core::registry::route_bindings::video_route_ids("candle", model, mode).to_vec()
 }
 
 // ---------------------------------------------------------------------------

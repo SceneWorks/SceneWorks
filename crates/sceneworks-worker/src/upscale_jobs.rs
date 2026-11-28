@@ -451,12 +451,11 @@ async fn run_seedvr2_upscale(
         LoadSpec::new(WeightsSource::Dir(dir)),
         "SeedVR2 engine load",
         move |generator| {
-            let request = GenerationRequest {
+            let mut request = GenerationRequest {
                 width: target_w,
                 height: target_h,
                 count: 1,
                 seed: Some(seed),
-                softness: Some(softness),
                 conditioning: vec![Conditioning::Reference {
                     image,
                     strength: None,
@@ -464,6 +463,7 @@ async fn run_seedvr2_upscale(
                 cancel: cancel.clone(),
                 ..Default::default()
             };
+            request.extensions.seedvr2_mut().softness = Some(softness);
             let completed = generator
                 .generate_with_execution_report(&request, &mut |_progress| {})
                 .map_err(|error| match error {

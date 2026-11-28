@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn bernini_reference_probe_passes_the_provider_scope_and_binds_its_image() {
+    use runtime_cuda::calibration::bernini::memory_strategy as bernini;
     use runtime_cuda::gen_core::{MemoryBehaviorRoute, MemoryNumericTier};
-    use runtime_cuda::providers::bernini::memory_strategy as bernini;
     let arm = BERNINI_CANDLE_VIDEO_ARM;
     for (tier, quant) in [
         ("bf16", None),
@@ -1908,7 +1908,7 @@ fn the_qwen_image_2_1_five_rung_family_splits_bf16_onto_the_upstream_snapshot_ro
 fn the_qwen_image_2_1_candle_identity_is_the_engine_constant() {
     assert_eq!(
         QWEN_IMAGE_2_1_CANDLE_FINGERPRINT,
-        runtime_cuda::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+        runtime_cuda::calibration::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
     );
     for tier in ["bf16", "q4", "q8"] {
         assert_eq!(
@@ -1920,7 +1920,7 @@ fn the_qwen_image_2_1_candle_identity_is_the_engine_constant() {
     // sc-25907: and Turbo's literal IS the engine's Turbo constant, distinct from base's.
     assert_eq!(
             QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT,
-            runtime_cuda::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT
+            runtime_cuda::calibration::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT
         );
     assert_ne!(
         QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT,

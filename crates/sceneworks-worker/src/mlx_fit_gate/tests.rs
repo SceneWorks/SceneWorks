@@ -1774,7 +1774,11 @@ impl gen_core::Generator for ReferenceRenderGenerator {
             (request.width, request.height),
             (context.geometry.width, context.geometry.height)
         );
-        assert!(request.flux3_reference_output.is_some());
+        assert!(request
+            .extensions
+            .flux3
+            .as_ref()
+            .is_some_and(|ext| ext.reference_output.is_some()));
         record.generated += 1;
         Ok(gen_core::GenerationOutput::Images(vec![gen_core::Image {
             width: request.width,
@@ -2603,7 +2607,14 @@ fn owned_reference_pricing_precedes_candidate_fit_and_none_preserves_decisions()
                     {
                         assert_eq!(carrier(actual), carrier(expected));
                     }
-                    assert_eq!(request.flux3_reference_output, Some(references.output_size));
+                    assert_eq!(
+                        request
+                            .extensions
+                            .flux3
+                            .as_ref()
+                            .and_then(|ext| ext.reference_output),
+                        Some(references.output_size)
+                    );
                     let observed = record.lock().unwrap();
                     assert_eq!(observed.safety, vec![admission.context.clone()]);
                     assert_eq!(observed.scopes, vec![admission.context.clone()]);
@@ -8777,7 +8788,7 @@ fn write_audited_flux2_encoder_fixture(
         gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
             &encoder_root,
             contract,
-            runtime_macos::providers::flux2::config::DEV_VISION_ENCODER_CONTRACT,
+            runtime_macos::converters::flux2::config::DEV_VISION_ENCODER_CONTRACT,
             quant_bits,
         )
     } else {
@@ -11209,10 +11220,11 @@ fn installed_sensenova_infographic_request_is_admitted_and_renders() {
             false,
         );
     }
-    let contract = runtime_macos::providers::sensenova::memory_strategy::memory_strategy_contract(
-        engine, &spec,
-    )
-    .unwrap();
+    let contract =
+        runtime_macos::memory_helpers::sensenova::memory_strategy::memory_strategy_contract(
+            engine, &spec,
+        )
+        .unwrap();
     assert_eq!(
         Some(
             contract
@@ -11222,7 +11234,7 @@ fn installed_sensenova_infographic_request_is_admitted_and_renders() {
                 .fingerprint
                 .clone()
         ),
-        runtime_macos::providers::sensenova::memory_strategy::production_calibration_fingerprint(
+        runtime_macos::memory_helpers::sensenova::memory_strategy::production_calibration_fingerprint(
             engine, &spec
         )
     );
@@ -11382,7 +11394,7 @@ fn installed_flux2_dev_request_uses_the_staged_ladder() {
         gen_core::LoadShapeDeclarationResult::Refused
     );
     let contract =
-        runtime_macos::providers::flux2::memory_strategy::registered_dev_t2i_contract(&spec)
+        runtime_macos::memory_helpers::flux2::memory_strategy::registered_dev_t2i_contract(&spec)
             .unwrap();
     let generator = RequestGenerator {
         descriptor: crate::inference_runtime::media_descriptor("flux2_dev")
@@ -11645,7 +11657,7 @@ fn mlx_prefix_kv_cache_keeps_the_shed_rung_and_never_refuses_an_admissible_reque
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_production_pricing_site_prices_the_linked_turbo_cache_only_for_an_eligible_request() {
-    use runtime_macos::providers::qwen_image_2_1::{memory_strategy::derived, quant::Tier};
+    use runtime_macos::memory_helpers::qwen_image_2_1::{memory_strategy::derived, quant::Tier};
     let descriptor = crate::inference_runtime::media_descriptor("qwen_image_2_1_turbo")
         .expect("the linked MLX registry carries qwen_image_2_1_turbo");
     assert!(
@@ -12596,7 +12608,7 @@ fn mage_calibration_cells_are_the_eighteen_distinct_shipped_pairs() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mage_estimator_fingerprint_matches_the_linked_provider_contract() {
-    use runtime_macos::providers::mage::model::{production_calibration_fingerprint, MODEL_IDS};
+    use runtime_macos::converters::mage::model::{production_calibration_fingerprint, MODEL_IDS};
     let tiers = [
         None,
         Some(gen_core::Quant::Q4),
@@ -15994,7 +16006,7 @@ mod adaln_exclusion_reaches_the_estimate_floor {
     #[cfg(native_lane)]
     #[test]
     fn the_h3_eviction_figures_are_the_pinned_engines_own() {
-        use platform_runtime::providers::minimax_h3::memory_strategy as h3;
+        use platform_runtime::memory_helpers::minimax_h3::memory_strategy as h3;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         use runtime_cuda as platform_runtime;
         #[cfg(target_os = "macos")]

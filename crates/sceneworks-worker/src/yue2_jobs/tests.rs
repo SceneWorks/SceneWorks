@@ -326,6 +326,8 @@ impl StubYue2 {
             prefix_kv_cache: None,
             pag: None,
             low_res_start: None,
+            adapter_apply_reports: Vec::new(),
+            family_report: None,
         })
     }
 }
@@ -2357,6 +2359,8 @@ mod real_weights {
                 prefix_kv_cache: None,
                 pag: None,
                 low_res_start: None,
+                adapter_apply_reports: Vec::new(),
+                family_report: None,
             })
         }
     }

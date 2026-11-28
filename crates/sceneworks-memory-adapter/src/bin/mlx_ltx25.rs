@@ -7,8 +7,7 @@
 //! contract, and the shared request scope; there is no synthetic peak or alternate render path.
 
 use super::*;
-use mlx_gen::gen_core::AudioTrack;
-use mlx_gen::{AdapterKind, AdapterSpec};
+use runtime_macos::gen_core::{AdapterKind, AdapterSpec, AudioTrack};
 
 const LABEL: &str = "MLX LTX-2.5";
 const EXECUTION_PATH: &str = "the MLX LTX-2.5 full-A/V text-to-video path";
@@ -470,7 +469,7 @@ fn runtime_overlay(spec: &LoadSpec, decoder: Decoder) -> Result<Option<String>, 
     let mut axes = Vec::new();
     if !spec.adapters.is_empty() {
         axes.push(
-            mlx_gen::gen_core::adapter_stack_identity(&spec.adapters).ok_or_else(|| {
+            runtime_macos::gen_core::adapter_stack_identity(&spec.adapters).ok_or_else(|| {
                 format!("{LABEL} dev adapter stack has no exact production identity")
             })?,
         );
@@ -693,6 +692,12 @@ fn full_av_video(output: GenerationOutput) -> Result<(Vec<Image>, u32, AudioTrac
         GenerationOutput::Interleaved { .. } => Err(format!(
             "{LABEL} returned interleaved output, not a video clip"
         )),
+        GenerationOutput::Vector(_) => {
+            Err(format!("{LABEL} returned vector output, not a video clip"))
+        }
+        GenerationOutput::Latents { .. } => {
+            Err(format!("{LABEL} returned latent output, not a video clip"))
+        }
     }
 }
 
@@ -1068,8 +1073,9 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let capture_plan = prepare_source_capture(request, target)?;
     let artifact = load_artifact(request, target, tier, &selection)?;
     let overlay = runtime_overlay(&artifact.spec, target.decoder)?;
-    let registry = mlx_gen_ltx::provider_registry()
-        .map_err(|error| format!("build LTX-2.5 registry: {error}"))?;
+    let catalog =
+        runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let registry = catalog.media();
     let contract = registry
         .memory_strategy_contract(LTX25_PROVIDER, &artifact.spec)
         .map_err(|error| format!("resolve real LTX-2.5 memory contract: {error}"))?
@@ -1095,7 +1101,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         ));
     }
     let resolved_tier =
-        mlx_gen_ltx::resolved_video_memory_numeric_tier(LTX25_PROVIDER, &artifact.spec)
+        runtime_macos::resolved_video_memory_numeric_tier(LTX25_PROVIDER, &artifact.spec)
             .map_err(|error| format!("resolve physical LTX-2.5 numeric tier: {error}"))?
             .ok_or_else(|| "LTX-2.5 numeric tier resolver returned no tier".to_owned())?;
     if resolved_tier != selection.tier {

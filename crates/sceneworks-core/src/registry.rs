@@ -23,6 +23,7 @@ pub(crate) use trainer_routes::{native_trainer_serves, offered_network_types};
 mod evidence;
 #[cfg(test)]
 mod policy;
+pub mod route_bindings;
 pub use evidence::{builtin_memory_evidence, project_builtin_memory_evidence};
 
 static BUILTINS: LazyLock<BTreeMap<String, ModelSpec>> = LazyLock::new(|| {

@@ -310,7 +310,7 @@ fn convert_flux3_ggml(
             return Err("an MLX affine conversion is not a GGML pack".to_owned())
         }
     };
-    runtime_cuda::providers::flux3::convert::convert_ggml(source, storage, out_dir, cancel)
+    runtime_cuda::converters::flux3::convert::convert_ggml(source, storage, out_dir, cancel)
         .map_err(|error| error.to_string())
 }
 
@@ -1026,7 +1026,7 @@ mod tests {
                 Flux3Conversion::CandleGgmlQ4_1 | Flux3Conversion::CandleGgmlQ8_0
             ) {
                 use gen_core_flux3::artifacts::NativeDitStorage;
-                use runtime_cuda::providers::flux3::memory_strategy::{
+                use runtime_cuda::memory_helpers::flux3::memory_strategy::{
                     dit_bytes, native_dit_bytes,
                 };
                 let config = gen_core_flux3::resolve_checkpoint(&dir).unwrap();

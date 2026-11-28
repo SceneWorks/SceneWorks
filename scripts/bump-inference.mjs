@@ -34,16 +34,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// The stage-2 derivation owns both halves of the facts-file contract, so the bump's fail-closed
-// check reuses them rather than re-implementing a second, drifting copy (the same cross-import
-// shape as scripts/check-scaffold.mjs).
-import {
-  assertBackendCoverage,
-  parseSceneworksAudioBackends,
-  parseSceneworksBackends,
-} from "../apps/web/src/data/previewSupportDerivation.js";
+import { isDeepStrictEqual } from "node:util";
+import { validateSgaCapabilitiesExport } from "./compare-engine-capability-facts.mjs";
 import { parseCargoLock } from "./inference-closure-digest.mjs";
-import { validateMemoryContractFacts } from "./lib/memory-contract-reconciliation.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
@@ -52,19 +45,21 @@ const LOCKFILE = join(repoRoot, "Cargo.lock");
 // Root workspace manifest: holds the Candle [patch] pins (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
-// Every inference crate any workspace manifest depends on, so `cargo update -p` refreshes ALL of
-// their lock entries. `mlx-gen` / `candle-gen` come in through
-// `crates/sceneworks-memory-adapter` -- omitting them left that crate's four deps stranded on
-// the previous revision in `Cargo.lock` even after its manifest was rewritten, which is the same
-// two-revisions-in-one-lockfile skew `inferenceManifests()` exists to prevent one step earlier.
+// Bundle-only inference crate list (REG-5): SceneWorks depends only on runtime bundles and
+// contract crates, never directly on `mlx-gen*` or `candle-gen*` family crates.
 const INFERENCE_CRATES = [
   "sceneworks-gen-core",
   "sceneworks-gen-core-testkit",
   "runtime-macos",
   "runtime-cuda",
-  "mlx-gen",
-  "candle-gen",
 ];
+export const SGA_CAPABILITY_EXPORTS = Object.freeze([
+  { file: "candle-cpu.json", featureSet: "candle-cpu", backend: "candle", platform: "cpu", args: ["-p", "runtime-cpu", "--bin", "sga-capabilities-export-candle", "--", "--feature-set", "candle-cpu"] },
+  { file: "candle-cuda.json", featureSet: "candle-cuda", backend: "candle", platform: "cuda", args: ["-p", "runtime-cpu", "--bin", "sga-capabilities-export-candle", "--", "--feature-set", "candle-cuda"] },
+  { file: "macos-mlx.json", featureSet: "macos-mlx", backend: "mlx", platform: "macos", args: ["-p", "runtime-macos", "--bin", "sga-capabilities-export-macos", "--"] },
+  { file: "ios-media.json", featureSet: "ios-media", backend: "mlx", platform: "ios", args: ["-p", "runtime-ios", "--bin", "sga-capabilities-export-ios", "--"] },
+  { file: "ios-llm-only.json", featureSet: "ios-llm-only", backend: "mlx", platform: "ios", args: ["--no-default-features", "-p", "runtime-ios", "--bin", "sga-capabilities-export-ios", "--"] },
+]);
 // Resolved through the root [patch], not direct dependencies. Every vendored package must move
 // with the inference pin and have its lock entry refreshed by Cargo.
 const PATCHED_CRATES = ["candle-core", "candle-nn", "candle-kernels", "candle-metal-kernels"];
@@ -660,47 +655,10 @@ export function deriveLicenseAudit(sha, repo, io = {}) {
 }
 
 /**
- * Say up front which capability facts this machine cannot produce.
- *
- * The dump binary selects its backend by PLATFORM, not by feature flag, so on macOS the documented
- * `--no-default-features --features backend-candle` command rewrites the MLX file instead of the
- * candle one. Learning that at the END of a bump — after pins, closures, audit and matrix have all
- * moved — is what makes this feel like a maze. Same information, delivered before the work.
+ * Hardware-free `sga.capabilities/2` exports need no second-OS lane (SW-6983 / REG-3 / M8).
  */
-function reportCrossLaneWork(sha) {
-  const dir = join(repoRoot, "config/engine-capabilities");
-  const revisionMismatches = [];
-  for (const [sub, name] of [
-    ["", "capabilities.mlx.json"],
-    ["", "capabilities.candle.json"],
-    ["audio", "capabilities.candle.json"],
-  ]) {
-    try {
-      const facts = JSON.parse(readFileSync(join(dir, sub, name), "utf8"));
-      const at = facts?.generatedFrom?.inferenceRevision;
-      if (at && at !== sha) revisionMismatches.push([join(sub, name), at]);
-    } catch {
-      /* absent files are the existing checker's business, not this preview's */
-    }
-  }
-  if (revisionMismatches.length === 0) return;
-  console.log("bump-inference: engine-capability revision labels that differ from this pin —");
-  for (const [name, at] of revisionMismatches) {
-    const needsOtherLane = name === "capabilities.candle.json" && process.platform === "darwin";
-    console.log(
-      `    ${name}  (at ${at.slice(0, 12)}…)  ${needsOtherLane ? "NEEDS A LINUX/WINDOWS LANE" : "dumpable here"}`,
-    );
-  }
-  if (
-    revisionMismatches.some(([name]) => name === "capabilities.candle.json") &&
-    process.platform === "darwin"
-  ) {
-    console.log(
-      "  capabilities.candle.json cannot be dumped on macOS. Land the bump, then re-dump it on a\n" +
-        "  Linux/Windows lane if declared Candle capabilities changed. A revision-only mismatch is\n" +
-        "  informational and does not require either producer machine.",
-    );
-  }
+function reportCrossLaneWork() {
+  // All five `config/engine-capabilities/sga/*.json` exports are hardware-free and pin-free.
 }
 
 /**
@@ -740,196 +698,139 @@ function reportStaleCurrencyAttestations(sha) {
   );
 }
 
-// Every checked-in file under `config/engine-capabilities/` records the producing revision and the
-// preview flags plus the rich `runtime/` descriptor/trainer/provider and worker-capability surfaces
-// read off the LINKED registries (sc-16965, epic 16948). A pin change alone does not invalidate that
-// content (e14171984); the revision label is retained as provenance and reported when it differs.
-//
-// Like the licence audit, this CANNOT be regenerated blindly from here: the dumper needs a lane that
-// actually links engines (macOS for mlx,
-// `--features backend-candle` off-Mac for candle), which a bump does not otherwise require and
-// which no single host can supply for both backends. So verify structural completeness and native
-// content shape, report revision-label drift, and let the remediation text name the exact invocation.
-//
-// Downstream cascade: re-dumping a facts file makes `config/manifests/builtin.preview-support.jsonc`
-// + `apps/web/src/data/previewSupport.json`
-// stale, and `apps/web/src/data/previewSupportCatalog.test.js` (web vitest, every PR) fails until
-// `npm run gen:preview-support` is re-run.
-// `root` is a parameter purely so `--self-test` can drive this against fixture trees. It is the one
-// check in this script with real branching over the FILESYSTEM rather than over text, and its
-// audio half (sc-17593) guards a hole that stayed invisible for four pins, so "it is wired" is not
-// the same as "it fires".
+/**
+ * Refresh `config/engine-capabilities/sga/*.json` from an inference checkout using its
+ * hardware-free `sga-capabilities-export-*` CLIs, writing ONLY files whose semantic
+ * `sga.capabilities/2` payload actually changed (`M8`: pin-only bumps produce zero churn).
+ */
+export function syncSgaCapabilityExports(repo, root = repoRoot, io = {}) {
+  const sgaDir = join(root, "config/engine-capabilities/sga");
+  const {
+    exportProfile = (entry, outPath) => {
+      execFileSync("cargo", ["run", "--locked", ...entry.args, "--out", outPath], {
+        cwd: repo,
+        encoding: "utf8",
+      });
+    },
+    log = console.log,
+  } = io;
+  mkdirSync(sgaDir, { recursive: true });
+  const scratch = mkdtempSync(join(tmpdir(), "bump-inference-sga-"));
+  const changed = [];
+  try {
+    for (const entry of SGA_CAPABILITY_EXPORTS) {
+      const freshPath = join(scratch, entry.file);
+      exportProfile(entry, freshPath);
+      const freshRaw = readFileSync(freshPath, "utf8");
+      const fresh = validateSgaCapabilitiesExport(JSON.parse(freshRaw), freshPath);
+      const targetPath = join(sgaDir, entry.file);
+      let identical = false;
+      try {
+        const committed = validateSgaCapabilitiesExport(
+          JSON.parse(readFileSync(targetPath, "utf8")),
+          targetPath,
+        );
+        identical = isDeepStrictEqual(committed, fresh);
+      } catch {
+        identical = false;
+      }
+      if (!identical) {
+        writeFileSync(targetPath, freshRaw.endsWith("\n") ? freshRaw : `${freshRaw}\n`);
+        changed.push(entry.file);
+      }
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  if (root === repoRoot) {
+    log(
+      changed.length === 0
+        ? "bump-inference: sga.capabilities/2 exports semantically unchanged (zero artifact churn)"
+        : `bump-inference: updated sga.capabilities/2 exports: ${changed.join(", ")}`,
+    );
+  }
+  return changed;
+}
+
+/**
+ * Verify all five canonical `sga.capabilities/2` exports exist, carry no pin stamps (`M8`),
+ * and that no retired legacy `capabilities.{mlx,candle}.json` dump files remain (`REG-3`).
+ */
 export function verifyEngineCapabilityFacts(sha, root = repoRoot) {
   const dir = join(root, "config/engine-capabilities");
-  // The audio registry's dumps live one level down (sc-17593), so `readdirSync` — not recursive —
-  // keeps the two sets apart on its own. They are validated for staleness together and for coverage
-  // separately, because their declared backend sets are different consts.
-  const audioDir = join(dir, "audio");
-  const runtimeDir = join(dir, "runtime");
-  const factsFileNames = (from) => {
+  const sgaDir = join(dir, "sga");
+  const retired = [
+    "capabilities.mlx.json",
+    "capabilities.candle.json",
+    "audio/capabilities.candle.json",
+    "runtime/capabilities.mlx.json",
+    "runtime/capabilities.candle.json",
+  ];
+  for (const rel of retired) {
+    let exists = false;
     try {
-      return readdirSync(from).filter((name) => /^capabilities\.[a-z0-9_-]+\.json$/.test(name));
+      readFileSync(join(dir, rel), "utf8");
+      exists = true;
     } catch {
-      return [];
+      exists = false;
     }
-  };
-  const names = factsFileNames(dir);
-  const audioNames = factsFileNames(audioDir);
-  const runtimeNames = factsFileNames(runtimeDir);
-  if (names.length === 0) {
-    throw new Error(
-      `no engine-capability facts under ${dir}. Dump them on a lane that links engines: ` +
-        "`cargo run -p sceneworks-worker --bin dump-engine-capabilities --features backend-candle` " +
-        "(off-Mac) or the same command with no features (macOS), then re-run " +
-        "`npm run gen:preview-support` from apps/web.",
-    );
-  }
-  // Coverage BEFORE staleness (sc-17119). The loop below can only judge files that exist, so a
-  // backend that was never dumped is not "stale" — it is absent, and absence passed this check
-  // forever. `capabilities.mlx.json` was absent for four consecutive pins beginning with the one
-  // sc-16965 itself shipped on, and nothing in this function could have objected -- it validates
-  // only the files that are there.
-  const dumpedBackendsIn = (from, fileNames, constName, lane) =>
-    fileNames.map((name) => {
-      const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
-      const backend = facts?.backend;
-      if (typeof backend !== "string" || backend.length === 0) {
-        // Named here rather than left to `assertBackendCoverage`, which sees only the values: a
-        // nameless backend reads there as an unidentifiable entry, and the operator needs the file.
-        throw new Error(
-          `${name} carries no \`backend\` field, so it cannot be matched against ${constName}. ` +
-            "Re-dump it on the lane that owns it rather than hand-editing it.",
-        );
-      }
-      // The `registry` discriminator (sc-17593). Checking it here and not only in the stage-2
-      // derivation matters because a media and an audio dump can carry the SAME `backend` —
-      // `candle` on every platform for audio — so `backend` alone cannot tell a file that landed in
-      // the wrong directory from a correct one, and this check would happily count it as coverage.
-      const registry = facts?.registry ?? "media";
-      if (registry !== lane) {
-        throw new Error(
-          `${name} is a ${JSON.stringify(registry)} dump but sits in the ${JSON.stringify(lane)} ` +
-            "facts directory. Media dumps belong in config/engine-capabilities/, audio dumps in " +
-            "config/engine-capabilities/audio/ — counting this one would report coverage for a " +
-            "registry that was never dumped.",
-        );
-      }
-      return backend;
-    });
-  const factsDeclarationSource = readFileSync(
-    join(root, "crates/sceneworks-worker/src/engine_capability_facts.rs"),
-    "utf8",
-  );
-  assertBackendCoverage(
-    parseSceneworksBackends(factsDeclarationSource),
-    dumpedBackendsIn(dir, names, "SCENEWORKS_BACKENDS", "media"),
-  );
-  const runtimeBackends = runtimeNames.map((name) => {
-    const facts = JSON.parse(readFileSync(join(runtimeDir, name), "utf8"));
-    const backend = facts?.snapshot?.backend;
-    if (facts?.schemaVersion !== 2 || typeof backend !== "string" || backend.length === 0) {
+    if (exists) {
       throw new Error(
-        `runtime/${name} is not a schema-2 rich runtime descriptor dump; re-dump it on the ` +
-          "matching platform rather than projecting or hand-editing descriptor facts.",
+        `retired legacy capability dump config/engine-capabilities/${rel} must not remain; ` +
+          "only config/engine-capabilities/sga/*.json (sga.capabilities/2) is permitted.",
       );
     }
-    const generators = facts?.snapshot?.generator_capabilities;
-    const trainers = facts?.snapshot?.trainer_capabilities;
+  }
+
+  for (const entry of SGA_CAPABILITY_EXPORTS) {
+    const filePath = join(sgaDir, entry.file);
+    let doc;
+    try {
+      doc = JSON.parse(readFileSync(filePath, "utf8"));
+    } catch (error) {
+      throw new Error(
+        `missing or unreadable sga.capabilities/2 export config/engine-capabilities/sga/${entry.file} ` +
+          `(${error?.message ?? error}). Regenerate with inference's hardware-free sga-capabilities-export-* CLI.`,
+      );
+    }
+    if (doc?.schema_version !== "sga.capabilities/2") {
+      throw new Error(
+        `config/engine-capabilities/sga/${entry.file} must declare schema_version "sga.capabilities/2", ` +
+          `got ${JSON.stringify(doc?.schema_version)}`,
+      );
+    }
+    if ("generatedFrom" in doc || "inferenceRevision" in doc) {
+      throw new Error(
+        `config/engine-capabilities/sga/${entry.file} must be pin-free (M8): remove generatedFrom/inferenceRevision`,
+      );
+    }
     if (
-      !Array.isArray(generators) ||
-      generators.length === 0 ||
-      !Array.isArray(trainers) ||
-      trainers.length === 0 ||
-      !Array.isArray(facts?.workerCapabilities) ||
-      facts.workerCapabilities.length === 0 ||
-      !Array.isArray(facts?.videoModelMappings) ||
-      facts.videoModelMappings.length === 0 ||
-      facts.videoModelMappings.some(
-        (mapping) =>
-          typeof mapping?.modelId !== "string" ||
-          typeof mapping?.mode !== "string" ||
-          !Array.isArray(mapping?.engineIds) ||
-          mapping.engineIds.length === 0,
-      ) ||
-      generators.some(
-        (descriptor) =>
-          !Array.isArray(descriptor?.conditioning) ||
-          !Array.isArray(descriptor?.supported_quants) ||
-          typeof descriptor?.supports_lora !== "boolean" ||
-          typeof descriptor?.supports_lokr !== "boolean" ||
-          typeof descriptor?.supports_prompt_enhancement !== "boolean",
-      )
+      doc.feature_set !== entry.featureSet ||
+      doc.backend !== entry.backend ||
+      doc.platform !== entry.platform
     ) {
       throw new Error(
-        `runtime/${name} omits video mappings, conditioning, adapter, quant, prompt-enhancement, trainer, or worker capability truth; ` +
-          "re-dump the full runtime snapshot on the matching platform.",
+        `config/engine-capabilities/sga/${entry.file} header mismatch: expected ` +
+          `${entry.featureSet}/${entry.backend}/${entry.platform}, got ` +
+          `${doc.feature_set}/${doc.backend}/${doc.platform}`,
       );
     }
-    return backend;
-  });
-  if (runtimeNames.length === 0) {
-    throw new Error(
-      "rich runtime descriptor facts are missing. Re-run dump-engine-capabilities on the MLX and " +
-        "Candle matching-platform lanes; the runtime/ files cannot be projected or hand-authored.",
-    );
-  }
-  assertBackendCoverage(parseSceneworksBackends(factsDeclarationSource), runtimeBackends);
-  // sc-17593. The audio registry is dumped separately and its coverage must be asserted separately:
-  // `candle` in SCENEWORKS_BACKENDS is satisfied by the media dump alone, so an undumped audio
-  // registry cleared the check above every time — which is how it stayed invisible.
-  assertBackendCoverage(
-    parseSceneworksAudioBackends(factsDeclarationSource),
-    dumpedBackendsIn(audioDir, audioNames, "SCENEWORKS_AUDIO_BACKENDS", "audio"),
-    "audio",
-  );
-
-  // SC-18460: a pin bump must not accept descriptor-only media dumps. The same generated files are
-  // the authoritative registry side of the memory-contract reconciliation gate, so require the
-  // complete two-backend inventory, unique providers/selectors, and digest-bound surfaces here.
-  // Audio facts remain a separate registry and deliberately carry no image-memory contracts.
-  validateMemoryContractFacts(
-    names.map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))),
-  );
-
-  const stale = [];
-  for (const [from, fileNames, label] of [
-    [dir, names, ""],
-    [audioDir, audioNames, "audio/"],
-    [runtimeDir, runtimeNames, "runtime/"],
-  ]) {
-    for (const name of fileNames) {
-      const facts = JSON.parse(readFileSync(join(from, name), "utf8"));
-      const revision = facts?.generatedFrom?.inferenceRevision;
-      if (revision !== sha) stale.push(`${label}${name} (dumped at ${revision ?? "unknown"})`);
+    if (!doc.routes || typeof doc.routes !== "object" || Array.isArray(doc.routes)) {
+      throw new Error(`config/engine-capabilities/sga/${entry.file} is missing its routes map`);
+    }
+    if ((entry.featureSet === "macos-mlx" || entry.featureSet === "candle-cuda") && Object.keys(doc.routes).length === 0) {
+      throw new Error(`config/engine-capabilities/sga/${entry.file} has zero routes`);
+    }
+    if (!doc.trainers || typeof doc.trainers !== "object" || Array.isArray(doc.trainers)) {
+      throw new Error(`config/engine-capabilities/sga/${entry.file} is missing its trainers map`);
+    }
+    if (!doc.audio_routes || typeof doc.audio_routes !== "object" || Array.isArray(doc.audio_routes)) {
+      throw new Error(`config/engine-capabilities/sga/${entry.file} is missing its audio_routes map`);
     }
   }
-  if (stale.length) {
-    // REPORTED, not refused. A pin bump does not invalidate a capability dump: pins change
-    // constantly, declared capabilities almost never do. A dump goes stale when a provider gains or
-    // loses a capability — a property of its CONTENT, not of the revision label on it — and the only
-    // way to learn that is to re-dump on a lane that links the backend.
-    //
-    // Refusing here made every pin bump wait on a second machine, because the candle media dump can
-    // only be produced off-Mac. Landing a bump and re-dumping when that lane next runs leaves the
-    // catalog describing the previous revision's descriptors in the meantime, which is a stale
-    // label on accurate data far more often than it is a wrong capability.
-    console.warn(
-      `bump-inference: engine-capability facts still at an older revision (NOT blocking):\n  ${stale.join("\n  ")}\n` +
-        "  Re-dump on the lane that owns each file when convenient — one file per backend:\n" +
-        "    macOS  : cargo run -p sceneworks-worker --bin dump-engine-capabilities\n" +
-        "    off-Mac: cargo run -p sceneworks-worker --bin dump-engine-capabilities " +
-        "--no-default-features --features backend-candle\n" +
-        "  then (cd apps/web && npm run gen:preview-support).",
-    );
-  }
-  // Silent when driven from `--self-test`, which runs in `npm run check`: the fixture tree is a
-  // temp dir at a fake SHA, and an "OK: … dumped at aaaa…" line there reads exactly like a real
-  // verification of the repo's own facts files.
   if (root === repoRoot) {
     console.log(
-      `OK: ${names.length} engine-capability facts file(s) + ${audioNames.length} audio file(s) ` +
-        `+ ${runtimeNames.length} rich runtime file(s) are structurally complete; Cargo pin ${sha} ` +
-        "(revision-label differences are informational)",
+      `OK: all ${SGA_CAPABILITY_EXPORTS.length} sga.capabilities/2 exports are present and pin-free (Cargo pin ${sha})`,
     );
   }
 }
@@ -1203,120 +1104,35 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       metadataInvocation?.options.cwd === "/self-test/repo" &&
       !metadataInvocation?.args.includes("--no-deps"),
   );
-  // --- engine-capability facts, over a real fixture tree (sc-17593) --------------------------
-  //
-  // Everything above is text in, text out. This check is here because the facts verification is the
-  // one part of the script that branches on FILES — including files that are not there, which is the
-  // failure mode that hid an undumped registry for four consecutive pins. Driven over a temp tree so
-  // it exercises the same code the bump runs, rather than a paraphrase of it.
-  const factsDeclaration = [
-    "/// doc comment naming candle and mlx in prose, which the parser must not anchor on.",
-    'pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];',
-    'pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];',
-    "",
-  ].join("\n");
-  const factsFile = (backend, revision, extra = {}) => {
-    const surfaces = [
-      {
-        selector: { tier: "q4", offloadPolicy: "resident", loadShape: "deferred_materialization" },
-        implementedRungs: ["resident", "bounded_transformer_residency"],
-        structurallyNotApplicableRungs: [],
-        deferredMaterializationRungs: ["bounded_transformer_residency"],
-      },
-    ];
-    return JSON.stringify({
-      backend,
-      generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
-      engines: [{ id: "x", modality: "image", supportsPreview: false }],
-      memoryContracts: [
-        {
-          id: `${backend}_x`,
-          composed: false,
-          selectorDigest: `sha256:${createHash("sha256")
-            .update(JSON.stringify(surfaces))
-            .digest("hex")}`,
-          surfaces,
-        },
-      ],
-      memoryRouteWitnesses: [{
-        provider: `${backend}_x`,
-        tier: "q4",
-        mode: "text_to_image",
-        overlay: "none",
-        loadProfile: "plain",
-      }],
-      ...extra,
-    });
-  };
-  const runtimeFactsFile = (backend, revision, narrow = false) =>
-    JSON.stringify({
-      schemaVersion: 2,
-      generatedFrom: { inferenceRevision: revision, dumper: "self-test" },
-      modelMappings: { x: "x" },
-      videoModelMappings: [{ modelId: "video-x", mode: "text_to_video", engineIds: ["x"] }],
-      trainerMappings: { x: "x" },
-      workerCapabilities: ["gpu", "image_generate", "lora_train_execute"],
-      snapshot: {
-        backend,
-        generator_capabilities: narrow
-          ? [{ id: "x" }]
-          : [
-              {
-                id: "x",
-                conditioning: ["reference"],
-                supported_quants: ["q4"],
-                supports_lora: true,
-                supports_lokr: false,
-                supports_prompt_enhancement: true,
-              },
-            ],
-        trainer_capabilities: [{ id: "x", supports_lora: true }],
-      },
-    });
+  // --- sga.capabilities/2 exports, over a real fixture tree (SW-6983 / REG-3 / M8) -----------
+  const sgaDoc = (entry, extra = {}) => ({
+    schema_version: "sga.capabilities/2",
+    feature_set: entry.featureSet,
+    backend: entry.backend,
+    platform: entry.platform,
+    routes: entry.featureSet === "ios-llm-only" ? {} : { x: { id: "x" } },
+    trainers: {},
+    audio_routes: {},
+    ...extra,
+  });
   const fixture = ({
-    audio = true,
-    runtime = true,
-    revision = SHA,
-    runtimeRevision = SHA,
-    narrowRuntime = false,
-    swapped = false,
-    mutateMediaFacts = null,
+    omit = null,
+    legacyFile = null,
+    mutate = null,
   } = {}) => {
-    const root = mkdtempSync(join(tmpdir(), "bump-inference-facts-"));
-    mkdirSync(join(root, "crates/sceneworks-worker/src"), { recursive: true });
-    writeFileSync(
-      join(root, "crates/sceneworks-worker/src/engine_capability_facts.rs"),
-      factsDeclaration,
-    );
-    const dir = join(root, "config/engine-capabilities");
-    mkdirSync(dir, { recursive: true });
-    for (const backend of ["candle", "mlx"]) {
-      const mediaFacts = JSON.parse(
-        factsFile(backend, SHA, swapped && backend === "candle" ? { registry: "audio" } : {}),
-      );
-      mutateMediaFacts?.(mediaFacts, backend);
-      writeFileSync(
-        join(dir, `capabilities.${backend}.json`),
-        // `swapped` puts an AUDIO dump where a media one belongs — the realistic mistake, and the
-        // one `backend` alone cannot detect, since both registries are `candle`.
-        JSON.stringify(mediaFacts),
-      );
+    const root = mkdtempSync(join(tmpdir(), "bump-inference-sga-facts-"));
+    const sgaDir = join(root, "config/engine-capabilities/sga");
+    mkdirSync(sgaDir, { recursive: true });
+    for (const entry of SGA_CAPABILITY_EXPORTS) {
+      if (entry.file === omit) continue;
+      const doc = sgaDoc(entry);
+      mutate?.(doc, entry);
+      writeFileSync(join(sgaDir, entry.file), `${JSON.stringify(doc, null, 2)}\n`);
     }
-    if (audio) {
-      mkdirSync(join(dir, "audio"), { recursive: true });
-      writeFileSync(
-        join(dir, "audio/capabilities.candle.json"),
-        factsFile("candle", revision, swapped ? {} : { registry: "audio" }),
-      );
-    }
-    if (runtime) {
-      mkdirSync(join(dir, "runtime"), { recursive: true });
-      for (const backend of ["candle", "mlx"]) {
-        writeFileSync(
-          join(dir, `runtime/capabilities.${backend}.json`),
-          runtimeFactsFile(backend, runtimeRevision, narrowRuntime),
-        );
-      }
+    if (legacyFile) {
+      const target = join(root, "config/engine-capabilities", legacyFile);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, "{}\n");
     }
     return root;
   };
@@ -1332,112 +1148,61 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     }
   };
 
-  check("a complete facts tree verifies", verifyFacts() === null);
-  const missingContracts = verifyFacts({
-    mutateMediaFacts: (facts) => { facts.memoryContracts = []; },
-  });
+  check("a complete sga.capabilities/2 tree verifies", verifyFacts() === null);
+  const missingProfile = verifyFacts({ omit: "ios-media.json" });
   check(
-    "a descriptor-only media dump is refused",
-    !!missingContracts && /no memoryContracts inventory/.test(missingContracts),
+    "a missing sga.capabilities/2 profile fails coverage",
+    !!missingProfile && /ios-media\.json/.test(missingProfile),
   );
-  const duplicateContract = verifyFacts({
-    mutateMediaFacts: (facts, backend) => {
-      if (backend === "mlx") facts.memoryContracts.push(structuredClone(facts.memoryContracts[0]));
+  const pinnedStamp = verifyFacts({
+    mutate: (doc, entry) => {
+      if (entry.file === "macos-mlx.json") doc.generatedFrom = { inferenceRevision: SHA };
     },
   });
   check(
-    "duplicate memory-contract providers are refused during a pin bump",
-    !!duplicateContract && /duplicate mlx memory-contract provider/.test(duplicateContract),
+    "pin-stamped sga.capabilities/2 export is refused (M8)",
+    !!pinnedStamp && /pin-free/.test(pinnedStamp),
   );
-  const unboundDigest = verifyFacts({
-    mutateMediaFacts: (facts, backend) => {
-      if (backend === "mlx") facts.memoryContracts[0].selectorDigest = `sha256:${"f".repeat(64)}`;
+  const retiredLegacy = verifyFacts({ legacyFile: "capabilities.mlx.json" });
+  check(
+    "retired legacy capabilities.mlx.json is refused (REG-3)",
+    !!retiredLegacy && /retired legacy capability dump/.test(retiredLegacy),
+  );
+  const emptyDesktopRoutes = verifyFacts({
+    mutate: (doc, entry) => {
+      if (entry.file === "candle-cuda.json") doc.routes = {};
     },
   });
   check(
-    "a selector digest that does not bind the dumped surfaces is refused",
-    !!unboundDigest && /selectorDigest does not bind/.test(unboundDigest),
+    "empty desktop routes map is refused",
+    !!emptyDesktopRoutes && /has zero routes/.test(emptyDesktopRoutes),
   );
-  // THE regression this exists for. Before sc-17593 this exact tree — every media backend dumped,
-  // the audio registry dumped nowhere — passed, because `candle` in SCENEWORKS_BACKENDS is satisfied
-  // by the MEDIA dump alone. The check must name the audio lane, not merely fail.
-  const missingAudio = verifyFacts({ audio: false });
-  check("a missing audio dump fails", missingAudio !== null);
-  check(
-    "the missing-audio failure names the audio lane and how to dump it",
-    !!missingAudio &&
-      /audio engine-capability facts are missing/.test(missingAudio) &&
-      /dump-engine-capabilities/.test(missingAudio),
-  );
-  // Staleness is now WARNED about, not refused (see verifyEngineCapabilityFacts): a pin bump does
-  // not invalidate a capability dump, and blocking on one meant waiting for a second machine. What
-  // must survive is that a MISSING dump still fails — absence is a real coverage hole, whereas an
-  // older revision is a stale label on data that is usually still accurate.
-  const staleAudio = verifyFacts({ revision: "b".repeat(40) });
-  check("a stale audio dump no longer blocks the bump", staleAudio === null);
-  const missingRuntime = verifyFacts({ runtime: false });
-  check(
-    "a missing rich runtime descriptor dump fails coverage",
-    !!missingRuntime && /rich runtime descriptor facts are missing/.test(missingRuntime),
-  );
-  // Same reasoning as the audio dump above: an older revision is warned about, not refused.
-  const staleRuntime = verifyFacts({ runtimeRevision: "b".repeat(40) });
-  check("a stale rich runtime descriptor dump no longer blocks the bump", staleRuntime === null);
-  const narrowRuntime = verifyFacts({ narrowRuntime: true });
-  check(
-    "a narrow runtime projection without parity axes is refused",
-    !!narrowRuntime &&
-      /omits video mappings, conditioning, adapter, quant, prompt-enhancement, trainer, or worker/.test(
-        narrowRuntime,
-      ),
-  );
-  const missingPromptEnhancement = (() => {
+  // M8 semantic equality: syncSgaCapabilityExports leaves equal exports untouched and writes only diffs.
+  {
     const root = fixture();
     try {
-      const path = join(root, "config/engine-capabilities/runtime/capabilities.mlx.json");
-      const facts = JSON.parse(readFileSync(path, "utf8"));
-      delete facts.snapshot.generator_capabilities[0].supports_prompt_enhancement;
-      writeFileSync(path, JSON.stringify(facts));
-      verifyEngineCapabilityFacts(SHA, root);
-      return null;
-    } catch (error) {
-      return error?.message ?? String(error);
+      const unchanged = syncSgaCapabilityExports("/unused", root, {
+        exportProfile: (entry, outPath) => {
+          writeFileSync(outPath, `${JSON.stringify(sgaDoc(entry))}\n`);
+        },
+        log: () => {},
+      });
+      check("M8: semantically equal sga exports cause zero artifact churn", unchanged.length === 0);
+      const changed = syncSgaCapabilityExports("/unused", root, {
+        exportProfile: (entry, outPath) => {
+          const extra = entry.file === "macos-mlx.json" ? { routes: { x: { id: "x" }, y: { id: "y" } } } : {};
+          writeFileSync(outPath, `${JSON.stringify(sgaDoc(entry, extra))}\n`);
+        },
+        log: () => {},
+      });
+      check(
+        "M8: semantic change updates only the affected sga export",
+        changed.length === 1 && changed[0] === "macos-mlx.json",
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  })();
-  check(
-    "a runtime snapshot missing prompt-enhancement support is refused",
-    !!missingPromptEnhancement &&
-      /omits video mappings, conditioning, adapter, quant/.test(missingPromptEnhancement),
-  );
-  const missingVideoMappings = (() => {
-    const root = fixture();
-    try {
-      const path = join(root, "config/engine-capabilities/runtime/capabilities.mlx.json");
-      const facts = JSON.parse(readFileSync(path, "utf8"));
-      facts.videoModelMappings = [];
-      writeFileSync(path, JSON.stringify(facts));
-      verifyEngineCapabilityFacts(SHA, root);
-      return null;
-    } catch (error) {
-      return error?.message ?? String(error);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  })();
-  check(
-    "a runtime snapshot missing production video mappings is refused",
-    !!missingVideoMappings && /omits video mappings/.test(missingVideoMappings),
-  );
-  // Both dumps carry `backend: "candle"`, so swapping the two directories is invisible to a check
-  // that reads `backend` alone — it would count an audio file as media coverage and vice versa, and
-  // report full coverage with one registry dumped twice and the other not at all.
-  const swapped = verifyFacts({ swapped: true });
-  check(
-    "a dump sitting in the other registry's directory is refused",
-    !!swapped && /sits in the/.test(swapped),
-  );
+  }
 
   // --- the FLUX.2 audited window (sc-17760) --------------------------------------------------
   //

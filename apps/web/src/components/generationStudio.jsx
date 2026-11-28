@@ -2,6 +2,7 @@ import { AppearanceSelectors, AppearanceNotes } from "./AppearanceSelectors.jsx"
 import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
+import { InfoTip } from "./InfoTip.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
   modelLibraryContextForModel,
@@ -14,6 +15,7 @@ import {
   clearPresetDefault,
   loraHasResolvableFamily,
   loraMatchesModel,
+  loraModelForMode,
   loraWeight,
   noPresetId,
   presetLoraSeedEntries,
@@ -162,9 +164,24 @@ export function TierPickerField({
   const conversionNoteId = useId();
   const conversionHint = items.find((item) => item.tier === value)?.conversionHint;
   const showSuggested = suggested && !tierSwitching;
+  // The explanation (`title`), the selected tier's conversion note and any memory/quality
+  // `warning` open from an (i) beside the label instead of stacking under the select.
+  const tipContent = [title, conversionHint].filter(Boolean);
   return (
-    <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
-      Quant tier
+    <label className={`quant-tier-picker${className ? ` ${className}` : ""}`}>
+      <span className="field-label">
+        Quant tier
+        {tipContent.length || warning ? (
+          <InfoTip label="About Quant tier" tone={warning ? "warn" : undefined}>
+            {warning}
+            {tipContent.map((text, index) => (
+              <span className="info-tip-para" id={text === conversionHint ? conversionNoteId : undefined} key={index}>
+                {text}
+              </span>
+            ))}
+          </InfoTip>
+        ) : null}
+      </span>
       <select
         aria-label="Quant tier"
         aria-describedby={[showSuggested && suggestedNoteId, conversionHint && conversionNoteId].filter(Boolean).join(" ") || undefined}
@@ -177,7 +194,6 @@ export function TierPickerField({
           </option>
         ))}
       </select>
-      {conversionHint ? <span className="field-hint" id={conversionNoteId}>{conversionHint}</span> : null}
       {tierSwitching ? (
         <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
       ) : null}
@@ -203,7 +219,6 @@ export function TierPickerField({
           ) : null}
         </span>
       ) : null}
-      {warning}
     </label>
   );
 }
@@ -584,6 +599,9 @@ export function useGenerationStudio({
   );
 
   // ---- LoRA selection (sc-4196: shared by Image + Video studios) ----
+  // The model as the LoRA gate sees it in this mode: a hybrid MiniMax-H3 import narrows to the
+  // partition this mode runs, so a mode switch prunes the other partition's adapters below.
+  const loraModel = useMemo(() => loraModelForMode(selectedModel, mode), [selectedModel, mode]);
   const compatibleLoras = useMemo(() => loras.filter((lora) => {
     if (lora.presetManaged) {
       return false;
@@ -597,19 +615,19 @@ export function useGenerationStudio({
     if (showIncompatibleLoras) {
       return loraHasResolvableFamily(lora);
     }
-    return loraMatchesModel(lora, selectedModel);
-  }), [loras, selectedModel, showIncompatibleLoras]);
+    return loraMatchesModel(lora, loraModel);
+  }), [loras, loraModel, showIncompatibleLoras]);
   const compatibleLoraKey = useMemo(() => compatibleLoras.map((lora) => lora.id).join("|"), [compatibleLoras]);
   const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   const userSelectedLoraCount = selectedLoras.filter((lora) => lora.scope !== "builtin").length;
   const selectedLoraValidationResult = useMemo(() => {
-    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, selectedModel)).map((lora) => lora.name ?? lora.id);
+    const incompatible = selectedLoras.filter((lora) => !loraMatchesModel(lora, loraModel)).map((lora) => lora.name ?? lora.id);
     return {
       incompatible,
       ok: incompatible.length === 0,
     };
-  }, [selectedLoras, selectedModel]);
-  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, selectedModel));
+  }, [selectedLoras, loraModel]);
+  const hasPendingCompatibleLoras = Boolean(selectedModel) && loras.some((lora) => lora.installState === "missing" && loraMatchesModel(lora, loraModel));
   const loraEmptyMessage = !selectedModel
     ? "No model selected"
     : hasPendingCompatibleLoras

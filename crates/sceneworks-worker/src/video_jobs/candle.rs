@@ -2223,7 +2223,7 @@ pub(super) fn validate_candle_scail2_tier_dir(
     path: &Path,
     tier: Scail2CandleTier,
 ) -> WorkerResult<()> {
-    runtime_cuda::providers::scail2::snapshot_layout(path).map_err(|error| {
+    runtime_cuda::converters::scail2::snapshot_layout(path).map_err(|error| {
         crate::provider_error(error, |error| {
             WorkerError::InvalidPayload(format!(
                 "scail2 (candle): {} is not a complete {} hosted package: {error}",
@@ -2272,7 +2272,7 @@ pub(super) fn validate_candle_scail2_tier_dir(
 /// It remains a dense-only compatibility path; never use it to satisfy a q4/q8 request.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn validate_candle_scail2_legacy_bf16_dir(path: &Path) -> WorkerResult<()> {
-    runtime_cuda::providers::scail2::snapshot_layout(path)
+    runtime_cuda::converters::scail2::snapshot_layout(path)
         .map(|_| ())
         .map_err(|error| {
             crate::provider_error(error, |error| {
@@ -2365,7 +2365,7 @@ pub(super) fn resolve_managed_candle_scail2_model(
 fn candle_scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
     adapters
         .iter()
-        .any(|a| runtime_cuda::providers::scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
+        .any(|a| runtime_cuda::converters::scail2::has_diff_patch_keys(&a.path).unwrap_or(false))
 }
 
 /// Resolve a candle SCAIL-2 `animate_character` request into the engine conditioning — the candle

@@ -9,7 +9,7 @@ use super::candle_prefix_kv_cache_surcharge;
 #[test]
 fn the_candle_lane_prices_the_linked_turbo_cache_only_for_a_single_pass_request() {
     let expected =
-        runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+        runtime_cuda::memory_helpers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
             1024, 768, 2, true,
         );
     for engine_id in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {

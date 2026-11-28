@@ -112,7 +112,7 @@ fn wan_i2v_14b_build_tiers() {
             out_dir.display(),
             quant
         );
-        runtime_macos::providers::wan::convert::convert_i2v_14b(&native_dir, &out_dir, *quant)
+        runtime_macos::converters::wan::convert::convert_i2v_14b(&native_dir, &out_dir, *quant)
             .unwrap_or_else(|e| panic!("convert_i2v_14b {tier} failed: {e:?}"));
         // Release any retained buffers before the next (heavier) tier so residue never accumulates.
         mlx_rs::memory::clear_cache();

@@ -1,54 +1,75 @@
-//! Regression checks at the compiled registry boundary, without a second capability matrix.
+//! Regression checks at the compiled registry boundary against canonical `sga.capabilities/2`
+//! exports (`SW-6983`), without a second capability matrix.
 use super::BUILTINS;
-use serde_json::Value;
+use crate::sga_capabilities::{CapabilitiesExportV2, ExportedRouteV2};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+
+fn exported_route_to_generator_json(route: &ExportedRouteV2) -> Value {
+    let mut features = serde_json::Map::new();
+    for feature in &route.features {
+        if feature.feature_id == "low_res_start" && feature.applicable {
+            features.insert(
+                feature.feature_id.clone(),
+                serde_json::to_value(feature).unwrap(),
+            );
+        }
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), json!(route.route_id));
+    obj.insert("family".into(), json!(route.family));
+    obj.insert("backend".into(), json!(route.backend));
+    obj.insert("modality".into(), json!(route.modality));
+    obj.insert("conditioning".into(), json!(route.conditioning.kinds));
+    obj.insert(
+        "supported_quants".into(),
+        json!(route.quant.supported_tiers),
+    );
+    obj.insert("supports_lora".into(), json!(route.adapters.supports_lora));
+    obj.insert("supports_lokr".into(), json!(route.adapters.supports_lokr));
+    obj.insert(
+        "supports_preview".into(),
+        json!(route.capabilities.supports_preview),
+    );
+    obj.insert(
+        "supports_prompt_enhancement".into(),
+        json!(route.capabilities.supports_prompt_enhancement),
+    );
+    obj.insert("samplers".into(), json!(route.solvers));
+    obj.insert("schedulers".into(), json!(route.schedules));
+    obj.insert(
+        "supported_guidance_methods".into(),
+        json!(route.guidance.methods),
+    );
+    if let Some(pag) = &route.guidance.pag {
+        obj.insert("pag".into(), serde_json::to_value(pag).unwrap());
+    }
+    if !features.is_empty() {
+        obj.insert("features".into(), Value::Object(features));
+    }
+    Value::Object(obj)
+}
 
 fn native_generators() -> BTreeMap<(String, String), Value> {
     let mut routes = BTreeMap::new();
-    for (backend, source) in [
-        (
-            "mlx",
-            include_str!("../../../../config/engine-capabilities/runtime/capabilities.mlx.json"),
-        ),
-        (
-            "candle",
-            include_str!("../../../../config/engine-capabilities/runtime/capabilities.candle.json"),
-        ),
+    for (backend, export) in [
+        ("mlx", crate::sga_capabilities::macos_mlx()),
+        ("candle", crate::sga_capabilities::candle_cuda()),
     ] {
-        let dump: Value = serde_json::from_str(source).unwrap();
-        assert_eq!(dump["snapshot"]["backend"], backend);
-        for route in dump["snapshot"]["generator_capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .chain(
-                dump["snapshot"]["audio_generator_capabilities"]
-                    .as_array()
-                    .unwrap(),
-            )
-        {
-            let id = route["id"].as_str().unwrap();
-            // The MLX dump carries Candle audio inventory for host discovery.
-            // Only descriptors tagged for this backend can enter its compiled route.
-            if route["backend"] != backend {
+        let export: &CapabilitiesExportV2 = export;
+        assert_eq!(export.backend, backend);
+        for route in export.routes.values().chain(export.audio_routes.values()) {
+            // The MLX export carries Candle audio routes for host discovery.
+            // Only routes tagged for this backend can enter its compiled route.
+            if route.backend != backend {
                 continue;
             }
-            let mut route = route.clone();
-            if let Some(features) = route.get_mut("features").and_then(Value::as_object_mut) {
-                features.retain(|id, detail| {
-                    id == "low_res_start"
-                        && detail
-                            .get("applicable")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                });
-                if features.is_empty() {
-                    if let Some(obj) = route.as_object_mut() {
-                        obj.remove("features");
-                    }
-                }
-            }
-            assert!(routes.insert((backend.into(), id.into()), route).is_none());
+            assert!(routes
+                .insert(
+                    (backend.into(), route.route_id.clone()),
+                    exported_route_to_generator_json(route)
+                )
+                .is_none());
         }
     }
     routes

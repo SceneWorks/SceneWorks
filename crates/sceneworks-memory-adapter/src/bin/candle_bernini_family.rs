@@ -30,7 +30,7 @@ pub(super) fn validate_bernini_candle_geometry(
     height: u32,
     frames: u32,
 ) -> Result<(), String> {
-    let advertised = runtime_cuda::providers::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
+    let advertised = runtime_cuda::calibration::bernini::memory_strategy::ADVERTISED_GEOMETRIES;
     if !advertised.contains(&(width, height)) {
         return Err(format!(
             "Candle Bernini memory evidence requires one of the advertised geometries \
