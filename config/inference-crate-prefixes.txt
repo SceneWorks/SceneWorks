@@ -57,7 +57,6 @@ crates/media/candle-gen/candle-gen
 crates/media/candle-gen/candle-gen-anima
 crates/media/candle-gen/candle-gen-bernini
 crates/media/candle-gen/candle-gen-body
-crates/media/candle-gen/candle-gen-boogu
 crates/media/candle-gen/candle-gen-catalog
 crates/media/candle-gen/candle-gen-chroma
 crates/media/candle-gen/candle-gen-clip
@@ -72,9 +71,7 @@ crates/media/candle-gen/candle-gen-iris
 crates/media/candle-gen/candle-gen-joycaption
 crates/media/candle-gen/candle-gen-kolors
 crates/media/candle-gen/candle-gen-krea
-crates/media/candle-gen/candle-gen-lens
 crates/media/candle-gen/candle-gen-ltx
-crates/media/candle-gen/candle-gen-mage
 crates/media/candle-gen/candle-gen-minimax-h3
 crates/media/candle-gen/candle-gen-mochi
 crates/media/candle-gen/candle-gen-moss-image
@@ -104,7 +101,6 @@ crates/media/mlx-gen
 crates/media/mlx-gen/mlx-gen-anima
 crates/media/mlx-gen/mlx-gen-bernini
 crates/media/mlx-gen/mlx-gen-body
-crates/media/mlx-gen/mlx-gen-boogu
 crates/media/mlx-gen/mlx-gen-catalog
 crates/media/mlx-gen/mlx-gen-chroma
 crates/media/mlx-gen/mlx-gen-clip
@@ -121,9 +117,7 @@ crates/media/mlx-gen/mlx-gen-joycaption
 crates/media/mlx-gen/mlx-gen-kolors
 crates/media/mlx-gen/mlx-gen-krea
 crates/media/mlx-gen/mlx-gen-krea-realtime
-crates/media/mlx-gen/mlx-gen-lens
 crates/media/mlx-gen/mlx-gen-ltx
-crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-minimax-h3
 crates/media/mlx-gen/mlx-gen-mochi
 crates/media/mlx-gen/mlx-gen-moss-image
