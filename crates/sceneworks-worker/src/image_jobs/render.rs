@@ -2497,8 +2497,6 @@ mod hires_report_tests {
             "chroma1_hd",
             "chroma1_base",
             "chroma1_flash",
-            "lens",
-            "lens_turbo",
             "anima",
             "anima_base",
             "anima_aesthetic",
@@ -2507,8 +2505,6 @@ mod hires_report_tests {
             "sd3_5_large_turbo",
             "sd3_5_medium",
             "sana_1600m",
-            "boogu_image",
-            "boogu_image_edit",
             "qwen_image",
             "qwen_image_edit",
             "qwen_image_control",
@@ -2528,7 +2524,6 @@ mod hires_report_tests {
         }
         for excluded_route in [
             "sana_sprint_1600m",
-            "boogu_image_turbo",
             "krea_2_raw",
             "krea_2_turbo",
             "flux3_klein",
@@ -2558,8 +2553,6 @@ mod hires_report_tests {
             ("chroma1_hd", None, None, None, Some(4.0)),
             ("chroma1_base", None, None, None, Some(4.0)),
             ("chroma1_flash", None, None, None, None),
-            ("lens", None, None, Some(4.0), None),
-            ("lens_turbo", None, None, None, None),
             ("anima_base", None, None, Some(4.0), None),
             ("anima_aesthetic", None, None, Some(4.0), None),
             ("anima_turbo", None, None, None, None),
@@ -2567,7 +2560,6 @@ mod hires_report_tests {
             ("sd3_5_large_turbo", None, None, None, None),
             ("sd3_5_medium", None, None, Some(4.5), None),
             ("sana_1600m", None, None, Some(4.5), None),
-            ("boogu_image", None, None, Some(3.5), None),
             ("qwen_image", None, None, None, Some(4.0)),
             ("qwen_image_2_1", None, None, None, Some(4.0)),
             ("qwen_image_2_1_turbo", None, None, None, None),
@@ -2658,7 +2650,6 @@ mod hires_report_tests {
             ("sd3_5_large_turbo", &base_spec, None, None, None, None),
             ("sd3_5_medium", &base_spec, None, None, Some(4.5), None),
             ("sana_1600m", &base_spec, None, None, Some(4.5), None),
-            ("boogu_image", &base_spec, None, None, Some(3.5), None),
             ("qwen_image", &base_spec, None, None, None, Some(4.0)),
             ("z_image", &base_spec, None, None, Some(4.0), None),
             ("z_image_turbo", &base_spec, None, None, None, None),
@@ -2685,7 +2676,6 @@ mod hires_report_tests {
             ("sd3_5_large_turbo", &base_spec, None, None, None, None),
             ("sd3_5_medium", &base_spec, None, None, Some(4.5), None),
             ("sana_1600m", &base_spec, None, None, Some(4.5), None),
-            ("boogu_image", &base_spec, None, None, Some(3.5), None),
             ("z_image", &base_spec, None, None, Some(4.0), None),
             ("z_image_turbo", &base_spec, None, None, None, None),
             (
@@ -2713,8 +2703,7 @@ mod hires_report_tests {
         };
 
         for &(route, spec, sampler, scheduler, guidance, true_cfg) in two_pass_routes {
-            let needs_pass0_ref =
-                matches!(route, "flux1_dev" | "boogu_image_edit" | "qwen_image_edit");
+            let needs_pass0_ref = matches!(route, "flux1_dev" | "qwen_image_edit");
             let (base_dim, hires_dim) = if matches!(route, "kolors" | "sdxl") {
                 (1024, 1280)
             } else {
@@ -2878,7 +2867,7 @@ mod hires_report_tests {
                 "{qwen_model}: compile_hires_multi_pass_plan must reject fractional denoising_strength pre-load"
             );
         }
-        for t2i_only_route in ["flux1_dev", "chroma1_hd", "lens", "anima_base"] {
+        for t2i_only_route in ["flux1_dev", "chroma1_hd", "anima_base"] {
             let first = gen_core::GenerationRequest {
                 prompt: "a portrait".to_owned(),
                 width: 512,

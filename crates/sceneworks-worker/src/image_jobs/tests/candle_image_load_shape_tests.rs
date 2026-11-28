@@ -31,12 +31,6 @@ fn adopting_native_image_routes_use_deferred_materialization() {
         "flux1_dev",
         "flux2_dev",
         "flux2_klein_9b",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
     ] {
         assert_eq!(
             legacy_shape(engine_id, fixture_spec()).load_shape,
@@ -44,8 +38,7 @@ fn adopting_native_image_routes_use_deferred_materialization() {
         );
     }
     // Qwen edit's own accounting. Note that being declaration-owned is NOT what excludes it —
-    // several routes above (the Mage six, `flux2_dev`) carry a declared rule alongside their
-    // legacy one and still shape here. What excludes qwen edit is that its legacy Candle rule
+    // `flux2_dev` carries a declared rule alongside its legacy one and still shapes here. What excludes qwen edit is that its legacy Candle rule
     // was REPLACED rather than supplemented, so the legacy shaper finds nothing and correctly
     // returns the spec untouched; its production call site reaches the declared shaper instead.
     assert!(
@@ -77,13 +70,6 @@ fn unsupported_overlays_and_non_streamable_routes_remain_eager() {
                 WeightsSource::Dir(std::path::PathBuf::from("gemma")),
             ),
         ),
-        (
-            "mage_flow_edit",
-            fixture_spec().with_pid(
-                WeightsSource::File(std::path::PathBuf::from("pid.safetensors")),
-                WeightsSource::Dir(std::path::PathBuf::from("gemma")),
-            ),
-        ),
         ("z_image", fixture_spec()),
     ];
     for (engine_id, spec) in cases {
@@ -95,7 +81,7 @@ fn unsupported_overlays_and_non_streamable_routes_remain_eager() {
 }
 
 #[test]
-fn shared_reference_count_preserves_mage_multi_reference_geometry() {
+fn shared_reference_count_preserves_multi_reference_geometry() {
     assert_eq!(shared_image_reference_count(0, false, false, false), 0);
     assert_eq!(shared_image_reference_count(0, true, false, false), 1);
     assert_eq!(shared_image_reference_count(1, true, false, false), 1);

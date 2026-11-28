@@ -38,7 +38,6 @@
 //! cargo test -p sceneworks-worker --release footprint_sdxl_q8         -- --ignored --nocapture
 //! cargo test -p sceneworks-worker --release footprint_z_image_turbo_q4 -- --ignored --nocapture
 //! cargo test -p sceneworks-worker --release footprint_z_image_q4       -- --ignored --nocapture
-//! cargo test -p sceneworks-worker --release footprint_lens_turbo_q4    -- --ignored --nocapture
 //! ```
 //!
 //! CALIBRATION SET (prefer already-on-disk tiers; do NOT trigger a 30GB+ download sweep — sc-8516

@@ -1176,9 +1176,6 @@ pub(super) fn five_rung_generation_request(
 /// their packaged records already carry; the FLUX.1 members (sc-22726) and the SD3.5 members
 /// (sc-22730) cite their own.
 pub(super) fn five_rung_evidence_story(provider_id: &str) -> &'static str {
-    if let Some(arm) = MAGE_ARMS.iter().find(|arm| arm.provider == provider_id) {
-        return arm.evidence_story;
-    }
     match provider_id {
         FLUX1_DEV_ID | FLUX1_SCHNELL_ID => "sc-22726",
         KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID => "sc-22732",
@@ -1198,7 +1195,7 @@ pub(super) fn run_five_rung_reference(request: &Value) -> Result<Value, String> 
     protocol::validate_still_geometry(request, still_calibration_label(request)?)?;
     let (provider_id, execution_path, repository, revision, generator, mut vram) =
         load_five_rung_generator(request)?;
-    let mut fragment = run_five_rung_reference_loaded(
+    run_five_rung_reference_loaded(
         request,
         provider_id,
         execution_path,
@@ -1206,8 +1203,7 @@ pub(super) fn run_five_rung_reference(request: &Value) -> Result<Value, String> 
         &mut vram,
         &repository,
         &revision,
-    )?;
-    Ok(fragment)
+    )
 }
 
 pub(super) fn run_five_rung_batch(request: &Value) -> Result<Value, String> {
@@ -1316,8 +1312,6 @@ pub(super) fn routes_to_five_rung_reference(request: &Value) -> Result<bool, Str
     let provider = planned_provider(request)?;
     // sc-22726: the FLUX.1 BASE providers have no inline arm either. PuLID is deliberately absent —
     // it is a bespoke route with its own arm, dispatched before this is ever consulted.
-    // sc-22733: the six Mage routes have no inline arm either — they ride the shared five-rung
-    // lifecycle behind their own loader (`load_mage_generator`) and their own request shape.
     // sc-22730: the three SD3.5 base providers have no inline arm either.
     Ok(is_five_rung_fixture
         || provider == QWEN_ID

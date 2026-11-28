@@ -184,14 +184,6 @@ pub fn validate_plan_identity(
     Ok(())
 }
 
-pub fn mage_mode(edit: bool) -> &'static str {
-    if edit {
-        "edit_image"
-    } else {
-        "text_to_image"
-    }
-}
-
 pub fn instantid_fixture_seed(request: &Value, prefix: &str) -> Result<u64, String> {
     let fixture = crate::planned_fixture(request)?;
     let remainder = fixture

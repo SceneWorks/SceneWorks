@@ -458,10 +458,7 @@ fn request_for_true_cfg(steps: u32, true_cfg: f32) -> impl Fn(u32, u32) -> Gener
 
 const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";
 const SDXL_BF16_SENTINEL: &str = "unet/diffusion_pytorch_model.fp16.safetensors";
-// Lens AND Krea pack the DiT under transformer/diffusion_pytorch_model.safetensors …
-const LENS_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors";
-// … but Krea's DENSE bf16 DiT is SHARDED (…-0000N-of-0000M.safetensors), so its tier-presence
-// sentinel is the shard index the plain name would miss (the same split lens-turbo bf16 has).
+// Krea's dense bf16 DiT is sharded, so its tier-presence sentinel is the shard index.
 const SHARDED_DIT_SENTINEL: &str = "transformer/diffusion_pytorch_model.safetensors.index.json";
 // … while Z-Image AND Qwen-Image pack the DiT under transformer/model.safetensors.
 const ZIMAGE_SENTINEL: &str = "transformer/model.safetensors";
@@ -538,7 +535,7 @@ fn sweep_krea_2_turbo_q8() {
         "RS_KREA_TURBO_DIR",
         "SceneWorks/krea-2-turbo-mlx",
         "q8",
-        LENS_SENTINEL,
+        DIT_SENTINEL,
     );
     sweep_tier(
         "krea_2_turbo",

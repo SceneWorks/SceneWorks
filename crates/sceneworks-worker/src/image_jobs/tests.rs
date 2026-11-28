@@ -7699,13 +7699,6 @@ fn adapter_id_reports_per_family_mlx_label() {
         adapter_id(&request(json!({ "model": "kolors" }))),
         "mlx_kolors"
     );
-    // Lens / Lens-Turbo are MLX-routed (sc-5105) via the MODEL_TABLE registry families → both record
-    // the shared mlx_lens adapter label.
-    assert_eq!(adapter_id(&request(json!({ "model": "lens" }))), "mlx_lens");
-    assert_eq!(
-        adapter_id(&request(json!({ "model": "lens_turbo" }))),
-        "mlx_lens"
-    );
     // Bernini still-image companion (sc-5424) IS a MODEL_TABLE row (engine `bernini`).
     assert_eq!(
         adapter_id(&request(json!({ "model": "bernini_image" }))),
@@ -7801,8 +7794,6 @@ fn mlx_engine_registry_links_image_families() {
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "kolors",
-        "lens",
-        "lens_turbo",
         // Bernini still-image companion (sc-5424): the `Modality::Both` engine must appear in the
         // explicit IMAGE catalog too (the "no generator registered" trap).
         "bernini",
@@ -12768,7 +12759,7 @@ async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_can
 
 #[cfg(target_os = "macos")]
 #[test]
-fn boogu_build_reference_conditioning_single_vs_multi() {
+fn build_reference_conditioning_preserves_single_and_multi_reference() {
     // sc-7645: one reference stays a `Reference` (byte-identical to the single-reference edit path);
     // 2–5 become a single `MultiReference` (the DiT packs all of them). Empty → no conditioning.
     let img = |seed| gen_core::Image {
@@ -20610,20 +20601,20 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
         )
     );
 
-    let override_repo = "example/custom-boogu";
-    let override_cache = hub.join("models--example--custom-boogu");
+    let override_repo = "example/custom-ideogram";
+    let override_cache = hub.join("models--example--custom-ideogram");
     let override_revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(override_cache.join("refs")).unwrap();
     std::fs::write(override_cache.join("refs/main"), override_revision).unwrap();
     let override_file = override_cache
         .join("snapshots")
         .join(override_revision)
-        .join("base-q4/transformer")
-        .join("diffusion_pytorch_model.safetensors");
+        .join("q4/transformer")
+        .join("model.safetensors");
     std::fs::create_dir_all(override_file.parent().unwrap()).unwrap();
     std::fs::write(override_file, b"override").unwrap();
     let override_request = request(json!({
-        "projectId": "p", "model": "boogu_image",
+        "projectId": "p", "model": "ideogram_4",
         "advanced": {"mlxQuantize": 4},
         "modelManifestEntry": {"repo": override_repo}
     }));
@@ -20633,7 +20624,7 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
             override_cache
                 .join("snapshots")
                 .join(override_revision)
-                .join("base-q4")
+                .join("q4")
         )
     );
 }
@@ -25590,7 +25581,6 @@ fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_cod
     for family in [
         "\"krea_2\"",
         "\"sdxl\"",
-        "\"mage-flow\"",
         "\"z-image\"",
         "\"qwen-image\"",
         "\"flux2\"",
@@ -25606,28 +25596,6 @@ fn the_comfyui_tree_lanes_bespoke_surface_and_migration_table_are_still_live_cod
             "the migration table must name {family}, whose row has landed"
         );
     }
-}
-
-/// The tensor surface a Mage-Flow transformer directory is recognized by: exactly the published
-/// twelve `transformer_blocks`, each carrying the Mage-specific modulation and dual-stream MLP
-/// names. The exact block count is load-bearing in `detect_transformer_family` — it is what keeps
-/// the broader Qwen-Image arm from claiming a Mage DiT — so the fixture reproduces it rather than
-/// truncating.
-#[cfg(target_os = "macos")]
-fn mage_flow_entries() -> Vec<(String, &'static str)> {
-    let mut entries = Vec::new();
-    for block in 0..12 {
-        for leaf in [
-            "attn.add_q_proj.weight",
-            "img_mlp.net.0.proj.weight",
-            "txt_mlp.net.0.proj.weight",
-            "img_mod.1.weight",
-            "txt_mod.1.weight",
-        ] {
-            entries.push((format!("transformer_blocks.{block}.{leaf}"), "BF16"));
-        }
-    }
-    entries
 }
 
 /// Populate the isolated Hugging Face cache with the model-agnostic CLIP tokenizer assets — at the

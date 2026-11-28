@@ -1486,8 +1486,6 @@ fn shipped_standard_tier_membership_is_compiled_product_data() {
         "flux_schnell",
         "flux_dev",
         "pulid_flux_dev",
-        "lens",
-        "lens_turbo",
         "sana_1600m",
         "sana_sprint_1600m",
         "kolors",
@@ -1497,12 +1495,7 @@ fn shipped_standard_tier_membership_is_compiled_product_data() {
             "{id}"
         );
     }
-    for id in [
-        "ideogram_4",
-        "boogu_image",
-        "krea_2_turbo",
-        "qwen_image_2_1",
-    ] {
+    for id in ["ideogram_4", "krea_2_turbo", "qwen_image_2_1"] {
         assert!(
             !uses_standard_tier_layout(&manifest_request(id, json!({}))),
             "{id}"

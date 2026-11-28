@@ -1139,7 +1139,6 @@ mod tests {
         for id in [
             "anima_base",
             "kolors",
-            "mage_flow_base",
             "sd3_5_large",
             "sd3_5_medium",
             "wan2_2_ti2v_5b",
@@ -2090,11 +2089,7 @@ mod tests {
             ("flux2_klein_9b", 16),
             ("ideogram_4", 16),
             ("anima_base", 16),
-            ("boogu_image", 16),
             ("krea_2_turbo", 16),
-            ("mage_flow_base", 16),
-            ("mage_flow_edit_base", 16),
-            ("lens", 16),
             ("qwen_image", 16),
             // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
             ("qwen_image_2_1", 32),

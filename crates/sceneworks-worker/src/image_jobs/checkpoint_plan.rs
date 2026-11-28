@@ -590,14 +590,8 @@ fn checkpoint_plan_request_shape_refusal(
 /// [`checkpoint_plan_serves_request_shape`], flips from a DECLINE that its family lane picks up to a
 /// hard refusal. That is a capability regression, not a cleanup. What the table names is precisely
 /// the set of families whose plan-sourced lanes are must-outlive, so the table is must-outlive too.
-const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] = &[
-    "krea_2",
-    "sdxl",
-    "mage-flow",
-    "z-image",
-    "qwen-image",
-    "flux2",
-];
+const CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES: &[&str] =
+    &["krea_2", "sdxl", "z-image", "qwen-image", "flux2"];
 
 /// Whether SOME other lane could take this request if the plan route declines it.
 ///

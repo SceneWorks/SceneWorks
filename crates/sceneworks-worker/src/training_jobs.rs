@@ -6204,8 +6204,7 @@ mod tests {
                 ),
                 other => panic!("{key} {case}: expected a refusal, got {other:?}"),
             };
-        // E-LatentLPIPS is absent: no trainer that offers a full fine-tune (Mage) or an LTX-2.5
-        // workflow has E-LatentLPIPS weights, so it is refused earlier as unsupported there.
+        // LTX-2.5 does not advertise E-LatentLPIPS, so its support check refuses that loss first.
         for key in [
             "depthAnchoringWeight",
             "bodyProportionWeight",
@@ -6217,23 +6216,12 @@ mod tests {
         ] {
             let on = (key, json!(0.05));
             validate_training_target_config(&plan(
-                "mage_flow_lora",
-                "mage_flow_base",
+                "z_image_lora",
+                "z_image_turbo",
                 "lora",
                 std::slice::from_ref(&on),
             ))
-            .unwrap_or_else(|error| panic!("{key}: Mage LoRA admits it, got {error:?}"));
-            refused(
-                validate_training_target_config(&plan(
-                    "mage_flow_lora",
-                    "mage_flow_base",
-                    "full",
-                    std::slice::from_ref(&on),
-                )),
-                key,
-                "not a full fine-tune",
-                "mage full",
-            );
+            .unwrap_or_else(|error| panic!("{key}: Z-Image LoRA admits it, got {error:?}"));
             refused(
                 validate_training_target_config(&plan(
                     "ltx_mlx_lora",
@@ -6800,10 +6788,10 @@ mod tests {
             );
         }
 
-        // Full base fine-tune + either noise is refused (Mage is the full-tune-capable trainer).
+        // Iris full base fine-tune refuses adapter noise.
         for (key, on, _) in techniques.clone() {
             assert!(
-                err(plan("mage_flow_lora", "mage_flow_base", "full", key, on))
+                err(plan("iris_3b_generation", "iris_3b", "full", key, on))
                     .contains("networkType 'full'"),
                 "{key}"
             );
@@ -7117,12 +7105,8 @@ mod tests {
         }
 
         // Every LoRA trainer declares it on both backends (sc-24830): SDXL (TAESDXL), Z-Image
-        // (TAEF1) and Mage (its own VAE) are admitted on the active runtime.
-        for (kernel, base) in [
-            ("sdxl_lora", "sdxl"),
-            ("z_image_lora", "z_image_turbo"),
-            ("mage_flow_lora", "mage_flow_base"),
-        ] {
+        // (TAEF1) are admitted on the active runtime.
+        for (kernel, base) in [("sdxl_lora", "sdxl"), ("z_image_lora", "z_image_turbo")] {
             validate_training_target_config(&plan(kernel, base, &on))
                 .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
         }
@@ -7694,11 +7678,7 @@ mod tests {
                 assert!(control.contains("not registered"), "{control}");
             }
         }
-        for (kernel, base) in [
-            ("sdxl_lora", "sdxl"),
-            ("z_image_lora", "z_image_turbo"),
-            ("mage_flow_lora", "mage_flow_base"),
-        ] {
+        for (kernel, base) in [("sdxl_lora", "sdxl"), ("z_image_lora", "z_image_turbo")] {
             for on in [&identity, &landmark] {
                 validate_training_target_config(&plan(kernel, base, on))
                     .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
@@ -9108,9 +9088,6 @@ mod tests {
             ("anima_base_lora", "lokr", "anima_base"),
             ("kolors_lora", "lora", "kolors"),
             ("kolors_lora", "lokr", "kolors"),
-            ("mage_flow_base_lora", "lora", "mage_flow_base"),
-            ("mage_flow_base_lora", "lokr", "mage_flow_base"),
-            ("mage_flow_base_lora", "full", "mage_flow_base"),
             ("sd3_5_large_lora", "lora", "sd3_5_large"),
             ("sd3_5_large_lora", "lokr", "sd3_5_large"),
             ("sd3_5_medium_lora", "lora", "sd3_5_medium"),
@@ -9118,7 +9095,7 @@ mod tests {
             ("wan_lora", "lora", "wan2_2_ti2v_5b"),
             ("wan_i2v_14b_lora", "lora", "wan2_2_i2v_14b"),
         ];
-        assert_eq!(cells.len(), 13, "the reconciled matrix has exactly 13 gaps");
+        assert_eq!(cells.len(), 10, "ten reconciled retained route cells");
 
         let targets = builtin_training_targets();
         let registry = crate::inference_runtime::media();
@@ -9452,13 +9429,6 @@ mod tests {
                 json!(true),
             ),
             ("sd3_lora", "sd3_5_large", "lora", "sampleEvery", json!(1)),
-            (
-                "mage_flow_lora",
-                "mage_flow_base",
-                "lora",
-                "resume",
-                json!(true),
-            ),
             ("wan_lora", "wan_2_2", "lora", "sampleEvery", json!(1)),
             (
                 "wan_moe_lora",
@@ -9532,12 +9502,6 @@ mod tests {
                 "timestepType",
                 json!("logit_normal"),
             ),
-            (
-                "mage_flow_lora",
-                "mage_flow_base",
-                "timestepType",
-                json!("logit_normal"),
-            ),
             ("kolors_lora", "kolors", "timestepType", json!("linear")),
             ("wan_lora", "wan_2_2", "optimizer", json!("lion")),
             ("sd3_lora", "sd3_5_large", "timestepBias", json!("middle")),
@@ -9577,7 +9541,6 @@ mod tests {
             ("anima_lora", "anima_base"),
             ("kolors_lora", "kolors"),
             ("sd3_lora", "sd3_5_medium"),
-            ("mage_flow_lora", "mage_flow_base"),
             ("wan_lora", "wan_2_2"),
             ("wan_moe_lora", "wan_2_2_i2v_14b"),
         ] {
@@ -9593,22 +9556,6 @@ mod tests {
                 "{kernel}: {error}"
             );
         }
-
-        // Mage full legitimately carries rank=0. Its provider normalizes only for flow validation;
-        // the prepared request must preserve the complete-base optimizer surface unchanged.
-        let mut mage_full = plan_json(
-            dir.path(),
-            "mage_flow_lora",
-            "mage_flow_base",
-            "full",
-            &[&image],
-        );
-        mage_full["target"]["outputKind"] = json!("base_checkpoint");
-        mage_full["config"]["rank"] = json!(0);
-        mage_full["config"]["advanced"]["mixedPrecision"] = json!("f32");
-        let prepared = preflight_training_run(&settings, &parse(mage_full), false)
-            .expect("rank-zero Mage full request validates");
-        assert_eq!(prepared.request.config.rank, 0);
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -10205,103 +10152,6 @@ mod tests {
         }
     }
 
-    /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.
-    ///
-    /// `model_jobs` has its own coverage that `resolve_co_requisites_for_tier` honours `variant` and
-    /// `subdir`. What is untested there — and what broke when sc-14980 landed under this story — is
-    /// which tier *training* asks for. Three ways to get it wrong, all silent or misleading:
-    /// passing `None` (the resolver refuses with "refusing to guess"), passing whichever tier is
-    /// installed (a q4 tier would hand the gradient path PACKED weights, which `quantize` no-ops —
-    /// it trains WRONG and reports success), or keeping the old tier-agnostic call (which cannot
-    /// pick at all).
-    ///
-    /// So: stage ONLY q4 and require that training still fails, naming `bf16`. A resolver asking for
-    /// `None` produces the "refusing to guess" text instead; one asking for q4 would SUCCEED here,
-    /// which is the dangerous outcome this asserts against.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn training_components_demand_the_dense_tier_even_when_a_packed_tier_is_installed() {
-        // Pin the HF cache to the temp data dir so the staged components are the only ones visible.
-        let _env = crate::test_env::EnvVars::set(&[
-            ("HF_HOME", ""),
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-        ]);
-        let manifest = builtin_model_manifest_entry("mage_flow_base")
-            .expect("mage_flow_base has a builtin catalog entry");
-        // Stage exactly one tier's shared components into a data dir.
-        let stage = |settings: &Settings, tier: &str| {
-            for download in manifest
-                .get("downloads")
-                .and_then(Value::as_array)
-                .expect("downloads")
-            {
-                if download.get("coRequisite").and_then(Value::as_bool) != Some(true)
-                    || download.get("variant").and_then(Value::as_str) != Some(tier)
-                {
-                    continue;
-                }
-                let repo = download["repo"].as_str().expect("repo");
-                let revision = download["revision"].as_str().expect("revision");
-                let subdir = download["subdir"].as_str().expect("subdir");
-                let dir =
-                    sceneworks_core::hf_home::huggingface_repo_cache_path(&settings.data_dir, repo)
-                        .expect("repo cache path")
-                        .join("snapshots")
-                        .join(revision)
-                        .join(subdir);
-                std::fs::create_dir_all(&dir).expect("stage component dir");
-                std::fs::write(dir.join("model.safetensors"), b"stub")
-                    .expect("stage component file");
-            }
-        };
-
-        // POSITIVE: with the dense tier staged, training resolves each component to THAT tier's own
-        // component DIR, not the snapshot root. `subdir` is what makes this pass — a resolver
-        // ignoring it hands the engine a repo root holding q4/ q8/ bf16/ side by side.
-        let dense = tempfile::tempdir().expect("tempdir");
-        let dense_settings = test_settings(dense.path());
-        stage(&dense_settings, "bf16");
-        let components =
-            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings, None)
-                .expect("the bf16 shared components are staged");
-        let keys: Vec<&str> = components.keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["text_encoder", "vae"]);
-        for component in ["text_encoder", "vae"] {
-            let WeightsSource::Dir(dir) = &components[component] else {
-                panic!("{component} must stage as a directory");
-            };
-            assert!(
-                dir.ends_with(format!("bf16/{component}")),
-                "{component} must resolve to the DENSE tier's component dir, got {}",
-                dir.display()
-            );
-            assert!(dir.is_dir(), "{component} dir must exist");
-        }
-
-        // NEGATIVE: with only a PACKED tier installed, training refuses rather than falling back.
-        let temp = tempfile::tempdir().expect("tempdir");
-        let settings = test_settings(temp.path());
-        stage(&settings, "q4");
-
-        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings, None)
-            .expect_err(
-                "only the q4 shared components are installed, so a training run — which needs the \
-                 DENSE base — must be refused",
-            );
-        let message = error.to_string();
-        assert!(
-            message.contains("bf16"),
-            "training must ask for the bf16 tier BY NAME; asking for `None` yields the \
-             refusing-to-guess error instead. got: {message}"
-        );
-        assert!(
-            !message.contains("refusing to guess"),
-            "training resolves a concrete tier, so it must never hit the ambiguous-candidate \
-             branch: {message}"
-        );
-    }
-
     /// sc-14056 — the full-base-fine-tune signal and submitted checkpointing intent must both reach
     /// the engine config unchanged. Unsupported combinations are rejected by the shared preflight.
     ///
@@ -10320,8 +10170,8 @@ mod tests {
         let mapped = |network_type: &str| {
             let mut value = plan_json(
                 dir.path(),
-                "mage_flow_lora",
-                "mage_flow_base",
+                "iris_3b_generation",
+                "iris_3b",
                 network_type,
                 &[&image.display().to_string()],
             );
@@ -10388,16 +10238,16 @@ mod tests {
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
         let mut value = plan_json(
             dir.path(),
-            "mage_flow_lora",
-            "mage_flow_base",
+            "iris_3b_generation",
+            "iris_3b",
             "full",
             &[&image.display().to_string()],
         );
         value["target"]["outputKind"] = json!("base_checkpoint");
-        value["output"]["loraId"] = json!("finetune_mage");
+        value["output"]["loraId"] = json!("finetune_iris");
         let plan = parse(value);
         let output = TrainingOutput {
-            adapter_path: dir.path().join("models/finetunes/finetune_mage"),
+            adapter_path: dir.path().join("models/finetunes/finetune_iris"),
             steps: 1,
             final_loss: 0.25,
         };
@@ -10405,7 +10255,7 @@ mod tests {
 
         assert_eq!(result["outputKind"], json!("base_checkpoint"));
         assert_eq!(result["networkType"], json!("full"));
-        assert_eq!(result["outputId"], json!("finetune_mage"));
+        assert_eq!(result["outputId"], json!("finetune_iris"));
         assert_eq!(result["backend"], json!("candle"));
         // sc-2127: a single-resolution run records no bucket rows...
         assert!(!result.contains_key("resolutionBuckets"));

@@ -13277,7 +13277,7 @@ fn imported_file_plan_prices_consumed_companions_not_replaced_snapshot_transform
 #[cfg(target_os = "macos")]
 #[test]
 fn engine_supports_sequential_is_derived_from_the_registered_capability() {
-    // The earlier-wired families (sdxl / z-image / qwen / lens / krea) still resolve true — proving
+    // The earlier-wired families (sdxl / z-image / qwen / krea) still resolve true — proving
     // dropping the hardcoded allowlist introduced no regression for the already-covered engines.
     for id in [
         "sdxl",
@@ -13290,8 +13290,6 @@ fn engine_supports_sequential_is_derived_from_the_registered_capability() {
         "qwen_image_2_1_turbo",
         "qwen_image_edit",
         "qwen_image_control",
-        "lens",
-        "lens_turbo",
         "krea_2_turbo",
         "krea_2_raw",
         "krea_2_edit",
@@ -13329,9 +13327,6 @@ fn engine_supports_sequential_is_derived_from_the_registered_capability() {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
     ] {
         assert!(
             engine_supports_sequential(id),
@@ -13448,8 +13443,6 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
         "qwen_image_2_1_turbo",
         "qwen_image_edit",
         "qwen_image_control",
-        "lens",
-        "lens_turbo",
         "krea_2_turbo",
         "krea_2_raw",
         "krea_2_edit",
@@ -13478,9 +13471,6 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
         "bernini",
         "bernini_renderer",
         "krea_realtime_14b",
@@ -13552,22 +13542,8 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
 /// loop does not demand a sweep entry for them. This is an OBSERVED fact about each descriptor,
 /// read back from `engine_engages_staged_residency` in that same test, not a claim that the
 /// provider never stages anything.
-///
-/// That distinction matters for the six Mage engines. The generated matrix publishes their
-/// `staged_residency` cells as `Anchored`, which folds to "implemented" in the census — but it
-/// does so from MEASURED ANCHORS, not from this predicate, which the generator consults only to
-/// choose between `Implemented` and `Missing`. So the matrix and this list do not disagree:
-/// Mage has evidence and no advertised capability bit. Whether `mlx-gen-mage`'s descriptor
-/// SHOULD advertise one is a real question about that provider and predates sc-24108, which
-/// added this loop; it is recorded here rather than silently absorbed.
 #[cfg(target_os = "macos")]
 const ENGINES_WITHOUT_A_STAGED_RESIDENCY_CAPABILITY: &[&str] = &[
-    "mage_flow",
-    "mage_flow_base",
-    "mage_flow_edit",
-    "mage_flow_edit_base",
-    "mage_flow_edit_turbo",
-    "mage_flow_turbo",
     // sc-26325: native MOSS accepts resident/eager loading and advertises neither staging bit.
     "moss_image_base",
     "moss_image_sft",

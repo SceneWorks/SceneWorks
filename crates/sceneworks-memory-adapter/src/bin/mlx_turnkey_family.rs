@@ -527,7 +527,7 @@ pub(super) fn run_turnkey_still(request: &Value) -> Result<Value, String> {
         )
     } else {
         concat!(
-            "the pinned Kolors, Ideogram and Lens crates open no memory-strategy request scope for ",
+            "the pinned Kolors and Ideogram crates open no memory-strategy request scope for ",
             "the resident anchor composition and expose no calibration fault-injection site, so the ",
             "scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator ",
             "cleanup bounds are attested in quality and diagnostics instead"

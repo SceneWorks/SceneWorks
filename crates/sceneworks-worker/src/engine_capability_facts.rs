@@ -2038,19 +2038,19 @@ mod tests {
 
     #[test]
     fn imported_facts_match_exact_shape_and_apply_structural_adapter_refusal() {
-        let mut provider = descriptor("mage_flow_base", "mlx", true);
-        provider.family = "mage-flow";
+        let mut provider = descriptor("split_component_fixture", "mlx", true);
+        provider.family = "fixture-family";
         provider.capabilities.supports_lora = true;
         provider.capabilities.supports_lokr = true;
         provider.capabilities.supported_quants = &[gen_core::Quant::Q4];
         provider.capabilities.supports_kv_cache = true;
         provider.capabilities.conditioning = vec![gen_core::ConditioningKind::ReferenceVideo];
         let route = gen_core::ImportedModelRegistration {
-            family: "mage-flow",
+            family: "fixture-family",
             source: gen_core::ImportedModelSource::TransformerDirectory,
             operation: gen_core::ImportedModelOperation::Generate,
-            provider_id: "mage_flow_base",
-            required_components: Some(&["mage_text_encoder", "mage_vae"]),
+            provider_id: "split_component_fixture",
+            required_components: Some(&["fixture_text_encoder", "fixture_vae"]),
             inherit_adapters: false,
         };
 
@@ -2059,10 +2059,10 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].imports.len(), 1);
         let imported = &facts[0].imports[0];
-        assert_eq!(imported.family, "mage-flow");
+        assert_eq!(imported.family, "fixture-family");
         assert_eq!(imported.source, "transformer_directory");
         assert_eq!(imported.operation, "generate");
-        assert_eq!(imported.provider_id, "mage_flow_base");
+        assert_eq!(imported.provider_id, "split_component_fixture");
         assert_eq!(imported.conditioning, ["reference_video"]);
         assert!(!imported.supports_lora);
         assert!(!imported.supports_lokr);
@@ -2140,15 +2140,15 @@ mod tests {
             !imported.is_empty(),
             "the linked registry must publish its exact imported-source routes"
         );
-        if facts.iter().any(|entry| entry.backend == "mlx") {
-            assert!(imported.iter().any(|route| {
-                route.family == "mage-flow"
-                    && route.source == "transformer_directory"
-                    && route.operation == "generate"
-                    && !route.supports_lora
-                    && !route.supports_lokr
-            }));
-        }
+        assert!(
+            imported
+                .iter()
+                .all(
+                    |route| sceneworks_core::model_family::retired_image_family(&route.family)
+                        .is_none()
+                ),
+            "the linked registry must omit retired import families"
+        );
     }
 
     // sc-17593. The audio twin of `refuses_to_dump_an_empty_registry`, and the same trap: an audio

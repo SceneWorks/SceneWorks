@@ -350,13 +350,11 @@ mod pid_tests {
         assert_eq!(pid_backbone_for("krea_2_raw"), Some("qwenimage"));
         // flux (sc-7846) — incl. Z-Image, which is in the FLUX.1 VAE latent space.
         assert_eq!(pid_backbone_for("flux_dev"), Some("flux"));
-        assert_eq!(pid_backbone_for("boogu_image_turbo"), Some("flux"));
         assert_eq!(pid_backbone_for("chroma1_flash"), Some("flux"));
         assert_eq!(pid_backbone_for("z_image_turbo"), Some("flux"));
-        // flux2 (sc-7847) — incl. every klein-9b variant, Lens, Ideogram 4.
+        // flux2 (sc-7847) — incl. every klein-9b variant and Ideogram 4.
         assert_eq!(pid_backbone_for("flux2_dev"), Some("flux2"));
         assert_eq!(pid_backbone_for("flux2_klein_9b_true_v2"), Some("flux2"));
-        assert_eq!(pid_backbone_for("lens_turbo"), Some("flux2"));
         assert_eq!(pid_backbone_for("ideogram_4"), Some("flux2"));
         // sdxl (sc-7848)
         assert_eq!(pid_backbone_for("sdxl"), Some("sdxl"));

@@ -416,8 +416,6 @@ fn every_planned_turnkey_mlx_cell_is_served_by_an_arm() {
         "kolors",
         "ideogram_4",
         "ideogram_4_turbo",
-        "lens",
-        "lens_turbo",
         "qwen_image_2_1",
         "qwen_image_2_1_turbo",
     ]
@@ -517,11 +515,7 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
             identities[planned]
         );
     }
-    assert_eq!(
-        identities.len(),
-        15,
-        "fifteen distinct turnkey MLX identities"
-    );
+    assert_eq!(identities.len(), 9, "nine distinct turnkey MLX identities");
     assert_eq!(
         qwen_image_2_1.len(),
         3,
@@ -575,24 +569,9 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
         "kolors:q4:mlx"
     );
     assert_eq!(
-        identities["lens-mlx-shared-ladder-2026-08-03-v1"],
-        "lens:q4:mlx"
-    );
-    assert_eq!(
         runtime_macos::calibration::kolors::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
         "kolors-mlx-chatglm3-sdxl-unet-ladder-v1"
     );
-    assert_eq!(
-        runtime_macos::calibration::lens::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
-        "lens-mlx-shared-ladder-2026-08-03-v1"
-    );
-    // The legacy dense Lens-Turbo key is a real engine constant and it is NOT a cell here.
-    assert_eq!(
-        runtime_macos::calibration::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT,
-        "lens-text-encoder-window-2026-07-31-v1"
-    );
-    assert!(!identities.contains_key("lens-text-encoder-window-2026-07-31-v1"));
-    // The thirteen new cells, spelled out: the strings the sc-22732 inference head mints.
     for (key, identity) in [
         ("kolors:q8:mlx", "kolors-q8-mlx-shared-ladder-v1"),
         ("kolors:bf16:mlx", "kolors-bf16-mlx-shared-ladder-v1"),
@@ -613,14 +592,6 @@ fn every_planned_turnkey_mlx_cell_names_the_identity_its_loaded_generator_publis
         (
             "ideogram_4_turbo:bf16:mlx",
             "ideogram-4-turbo-bf16-mlx-shared-ladder-v1",
-        ),
-        ("lens:q8:mlx", "lens-q8-mlx-shared-ladder-v1"),
-        ("lens:bf16:mlx", "lens-bf16-mlx-shared-ladder-v1"),
-        ("lens_turbo:q4:mlx", "lens-turbo-q4-mlx-shared-ladder-v1"),
-        ("lens_turbo:q8:mlx", "lens-turbo-q8-mlx-shared-ladder-v1"),
-        (
-            "lens_turbo:bf16:mlx",
-            "lens-turbo-bf16-mlx-shared-ladder-v1",
         ),
     ] {
         assert_eq!(identities[identity], key);

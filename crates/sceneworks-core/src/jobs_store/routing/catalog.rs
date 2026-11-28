@@ -2894,16 +2894,15 @@ mod tests {
             .iter()
             .any(|route| route.supports_lora || route.supports_lokr));
 
-        for (family, source) in [("sdxl", "fused_checkpoint")] {
-            let routes = imported_provider_routes("mlx", family)
-                .filter(|route| route.source == source)
-                .collect::<Vec<_>>();
-            assert!(!routes.is_empty(), "{family} exact source is registered");
-            assert!(
-                routes.iter().all(|route| route.operation != "pose"),
-                "{family} exact source must keep the pose picker dark"
-            );
-        }
+        let (family, source) = ("sdxl", "fused_checkpoint");
+        let routes = imported_provider_routes("mlx", family)
+            .filter(|route| route.source == source)
+            .collect::<Vec<_>>();
+        assert!(!routes.is_empty(), "{family} exact source is registered");
+        assert!(
+            routes.iter().all(|route| route.operation != "pose"),
+            "{family} exact source must keep the pose picker dark"
+        );
     }
 
     #[test]

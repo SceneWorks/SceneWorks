@@ -1411,7 +1411,6 @@ mod tests {
             "sd3_5_large_turbo",
             "sd3_5_medium",
             "sana_1600m",
-            "boogu_image",
             "z_image",
             "z_image_turbo",
             "kolors",
@@ -1498,7 +1497,7 @@ mod tests {
                             false,
                         )
                         .unwrap();
-                    let image_and_strength = if matches!(model, "sana_1600m" | "boogu_image") {
+                    let image_and_strength = if model == "sana_1600m" {
                         assert!(conditioning.flux_source_image.is_none());
                         conditioning.identity_init
                     } else {

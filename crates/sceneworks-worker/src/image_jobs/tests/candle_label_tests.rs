@@ -197,18 +197,6 @@ fn candle_image_adapter_labels_are_per_family() {
     );
     assert_eq!(candle_adapter_label("ideogram_4"), "candle_ideogram");
     assert_eq!(candle_adapter_label("ideogram_4_turbo"), "candle_ideogram");
-    // Boogu (sc-7524): all three variants share the `candle_boogu` asset stamp.
-
-    for model in [
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-    ] {
-        assert_eq!(candle_adapter_label(model), "candle_mage");
-    }
     // Krea 2 Turbo (sc-7581): the candle asset stamp.
     assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
     // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
@@ -242,16 +230,11 @@ fn candle_image_adapter_labels_are_per_family() {
         "chroma1_hd",
         "chroma1_base",
         "chroma1_flash",
-        "lens",
-        "lens_turbo",
         "kolors",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "ideogram_4",
         "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
         // SD3.5 (sc-7880): Large / Large Turbo / Medium carry the `candle_sd3` stamp.
         "sd3_5_large",
         "sd3_5_large_turbo",
