@@ -990,3 +990,30 @@ fn hook4_low_res_start_feature_projects_from_runtime_snapshot_and_flips_when_pre
         Some(&true)
     );
 }
+
+/// SW-6132 / SW-6138: the lossy attention capability is projected for every candle engine a
+/// product loads, including the direct-dispatch identity engines (PuLID, InstantID) that have no
+/// generic image route, and the Qwen-Image-Edit 2511 routes Candle registers under their own ids.
+#[test]
+fn identity_and_qwen_edit_2511_products_project_the_lossy_attention_capability() {
+    for (model, engine) in [
+        ("pulid_flux_dev", "pulid_flux"),
+        ("instantid_realvisxl", "instantid"),
+        ("qwen_image_edit_2511", "qwen_image_edit_2511"),
+        (
+            "qwen_image_edit_2511_lightning",
+            "qwen_image_edit_2511_lightning",
+        ),
+    ] {
+        let spec = builtin_model_spec(model).unwrap();
+        assert_eq!(
+            spec.candle_attention_provider_ids(),
+            vec![engine],
+            "{model}"
+        );
+        let capability = spec
+            .lossy_attention_capability()
+            .unwrap_or_else(|| panic!("{model} projects a lossy attention capability"));
+        assert!(capability.int8.served && capability.sol.served, "{model}");
+    }
+}

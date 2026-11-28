@@ -359,6 +359,8 @@ pub fn platform_worker_capabilities(backend: &str) -> &'static [&'static str] {
             "video_extend",
             "video_generate",
             "video_upscale",
+            // SW-6135: the Krea 2 W4A8 tier marker (sm_80+), advertised beside `int8_convrot`.
+            "w4a8",
         ],
         _ => &[],
     }

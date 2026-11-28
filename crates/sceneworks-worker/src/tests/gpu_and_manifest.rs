@@ -3192,6 +3192,49 @@ fn cuda_preflight_runs_on_the_candle_gpu_worker_and_no_other_lane() {
 // sc-16260: an unusable GPU must change what the worker CLAIMS, not just what it logs.
 // ---------------------------------------------------------------------------
 
+/// The typed routing matrix and route coverage evaluate Candle cells against
+/// `route_bindings::platform_worker_capabilities("candle")`, so every capability a healthy
+/// sm_120 candle worker advertises (including the compute-cap-gated precision markers such as
+/// `w4a8`) must be listed there, or a served tier reads as served nowhere.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn every_advertised_candle_capability_is_a_declared_platform_capability() {
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = true;
+    settings.gpu_id = "0".to_owned();
+    // The same bare GPU descriptor the runtime descriptor facts dump uses, so only what the
+    // candle lane adds is compared (not the nvidia-smi probe's vendor/placeholder tags).
+    let descriptor = crate::DiscoveredGpu {
+        id: "0".to_owned(),
+        name: "Test GPU".to_owned(),
+        capabilities: vec![sceneworks_core::contracts::WorkerCapability::Gpu],
+        utilization: None,
+    };
+    let healthy = crate::gpu::with_candle_capabilities(
+        descriptor,
+        &settings,
+        Some(12.0),
+        &crate::GpuHealth::Usable,
+    );
+    let declared = sceneworks_core::registry::route_bindings::platform_worker_capabilities("candle");
+    let advertised: Vec<String> = crate::gpu::worker_capabilities_with_utility(&healthy, true)
+        .iter()
+        .map(|capability| capability.as_str().to_owned())
+        .collect();
+    assert!(
+        advertised.iter().any(|value| value == "w4a8"),
+        "an sm_120 candle worker advertises the w4a8 marker: {advertised:?}"
+    );
+    let undeclared: Vec<&String> = advertised
+        .iter()
+        .filter(|value| !declared.contains(&value.as_str()))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "advertised candle capabilities missing from platform_worker_capabilities: {undeclared:?}"
+    );
+}
+
 /// The routing half of the story. sc-16247 shipped the loud startup log; a driver-mismatch host
 /// still registered, still advertised its full candle capability set, and so still claimed and
 /// failed every routed generation job. Withholding the capability block is what actually stops

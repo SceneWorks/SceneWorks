@@ -123,15 +123,25 @@ impl ModelSpec {
             .as_ref()
             .map(|pag| serde_json::to_value(pag).expect("serializable PAG spec"))
     }
-    /// The candle engines a request for this model can select: the image route's generator, or
+    /// The candle engines a request for this model can select: the image route's generator, the
+    /// direct-dispatch identity engine a bespoke image product loads (`pulid_flux_dev` ->
+    /// `pulid_flux`, `instantid_realvisxl` -> `instantid`, when the candle export registers it), or
     /// every video mode's engines (which lane serves them, generic or bespoke, is routing's
     /// concern). Empty when the model has no candle engine.
     pub fn candle_attention_provider_ids(&self) -> Vec<&str> {
+        let bespoke = (self.product.model_type == "image")
+            .then(|| route_bindings::bespoke_image_route_id(&self.product.id))
+            .flatten()
+            .filter(|id| {
+                crate::sga_capabilities::for_backend("candle")
+                    .is_some_and(|export| export.routes.contains_key(*id))
+            });
         let mut ids: Vec<&str> = self
             .routes
             .get("candle")
             .map(|route| route.id.as_str())
             .into_iter()
+            .chain(bespoke)
             .chain(
                 self.video_routes
                     .get("candle")
