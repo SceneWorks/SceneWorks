@@ -162,10 +162,16 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
       label.textContent.trim().startsWith(text),
     );
   const turboSelect = () => container.querySelector('select[aria-label="Turbo (step-distilled)"]');
-  const openAdvanced = async () => {
-    const toggle = container.querySelector(".advanced-section-toggle");
-    if (toggle && container.querySelector(".advanced-panel") === null) await click(toggle);
+  // Settings live in a tab strip (studio layout simplification); only the open tab's panel is
+  // mounted. Model & output (model, quant tier) is open by default; the Turbo control, Veda and
+  // Steps sit under Sampling; the generic LoRA picker under Character & LoRAs.
+  const openSettingsTab = async (label) => {
+    const tab = [...container.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+      node.textContent.includes(label),
+    );
+    if (tab && tab.getAttribute("aria-selected") !== "true") await click(tab);
   };
+  const openSampling = () => openSettingsTab("Sampling");
   const generate = async () => {
     await click(
       [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip")),
@@ -195,7 +201,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     await click([...document.querySelectorAll(".asset-picker-footer button")].find((node) =>
       node.textContent.trim() === "Use Selection",
     ));
-    await openAdvanced();
+    await openSampling();
   };
 
   it.each([MINIMAX, MINIMAX_REF])("shows the CUDA tier selector for $id even when bf16 needs repair", async (model) => {
@@ -222,18 +228,24 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
   // The GENERIC picker's own controls — the second entry point this story has to keep in agreement
   // with the turbo control. Selecting goes through "Add LoRA" → a `.lora-pick-row`; deselecting
   // goes through the selected slot's own Remove button.
+  // The picker lives in the Character & LoRAs tab; each helper returns to Sampling, where the
+  // turbo control these tests compare it against lives.
   const addFromPicker = async (name) => {
+    await openSettingsTab("LoRAs");
     await click(container.querySelector("button.lora-add"));
     const row = [...container.querySelectorAll("button.lora-pick-row")].find((node) =>
       node.textContent.includes(name),
     );
     if (!row) throw new Error(`the generic picker does not offer ${name}`);
     await click(row);
+    await openSampling();
   };
   const removeFromPicker = async (name) => {
+    await openSettingsTab("LoRAs");
     const remove = container.querySelector(`button[aria-label="Remove ${name}"]`);
     if (!remove) throw new Error(`${name} is not shown as selected in the generic picker`);
     await click(remove);
+    await openSampling();
   };
 
   // ------------------------------------------------------------------ the chain
@@ -245,7 +257,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // here. Anything less follows the value into React state and stops.
     const context = baseContext();
     await render(context);
-    await openAdvanced();
+    await openSampling();
     await act(async () => setSelect(turboSelect(), TURBO_8STEP.id));
     await generate();
 
@@ -263,7 +275,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // two-and-a-half-hour render.
     const context = baseContext();
     await render(context);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect().value).toBe(TURBO_768P.id);
     await generate();
     expect(jobLoraIds(context)).toContain(TURBO_768P.id);
@@ -282,7 +294,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // folds cleanly, and quietly wrong (a quality mismatch with no error).
     const context = baseContext({ videoModels: [MINIMAX_REF] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect().value).toBe(TURBO_REF2V.id);
     expect(turboSelect().value).not.toBe(TURBO_768P.id);
   });
@@ -327,7 +339,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // untouched — turbo is not a mode that evicts the picker.
     const context = baseContext({ loras: [...ALL_TURBO, PLAIN_LORA] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
     await addFromPicker(PLAIN_LORA.name);
 
     await act(async () => setSelect(turboSelect(), TURBO_4STEP_V01.id));
@@ -345,7 +357,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // deselecting the seeded variant there has to turn the control off, not leave it stale.
     const context = baseContext();
     await render(context);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect().value).toBe(TURBO_768P.id);
 
     // Deselect from the PICKER side: the control must follow.
@@ -370,7 +382,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // alternative answers "why is this render two and a half hours?" with silence.
     const context = baseContext({ loras: [] });
     await render(context);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect()).toBeTruthy();
     expect(turboSelect().disabled).toBe(true);
     expect([...turboSelect().querySelectorAll("option")]).toHaveLength(1);
@@ -390,7 +402,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
       ],
     });
     await render(partial);
-    await openAdvanced();
+    await openSampling();
     expect([...turboSelect().querySelectorAll("option")].map((o) => o.value)).toEqual([
       "",
       TURBO_8STEP.id,
@@ -403,7 +415,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
   it("is absent on a model with no accelerator", async () => {
     const context = baseContext({ videoModels: [BERNINI], loras: ALL_TURBO });
     await render(context);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect()).toBeNull();
   });
 
@@ -422,7 +434,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // and this test would assert nothing (sc-15425's window).
     const context = baseContext({ preferencesHydrated: true });
     await render(context);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect().value).toBe(TURBO_768P.id);
 
     // A deliberate Off.
@@ -443,7 +455,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     ({ container, root } = mountRoot());
     const relaunched = baseContext({ preferencesHydrated: true });
     await render(relaunched);
-    await openAdvanced();
+    await openSampling();
     expect(turboSelect().value, "a stored Off must not be re-seeded on the next mount").toBe("");
     await generate();
     expect(jobLoraIds(relaunched)).not.toContain(TURBO_768P.id);
@@ -460,7 +472,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // only the second closes the quality mismatch the ref2v test above describes.
     const base = baseContext({ videoModels: [MINIMAX], loras: ALL_TURBO });
     await render(base);
-    await openAdvanced();
+    await openSampling();
     expect([...turboSelect().querySelectorAll("option")].map((option) => option.value)).toEqual([
       "",
       TURBO_768P.id,
@@ -470,7 +482,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
 
     const reference = baseContext({ videoModels: [MINIMAX_REF], loras: ALL_TURBO });
     await render(reference);
-    await openAdvanced();
+    await openSampling();
     expect([...turboSelect().querySelectorAll("option")].map((option) => option.value)).toEqual([
       "",
       TURBO_REF2V.id,
@@ -489,7 +501,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     // seizing the input, which is the Lightning precedent's opposite call and deliberately so.
     const context = baseContext();
     await render(context);
-    await openAdvanced();
+    await openSampling();
     await act(async () => setSelect(turboSelect(), TURBO_768P.id));
     const steps = labelStartingWith("Steps").querySelector("input");
     expect(steps.disabled).toBe(false);
@@ -507,14 +519,14 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
   const field = (label) => container.querySelector(`[aria-label="${label}"]`);
   it("Veda starts off and keeps the off job payload unchanged", async () => {
     const context = baseContext();
-    await render(context); await openAdvanced();
+    await render(context); await openSampling();
     expect(vedaToggle().checked).toBe(false);
     await generate();
     expect(lastJob(context).advanced).not.toHaveProperty("veda");
   });
   it("Veda independently serializes budget modes, exact dense lists, Turbo and style", async () => {
     const context = baseContext({ loras: [...ALL_TURBO, PLAIN_LORA], preferencesHydrated: true });
-    await render(context); await openAdvanced();
+    await render(context); await openSampling();
     await addFromPicker(PLAIN_LORA.name);
     await click(vedaToggle());
     await act(async () => setInput(field("Generated sparsity"), "32"));
@@ -529,14 +541,14 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     expect(JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1")).veda).toEqual(expected);
     await unmountRoot(root, container); ({ container, root } = mountRoot());
     const relaunched = baseContext({ loras: [...ALL_TURBO, PLAIN_LORA], preferencesHydrated: true });
-    await render(relaunched); await openAdvanced(); await generate();
+    await render(relaunched); await openSampling(); await generate();
     expect(lastJob(relaunched).advanced.veda).toEqual(expected);
   });
   it("Veda malformed-request feedback retains the API detail through the real creator", async () => {
     const setError = vi.fn();
     const context = baseContext();
     context.createVideoJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.video, token: context.token, project: context.activeProject, setJobs: vi.fn(), setError });
-    await render(context); await openAdvanced(); await click(vedaToggle());
+    await render(context); await openSampling(); await click(vedaToggle());
     await act(async () => setInput(field("Full-attention steps"), "4"));
     const detail = "advanced.veda.fullAttentionSteps: zero-based index 4 outside 0..4";
     apiFetch.mockRejectedValueOnce(new Error(detail));
@@ -567,7 +579,7 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
       { model: { state: "resolved", catalogId: MINIMAX.id }, loras: [] },
     );
     const context = baseContext({ studioLaunch: { view: "Video", id: "veda-replay", recipe } });
-    await render(context); await openAdvanced(); await generate();
+    await render(context); await openSampling(); await generate();
     expect(lastJob(context).advanced.veda).toEqual(veda);
     expect(lastJob(context).advanced).not.toHaveProperty("vedaExecution");
     await render({ ...context, studioLaunch: { view: "Video", id: "old-replay", recipe: { ...recipe, rawAdapterSettings: {} } } });
@@ -616,8 +628,10 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
 
   it("Veda remains answerable after an incompatible model change", async () => {
     const context = baseContext({ videoModels: [MINIMAX, BERNINI] });
-    await render(context); await openAdvanced(); await click(vedaToggle());
+    await render(context); await openSampling(); await click(vedaToggle());
+    await openSettingsTab("Model");
     await act(async () => setSelect(container.querySelector(".settings-field-model select"), BERNINI.id));
+    await openSampling();
     expect(vedaToggle().checked).toBe(true);
     await generate(); expect(context.createVideoJob).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Veda requires MiniMax-H3");

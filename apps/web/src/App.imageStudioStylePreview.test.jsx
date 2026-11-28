@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withImageStudioContext, settle } from "./main.testSupport.jsx";
+import { openSettingsTab } from "./screens/imageStudio/studioTestUtils.js";
 import { STYLE_GROUPS, styleHintForId, styleTextForId } from "./data/styleCatalog.js";
 import { recipeToStudioPatch } from "./screens/imageStudio/recipeToStudioPatch.js";
 
@@ -59,6 +60,10 @@ describe("Image Studio — live Style preview parity (sc-13131)", () => {
         }),
       );
     });
+    await settle();
+    // The Style axis, its composed-prompt preview and the preset stack live in the Style & look
+    // settings tab.
+    await openSettingsTab("Style");
     await settle();
   }
 

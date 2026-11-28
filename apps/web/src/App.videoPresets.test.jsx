@@ -5,6 +5,21 @@ import { PresetManagerScreen } from "./screens/PresetManagerScreen.jsx";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { withAppContext, FakeEventSource, response, settle, field, changeField, openAdvancedSection } from "./main.testSupport.jsx";
 
+
+// Video Studio settings live in a tab strip (studio layout simplification); only the open tab's
+// panel is mounted. Model & output is open by default; style presets and the general stack sit
+// under Style & look, Character under Character & LoRAs, steps under Sampling.
+async function openVideoSettingsTab(label) {
+  const tab = [...document.body.querySelectorAll('.studio-settings-tablist [role="tab"]')].find((node) =>
+    node.textContent.includes(label),
+  );
+  if (tab && tab.getAttribute("aria-selected") !== "true") {
+    await act(async () => {
+      tab.click();
+    });
+  }
+}
+
 describe("SceneWorks app shell", () => {
   let container;
   let root;
@@ -116,12 +131,14 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
-    const activeChip = [...document.body.querySelectorAll(".preset-chip.active")].map((chip) => chip.textContent.trim());
-    expect(activeChip).toEqual(["Bridge Clip"]);
     expect(field(container, "Model").value).toBe("wan_i2v");
     expect(field(container, "Duration").value).toBe("8");
 
-    await openAdvancedSection();
+    await openVideoSettingsTab("Style");
+    const activeChip = [...document.body.querySelectorAll(".preset-chip.active")].map((chip) => chip.textContent.trim());
+    expect(activeChip).toEqual(["Bridge Clip"]);
+
+    await openVideoSettingsTab("Sampling");
     expect(field(container, "Steps").value).toBe("41");
   });
 
@@ -173,14 +190,16 @@ describe("SceneWorks app shell", () => {
     });
     await settle();
 
+    const modelBefore = field(container, "Model").value;
+
     // The general preset lives in its own chip group, not the model-preset row.
+    await openVideoSettingsTab("Style");
     const generalGroup = container.querySelector(".general-preset-chips");
     expect(generalGroup).not.toBeNull();
     const chip = [...generalGroup.querySelectorAll(".preset-chip")].find((c) => c.textContent.trim() === "Film Look");
     expect(chip).toBeDefined();
     expect(chip.classList.contains("active")).toBe(false);
 
-    const modelBefore = field(container, "Model").value;
     await act(async () => chip.click());
 
     // Toggling activates the chip and leaves the model untouched (Phase 3 is state only).
@@ -188,7 +207,9 @@ describe("SceneWorks app shell", () => {
       c.textContent.trim(),
     );
     expect(activeGeneral).toEqual(["Film Look"]);
+    await openVideoSettingsTab("Model");
     expect(field(container, "Model").value).toBe(modelBefore);
+    await openVideoSettingsTab("Style");
 
     // epic 11949 Phase 4: toggling a general preset surfaces a live composed-prompt preview
     // showing exactly what the run will send — the safeguard against messy concatenation.
@@ -259,6 +280,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // sc-5875: presets are opt-in — select it explicitly before its defaults apply.
+    await openVideoSettingsTab("Style");
     await act(async () => {
       [...document.body.querySelectorAll(".preset-chip")].find((chip) => chip.textContent.trim() === "Dream Motion").click();
     });
@@ -272,7 +294,7 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Preset LoRA applied at generation");
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Render clip")).click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -353,6 +375,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     // Toggle the general preset into the stack (no base model preset selected).
+    await openVideoSettingsTab("Style");
     await act(async () => {
       [...container.querySelectorAll(".general-preset-chips .preset-chip")]
         .find((chip) => chip.textContent.trim() === "Film Look")
@@ -361,7 +384,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     await act(async () => {
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Render clip")).click();
     });
 
     expect(createVideoJob).toHaveBeenCalledWith(
@@ -431,7 +454,7 @@ describe("SceneWorks app shell", () => {
 
     // With a source image selected and an empty prompt, Render clip is enabled
     // and submits (a text-prompted model would be blocked here).
-    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");
+    const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Render clip"));
     expect(generate.disabled).toBe(false);
     await act(async () => {
       generate.click();
@@ -498,6 +521,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
+    await openVideoSettingsTab("Style");
 
     expect(container.textContent).toContain("LTX Motion");
     expect(container.textContent).not.toContain("Wan Motion");
@@ -510,11 +534,10 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("LTX Story");
     expect(container.textContent).not.toContain("LTX Motion");
 
-    await act(async () => {
-      document.body.querySelector(".advanced-section-toggle").click();
-    });
+    await openVideoSettingsTab("Model");
     await changeField(field(container, "Model"), "wan_2_2");
     await settle();
+    await openVideoSettingsTab("Style");
 
     // No preset selected → no guidance strip (it only appears when a preset is active).
     expect(document.body.querySelector(".style-axis-guidance")).toBeNull();
@@ -586,6 +609,7 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Image → Video").click();
     });
     await settle();
+    await openVideoSettingsTab("Style");
 
     expect(container.textContent).toContain("Camera Bridge");
     expect(container.textContent).toContain("Start Frame");
@@ -802,8 +826,8 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).toContain("Ref One");
     expect(container.textContent).toContain("Ref Two");
 
-    // The restored character resolves too (advanced holds the Character select).
-    await openAdvancedSection();
+    // The restored character resolves too (the Character & LoRAs tab holds the Character select).
+    await openVideoSettingsTab("Character");
     expect(field(container, "Character").value).toBe("char-1");
 
     // And the settled snapshot round-trips every selection — proving they were seeded from the

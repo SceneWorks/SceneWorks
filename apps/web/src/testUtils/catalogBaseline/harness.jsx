@@ -135,7 +135,9 @@ async function settleServerFeedback(document) {
 export function submissionButton(container, studio) {
   return [...container.querySelectorAll("button")].filter((node) => !node.closest("[hidden]"))
     .find((node) => {
-      const label = clean(node.textContent);
+      // A studio submit carries its shortcut inside (`<span class="kbd">⌘ ↵</span>`); the label
+      // is the button's text without it.
+      const label = clean(node.textContent.replace(node.querySelector(".kbd")?.textContent ?? "", ""));
       if (studio === "training") return node.classList.contains("primary-action") && label === "Start training";
       return (node.type === "submit" || node.classList.contains("su-generate")) &&
         /^(Generate(?:\s|$)|Render clip$|Replace person$|Convert to SVG$|Compose document$|Create SVG$|Test Character$|Run test$)/.test(label);

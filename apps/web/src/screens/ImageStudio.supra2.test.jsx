@@ -22,6 +22,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { openSettingsTab } from "./imageStudio/studioTestUtils.js";
 
 // Mirrors the shipped catalog entry's control-bearing keys.
 const SUPRA2 = {
@@ -81,7 +82,7 @@ const labelled = (container, text) =>
   );
 const field = (container, text) => labelled(container, text)?.querySelector("input, select, textarea");
 const generateButton = () =>
-  [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+  [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
 
 function setTextarea(element, value) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
@@ -113,8 +114,6 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
       );
     });
     await act(async () => {});
-    await click(document.body.querySelector(".advanced-section-toggle"));
-    await act(async () => {});
   }
 
   it("offers exactly the published controls and states the native size and prompt budget", async () => {
@@ -127,13 +126,14 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
     expect(container.textContent).toContain(
       "Supra2-IMG reads up to 128 prompt tokens; anything longer is truncated and the image is flagged.",
     );
+    expect(field(container, "Variations")).toBeTruthy();
+    await openSettingsTab("Sampling");
     const steps = field(container, "Steps");
     // The declared ceiling (gen-core's sanity cap), not the generic 80-step clamp.
     expect(steps.getAttribute("max")).toBe("100000");
     expect(steps.getAttribute("placeholder")).toBe("50");
     expect(field(container, "Guidance")).toBeTruthy();
     expect(field(container, "Seed")).toBeTruthy();
-    expect(field(container, "Variations")).toBeTruthy();
     for (const absent of [
       "Negative prompt",
       "Guidance method",
@@ -152,6 +152,7 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
     await render(baseContext({ createImageJob }));
     await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a red fox"));
     await act(async () => setInput(field(container, "Variations"), "4"));
+    await openSettingsTab("Sampling");
     await act(async () => setInput(field(container, "Seed"), "7"));
     await act(async () => setInput(field(container, "Steps"), "30"));
     await act(async () => setInput(field(container, "Guidance"), "1"));

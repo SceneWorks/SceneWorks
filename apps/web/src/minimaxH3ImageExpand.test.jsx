@@ -6,6 +6,7 @@ import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, imageSize, mountRoot, unmountRoot } from "./testUtils/dom.js";
+import { openPromptTool, openSettingsTab, promptToolButton } from "./screens/imageStudio/studioTestUtils.js";
 import {
   H3_IMAGE_EXPAND_COPY,
   h3ExpanderChoices,
@@ -177,7 +178,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     await render(value);
     const prompt = container.querySelector('textarea[aria-label="Prompt"]');
     await act(async () => setTextarea(prompt, "a lighthouse in fog"));
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
     await act(async () => {});
     expect(value.h3ImageExpandPrompt).toHaveBeenCalledWith(
@@ -195,7 +196,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     await click(buttonWithText(container, "Apply"));
     expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe(EXPANSION.refinedPrompt);
     // Applying the prompt did not change the size; the size is its own accept.
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Model");
     expect(imageSize(container)).toBe("2048x2048");
   });
 
@@ -216,7 +217,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     await act(async () =>
       setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
     );
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
     await act(async () => {});
     await click(buttonWithText(container, "Use this size"));
@@ -244,7 +245,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     await act(async () =>
       setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
     );
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
     await act(async () => {});
     expect(value.h3ImageExpandPrompt).toHaveBeenCalledWith(
@@ -266,7 +267,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     await act(async () =>
       setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "<Picture 1> in the coat from <Picture 3>"),
     );
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand edit instruction"));
     await act(async () => {});
     expect(value.h3ImageExpandPrompt).toHaveBeenCalledWith(
@@ -279,7 +280,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     await render(value);
     const prompt = container.querySelector('textarea[aria-label="Prompt"]');
     await act(async () => setTextarea(prompt, "a lighthouse in fog"));
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
     await act(async () => {});
     await click(buttonWithText(container, "Keep original"));
@@ -321,7 +322,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     });
     await render(value);
     expect(buttonWithText(container, "Run batch · 3")).toBeTruthy();
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     expect(container.textContent).toContain(H3_IMAGE_EXPAND_COPY.batch.hint);
     await click(buttonWithText(container, "Expand & run batch · 3"));
     await settle();
@@ -356,7 +357,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
       createImageJob: vi.fn(async () => ({ id: `job-${Math.random()}`, status: "queued" })),
     });
     await render(value);
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(container.querySelector(".batch-expand-sizes input"));
     await click(buttonWithText(container, "Expand & run batch · 3"));
     await settle();
@@ -381,7 +382,7 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
       ),
     });
     await render(value);
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(buttonWithText(container, "Expand & run batch · 2"));
     await settle();
     expect(container.textContent).toContain("Expanding prompt 2 of 2");
@@ -393,9 +394,9 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
 
   it("offers no Expand prompt tool without the expander or for another model", async () => {
     await render(context([H3_IMAGE, withState("minimax_h3_image_pe", "missing")]));
-    expect(buttonWithText(container, "Expand prompt")).toBeUndefined();
+    expect(promptToolButton("Expand", container)).toBeUndefined();
     await render(context([QWEN_TURBO, PE]));
-    expect(buttonWithText(container, "Expand prompt")).toBeUndefined();
+    expect(promptToolButton("Expand", container)).toBeUndefined();
   });
 });
 
@@ -598,7 +599,7 @@ describe("picking the expander model in the advanced Image Studio (SW-7208)", ()
     await act(async () =>
       setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
     );
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     expect(radio("minimax_h3_image_pe").checked).toBe(true);
     await click(radio("vision_describe_qwen3_8_27b"));
     expect(radio("vision_describe_qwen3_8_27b").checked).toBe(true);
@@ -621,7 +622,7 @@ describe("picking the expander model in the advanced Image Studio (SW-7208)", ()
       createImageJob: vi.fn(async () => ({ id: `job-${Math.random()}`, status: "queued" })),
     });
     await render(value);
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     await click(radio("vision_describe_qwen3_8_27b"));
     await click(buttonWithText(container, "Expand & run batch · 2"));
     for (let round = 0; round < 6; round += 1) {
@@ -649,7 +650,7 @@ describe("picking the expander model in the advanced Image Studio (SW-7208)", ()
     await act(async () =>
       setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
     );
-    await click(buttonWithText(container, "Expand prompt"));
+    await openPromptTool("Expand", container);
     expect(radio("minimax_h3_image_pe").disabled).toBe(true);
     expect(radio("vision_describe_qwen3_8_27b").checked).toBe(true);
     expect(container.textContent).toContain("needs MiniMax’s prompt files");

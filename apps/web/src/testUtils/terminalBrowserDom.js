@@ -4,7 +4,9 @@ import { act } from 'react';
 import { click, setSelect } from './dom.js';
 const text=node=>(node?.textContent??'').replace(/\s+/g,' ').trim();
 const matches=(value,wanted,exact=true)=>wanted instanceof RegExp?wanted.test(value):exact?value===wanted:value.includes(wanted);
-const named=(node)=>node.getAttribute('aria-label')??(node.hasAttribute('aria-labelledby')?node.getAttribute('aria-labelledby').split(/\s+/).map(id=>text(node.ownerDocument.getElementById(id))).join(' '):text(node));
+// An accessible name leaves out aria-hidden content (e.g. a Generate button's shortcut hint).
+const nameText=node=>{if(!node?.querySelector?.('[aria-hidden="true"]'))return text(node);const copy=node.cloneNode(true);copy.querySelectorAll('[aria-hidden="true"]').forEach(hidden=>hidden.remove());return text(copy);};
+const named=(node)=>node.getAttribute('aria-label')??(node.hasAttribute('aria-labelledby')?node.getAttribute('aria-labelledby').split(/\s+/).map(id=>nameText(node.ownerDocument.getElementById(id))).join(' '):nameText(node));
 const role=node=>node.getAttribute('role')??({BUTTON:'button',SELECT:'combobox',FIELDSET:'group',INPUT:node.type==='checkbox'?'checkbox':undefined}[node.tagName]);
 // jsdom has no layout boxes. Resolve the terminal driver's descendant :visible
 // compounds from CSS visibility/display (including retained hidden ancestors).

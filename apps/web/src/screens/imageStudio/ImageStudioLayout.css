@@ -1,0 +1,495 @@
+/* Image Studio compose panel — studio layout simplification.
+   The shared pieces (tab strip, .studio-grid, prompt box, Generate, assist card) live in
+   components/StudioSettingsTabs.css; this file only places Image Studio's own controls on them
+   and quiets the older settings-bar / Advanced-panel rules those controls still carry as test
+   and styling hooks. Everything is scoped under .image-studio. Tokens only, so both themes hold. */
+
+.image-studio .image-compose-panel {
+  gap: 16px;
+}
+
+/* ── Top row: mode switch left, Batch / Prompt guide / Saved presets right ─── */
+.image-studio .studio-compose-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.image-studio .studio-compose-top-spacer {
+  flex: 1;
+}
+
+/* The shared ModeTabs (underline tabs elsewhere) as a segmented control here. */
+.image-studio .studio-mode-segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.image-studio .studio-mode-segment .mode-tab {
+  height: 30px;
+  margin: 0;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.image-studio .studio-mode-segment .mode-tab.active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  font-weight: 600;
+}
+
+.image-studio .studio-compose-top .batch-toggle,
+.image-studio .studio-compose-top .hero-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.image-studio .studio-compose-top .batch-toggle:hover,
+.image-studio .studio-compose-top .hero-link:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.image-studio .studio-compose-top .batch-toggle.active {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.image-studio .studio-compose-top > :last-child {
+  margin-right: -6px;
+}
+
+/* ── Prompt box ─────────────────────────────────────────────────────────── */
+/* The textarea keeps its .prompt-input hook; the box owns the surface and border. */
+.image-studio .studio-prompt-box > textarea.prompt-input {
+  border: 0;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.image-studio .studio-prompt-box-body,
+.image-studio .studio-prompt-box.batch > :first-child {
+  min-width: 0;
+  padding: 14px;
+}
+
+.image-studio .studio-prompt-tool-flag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* Try: suggestions stay on the footer's one line: they take the space between the tools and
+   Generate, and the ones that don't fit fade out rather than wrapping the footer onto more rows. */
+.image-studio .studio-prompt-suggestions {
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+}
+
+.image-studio .studio-prompt-suggestions + .studio-prompt-box-spacer {
+  flex: 0 0 8px;
+}
+
+.image-studio .studio-prompt-suggestions .suggestion-row-label,
+.image-studio .studio-prompt-suggestions .suggestion {
+  flex-shrink: 0;
+}
+
+.image-studio .studio-prompt-suggestions .suggestion {
+  max-width: 240px;
+  height: 28px;
+  padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.image-studio .studio-prompt-box-foot .batch-confirm {
+  justify-content: flex-end;
+}
+
+/* ── Status lines directly under the prompt box ─────────────────────────── */
+.image-studio .studio-prompt-status {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.image-studio .studio-prompt-status:empty,
+.image-studio .studio-prompt-status > .batch-run:empty {
+  display: none;
+}
+
+.image-studio .studio-prompt-status p {
+  margin: 0;
+}
+
+.image-studio .studio-prompt-status > .batch-run {
+  align-items: flex-start;
+}
+
+.image-studio .image-reference-summary {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  font-size: 13px;
+}
+
+/* ── The one inline assist panel ────────────────────────────────────────── */
+.image-studio .studio-tool-card-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-right: -8px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.image-studio .studio-tool-card-close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.image-studio .studio-tool-card .structured-reference,
+.image-studio .studio-tool-card .refine-control {
+  display: grid;
+  gap: 10px;
+}
+
+.image-studio .studio-tool-card .refine-review {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.image-studio .studio-tool-card .structured-reference .secondary-action,
+.image-studio .studio-tool-card .refine-review-actions .secondary-action:first-child {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+
+.image-studio .studio-tool-card .structured-reference .secondary-action:hover:not(:disabled),
+.image-studio .studio-tool-card .refine-review-actions .secondary-action:first-child:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.image-studio .control-panel-embedded {
+  display: grid;
+  gap: 14px;
+}
+
+.image-studio .control-panel-embedded .control-panel-desc {
+  margin: 0;
+}
+
+/* ── Inputs (Edit / With character, and the FLUX.3 layout) ──────────────── */
+.image-studio .studio-inputs-label {
+  padding-top: 4px;
+}
+
+.image-studio .studio-input-cell {
+  min-width: 0;
+}
+
+.image-studio .studio-inputs > .studio-input-action {
+  align-self: end;
+  min-height: var(--control-h);
+}
+
+.image-studio .studio-inputs > .field-hint,
+.image-studio .studio-inputs > p {
+  margin: 0;
+}
+
+.image-studio .studio-quick-edits .suggestion-row-label {
+  font-weight: 600;
+}
+
+/* ── Settings tab panels ────────────────────────────────────────────────── */
+.image-studio .image-settings-tabs .studio-grid > p {
+  margin: 0;
+}
+
+/* The older settings bar drew its field labels as tiny uppercase eyebrows; in the tab panels
+   they read like every other grid field. The classes stay as hooks. */
+.image-studio .image-settings-tabs .settings-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text);
+}
+
+.image-studio .image-settings-tabs .settings-field select,
+.image-studio .image-settings-tabs .settings-field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) {
+  height: var(--control-h);
+}
+
+.image-studio .image-settings-tabs .studio-field-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-studio .image-model-update:empty {
+  display: none;
+}
+
+.image-studio .image-model-settings > .aspect-picker {
+  grid-column: span 2;
+  flex: none;
+  min-width: 0;
+}
+
+.image-studio .image-model-settings .mp-stepper {
+  height: var(--control-h);
+}
+
+.image-studio .image-model-settings .mp-stepper input {
+  height: calc(var(--control-h) - 2px);
+}
+
+.image-studio .image-model-settings > .settings-field-tier strong {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h);
+  font-weight: 500;
+}
+
+.image-studio .moss-acceleration-download {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.image-studio .moss-acceleration-download p {
+  margin: 0;
+}
+
+/* Fields inside a "For this model" group sit on the panel grid (subgrid) and look like the
+   panel's own fields. */
+.image-studio .studio-settings-group > label {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.image-studio .studio-settings-group > label > select,
+.image-studio .studio-settings-group > label > input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-h);
+}
+
+.image-studio .studio-settings-group > label.checkline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-weight: 500;
+  align-self: end;
+}
+
+/* Spans inside the group come from StudioSettingsTabs.css; an inline alert also takes a row. */
+.image-studio .studio-settings-group > [role="alert"] { grid-column: 1 / -1; }
+
+/* Range rows: the slider and its value readout share one 38px line under the label. */
+.image-studio .image-settings-tabs .studio-grid > label:has(> input[type="range"]) {
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: center;
+}
+
+.image-studio .image-settings-tabs .studio-grid > label:has(> input[type="range"]) > input[type="range"] {
+  grid-column: 1;
+  height: var(--control-h);
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.image-studio .image-settings-tabs .studio-grid > label:has(> input[type="range"]) > span {
+  grid-column: 2;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.image-studio .image-settings-tabs .studio-grid > label:has(> input[type="range"]) > :not(input):not(span) {
+  grid-column: 1 / -1;
+}
+
+.image-studio .image-settings-tabs .studio-grid > label.prompt-field > textarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+}
+
+.image-studio .pag-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.image-studio .pag-controls > label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.image-studio .pag-controls > label > input {
+  height: var(--control-h);
+}
+
+.image-studio .pag-controls > .pag-advanced {
+  align-self: end;
+}
+
+.image-studio .low-res-start-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.image-studio .low-res-start-controls > .low-res-start-toggle {
+  justify-self: start;
+  min-height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.image-studio .low-res-start-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.image-studio .low-res-start-fields > label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.image-studio .low-res-start-fields > .low-res-start-dimensions {
+  grid-column: 1 / -1;
+}
+
+.image-studio .multiphase-section {
+  display: grid;
+  gap: 6px;
+}
+
+.image-studio .multiphase-section > .studio-field-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.image-studio .image-finish-restore {
+  min-width: 0;
+}
+
+.image-studio .transparency-prompt-hint {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/* LoRAs and Style & look keep their own components' layouts; drop the card chrome they draw
+   elsewhere so the tab panel is the only surface. */
+.image-studio .image-lora-settings,
+.image-studio .image-style-settings {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.image-studio .image-lora-settings > .lora-picker {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.image-studio .image-style-settings > .settings-bar-styles:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+@media (max-width: 900px) {
+  .image-studio .low-res-start-fields,
+  .image-studio .pag-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 560px) {
+  .image-studio .image-model-settings > .aspect-picker,
+  .image-studio .studio-settings-group > .span-2 {
+    grid-column: 1 / -1;
+  }
+
+  .image-studio .studio-prompt-box-foot .studio-generate {
+    width: 100%;
+  }
+}

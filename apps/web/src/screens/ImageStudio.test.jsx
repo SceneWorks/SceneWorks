@@ -29,6 +29,7 @@ import {
 } from "../ideogramCaption.js";
 import { MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { generateButton as studioGenerateButton, openPromptTool, openSettingsTab, promptToolButton } from "./imageStudio/studioTestUtils.js";
 
 const Z_IMAGE = {
   id: "z_image_turbo",
@@ -189,24 +190,28 @@ describe("ImageStudio Save as Preset", () => {
       .toEqual([["first prompt", 1896, 1520], ["second prompt", 2048, 1152], ["exact prompt", 832, 1216], ["large portrait", 1464, 1960]]);
   });
 
-  // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
-  // the Purpose zone is one elevated card. It shipped detached in sc-10476 and was
-  // pulled back in by sc-10490 — assert the nesting so it cannot drift again.
-  it("nests the Advanced disclosure inside the work-panel", async () => {
+  // The settings tab strip belongs INSIDE the work-panel, not floating beneath it: the Purpose
+  // zone is one elevated card (sc-10476 / sc-10490). It is the panel's LAST child — it bleeds to
+  // the panel's edges and rounds its bottom corners — and the old Advanced disclosure is gone.
+  it("nests the settings tab strip inside the work-panel as its last child", async () => {
     await render(baseContext());
 
-    expect(document.body.querySelector(".work-panel .advanced-section")).toBeTruthy();
-    expect(document.body.querySelector(".studio-shell > .advanced-section")).toBeNull();
+    const strip = document.body.querySelector(".work-panel .image-settings-tabs");
+    expect(strip).toBeTruthy();
+    expect(strip.parentElement.lastElementChild).toBe(strip);
+    expect(document.body.querySelector(".studio-shell > .image-settings-tabs")).toBeNull();
+    expect(document.body.querySelector(".advanced-section")).toBeNull();
   });
 
-  // `.advanced-panel` is a 3-column grid, so a bare hint span is a grid ITEM: it eats a
+  // The settings panels are a 4-column grid, so a bare hint span is a grid ITEM: it eats a
   // cell and shifts every control after it into the wrong column (sc-10493). Hints belong
   // inside the <label> they describe.
-  it("puts no bare hint spans in the advanced grid", async () => {
+  it("puts no bare hint spans in the settings grids", async () => {
     await render(baseContext());
-    await click(document.body.querySelector(".advanced-section-toggle"));
-
-    expect(document.body.querySelector(".advanced-panel > .field-hint")).toBeNull();
+    for (const tab of ["Model & output", "Sampling", "Upscale & finish"]) {
+      await openSettingsTab(tab);
+      expect(document.body.querySelector(".image-settings-tabs .studio-grid > span.field-hint"), tab).toBeNull();
+    }
     expect(document.body.textContent).not.toContain("Custom size overrides the Aspect dropdown");
   });
 
@@ -228,7 +233,7 @@ describe("ImageStudio Save as Preset", () => {
     expect(textTab?.getAttribute("aria-selected")).toBe("true");
 
     await click([...container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Generate"));
+      .find((button) => button.textContent.startsWith("Generate")));
     expect(createImageJob.mock.calls[0][0].mode).toBe("text_to_image");
   });
 
@@ -236,6 +241,7 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext();
     await render(context);
 
+    await openSettingsTab("Style");
     const input = nameInput(container);
     expect(input).toBeTruthy();
     await act(async () => setInput(input, "Atrium Look"));
@@ -271,6 +277,7 @@ describe("ImageStudio Save as Preset", () => {
     });
     await render(context);
 
+    await openSettingsTab("Style");
     await act(async () => setInput(nameInput(container), "Atrium Look"));
     await saveWithScope(container, "This project");
 
@@ -282,6 +289,7 @@ describe("ImageStudio Save as Preset", () => {
     const context = baseContext({ createPreset: vi.fn(() => Promise.reject({ message: { detail: "not renderable" } })) });
     await render(context);
 
+    await openSettingsTab("Style");
     await act(async () => setInput(nameInput(container), "Unavailable preset"));
     await saveWithScope(container, "This project");
 
@@ -723,15 +731,17 @@ describe("ImageStudio advanced model defaults", () => {
       }),
     );
 
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Sampling");
     await act(async () => setSelect(field(container, "Sampler"), "euler"));
     await act(async () => setSelect(field(container, "Scheduler"), "shift"));
     await act(async () => setInput(field(container, "Schedule shift"), "7.7"));
     await act(async () => setInput(field(container, "Steps"), "44"));
     await act(async () => setInput(field(container, "Guidance"), "11"));
 
+    await openSettingsTab("Model");
     await act(async () => setSelect(field(container, "Model"), "qwen_image"));
     await act(async () => {});
+    await openSettingsTab("Sampling");
 
     expect(field(container, "Sampler").value).toBe("unipc");
     expect(field(container, "Scheduler").value).toBe("shift");
@@ -744,7 +754,7 @@ describe("ImageStudio advanced model defaults", () => {
     // The model switch settles over several async steps; under a loaded run Generate can still be
     // disabled (or the submit still in flight) a tick later, so wait for both.
     const generateButton = () =>
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
     await vi.waitFor(() => expect(generateButton()?.disabled).toBe(false));
     await click(generateButton());
     await vi.waitFor(() => expect(createImageJob).toHaveBeenCalled());
@@ -808,8 +818,8 @@ describe("ImageStudio resolution continuity", () => {
     expect(imageSize(container)).toBe(expected);
     expect(field(container, "Aspect").value).toBe(expectedRatio);
 
-    await vi.waitFor(() => expect([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate")?.disabled).toBe(false));
-    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    await vi.waitFor(() => expect([...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"))?.disabled).toBe(false));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")));
     expect(createImageJob.mock.calls[0][0].advanced.resolution).toBe(expected);
 
     // Returning to the source preserves the current choice where it fits there, rather than
@@ -914,11 +924,12 @@ describe("ImageStudio text encoder selector", () => {
     await act(async () => {});
   }
 
-  const openAdvanced = () => click(document.body.querySelector(".advanced-section-toggle"));
+  // The text encoder sits with the hardware/precision knobs in the Model & output tab.
+  const openAdvanced = () => openSettingsTab("Model");
   const generate = () =>
     click(
       [...document.body.querySelectorAll("button")].find(
-        (button) => button.textContent === "Generate",
+        (button) => button.textContent.startsWith("Generate"),
       ),
     );
 
@@ -997,6 +1008,7 @@ describe("ImageStudio text encoder selector", () => {
       ).textEncoderModel,
     ).toBe(ALTERNATE_ENCODER.id);
 
+    await openSettingsTab("Style");
     await act(async () => setInput(nameInput(container), "Alternate encoder preset"));
     await saveWithScope(container, "This project");
     expect(context.createPreset.mock.calls[0][0].defaults.textEncoderModel).toBe(
@@ -1032,7 +1044,7 @@ describe("ImageStudio text encoder selector", () => {
     // can still be disabled (or the submit still in flight) a tick after the encoder shows, so
     // wait for both rather than assume one tick.
     const generateButton = () =>
-      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
     await vi.waitFor(() => expect(generateButton()?.disabled).toBe(false));
     await generate();
     await vi.waitFor(() => expect(createImageJob).toHaveBeenCalled());
@@ -1110,10 +1122,9 @@ describe("ImageStudio guidance method picker (epic 7434, sc-7449)", () => {
     limits: { resolutions: ["1024x1024"], guidanceMethods: ["cfg", "cfg_pp"] },
   };
 
-  const openAdvanced = async () =>
-    click(document.body.querySelector(".advanced-section-toggle"));
+  const openAdvanced = async () => openSettingsTab("Sampling");
   const generateButton = () =>
-    [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
   const generate = async () => {
     await vi.waitFor(() => expect(generateButton()?.disabled).toBe(false));
     await click(generateButton());
@@ -1330,7 +1341,7 @@ describe("ImageStudio edit source picker", () => {
     expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
 
-    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")));
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({ mode: "edit_image", sourceAssetId: "uploaded-source" }));
   });
 
@@ -1381,7 +1392,7 @@ describe("ImageStudio edit source picker", () => {
     expect(reopened.querySelector('.asset-picker-card[aria-selected="true"]')).toBeTruthy();
     await click([...reopened.querySelectorAll("button")].find((button) => button.textContent === "Cancel"));
 
-    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")));
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.mode).toBe("edit_image");
     expect(payload.referenceAssetIds).toEqual(["ref-a", "ref-b"]);
@@ -1422,7 +1433,7 @@ describe("ImageStudio edit source picker", () => {
     for (const file of files) expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
 
-    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")));
     expect(createImageJob).toHaveBeenCalledWith(expect.objectContaining({
       mode: "edit_image", referenceAssetIds: ["a.png", "b.png"],
       sourceAssetId: capability === "sourceWithMultiReference" ? "source" : null,
@@ -1494,7 +1505,7 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     const dialog = document.body.querySelector('[role="dialog"]');
     await act(async () => dialog.querySelector(".asset-picker-card").click());
     await click([...dialog.querySelectorAll("button")].find((b) => b.textContent === "Use Selection"));
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
 
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.mode).toBe("edit_image");
@@ -1524,7 +1535,7 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
 
     const download = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Download");
     expect(download).toBeTruthy();
-    const generate = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+    const generate = [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
     expect(generate.disabled).toBe(true);
 
     await click(download);
@@ -1535,7 +1546,7 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     const KREA_STYLE = { id: "krea_style", name: "Krea Style", family: "krea_2", scope: "global", installState: "installed", installedPath: "/loras/krea_style" };
     await render(baseContext({ imageModels: [KREA_RAW], loras: [EDIT_LORA, KREA_STYLE], assets: [SOURCE] }));
     await enterEdit();
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("LoRAs");
 
     // The managed edit LoRA is filtered out — only the non-managed style LoRA is on offer.
     const addButton = document.body.querySelector(".lora-add");
@@ -1603,7 +1614,7 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     await enterEdit();
     await pickNextSource("Scene Plate"); // → sourceAssetId (image 1)
     await pickNextSource("Person Plate"); // → editSecondAssetId (image 2)
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
 
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.mode).toBe("edit_image");
@@ -1622,7 +1633,7 @@ describe("ImageStudio Krea image edit LoRA (epic 10871)", () => {
     );
     await enterEdit();
     await pickNextSource("Scene Plate");
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
 
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.sourceAssetId).toBe("scene-plate");
@@ -1728,7 +1739,7 @@ describe("ImageStudio model picker capability gating", () => {
     expect(modelOptionValues()).toEqual([]);
     expect(container.textContent).toContain("No installed model supports Text generation.");
     expect(
-      [...container.querySelectorAll("button")].find((button) => button.textContent === "Generate").disabled,
+      [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate")).disabled,
     ).toBe(true);
 
     await click(
@@ -1900,9 +1911,7 @@ describe("ImageStudio model picker capability gating", () => {
     // Boogu is non-structured, so the plain-prompt path renders RefinePromptControl ("Refine my
     // prompt"). It drives the prompt_refine utility with Boogu's prompt guide as the rewriter context
     // (S4) — the optional, user-editable enhancement step; raw prompt remains the fallback.
-    const refineButton = [...document.body.querySelectorAll("button")].find((b) =>
-      b.textContent.includes("Refine my prompt"),
-    );
+    const refineButton = promptToolButton("Refine");
     expect(refineButton).toBeTruthy();
   });
 
@@ -1910,8 +1919,10 @@ describe("ImageStudio model picker capability gating", () => {
   // picker's "Full precision (bf16)" <option> text when both would otherwise be in the DOM).
   const precisionLabel = (root) =>
     root.querySelector("label.boogu-precision-toggle");
-  const openAdvanced = async (root) =>
-    click(root.querySelector(".advanced-section-toggle"));
+  // The quant tier, the precision toggle and the hardware knobs sit in the Model & output tab;
+  // the post-passes (PiD, Upscale, Hires.fix) in Upscale & finish.
+  const openAdvanced = async (root) => openSettingsTab("Model", root);
+  const openFinish = async (root) => openSettingsTab("Upscale & finish", root);
 
   it("exposes the Full-precision (bf16) toggle for Boogu in Advanced when ui.precisionToggle is set (sc-6568)", async () => {
     await render(
@@ -1951,7 +1962,7 @@ describe("ImageStudio model picker capability gating", () => {
   const tierPicker = (root) =>
     [...root.querySelectorAll("label.quant-tier-picker select")][0] ?? null;
   const generateButton = () =>
-    [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
   const clickGenerate = () => clickReadyGenerate(generateButton);
 
   it("explains saving a converted dense checkpoint and submits the chosen quant", async () => {
@@ -2007,8 +2018,9 @@ describe("ImageStudio model picker capability gating", () => {
   it("shows ALL possible tiers, disabling the un-installed ones (sc-8515, availability guard)", async () => {
     await render(baseContext({ imageModels: [matrixModel(["q4", "bf16"])], macCapabilities: MAC_CAPS }));
     await act(async () => {});
-    // Quant tier is an everyday settings-bar knob, not an Advanced one (sc-15374).
-    expect(document.body.querySelector(".settings-bar-row label.quant-tier-picker")).toBeTruthy();
+    // Quant tier is an everyday Model & output knob, open by default — not behind a
+    // disclosure (sc-15374).
+    expect(document.body.querySelector('[role="tabpanel"][data-panel="model"] label.quant-tier-picker')).toBeTruthy();
     const picker = tierPicker(container);
     expect(picker).toBeTruthy();
     const options = [...picker.options].map((o) => o.value);
@@ -2068,7 +2080,7 @@ describe("ImageStudio model picker capability gating", () => {
         models: [{ id: "pid_qwenimage", installState: "installed" }],
       }),
     );
-    await openAdvanced(container);
+    await openFinish(container);
     await act(async () => {});
 
     const pid = () => container.querySelector('.pid-decoder-toggle input[type="checkbox"]');
@@ -2101,7 +2113,7 @@ describe("ImageStudio model picker capability gating", () => {
       image: { supportsGuidance: false, supportsNegativePrompt: false },
     };
     await render(baseContext({ imageModels: [HIRES_MODEL], models: [HIRES_MODEL] }));
-    await openAdvanced(container);
+    await openFinish(container);
     await act(async () => {});
 
     const hires = () => container.querySelector('.hires-fix-toggle input[type="checkbox"]');
@@ -2437,7 +2449,7 @@ describe("ImageStudio structured-prompt recipe round-trip (sc-6147)", () => {
   };
 
   const generateButton = () =>
-    [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate");
+    [...document.body.querySelectorAll("button")].find((button) => button.textContent.startsWith("Generate"));
 
   it("restores the builder from a recipe, then re-emits the same caption + blob on Generate", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
@@ -2611,9 +2623,7 @@ describe("ImageStudio reference-image → JSON caption (epic 8102, sc-8108)", ()
     "selects Loop and preserves the target's %s description style", async (captionStyle, text) => {
       const imageDescribe = vi.fn(async () => text);
       await render(baseContext({ imageModels: [{ ...Z_IMAGE, captionStyle }], models: [LOOP_MODEL], assets: [REF_ASSET], imageDescribe }));
-      const tile = [...document.body.querySelectorAll(".prompt-tool-title")]
-        .find((element) => element.textContent.trim() === "Prompt from image");
-      await click(tile.closest("button"));
+      await click(promptToolButton("Prompt from image"));
       await selectLoopReference();
       await click(buttonByText("✨ Describe image"));
       expect(imageDescribe).toHaveBeenCalledWith(expect.objectContaining({
@@ -2731,7 +2741,7 @@ describe("ImageStudio Ideogram 4 auto-expand on plain-text Generate (sc-6501)", 
 
   const buttonByText = (text) =>
     [...document.body.querySelectorAll("button")].find((b) => b.textContent.trim() === text);
-  const generateButton = () => buttonByText("Generate");
+  const generateButton = () => studioGenerateButton();
 
   function setTextArea(element, value) {
     const setter = Object.getOwnPropertyDescriptor(
@@ -2831,12 +2841,11 @@ describe("ImageStudio PiD decoder toggle (sc-7851)", () => {
   const PID_QWEN = { ...Z_IMAGE, id: "qwen_image", name: "Qwen Image", ui: { pid: { checkpointId: "pid_qwenimage" } } };
   const PID_CKPT = (installState) => ({ id: "pid_qwenimage", type: "utility", installState });
 
-  const openAdvanced = async () =>
-    click(document.body.querySelector(".advanced-section-toggle"));
+  const openAdvanced = async () => openSettingsTab("Upscale & finish");
   const pidLabel = () =>
     [...document.body.querySelectorAll("label")].find((l) => l.textContent.includes("PiD decoder"));
   const generateButton = () =>
-    [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate");
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate"));
 
   it("shows the toggle (default off) when eligible AND the checkpoint is installed", async () => {
     await render(baseContext({ imageModels: [PID_QWEN], models: [PID_QWEN, PID_CKPT("installed")] }));
@@ -2996,7 +3005,7 @@ describe("ImageStudio alternate decoder capability hydration (sc-18315)", () => 
     expect(document.body.querySelector(".alternate-decoder-select")).toBeFalsy();
     expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe(DECODER_ID);
     const generate = [...document.body.querySelectorAll("button")].find(
-      (button) => button.textContent === "Generate",
+      (button) => button.textContent.startsWith("Generate"),
     );
     expect(generate.disabled).toBe(true);
     await act(async () => {
@@ -3011,7 +3020,7 @@ describe("ImageStudio alternate decoder capability hydration (sc-18315)", () => 
       macCapabilities: { macGatingActive: true, platform: "macos" },
       macCapabilitiesAuthoritative: true,
     });
-    await click(document.body.querySelector(".advanced-section-toggle"));
+    await openSettingsTab("Upscale & finish");
 
     const decoder = document.body.querySelector(".alternate-decoder-select select");
     expect(decoder).toBeTruthy();
@@ -3065,7 +3074,7 @@ describe("ImageStudio alternate decoder capability hydration (sc-18315)", () => 
     expect(JSON.parse(window.localStorage.getItem(storageKey)).decoder).toBe("native");
 
     const generate = [...document.body.querySelectorAll("button")].find(
-      (button) => button.textContent === "Generate",
+      (button) => button.textContent.startsWith("Generate"),
     );
     expect(generate.disabled).toBe(false);
     await click(generate);
@@ -3103,7 +3112,8 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
   // Krea-like img2img model: a `ui.img2img` toggle, plain text-to-image capability, no vision
   // captioner in context (baseContext leaves `imageDescribe` undefined → describe flow unavailable).
   const KREA_IMG2IMG = { ...Z_IMAGE, id: "krea_2_turbo", name: "Krea 2 Turbo", ui: { img2img: true } };
-  const tileByText = (text) =>
+  const tileByText = (text) => promptToolButton(text);
+  const anyButton = (text) =>
     [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes(text));
   function installFakeImageProbes() {
     const originalImage = global.Image;
@@ -3160,10 +3170,11 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
     await render(baseContext({ imageModels: [IDEOGRAM_IMG2IMG], models: [IDEOGRAM_IMG2IMG] }));
     // The tile coexists with the structured caption builder…
     expect(tileByText("Image reference")).toBeTruthy();
-    expect(document.body.querySelector(".structured-prompt-builder, .prompt-input-row.structured")).toBeTruthy();
-    // …but the free-text-only tiles ("Prompt from image" / "Refine my prompt") stay out of the strip —
-    // the caption builder owns image→caption + magic-expand, so this is the slim img2img-only strip.
-    expect(tileByText("Refine my prompt")).toBeFalsy();
+    expect(document.body.querySelector(".structured-prompt-builder, .studio-prompt-box.structured")).toBeTruthy();
+    // …but the free-text-only tools ("Prompt from image" / "Refine") stay out of the footer —
+    // the caption builder owns image→caption + magic-expand, so this is the slim img2img-only set.
+    expect(tileByText("Refine")).toBeFalsy();
+    expect(tileByText("Prompt from image")).toBeFalsy();
   });
 
   it("activating the structured img2img tile reveals the reference-guidance panel", async () => {
@@ -3171,7 +3182,7 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
     await click(tileByText("Image reference"));
     // The img2img panel's hint distinguishes it from the caption builder's own reference→caption picker.
     expect(
-      [...document.body.querySelectorAll(".prompt-tool-panel .structured-hint")].some((p) =>
+      [...document.body.querySelectorAll(".studio-tool-card .structured-hint")].some((p) =>
         p.textContent.includes("guide the render (image-to-image)"),
       ),
     ).toBe(true);
@@ -3204,17 +3215,17 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
     try {
       await render(baseContext({ assets: [portrait, landscape], imageModels: [model], models: [model] }));
       await click(tileByText("Image reference"));
-      await click(tileByText("Select reference image"));
+      await click(anyButton("Select reference image"));
       let cards = [...document.body.querySelectorAll(".asset-picker-card")];
       await click(cards.find((card) => card.textContent.includes("Portrait reference")));
-      await click(tileByText("Use Selection"));
+      await click(anyButton("Use Selection"));
       expect(probes).toHaveLength(1);
       const staleOnload = probes[0].onload;
 
-      await click(tileByText("Change"));
+      await click(anyButton("Change"));
       cards = [...document.body.querySelectorAll(".asset-picker-card")];
       await click(cards.find((card) => card.textContent.includes("Landscape reference")));
-      await click(tileByText("Use Selection"));
+      await click(anyButton("Use Selection"));
       expect(probes).toHaveLength(2);
 
       probes[1].naturalWidth = 1600;
@@ -3267,9 +3278,9 @@ describe("ImageStudio Image-reference (img2img) tile (epic 8588, sc-8593/sc-1019
         }),
       );
       await click(tileByText("Image reference"));
-      await click(tileByText("Select reference image"));
+      await click(anyButton("Select reference image"));
       await click(document.body.querySelector(".asset-picker-card"));
-      await click(tileByText("Use Selection"));
+      await click(anyButton("Use Selection"));
       expect(probes).toHaveLength(1);
       const staleOnload = probes[0].onload;
       // Both presets are 1.5 MP, so the carried-over 1024x1024 keeps its square shape and is
@@ -3364,12 +3375,12 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     [...document.body.querySelectorAll(".control-mode-tab")].map((b) => b.textContent.trim());
   const controlTabByLabel = (label) =>
     [...document.body.querySelectorAll(".control-mode-tab")].find((b) => b.textContent.trim() === label);
-  // The structure-control panel is collapsed by default; expand it so the gated inner content
-  // (mode tabs, control-image upload, slider) mounts before the assertions below.
-  const expandControlPanel = async () =>
-    click(document.body.querySelector(".control-panel .advanced-section-toggle"));
+  // The structure-control panel is the Structure prompt tool's assist panel, closed by default;
+  // open it so the gated inner content (mode tabs, control-image upload, slider) mounts before
+  // the assertions below.
+  const expandControlPanel = async () => openPromptTool("Structure");
   const generate = async () =>
-    click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    click([...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
 
   it("gates the picker to the backbone's supported modes (all three)", async () => {
     await render(baseContext({ imageModels: [FULL_CONTROL] }));
@@ -3385,6 +3396,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
 
   it("hides the panel entirely for a backbone with no control modes", async () => {
     await render(baseContext({ imageModels: [NO_CONTROL] }));
+    expect(promptToolButton("Structure")).toBeUndefined();
     expect(document.body.querySelector(".control-panel")).toBeNull();
   });
 
@@ -3395,6 +3407,7 @@ describe("ImageStudio strict-control panel (epic 8236, sc-8245)", () => {
     await click(controlTabByLabel("Canny"));
     expect(controlTabByLabel("Canny").getAttribute("aria-pressed")).toBe("true");
     // Switch to the pose-only backbone → canny is gone, only pose remains, and pose is active.
+    await openSettingsTab("Model");
     await act(async () => setSelect(field(container, "Model"), "pose_only"));
     await act(async () => {});
     expect(controlTabs()).toEqual(["Pose"]);
@@ -3575,48 +3588,44 @@ describe("ImageStudio multi-phase denoise (epic 13879 S5, sc-13885)", () => {
     await act(async () => {});
   }
 
-  const MULTI_PHASE_LABEL = "Multi-phase denoise (experimental)";
-  const hasMultiPhaseSection = () => document.body.textContent.includes(MULTI_PHASE_LABEL);
-  // Open the AdvancedSection disclosure whose header label matches `label`.
-  const openSection = async (label) => {
-    const section = [...document.body.querySelectorAll(".advanced-section")].find((node) =>
-      node.querySelector(".advanced-section-label")?.textContent.trim() === label,
-    );
-    await click(section.querySelector(".advanced-section-toggle"));
-  };
+  // The editor sits in the Sampling tab's "For this model" group (no disclosure of its own).
+  const multiPhaseSection = () => document.body.querySelector(".multiphase-section");
 
-  it("shows the multi-phase disclosure only for an acceleration-compat model in text mode", async () => {
-    // A model without the acceleration compat → no multi-phase disclosure.
+  it("shows the multi-phase editor only for an acceleration-compat model in text mode", async () => {
+    // A model without the acceleration compat → no multi-phase editor, and no model group.
     await render(baseContext({ imageModels: [Z_IMAGE] }));
-    expect(hasMultiPhaseSection()).toBe(false);
+    await openSettingsTab("Sampling");
+    expect(multiPhaseSection()).toBeNull();
 
-    // krea_2_raw (advertises acceleration) in the default text-to-image mode → the disclosure shows,
-    // collapsed (header only — the editor body is not rendered until expanded).
+    // krea_2_raw (advertises acceleration) in the default text-to-image mode → the editor shows
+    // under "For this model", off until enabled.
     await render(baseContext({ imageModels: [KREA_RAW_MP], loras: [TURBO_LORA] }));
-    expect(hasMultiPhaseSection()).toBe(true);
-    expect(document.body.textContent).not.toContain("Enable multi-phase denoise");
+    expect(multiPhaseSection()).toBeTruthy();
+    expect(multiPhaseSection().closest(".studio-settings-group")?.textContent).toContain("For this model");
+    expect(multiPhaseSection().textContent).toContain("Enable multi-phase denoise");
+    expect(multiPhaseSection().querySelector('input[type="checkbox"]').checked).toBe(false);
 
     // Switching to Edit mode hides it — multi-phase renders from pure noise (worker rejects edits).
     await click([...document.body.querySelectorAll(".mode-tabs button")].find((b) => b.textContent === "Edit"));
-    expect(hasMultiPhaseSection()).toBe(false);
+    expect(multiPhaseSection()).toBeNull();
   });
 
   it("builds the canonical Turbo finish (4+4) request end-to-end and round-trips advanced.phases", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(baseContext({ createImageJob, imageModels: [KREA_RAW_MP], loras: [TURBO_LORA] }));
 
-    // Select the turbo accelerator LoRA in the Advanced LoRA picker (it becomes request.loras[0]).
-    await openSection("Advanced");
+    // Select the turbo accelerator LoRA in the LoRAs tab (it becomes request.loras[0]).
+    await openSettingsTab("LoRAs");
     await click(document.body.querySelector(".lora-add"));
     await click(document.body.querySelector(".lora-pick-row"));
 
-    // Open the experimental disclosure and apply the Turbo finish (4+4) preset.
-    await openSection(MULTI_PHASE_LABEL);
+    // Open the Sampling tab's multi-phase editor and apply the Turbo finish (4+4) preset.
+    await openSettingsTab("Sampling");
     expect(document.body.textContent).toContain("Enable multi-phase denoise");
     await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Turbo finish (4+4)"));
 
     // Generate — the request must carry the phase list the worker parses, unchanged.
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
 
     const payload = createImageJob.mock.calls[0][0];
     // request.loras carries the turbo LoRA; the phase index points back into it.
@@ -3632,7 +3641,7 @@ describe("ImageStudio multi-phase denoise (epic 13879 S5, sc-13885)", () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(baseContext({ createImageJob, imageModels: [KREA_RAW_MP], loras: [TURBO_LORA] }));
     // Do NOT enable multi-phase — just generate a plain Raw job.
-    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    await click([...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.advanced).not.toHaveProperty("phases");
   });
@@ -3678,9 +3687,9 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
     await act(async () => {});
   }
 
-  const openAdvanced = async () => click(document.body.querySelector(".advanced-section-toggle"));
+  const openAdvanced = async () => openSettingsTab("Sampling");
   const generate = () => clickReadyGenerate(() =>
-    [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Generate"));
+    [...document.body.querySelectorAll("button")].find((b) => b.textContent.startsWith("Generate")));
   const labelStartingWith = (text) =>
     [...container.querySelectorAll("label")].find((node) => node.textContent.trim().startsWith(text));
   const setTextarea = async (element, value) => {
@@ -3872,8 +3881,10 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
     await openAdvanced();
     expect(labelStartingWith("Negative prompt")).toBeFalsy();
 
+    await openSettingsTab("Model");
     await act(async () => setSelect(field(container, "Model"), "sdxl"));
     await act(async () => {});
+    await openAdvanced();
     const negative = labelStartingWith("Negative prompt")?.querySelector("textarea");
     expect(negative, "the guidance-taking model shows the box again").toBeTruthy();
     expect(negative.value).toBe("");
@@ -3902,6 +3913,7 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
       }),
     );
 
+    await openSettingsTab("Style");
     await act(async () => setInput(nameInput(container), "My preset"));
     await saveWithScope(container, "This project");
     const defaults = createPreset.mock.calls[0][0].defaults;
@@ -3931,6 +3943,7 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
       baseContext({ createImageJob, imageModels: [GUIDED, CFG_FREE], presets: [stackPreset] }),
     );
 
+    await openSettingsTab("Style");
     const chip = [...container.querySelectorAll(".general-preset-chips .preset-chip")].find(
       (el) => el.textContent.trim() === "Film Look",
     );
@@ -3946,8 +3959,10 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
 
     // Same stack, CFG-free engine: the composed PROMPT is still shown (it is still sent), but the
     // Negative line is gone — because the payload no longer carries it.
+    await openSettingsTab("Model");
     await act(async () => setSelect(field(container, "Model"), "flux_schnell"));
     await act(async () => {});
+    await openSettingsTab("Style");
     preview = container.querySelector(".preset-stack-preview");
     expect(preview.textContent).toContain("Kodak Portra 400");
     expect(preview.textContent).not.toContain("Negative:");

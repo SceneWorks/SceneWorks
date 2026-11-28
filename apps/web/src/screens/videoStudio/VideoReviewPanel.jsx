@@ -22,16 +22,10 @@ export function VideoReviewPanel({
   setAbSide
 }) {
   return (
-<div className="studio-results">
-          <section className="review-panel">
-            <div className="review-panel-head">
-              <h2>Latest batch</h2>
-              <span className="kbd-hint">
-                <kbd>⌘</kbd>
-                <kbd>↵</kbd>
-                to render
-              </span>
-            </div>
+<>
+          {/* The results switch above names this view ("Latest batch") and the ⌘ ↵ shortcut now
+              sits inside the Render clip button, so the panel no longer carries its own head. */}
+          <section aria-label="Latest batch" className="review-panel">
             {localJobs.length ? (
               <div className="worker-progress-card-stack local-job-stack">
                 {localJobs.map((job) => {
@@ -114,6 +108,6 @@ export function VideoReviewPanel({
               )}
             </div>
           ) : null}
-        </div>
+        </>
   );
 }

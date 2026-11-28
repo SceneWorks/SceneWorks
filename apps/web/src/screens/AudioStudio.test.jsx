@@ -22,6 +22,7 @@ import { AppContext } from "../context/AppContext.js";
 import { AudioStudio } from "./AudioStudio.jsx";
 import { navSections, viewTitles } from "../App.jsx";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { withoutInfoTips } from "../components/InfoTip.jsx";
 
 beforeEach(() => {
   appConfirmMock.mockReset();
@@ -2150,7 +2151,7 @@ describe("AudioStudio YuE lyrics-to-song (sc-19385)", () => {
         .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     });
   };
-  const caption = (label) => label.childNodes[0].textContent.trim();
+  const caption = (label) => withoutInfoTips(label.childNodes[0]).trim();
   const settingsCaptions = () => [...container.querySelectorAll(".settings-bar label")].map(caption);
   const advancedCaptions = () => [...container.querySelectorAll(".advanced-panel label")].map(caption);
   const advancedField = (text) =>

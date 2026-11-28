@@ -1,0 +1,429 @@
+/* Studio layout simplification — shared pieces of the Image / Video Studio compose panel.
+   One 4-column grid, one 38px control height, one left edge (the work panel's padding).
+
+   .studio-settings-tabs   the tab strip + open panel; must be the LAST child of .work-panel,
+                           it bleeds to the panel's edges and rounds its bottom corners.
+   .studio-grid            the shared 4-column field grid (2 columns < 900px, 1 < 560px).
+   .studio-prompt-box      prompt textarea + footer bar (assist tools left, Generate right).
+   .studio-generate        the violet generative action with its shortcut inside.
+   .studio-tool-card       the one inline assist panel under the prompt box.
+   .studio-note            a quiet one-line footnote at the bottom of a panel. */
+
+/* ── Settings tab strip ─────────────────────────────────────────────────── */
+.studio-settings-tabs {
+  margin: 0 calc(-1 * var(--pad-panel)) calc(-1 * var(--pad-panel));
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
+
+.studio-settings-tablist {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(128px, 1fr);
+  overflow-x: auto;
+  /* Don't let the tabs' min widths size the page: on a narrow screen the strip scrolls
+     inside the panel instead of widening the studio's grid column. */
+  contain: inline-size;
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+}
+
+.studio-settings-tabs:has(.studio-settings-panel:not([hidden])) .studio-settings-tablist {
+  border-radius: 0;
+}
+
+.studio-settings-tab {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 12px 16px 10px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+
+.studio-settings-tab:first-child {
+  border-left: 0;
+  padding-left: var(--pad-panel);
+  border-bottom-left-radius: var(--r-lg);
+}
+
+.studio-settings-tab:last-child {
+  border-bottom-right-radius: var(--r-lg);
+}
+
+.studio-settings-tabs:has(.studio-settings-panel:not([hidden])) .studio-settings-tab {
+  border-radius: 0;
+}
+
+.studio-settings-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.studio-settings-tab.on {
+  background: var(--surface-2);
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.studio-settings-tab:focus-visible {
+  outline: none;
+  box-shadow: inset var(--shadow-glow);
+}
+
+.studio-settings-tab-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.studio-settings-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-settings-tab-caret {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--text-muted);
+  transition: transform var(--t-fast) var(--ease-out);
+}
+
+.studio-settings-tab-caret.open {
+  transform: rotate(180deg);
+}
+
+.studio-settings-tab-summary {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-settings-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+}
+
+.studio-settings-dot.warn {
+  background: var(--warn);
+}
+
+.studio-settings-panel {
+  padding: var(--pad-panel);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+  background: var(--surface-2);
+}
+
+.studio-settings-group {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  gap: inherit;
+}
+
+.studio-settings-group-label {
+  grid-column: 1 / -1;
+  padding-top: 4px;
+}
+
+.studio-settings-group > .span-2 { grid-column: span 2; }
+.studio-settings-group > .span-3 { grid-column: span 3; }
+.studio-settings-group > .span-full,
+.studio-settings-group > .studio-note { grid-column: 1 / -1; }
+
+/* ── Shared 4-column field grid ─────────────────────────────────────────── */
+.studio-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px 14px;
+  align-items: start;
+}
+
+.studio-grid > .span-2 { grid-column: span 2; }
+.studio-grid > .span-3 { grid-column: span 3; }
+.studio-grid > .span-full,
+.studio-grid > .studio-note,
+.studio-grid > [role="alert"],
+.studio-grid > [role="status"] { grid-column: 1 / -1; }
+
+@media (max-width: 900px) {
+  .studio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .studio-grid > .span-3 { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  .studio-grid { grid-template-columns: minmax(0, 1fr); }
+  .studio-grid > .span-2,
+  .studio-grid > .span-3 { grid-column: 1 / -1; }
+}
+
+/* Fields inside the grid: label above, one 38px control, hint below. */
+.studio-grid > label,
+.studio-grid > .studio-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.studio-grid > label > select,
+.studio-grid > label > input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.studio-grid > .studio-field > select,
+.studio-grid > .studio-field > input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-h);
+}
+
+.studio-grid > label.checkline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-weight: 500;
+  align-self: end;
+}
+
+.studio-grid .field-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.studio-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--text-muted);
+}
+
+/* ── Prompt box ─────────────────────────────────────────────────────────── */
+.studio-prompt-box {
+  display: grid;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+
+.studio-prompt-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.studio-prompt-box > textarea {
+  display: block;
+  width: 100%;
+  min-height: 104px;
+  padding: 14px;
+  border: 0;
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  background: transparent;
+  box-shadow: none;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  resize: vertical;
+  outline: none;
+}
+
+.studio-prompt-box > textarea:focus {
+  box-shadow: none;
+}
+
+.studio-prompt-box-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  padding: 8px 8px 8px 10px;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  background: var(--surface-2);
+}
+
+.studio-prompt-box-foot .studio-prompt-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.studio-prompt-box-foot .studio-prompt-tool:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.studio-prompt-box-foot .studio-prompt-tool[aria-pressed="true"] {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.studio-prompt-box-foot .studio-prompt-tool:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.studio-prompt-box-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--border);
+}
+
+.studio-prompt-box-spacer {
+  flex: 1;
+}
+
+.studio-generate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  min-width: 148px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--ai);
+  color: var(--ai-fg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.studio-generate:hover:not(:disabled) {
+  background: var(--ai-strong);
+}
+
+.studio-generate:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.studio-generate .kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in oklch, currentColor 35%, transparent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+/* ── Inline assist panel ────────────────────────────────────────────────── */
+.studio-tool-card {
+  display: grid;
+  gap: 16px;
+  padding: 16px 20px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+/* A card kept mounted while closed (so an in-flight tool survives) hides via [hidden]. */
+.studio-tool-card[hidden] {
+  display: none;
+}
+
+.studio-tool-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+}
+
+.studio-tool-card-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.studio-tool-card-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Underline mode tabs (Video Studio modes within a group) ────────────── */
+.studio-mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.studio-mode-tab {
+  height: 36px;
+  padding: 0;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.studio-mode-tab:hover {
+  color: var(--text);
+}
+
+.studio-mode-tab[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.studio-mode-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

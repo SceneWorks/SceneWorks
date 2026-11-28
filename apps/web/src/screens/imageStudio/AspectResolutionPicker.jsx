@@ -8,12 +8,15 @@ import {
   stepMegapixels,
 } from "../../aspectResolution.js";
 import { parseResolution } from "../../resolutionMatch.js";
+import { InfoTip } from "../../components/InfoTip.jsx";
 
 // Image Studio's size picker: an aspect-ratio menu and a megapixel stepper, with the derived pixel
 // size read out underneath. Both controls are views over the "WxH" `resolution` (see
 // aspectResolution.js) — changing either writes a new resolution through `onChange`; nothing here
 // holds a second copy of the size. The megapixel range is the selected model's own (`envelope`).
-export function AspectResolutionPicker({ resolution, onChange, envelope, children }) {
+// `info` (notes about how this model treats the size) opens from an (i) beside the first label.
+export function AspectResolutionPicker({ resolution, onChange, envelope, info, children }) {
+  const tip = info ? <InfoTip label="About the image size">{info}</InfoTip> : null;
   const size = parseResolution(resolution);
   // What the user ASKED for (ratio + megapixels), remembered against the size it produced. The box
   // shows the request (4.00) while the readout shows the on-grid result (1776 × 2352, 3.98 MP), and
@@ -36,7 +39,7 @@ export function AspectResolutionPicker({ resolution, onChange, envelope, childre
   if (envelope.fixed) {
     return (
       <div className="settings-field settings-field-aspect aspect-picker">
-        Size
+        <span className="field-label">Size{tip}</span>
         <div className="aspect-picker-readout" role="status" aria-label="Output size">
           <strong>{size ? `${size.width} × ${size.height}` : resolution}</strong>
           <span>Fixed by this model</span>
@@ -70,7 +73,7 @@ export function AspectResolutionPicker({ resolution, onChange, envelope, childre
   return (
     <div className="settings-field settings-field-aspect aspect-picker">
       <label className="aspect-picker-field">
-        Aspect
+        <span className="field-label">Aspect{tip}</span>
         <select onChange={(event) => apply(event.target.value, megapixels)} value={ratio.id}>
           {envelope.ratios.map((option) => (
             <option disabled={!option.available} key={option.id} value={option.id}>

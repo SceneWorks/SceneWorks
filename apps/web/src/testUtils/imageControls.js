@@ -14,7 +14,20 @@ export const modelPicker = page => page.locator('label.settings-field-model sele
 // KeepAlive retains Studio forms while Image Editor is active. Never resolve its
 // shared control labels against the whole page or choose an arbitrary first match.
 export const controlScope = (page,kind) => kind==='editor' ? page.locator('.image-editor-surface:visible .ie-insp-body:visible') : page;
+// Image Studio's settings tab strip shows one group's panel at a time, so a driver opens the tab
+// that holds a control before reading or setting it. Other surfaces have no strip (returns false).
+const STUDIO_TAB = { 'Model': 'Model & output', 'Variations': 'Model & output', 'Upscale': 'Upscale & finish' };
+for (const label of ['Width override','Height override','Steps','Guidance','Schedule shift','Training shift','Context limit','Seed','Negative prompt']) STUDIO_TAB[label] = 'Sampling';
+export async function studioTab(page, name, actions) {
+  if (!name) return false;
+  const tab = page.locator('.image-settings-tabs').getByRole('tab', { name: new RegExp(`^${escapeRegExp(name)}`) });
+  if (!(await tab.count())) return false;
+  if (await tab.getAttribute('aria-selected') !== 'true') await click(tab, actions, `${name} settings tab`);
+  return true;
+}
+const studioTabFor = (page, label, actions) => studioTab(page, STUDIO_TAB[label], actions);
 export async function advanced(page, actions) {
+  if (await studioTab(page, 'Sampling', actions)) { await page.getByLabel('Steps', { exact: true }).waitFor({ state: 'visible' }); return; }
   const simple = page.locator('details.su-advanced');
   if (await simple.count()) { if (!(await simple.getAttribute('open') !== null)) await click(simple.locator(':scope > summary'), actions, 'Advanced disclosure'); return; }
   const button = page.locator('.advanced-section').getByRole('button', { name: /^Advanced/ });
@@ -52,6 +65,7 @@ export async function verifyReplayForm(page, expected, actions) {
     'Training shift': expected.advanced.mossImage.training_shift ?? 1, 'Context limit': expected.advanced.mossImage.max_sequence_length ?? 4096,
     'Reference maximum edge': expected.advanced.mossImageEdit.reference_max_edge, 'Model': expected.model };
   for (const [label,value] of Object.entries(scalars)) {
+    await studioTabFor(page, label, actions);
     actual[label] = await (label === 'Model' ? modelPicker(page) : page.getByLabel(label, { exact: true })).inputValue();
     requireThat(actual[label] === String(value), `actual replay did not restore ${label}`);
   }
@@ -63,12 +77,14 @@ export async function verifyReplayForm(page, expected, actions) {
   for (const [label,value] of [['Native output',native.output],['Positive embeddings',native.positive?.values?.assetId ?? ''],['Positive attention mask',native.positive?.mask?.assetId ?? ''],['Negative embeddings',native.negative?.values?.assetId ?? ''],['Negative attention mask',native.negative?.mask?.assetId ?? ''],['Explicit initial noise',native.noise?.assetId ?? '']]) {
     requireThat(await (labelledSelect(page,label)).inputValue() === value, `replay changed ${label}`);
   }
+  await studioTabFor(page, 'Seed', actions);
   if (native.noise) requireThat(await page.getByLabel('Seed', { exact: true }).isDisabled(), 'supplied-noise replay left seed editable');
   else requireThat(await page.getByLabel('Seed', { exact: true }).inputValue() === String(expected.seed), 'replay changed original base seed');
   requireThat(await page.getByLabel('Native text prompt batch', { exact: true }).isChecked() === Boolean(expected.prompts), 'replay changed conditioning batch mode');
   if (expected.prompts) requireThat(await page.getByLabel('One positive prompt per conditioning row', { exact: true }).inputValue() === expected.prompts.join('\n'), 'replay changed conditioning row order');
   requireThat(await page.getByLabel('Per-prompt negative strings', { exact: true }).isChecked() === Boolean(native.negativePrompts), 'replay changed negative conditioning source');
   if (native.negativePrompts) requireThat(await page.getByLabel('One negative string per conditioning row', { exact: true }).inputValue() === native.negativePrompts.join('\n'), 'replay changed per-row negative strings');
+  await studioTabFor(page, 'Upscale', actions);
   requireThat(!await page.getByLabel('Upscale', { exact: true }).isChecked(), 'replay unexpectedly enabled inline upscale');
   actions.push({ at: now(), action: 'verify-restored-form', values: actual, referenceAssetIds: expected.referenceAssetIds, nativeOutput: native.output });
 }
@@ -90,7 +106,7 @@ export async function configure(page, expected, kind, actions) {
       const names = models.map(name => name.trim()).filter(name => variant.test(name));
       requireThat(names.length === 1, 'Simple model picker did not offer one exact MOSS variant');
       await click(page.locator('.su-sheet').getByRole('button', { name: names[0], exact: true }), actions, names[0]);
-    } else await select(modelPicker(page), expected.model, actions, 'Model');
+    } else { await studioTabFor(page, 'Model', actions); await select(modelPicker(page), expected.model, actions, 'Model'); }
     await fill(page.getByLabel('Prompt', { exact: true }), expected.prompt, actions, 'Prompt');
     await advanced(page, actions);
     await configureReferences(page,expected.referenceAssetIds,actions);
@@ -101,7 +117,7 @@ export async function configure(page, expected, kind, actions) {
     'Context limit': expected.advanced.mossImage.max_sequence_length ?? 4096,
     [kind === 'editor' ? 'Output width' : kind === 'simple' ? 'Custom width' : 'Width override']: expected.width,
     [kind === 'editor' ? 'Output height' : kind === 'simple' ? 'Custom height' : 'Height override']: expected.height };
-  for (const [label,value] of Object.entries(controls)) await fill(form.getByLabel(label, { exact: true }), value, actions, label);
+  for (const [label,value] of Object.entries(controls)) { await studioTabFor(page, label, actions); await fill(form.getByLabel(label, { exact: true }), value, actions, label); }
   await checked(form.getByLabel('Cache reference K/V', { exact: true }), expected.advanced.mossImageEdit.use_kv_cache, actions, 'Cache reference K/V');
   const native = expected.advanced.mossImageAdvanced ?? { output: 'images' };
   await select(labelledSelect(form,'Native output'), native.output, actions, 'Native output');
@@ -116,15 +132,17 @@ export async function configure(page, expected, kind, actions) {
     const batch = page.getByLabel('Native text prompt batch', { exact: true });
     if (await batch.isEnabled()) await checked(batch, Boolean(expected.prompts), actions, 'Native text prompt batch');
     if (expected.prompts) await fill(page.getByLabel('One positive prompt per conditioning row', { exact: true }), expected.prompts.join('\n'), actions, 'One positive prompt per conditioning row');
-    if (kind === 'full') await fill(page.getByLabel('Variations', { exact: true }), expected.count, actions, 'Variations');
+    if (kind === 'full') { await studioTabFor(page, 'Variations', actions); await fill(page.getByLabel('Variations', { exact: true }), expected.count, actions, 'Variations'); }
   }
   if (!native.noise) {
+    await studioTabFor(page, 'Seed', actions);
     const seed = kind === 'editor' ? form.locator('.ie-field').filter({ has: page.getByText('Seed', { exact: true }) }).locator('input') : page.getByLabel('Seed', { exact: true });
     await fill(seed, expected.seed ?? '', actions, 'Seed');
   }
+  await studioTabFor(page, 'Negative prompt', actions);
   const negative = form.getByLabel('Negative prompt', { exact: true });
   if (await negative.count() && await negative.isEnabled()) await fill(negative, expected.negativePrompt ?? '', actions, 'Negative prompt');
-  if (kind === 'full') await checked(page.getByLabel('Upscale', { exact: true }), false, actions, 'Upscale');
+  if (kind === 'full') { await studioTabFor(page, 'Upscale', actions); await checked(page.getByLabel('Upscale', { exact: true }), false, actions, 'Upscale'); }
   const adapter = form.getByText(/^Edit adapter: installed\./);
   await adapter.waitFor({ state: 'visible' }); actions.push({ at: now(), action: 'observe-installed-adapter', text: await adapter.innerText(), model: expected.model });
 }
