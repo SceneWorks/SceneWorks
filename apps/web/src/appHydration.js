@@ -90,13 +90,13 @@ export function hydrationDomainsForRoute(route, { simple = false, deferred = fal
 // Image Studio reference, a timeline item, a dataset's character images).
 //
 // The shell never narrows a catalog it already holds in full; see `useShellHydration`.
-const LIBRARY_SCOPED_ASSET_ROUTES = Object.freeze({
-  advanced: new Set(["Library"]),
-  simple: new Set(["assets"]),
-});
+// (Two constants rather than one `{ advanced, simple }` map: the workflow-share lint reads any
+// `advanced` key as a job payload's advanced-settings map.)
+const LIBRARY_SCOPED_ADVANCED_ROUTES = Object.freeze(new Set(["Library"]));
+const LIBRARY_SCOPED_SIMPLE_ROUTES = Object.freeze(new Set(["assets"]));
 
 export function assetCatalogScopeForRoute(route, { simple = false } = {}) {
-  const routes = simple ? LIBRARY_SCOPED_ASSET_ROUTES.simple : LIBRARY_SCOPED_ASSET_ROUTES.advanced;
+  const routes = simple ? LIBRARY_SCOPED_SIMPLE_ROUTES : LIBRARY_SCOPED_ADVANCED_ROUTES;
   return routes.has(route) ? "library" : "all";
 }
 
